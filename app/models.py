@@ -73,8 +73,17 @@ class ChatMessage(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     role: str
-    content: str
+    # Content can be a string or an array of content parts (for multimodal)
+    content: Any = None
     name: Optional[str] = None  # Optional name field for OpenAI compatibility
+
+
+class StreamOptions(BaseModel):
+    """OpenAI stream_options for including usage in streaming responses"""
+
+    model_config = ConfigDict(extra="allow")
+
+    include_usage: Optional[bool] = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -87,13 +96,17 @@ class ChatCompletionRequest(BaseModel):
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
+    max_completion_tokens: Optional[int] = None  # OpenAI newer API field
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None  # For streaming usage info
     n: Optional[int] = None
     stop: Optional[List[str]] = None
     presence_penalty: Optional[float] = None
     frequency_penalty: Optional[float] = None
     logit_bias: Optional[Dict[str, float]] = None
     user: Optional[str] = None
+    tools: Optional[List[Dict[str, Any]]] = None  # Function/tool definitions
+    tool_choice: Optional[Any] = None  # Tool selection mode
     # Allows pass-through of additional OpenAI parameters
 
 
