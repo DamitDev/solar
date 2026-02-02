@@ -1,0 +1,71 @@
+# Default values for solar-control
+
+replicaCount: 1
+
+image:
+  repository: imgrepo.damit.cloud/aiops/solar-control
+  tag: latest
+  pullPolicy: Always
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Use Recreate strategy for stateful workload
+strategy:
+  type: Recreate
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 80
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+  host: ""
+  tls: []
+
+env:
+  TZ: "Europe/Budapest"
+  HOST: "0.0.0.0"
+  PORT: "80"
+
+secret:
+  existingSecret: ""
+  keys:
+    - API_KEY
+
+# Persistent storage for model data
+persistence:
+  enabled: true
+  storageClass: longhorn
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  mountPath: /app/data
+
+resources:
+  requests:
+    cpu: "50m"
+    memory: "128Mi"
+  limits:
+    cpu: "250m"
+    memory: "256Mi"
+
+probes:
+  readiness:
+    enabled: true
+    path: /health
+    port: 80
+    initialDelaySeconds: 10
+    periodSeconds: 15
+  liveness:
+    enabled: true
+    path: /health
+    port: 80
+    initialDelaySeconds: 30
+    periodSeconds: 30
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

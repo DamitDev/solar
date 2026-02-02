@@ -1,0 +1,13 @@
+apiVersion: v2
+name: solar-control
+description: Solar Control - LLM model management and inference service
+type: application
+version: 0.1.0
+appVersion: "2.0.6"
+maintainers:
+  - name: AIOps Team
+keywords:
+  - aiops
+  - solar
+  - llm
+  - inference

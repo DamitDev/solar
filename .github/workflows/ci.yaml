@@ -1,0 +1,98 @@
+name: Build & push image to Harbor on Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: imgrepo.damit.cloud
+  IMAGE_PATH: aiops/solar-control
+  IMAGE: imgrepo.damit.cloud/aiops/solar-control
+
+jobs:
+  build-and-push:
+    runs-on: [self-hosted, fast]
+
+    steps:
+      - name: Check out at the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Extract Docker metadata (tags/labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ github.event.release.tag_name }}
+          labels: |
+            org.opencontainers.image.source=${{ github.repository }}
+            org.opencontainers.image.version=${{ github.event.release.tag_name }}
+
+      - name: Decide whether to also tag 'latest'
+        id: latest
+        run: |
+          if [ "${{ github.event.release.prerelease }}" = "true" ]; then
+            echo "also=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "also=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Buildx (host docker)
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+          driver: docker
+
+      - name: Login to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.AIOPS_HARBOR_USERNAME }}
+          password: ${{ secrets.AIOPS_HARBOR_PASSWORD }}
+
+      - name: Build & push (amd64) to Harbor
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.IMAGE }}:${{ github.event.release.tag_name }}
+            ${{ steps.latest.outputs.also == 'true' && format('{0}:latest', env.IMAGE) || '' }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+
+      - name: Update Chart.yaml with release version
+        run: |
+          sed -i "s/^version:.*/version: ${{ github.event.release.tag_name }}/" charts/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${{ github.event.release.tag_name }}\"/" charts/Chart.yaml
+          echo "Updated Chart.yaml:"
+          cat charts/Chart.yaml
+
+      - name: Package Helm chart
+        id: package
+        run: |
+          helm package charts/ --destination .
+          CHART_FILE=$(ls *.tgz)
+          echo "chart_file=$CHART_FILE" >> "$GITHUB_OUTPUT"
+          echo "Packaged chart: $CHART_FILE"
+
+      - name: Push Helm chart to Harbor OCI registry
+        run: |
+          # NOTE: --insecure is temporary workaround for certificate mismatch
+          echo "${{ secrets.AIOPS_HARBOR_PASSWORD }}" | helm registry login ${{ env.REGISTRY }} \
+            --username ${{ secrets.AIOPS_HARBOR_USERNAME }} \
+            --password-stdin \
+            --insecure
+          helm push ${{ steps.package.outputs.chart_file }} \
+            oci://${{ env.REGISTRY }}/aiops/charts \
+            --insecure-skip-tls-verify
