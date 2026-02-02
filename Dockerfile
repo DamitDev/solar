@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 
 # Create non-root user and set up directories
-RUN adduser -D -u 1000 appuser && \
+RUN useradd --create-home --uid 1000 appuser && \
     mkdir -p /app/data && \
     chown -R appuser:appuser /app
 
