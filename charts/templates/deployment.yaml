@@ -30,10 +30,21 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsNonRoot: true
+            readOnlyRootFilesystem: false
           envFrom:
             - configMapRef:
                 name: {{ include "solar-control.fullname" . }}-env
