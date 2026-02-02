@@ -15,8 +15,13 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy application code
 COPY . .
 
-# Create directory for persistent data
-RUN mkdir -p /app/data
+# Create non-root user and set up directories
+RUN adduser -D -u 1000 appuser && \
+    mkdir -p /app/data && \
+    chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
 
 # Note: With host networking, EXPOSE is just documentation
 # The actual port is determined by the PORT environment variable at runtime

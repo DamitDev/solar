@@ -8,9 +8,9 @@ permissions:
   contents: read
 
 env:
-  REGISTRY: imgrepo.damit.cloud
+  REGISTRY: imgrepo.damit.hu
   IMAGE_PATH: aiops/solar-control
-  IMAGE: imgrepo.damit.cloud/aiops/solar-control
+  IMAGE: imgrepo.damit.hu/aiops/solar-control
 
 jobs:
   build-and-push:

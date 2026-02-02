@@ -3,7 +3,7 @@
 replicaCount: 1
 
 image:
-  repository: imgrepo.damit.cloud/aiops/solar-control
+  repository: imgrepo.damit.hu/aiops/solar-control
   tag: latest
   pullPolicy: Always
 
