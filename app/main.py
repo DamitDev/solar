@@ -3,12 +3,27 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import asyncio
+import os
+import logging
 
 from app.config import settings
 from app.gateway import gateway
 from app.routes import hosts, openai, websockets
 from app.routes import gateway as gateway_routes
 from app.routes.websockets import broadcast_host_status
+
+# Configure logging
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# Configure uvicorn loggers to respect LOG_LEVEL
+logging.getLogger("uvicorn").setLevel(getattr(logging, log_level, logging.INFO))
+logging.getLogger("uvicorn.error").setLevel(getattr(logging, log_level, logging.INFO))
+logging.getLogger("uvicorn.access").setLevel(getattr(logging, log_level, logging.INFO))
 
 
 async def refresh_hosts_periodically():

@@ -30,6 +30,7 @@ env:
   TZ: "Europe/Budapest"
   HOST: "0.0.0.0"
   PORT: "80"
+  LOG_LEVEL: "INFO"
 
 secret:
   existingSecret: ""
