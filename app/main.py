@@ -186,7 +186,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Solar Control",
     description="Coordinator for multiple solar-host instances with OpenAI-compatible API gateway. Supports llama.cpp, HuggingFace CausalLM, and HuggingFace Classification backends.",
-    version="2.0.0",
+    version="2.1.1",
     lifespan=lifespan,
     swagger_ui_parameters={"persistAuthorization": True},
 )
@@ -310,7 +310,7 @@ app.openapi = custom_openapi  # type: ignore[method-assign]
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy", "service": "solar-control", "version": "2.0.0"}
+    return {"status": "healthy", "service": "solar-control", "version": "2.1.1"}
 
 
 @app.get("/")
@@ -318,7 +318,7 @@ async def root():
     """Root endpoint"""
     return {
         "service": "solar-control",
-        "version": "2.0.0",
+        "version": "2.1.1",
         "description": "Coordinator for multiple solar-host instances with OpenAI-compatible API gateway",
         "supported_backends": [
             "llamacpp",
