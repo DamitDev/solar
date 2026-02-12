@@ -2,8 +2,8 @@ apiVersion: v2
 name: solar-control
 description: Solar Control - LLM model management and inference service
 type: application
-version: 2.1.2
-appVersion: "2.1.2"
+version: 2.1.3
+appVersion: "2.1.3"
 maintainers:
   - name: AIOps Team
 keywords:
