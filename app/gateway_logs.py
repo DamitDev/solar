@@ -1,32 +1,35 @@
 """
-Gateway event logging - async disk writes with buffering.
+Gateway event logging - async PostgreSQL storage.
 
-Writes events and request summaries to JSONL files:
-- data/gateway-logs/YYYY-MM-DD.events.jsonl - All raw events
-- data/gateway-logs/YYYY-MM-DD.requests.jsonl - Request summaries (on completion)
+Stores events and request summaries in PostgreSQL tables:
+- gateway_events - All raw events
+- gateway_requests - Request summaries (on completion)
 
-Uses a write queue to avoid blocking the event loop during heavy traffic.
+Uses a write queue with periodic batch inserts for high throughput.
 """
 
 import asyncio
 import json
 from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from collections import defaultdict
+
+import asyncpg
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _date_str_from_iso(iso_ts: str) -> str:
+def _parse_ts(ts_str: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO timestamp string to a datetime object."""
+    if not ts_str:
+        return None
     try:
-        dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+        return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
     except Exception:
-        dt = datetime.now(timezone.utc)
-    return dt.strftime("%Y-%m-%d")
+        return None
 
 
 def classify_request_type(endpoint: Optional[str]) -> str:
@@ -98,49 +101,91 @@ class RequestSummary:
     decode_ms_per_token: Optional[float] = None
 
 
-class GatewayLogger:
-    """Async gateway event logger with write buffering."""
+# SQL for table and index creation
+_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS gateway_events (
+    id BIGSERIAL PRIMARY KEY,
+    event_type TEXT NOT NULL,
+    request_id TEXT,
+    data JSONB NOT NULL DEFAULT '{}',
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_events_timestamp ON gateway_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_events_type ON gateway_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_events_request_id ON gateway_events(request_id);
 
-    # Class-level constants for tuning
-    FLUSH_INTERVAL_S = 1.0  # Flush buffer every second
-    MAX_BUFFER_SIZE = 100  # Flush when buffer reaches this size
+CREATE TABLE IF NOT EXISTS gateway_requests (
+    id BIGSERIAL PRIMARY KEY,
+    request_id TEXT NOT NULL UNIQUE,
+    request_type TEXT,
+    status TEXT NOT NULL,
+    model TEXT,
+    resolved_model TEXT,
+    endpoint TEXT,
+    client_ip TEXT,
+    stream BOOLEAN,
+    attempts INTEGER DEFAULT 1,
+    start_timestamp TIMESTAMPTZ,
+    end_timestamp TIMESTAMPTZ NOT NULL,
+    duration_s DOUBLE PRECISION,
+    host_id TEXT,
+    host_name TEXT,
+    instance_id TEXT,
+    instance_url TEXT,
+    error_message TEXT,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    total_tokens INTEGER,
+    decode_tps DOUBLE PRECISION,
+    decode_ms_per_token DOUBLE PRECISION
+);
+CREATE INDEX IF NOT EXISTS idx_requests_end_ts ON gateway_requests(end_timestamp);
+CREATE INDEX IF NOT EXISTS idx_requests_status ON gateway_requests(status);
+CREATE INDEX IF NOT EXISTS idx_requests_model ON gateway_requests(model);
+CREATE INDEX IF NOT EXISTS idx_requests_host ON gateway_requests(host_id);
+CREATE INDEX IF NOT EXISTS idx_requests_type ON gateway_requests(request_type);
+"""
+
+
+class GatewayLogger:
+    """Async gateway event logger with PostgreSQL storage."""
+
+    FLUSH_INTERVAL_S = 1.0
+    MAX_BUFFER_SIZE = 100
 
     def __init__(self) -> None:
         try:
             from app.config import settings
-
-            self.base_dir = Path(
-                getattr(settings, "gateway_log_dir", "data/gateway-logs")
-            )
-            self.retention_days = int(
-                getattr(settings, "gateway_log_retention_days", 365)
-            )
+            self.database_url = settings.database_url
         except Exception:
-            self.base_dir = Path("data/gateway-logs")
-            self.retention_days = 365
+            self.database_url = "postgresql://solar:solar@localhost:5432/solar_gateway"
 
+        self._pool: Optional[asyncpg.Pool] = None
         self._inflight: Dict[str, RequestInProgress] = {}
-        self._lock = asyncio.Lock()  # Async lock for in-flight tracking
-        
-        # Write buffer: filename -> list of JSON strings
-        self._write_buffer: Dict[str, List[str]] = defaultdict(list)
-        self._buffer_lock = asyncio.Lock()  # Async lock for buffer access
-        
-        # Background flush task
+        self._lock = asyncio.Lock()
+
+        # Write buffers for batch inserts
+        self._event_buffer: List[dict] = []
+        self._request_buffer: List[dict] = []
+        self._buffer_lock = asyncio.Lock()
+
         self._flush_task: Optional[asyncio.Task] = None
         self._stop_event: Optional[asyncio.Event] = None
-        
-        self.base_dir.mkdir(parents=True, exist_ok=True)
 
     async def start(self) -> None:
-        """Start the background flush task."""
-        if self._flush_task is not None:
-            return
+        """Create connection pool and ensure schema exists."""
+        self._pool = await asyncpg.create_pool(
+            self.database_url, min_size=2, max_size=10
+        )
+        # Auto-create tables and indexes
+        async with self._pool.acquire() as conn:
+            await conn.execute(_SCHEMA_SQL)
+        # Start background flush loop
         self._stop_event = asyncio.Event()
         self._flush_task = asyncio.create_task(self._flush_loop())
 
     async def stop(self) -> None:
-        """Stop the background flush task and flush remaining buffer."""
+        """Stop flush task and close pool."""
         if self._stop_event:
             self._stop_event.set()
         if self._flush_task:
@@ -149,8 +194,11 @@ class GatewayLogger:
             except asyncio.CancelledError:
                 pass
             self._flush_task = None
-        # Final flush
+        # Final flush of remaining buffer
         await self._flush_all()
+        if self._pool:
+            await self._pool.close()
+            self._pool = None
 
     async def _flush_loop(self) -> None:
         """Background task that periodically flushes the write buffer."""
@@ -164,51 +212,101 @@ class GatewayLogger:
             await self._flush_all()
 
     async def _flush_all(self) -> None:
-        """Flush all buffered writes to disk."""
+        """Flush buffered events and requests to PostgreSQL."""
         async with self._buffer_lock:
-            if not self._write_buffer:
-                return
-            # Take ownership of buffer and clear it
-            to_write = dict(self._write_buffer)
-            self._write_buffer = defaultdict(list)
+            events = list(self._event_buffer)
+            requests = list(self._request_buffer)
+            self._event_buffer.clear()
+            self._request_buffer.clear()
 
-        # Write to disk in a thread pool to avoid blocking
-        if to_write:
-            await asyncio.to_thread(self._sync_write_batch, to_write)
+        if not self._pool:
+            return
 
-    def _sync_write_batch(self, batch: Dict[str, List[str]]) -> None:
-        """Synchronously write a batch of lines to files (runs in thread pool)."""
-        for filename, lines in batch.items():
-            if not lines:
-                continue
-            path = self.base_dir / filename
+        if events:
             try:
-                with open(path, "a", encoding="utf-8") as f:
-                    f.write("".join(lines))
-            except Exception as e:
-                print(f"[GatewayLogger] Failed to write to {path}: {e}")
+                async with self._pool.acquire() as conn:
+                    await conn.executemany(
+                        """INSERT INTO gateway_events (event_type, request_id, data, timestamp)
+                           VALUES ($1, $2, $3::jsonb, $4)""",
+                        [
+                            (
+                                e["event_type"],
+                                e.get("request_id"),
+                                json.dumps(e["data"], default=str),
+                                e["timestamp"],
+                            )
+                            for e in events
+                        ],
+                    )
+            except Exception as exc:
+                print(f"[GatewayLogger] Failed to flush events: {exc}")
 
-    async def _queue_write(self, filename: str, data: dict) -> None:
-        """Queue a JSON line to be written."""
-        line = json.dumps(data, ensure_ascii=False) + "\n"
+        if requests:
+            try:
+                async with self._pool.acquire() as conn:
+                    await conn.executemany(
+                        """INSERT INTO gateway_requests (
+                            request_id, request_type, status, model, resolved_model,
+                            endpoint, client_ip, stream, attempts, start_timestamp,
+                            end_timestamp, duration_s, host_id, host_name, instance_id,
+                            instance_url, error_message, prompt_tokens, completion_tokens,
+                            total_tokens, decode_tps, decode_ms_per_token
+                        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+                        ON CONFLICT (request_id) DO NOTHING""",
+                        [
+                            (
+                                r["request_id"],
+                                r.get("request_type"),
+                                r["status"],
+                                r.get("model"),
+                                r.get("resolved_model"),
+                                r.get("endpoint"),
+                                r.get("client_ip"),
+                                r.get("stream"),
+                                r.get("attempts", 1),
+                                _parse_ts(r.get("start_timestamp")),
+                                _parse_ts(r["end_timestamp"]),
+                                r.get("duration_s"),
+                                r.get("host_id"),
+                                r.get("host_name"),
+                                r.get("instance_id"),
+                                r.get("instance_url"),
+                                r.get("error_message"),
+                                r.get("prompt_tokens"),
+                                r.get("completion_tokens"),
+                                r.get("total_tokens"),
+                                r.get("decode_tps"),
+                                r.get("decode_ms_per_token"),
+                            )
+                            for r in requests
+                        ],
+                    )
+            except Exception as exc:
+                print(f"[GatewayLogger] Failed to flush requests: {exc}")
+
+    async def _queue_event(
+        self, event_type: str, request_id: Optional[str], data: dict, timestamp: datetime
+    ) -> None:
+        """Queue a raw event for batch insert."""
         should_flush = False
-        
         async with self._buffer_lock:
-            self._write_buffer[filename].append(line)
-            # Check if we should trigger an early flush
-            total_lines = sum(len(lines) for lines in self._write_buffer.values())
-            if total_lines >= self.MAX_BUFFER_SIZE:
+            self._event_buffer.append(
+                {
+                    "event_type": event_type,
+                    "request_id": request_id,
+                    "data": data,
+                    "timestamp": timestamp,
+                }
+            )
+            if len(self._event_buffer) >= self.MAX_BUFFER_SIZE:
                 should_flush = True
-        
         if should_flush:
-            # Flush in background, don't wait
             asyncio.create_task(self._flush_all())
 
-    def _get_date_str(self, timestamp: Optional[str] = None) -> str:
-        """Get date string for file naming."""
-        if timestamp:
-            return _date_str_from_iso(timestamp)
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    async def _queue_request(self, summary_dict: dict) -> None:
+        """Queue a request summary for batch insert."""
+        async with self._buffer_lock:
+            self._request_buffer.append(summary_dict)
 
     async def log_event(self, event: Dict[str, Any]) -> Optional[RequestSummary]:
         """
@@ -225,9 +323,11 @@ class GatewayLogger:
         if "timestamp" not in event:
             event["timestamp"] = timestamp
 
+        # Parse timestamp for DB storage
+        ts_dt = _parse_ts(timestamp) or datetime.now(timezone.utc)
+
         # Queue raw event write (non-blocking)
-        date_str = self._get_date_str(timestamp)
-        await self._queue_write(f"{date_str}.events.jsonl", event)
+        await self._queue_event(etype or "unknown", request_id, data, ts_dt)
 
         if not request_id:
             return None
@@ -354,7 +454,7 @@ class GatewayLogger:
                 )
 
                 # Queue summary write (non-blocking)
-                await self._queue_write(f"{date_str}.requests.jsonl", asdict(summary))
+                await self._queue_request(asdict(summary))
 
         return summary
 
@@ -378,24 +478,7 @@ class GatewayLogger:
             return "missed"
         return "error"
 
-    def cleanup_old_logs(self) -> None:
-        """Remove logs older than retention_days."""
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self.retention_days)
-        try:
-            for path in self.base_dir.glob("*.jsonl"):
-                try:
-                    date_part = path.name.split(".", 1)[0]
-                    dt = datetime.strptime(date_part, "%Y-%m-%d").replace(
-                        tzinfo=timezone.utc
-                    )
-                    if dt < cutoff:
-                        path.unlink(missing_ok=True)
-                except Exception:
-                    continue
-        except Exception as e:
-            print(f"[GatewayLogger] Cleanup error: {e}")
-
-    def read_requests(
+    async def read_requests_async(
         self,
         start: datetime,
         end: datetime,
@@ -404,108 +487,84 @@ class GatewayLogger:
         model: Optional[str] = None,
         host_id: Optional[str] = None,
     ) -> List[dict]:
-        """Read request summaries from disk with filtering."""
-        results: List[dict] = []
+        """Read request summaries from PostgreSQL with filtering."""
+        if not self._pool:
+            return []
 
-        # Iterate through date range
-        current = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
-        end_date = datetime(end.year, end.month, end.day, tzinfo=timezone.utc)
+        query = "SELECT * FROM gateway_requests WHERE end_timestamp >= $1 AND end_timestamp <= $2"
+        params: list = [start, end]
+        idx = 3
 
-        while current <= end_date:
-            date_str = current.strftime("%Y-%m-%d")
-            path = self.base_dir / f"{date_str}.requests.jsonl"
+        if status and status != "all":
+            query += f" AND status = ${idx}"
+            params.append(status)
+            idx += 1
+        if request_type and request_type != "all":
+            query += f" AND request_type = ${idx}"
+            params.append(request_type)
+            idx += 1
+        if model:
+            query += f" AND (model = ${idx} OR resolved_model = ${idx})"
+            params.append(model)
+            idx += 1
+        if host_id:
+            query += f" AND host_id = ${idx}"
+            params.append(host_id)
+            idx += 1
 
-            if path.exists():
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        for line in f:
-                            try:
-                                obj = json.loads(line)
-                                # Apply filters
-                                ts = obj.get("end_timestamp") or obj.get("timestamp")
-                                dt = self._parse_iso(ts)
-                                if not dt or not (start <= dt <= end):
-                                    continue
-                                if (
-                                    status
-                                    and status != "all"
-                                    and obj.get("status") != status
-                                ):
-                                    continue
-                                if (
-                                    request_type
-                                    and request_type != "all"
-                                    and obj.get("request_type") != request_type
-                                ):
-                                    continue
-                                if (
-                                    model
-                                    and obj.get("model") != model
-                                    and obj.get("resolved_model") != model
-                                ):
-                                    continue
-                                if host_id and obj.get("host_id") != host_id:
-                                    continue
-                                results.append(obj)
-                            except Exception:
-                                continue
-                except Exception as e:
-                    print(f"[GatewayLogger] Read error for {path}: {e}")
+        query += " ORDER BY end_timestamp DESC"
 
-            current += timedelta(days=1)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
 
+        # Convert rows to dicts with ISO string timestamps
+        results = []
+        for row in rows:
+            d = dict(row)
+            # Remove DB-internal id
+            d.pop("id", None)
+            # Convert datetime fields to ISO strings for API compatibility
+            for field in ("start_timestamp", "end_timestamp"):
+                if isinstance(d.get(field), datetime):
+                    d[field] = d[field].isoformat()
+            results.append(d)
         return results
 
-    def read_events(
+    async def read_events_async(
         self,
         start: datetime,
         end: datetime,
         types: Optional[List[str]] = None,
     ) -> List[dict]:
-        """Read raw events from disk with filtering."""
-        results: List[dict] = []
+        """Read raw events from PostgreSQL with filtering."""
+        if not self._pool:
+            return []
 
-        current = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
-        end_date = datetime(end.year, end.month, end.day, tzinfo=timezone.utc)
+        query = "SELECT * FROM gateway_events WHERE timestamp >= $1 AND timestamp <= $2"
+        params: list = [start, end]
+        idx = 3
 
-        while current <= end_date:
-            date_str = current.strftime("%Y-%m-%d")
-            path = self.base_dir / f"{date_str}.events.jsonl"
+        if types:
+            placeholders = ", ".join(f"${idx + i}" for i in range(len(types)))
+            query += f" AND event_type IN ({placeholders})"
+            params.extend(types)
+            idx += len(types)
 
-            if path.exists():
-                try:
-                    with open(path, "r", encoding="utf-8") as f:
-                        for line in f:
-                            try:
-                                obj = json.loads(line)
-                                # Check type filter
-                                if types and obj.get("type") not in types:
-                                    continue
-                                # Check time range
-                                ts = (obj.get("data") or {}).get(
-                                    "timestamp"
-                                ) or obj.get("timestamp")
-                                dt = self._parse_iso(ts)
-                                if dt and start <= dt <= end:
-                                    results.append(obj)
-                            except Exception:
-                                continue
-                except Exception as e:
-                    print(f"[GatewayLogger] Read error for {path}: {e}")
+        query += " ORDER BY timestamp ASC"
 
-            current += timedelta(days=1)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(query, *params)
 
+        # Reconstruct event dict format matching the old JSONL structure
+        results = []
+        for row in rows:
+            evt = {
+                "type": row["event_type"],
+                "data": json.loads(row["data"]) if isinstance(row["data"], str) else row["data"],
+                "timestamp": row["timestamp"].isoformat(),
+            }
+            results.append(evt)
         return results
-
-    def _parse_iso(self, ts: Optional[str]) -> Optional[datetime]:
-        if not ts:
-            return None
-        try:
-            return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(
-                timezone.utc
-            )
-        except Exception:
-            return None
 
 
 # Global singleton

@@ -5,4 +5,5 @@ pydantic-settings==2.5.2
 aiohttp==3.10.10
 python-multipart==0.0.12
 websockets==13.1
+asyncpg
 

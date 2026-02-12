@@ -67,6 +67,27 @@ probes:
     initialDelaySeconds: 30
     periodSeconds: 30
 
+postgresql:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "16-alpine"
+  auth:
+    username: solar
+    password: solar
+    database: solar_gateway
+  persistence:
+    enabled: true
+    storageClass: longhorn
+    size: 5Gi
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
 nodeSelector: {}
 tolerations: []
 affinity: {}

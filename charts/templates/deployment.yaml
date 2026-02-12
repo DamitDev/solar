@@ -36,6 +36,12 @@ spec:
         fsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      {{- if .Values.postgresql.enabled }}
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z {{ include "solar-control.fullname" . }}-postgresql 5432; do echo "Waiting for PostgreSQL..."; sleep 2; done']
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -53,6 +59,11 @@ spec:
                 name: {{ include "solar-control.fullname" . }}-env
             - secretRef:
                 name: {{ include "solar-control.secretName" . }}
+          {{- if .Values.postgresql.enabled }}
+          env:
+            - name: DATABASE_URL
+              value: "postgresql://{{ .Values.postgresql.auth.username }}:{{ .Values.postgresql.auth.password }}@{{ include "solar-control.fullname" . }}-postgresql:5432/{{ .Values.postgresql.auth.database }}"
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.targetPort }}

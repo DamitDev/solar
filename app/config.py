@@ -25,9 +25,11 @@ class Settings(BaseSettings):
     # Health probe mode (default: TCP connect only)
     health_probe_use_http: bool = False
     health_probe_http_path: str = "/v1/models"
-    # Gateway event logging
+    # Gateway event logging (legacy file-based settings kept for backward compat)
     gateway_log_dir: str = "data/gateway-logs"
     gateway_log_retention_days: int = 365
+    # PostgreSQL database for gateway logs
+    database_url: str = "postgresql://solar:solar@localhost:5432/solar_gateway"
     # Host manager save debounce
     host_save_debounce_s: float = 2.0
 

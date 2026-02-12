@@ -1,13 +1,29 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: solar-control-db
+    environment:
+      POSTGRES_USER: solar
+      POSTGRES_PASSWORD: solar
+      POSTGRES_DB: solar_gateway
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - solar-network
+
   solar-control:
     build: .
     container_name: solar-control
+    depends_on:
+      - postgres
     ports:
       - "${PORT:-8000}:${PORT:-8000}"
     environment:
       - API_KEY=${API_KEY:-change-me-please}
       - HOST=${HOST:-0.0.0.0}
       - PORT=${PORT:-8000}
+      - DATABASE_URL=postgresql://solar:solar@postgres:5432/solar_gateway
     volumes:
       - ./data:/app/data
     extra_hosts:
@@ -16,7 +32,9 @@ services:
     networks:
       - solar-network
 
+volumes:
+  pgdata:
+
 networks:
   solar-network:
     driver: bridge
-
