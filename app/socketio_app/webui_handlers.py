@@ -15,7 +15,12 @@ from typing import Optional
 from .server import sio
 from app.config import settings
 from app.database.hosts import host_db
-from app.socketio_app.host_handlers import is_host_connected, get_pending_hosts
+from app.socketio_app.host_handlers import (
+    is_host_connected,
+    get_pending_hosts,
+    get_connected_host_ids,
+    get_host_instances,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,17 @@ async def webui_connect(sid: str, environ: dict, auth: Optional[dict] = None):
         to=sid,
         namespace="/webui",
     )
+
+    # Send cached instance lists for all connected hosts
+    for hid in get_connected_host_ids():
+        instances = get_host_instances(hid)
+        if instances:
+            await sio.emit(
+                "instances_update",
+                {"host_id": hid, "instances": instances},
+                to=sid,
+                namespace="/webui",
+            )
 
     # Send current pending hosts (if any)
     pending = get_pending_hosts()

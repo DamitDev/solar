@@ -132,6 +132,14 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
         namespace="/webui",
     )
 
+    # Send cached instances to WebUI
+    if p.instances:
+        await sio.emit(
+            "instances_update",
+            {"host_id": host_id, "instances": p.instances},
+            namespace="/webui",
+        )
+
     # Trigger registry refresh to pick up the new host's instances
     try:
         from app.gateway import gateway
@@ -284,6 +292,14 @@ async def host_registration(sid: str, data: dict):
     if host_id:
         instances = data.get("instances", [])
         _host_instances[host_id] = instances
+
+        # Forward to WebUI so the dashboard gets the instance list
+        await sio.emit(
+            "instances_update",
+            {"host_id": host_id, "instances": instances},
+            namespace="/webui",
+        )
+
         try:
             from app.gateway import gateway
             asyncio.create_task(gateway.refresh_model_registry())
@@ -384,6 +400,13 @@ async def host_instances_update(sid: str, data: dict):
 
     instances = data.get("data", {}).get("instances", data.get("instances", []))
     _host_instances[host_id] = instances
+
+    # Forward to WebUI
+    await sio.emit(
+        "instances_update",
+        {"host_id": host_id, "instances": instances},
+        namespace="/webui",
+    )
 
     try:
         from app.gateway import gateway
