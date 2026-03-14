@@ -20,10 +20,23 @@ from app.socketio_app.host_handlers import is_host_connected, get_pending_hosts
 logger = logging.getLogger(__name__)
 
 
+def _extract_key_from_environ(environ: dict) -> Optional[str]:
+    """Extract API key from ASGI scope headers (set by reverse proxy)."""
+    for name, value in environ.get("headers", []):
+        header = name.decode("latin-1").lower() if isinstance(name, bytes) else name.lower()
+        val = value.decode("latin-1") if isinstance(value, bytes) else value
+        if header == "x-api-key":
+            return val
+        if header == "authorization" and val.startswith("Bearer "):
+            return val[7:]
+    return None
+
+
 @sio.on("connect", namespace="/webui")
 async def webui_connect(sid: str, environ: dict, auth: Optional[dict] = None):
     """Authenticate WebUI client and send initial state."""
-    if not auth or auth.get("api_key") != settings.management_api_key:
+    api_key = (auth or {}).get("api_key") or _extract_key_from_environ(environ)
+    if api_key != settings.management_api_key:
         logger.warning("WebUI client %s rejected: bad auth", sid)
         raise ConnectionRefusedError("Invalid management API key")
 
