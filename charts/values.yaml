@@ -1,6 +1,6 @@
-# Default values for solar-control
+# Default values for solar-control v3 (stateless multi-replica)
 
-replicaCount: 1
+replicaCount: 2
 
 image:
   repository: imgrepo.damit.hu/aiops/solar-control
@@ -10,9 +10,8 @@ image:
 nameOverride: ""
 fullnameOverride: ""
 
-# Use Recreate strategy for stateful workload
 strategy:
-  type: Recreate
+  type: RollingUpdate
 
 service:
   type: ClusterIP
@@ -22,7 +21,14 @@ service:
 ingress:
   enabled: true
   className: nginx
-  annotations: {}
+  annotations:
+    # Sticky sessions for Socket.IO (recommended but not required with Redis adapter)
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    nginx.ingress.kubernetes.io/session-cookie-name: "solar-sticky"
+    nginx.ingress.kubernetes.io/session-cookie-max-age: "3600"
+    # WebSocket support
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
   host: ""
   tls: []
 
@@ -35,15 +41,7 @@ env:
 secret:
   existingSecret: ""
   keys:
-    - API_KEY
-
-# Persistent storage for model data
-persistence:
-  enabled: true
-  storageClass: longhorn
-  accessMode: ReadWriteOnce
-  size: 1Gi
-  mountPath: /app/data
+    - MANAGEMENT_API_KEY
 
 resources:
   requests:
@@ -56,7 +54,7 @@ resources:
 probes:
   readiness:
     enabled: true
-    path: /health
+    path: /ready
     port: 80
     initialDelaySeconds: 10
     periodSeconds: 15
@@ -87,6 +85,19 @@ postgresql:
     limits:
       cpu: "500m"
       memory: "512Mi"
+
+redis:
+  enabled: true
+  image:
+    repository: redis
+    tag: "7-alpine"
+  resources:
+    requests:
+      cpu: "25m"
+      memory: "64Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
 
 nodeSelector: {}
 tolerations: []
