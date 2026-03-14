@@ -1,5 +1,6 @@
 """Host management API routes (under /api/hosts)."""
 
+import asyncio
 import uuid
 import aiohttp
 from typing import List
@@ -160,8 +161,10 @@ async def get_host_instances(host_id: str):
                 raise HTTPException(status_code=response.status, detail="Failed to get instances")
     except HTTPException:
         raise
+    except (aiohttp.ClientConnectionError, aiohttp.ClientConnectorError, asyncio.TimeoutError):
+        raise HTTPException(status_code=502, detail=f"Host '{host.name}' is unreachable at {host.url}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=502, detail=f"Cannot reach host '{host.name}': {e}")
 
 
 async def _proxy_instance_action(host_id: str, instance_id: str, action: str, method: str = "POST", timeout: int = 30, json_data: dict = None):
@@ -183,8 +186,10 @@ async def _proxy_instance_action(host_id: str, instance_id: str, action: str, me
                 raise HTTPException(status_code=response.status, detail=text)
     except HTTPException:
         raise
+    except (aiohttp.ClientConnectionError, aiohttp.ClientConnectorError, asyncio.TimeoutError):
+        raise HTTPException(status_code=502, detail=f"Host '{host.name}' is unreachable at {host.url}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=502, detail=f"Cannot reach host '{host.name}': {e}")
 
 
 @router.post("/{host_id}/instances/{instance_id}/start")
@@ -218,8 +223,10 @@ async def create_instance(host_id: str, instance_data: dict):
                 raise HTTPException(status_code=response.status, detail=text)
     except HTTPException:
         raise
+    except (aiohttp.ClientConnectionError, aiohttp.ClientConnectorError, asyncio.TimeoutError):
+        raise HTTPException(status_code=502, detail=f"Host '{host.name}' is unreachable at {host.url}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=502, detail=f"Cannot reach host '{host.name}': {e}")
 
 
 @router.put("/{host_id}/instances/{instance_id}")
@@ -248,8 +255,10 @@ async def get_instance_state(host_id: str, instance_id: str):
                 raise HTTPException(status_code=response.status, detail=text)
     except HTTPException:
         raise
+    except (aiohttp.ClientConnectionError, aiohttp.ClientConnectorError, asyncio.TimeoutError):
+        raise HTTPException(status_code=502, detail=f"Host '{host.name}' is unreachable at {host.url}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=502, detail=f"Cannot reach host '{host.name}': {e}")
 
 
 @router.get("/{host_id}/instances/{instance_id}/logs")
@@ -268,5 +277,7 @@ async def get_instance_logs(host_id: str, instance_id: str):
                 raise HTTPException(status_code=response.status, detail=text)
     except HTTPException:
         raise
+    except (aiohttp.ClientConnectionError, aiohttp.ClientConnectorError, asyncio.TimeoutError):
+        raise HTTPException(status_code=502, detail=f"Host '{host.name}' is unreachable at {host.url}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=502, detail=f"Cannot reach host '{host.name}': {e}")
