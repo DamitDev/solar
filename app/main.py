@@ -136,7 +136,7 @@ async def root():
 # Mount Socket.IO on top of FastAPI
 from app.socketio_app import sio  # noqa: E402
 
-sio_asgi_app = socketio.ASGIApp(sio, other_app=app)
+sio_asgi_app = socketio.ASGIApp(sio, other_asgi_app=app)
 
 if __name__ == "__main__":
     import uvicorn
