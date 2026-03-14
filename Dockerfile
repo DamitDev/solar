@@ -30,5 +30,5 @@ USER appuser
 ENV HOST=0.0.0.0
 ENV PORT=8000
 
-CMD ["sh", "-c", "uvicorn app.main:app --host $HOST --port $PORT"]
+CMD ["sh", "-c", "uvicorn app.main:sio_asgi_app --host $HOST --port $PORT"]
 
