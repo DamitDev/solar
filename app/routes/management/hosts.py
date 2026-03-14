@@ -4,6 +4,7 @@ import uuid
 import aiohttp
 from typing import List
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from app.models import Host, HostCreate, HostResponse, HostStatus
 from app.database.hosts import host_db
@@ -12,34 +13,52 @@ from app.database.hosts import host_db
 router = APIRouter(prefix="/hosts", tags=["hosts"])
 
 
+# ── Pending host approval ────────────────────────────────────
+
+class PendingApproveRequest(BaseModel):
+    name: str
+    url: str
+
+
+@router.get("/pending")
+async def list_pending_hosts():
+    from app.socketio_app.host_handlers import get_pending_hosts
+    return get_pending_hosts()
+
+
+@router.post("/pending/{pending_id}/approve", response_model=HostResponse)
+async def approve_host(pending_id: str, data: PendingApproveRequest):
+    from app.socketio_app.host_handlers import approve_pending_host, get_pending_host
+
+    pending = get_pending_host(pending_id)
+    if not pending:
+        raise HTTPException(status_code=404, detail="Pending host not found (may have disconnected)")
+
+    host_id = await approve_pending_host(pending_id, data.name, data.url)
+    if not host_id:
+        raise HTTPException(status_code=404, detail="Pending host not found")
+
+    host = await host_db.get_host(host_id)
+    return HostResponse(host=host, message=f"Host '{data.name}' approved and registered")
+
+
+@router.post("/pending/{pending_id}/reject")
+async def reject_host(pending_id: str):
+    from app.socketio_app.host_handlers import reject_pending_host
+
+    ok = await reject_pending_host(pending_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Pending host not found")
+    return {"message": "Host rejected and disconnected"}
+
+
+# ── Manual host registration (no health check required) ──────
+
 @router.post("", response_model=HostResponse)
 async def register_host(data: HostCreate):
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"{data.url}/health"
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as response:
-                if response.status != 200:
-                    raise HTTPException(status_code=400, detail=f"Cannot connect to host at {data.url}")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Cannot connect to host: {str(e)}")
-
+    """Pre-register a host record. The host does not need to be online."""
     host_id = str(uuid.uuid4())
     host = Host(id=host_id, name=data.name, url=data.url, api_key=data.api_key)
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"{data.url}/instances"
-            headers = {"X-API-Key": data.api_key}
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as response:
-                if response.status == 200:
-                    host.status = HostStatus.ONLINE
-                    from datetime import datetime, timezone
-                    host.last_seen = datetime.now(timezone.utc)
-    except Exception:
-        pass
-
     await host_db.add_host(host)
     return HostResponse(host=host, message=f"Host '{data.name}' registered successfully")
 
