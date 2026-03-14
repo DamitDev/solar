@@ -15,7 +15,7 @@ from typing import Optional
 from .server import sio
 from app.config import settings
 from app.database.hosts import host_db
-from app.socketio_app.host_handlers import is_host_connected
+from app.socketio_app.host_handlers import is_host_connected, get_pending_hosts
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,11 @@ async def webui_connect(sid: str, environ: dict, auth: Optional[dict] = None):
         to=sid,
         namespace="/webui",
     )
+
+    # Send current pending hosts (if any)
+    pending = get_pending_hosts()
+    for p in pending:
+        await sio.emit("host_pending", p, to=sid, namespace="/webui")
 
 
 @sio.on("disconnect", namespace="/webui")
