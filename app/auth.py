@@ -84,16 +84,20 @@ async def auth_middleware(request: Request, call_next):
     if path.startswith("/v1/"):
         # OpenAI endpoint: resolve API key to endpoint
         endpoint = await _resolve_endpoint(api_key)
-        if not endpoint:
-            return JSONResponse(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                content=_UNAUTHORIZED_RESPONSE,
-                headers=_CORS_HEADERS,
-            )
-        # Store endpoint info in request state for downstream use
-        request.state.endpoint_id = endpoint.id
-        request.state.endpoint_name = endpoint.name
-        return await call_next(request)
+        if endpoint:
+            request.state.endpoint_id = endpoint.id
+            request.state.endpoint_name = endpoint.name
+            return await call_next(request)
+        # Management key can also access /v1/* (e.g. webui listing models)
+        if api_key == settings.management_api_key:
+            request.state.endpoint_id = None
+            request.state.endpoint_name = None
+            return await call_next(request)
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content=_UNAUTHORIZED_RESPONSE,
+            headers=_CORS_HEADERS,
+        )
 
     if path.startswith("/api/"):
         # Management API: compare against management key
