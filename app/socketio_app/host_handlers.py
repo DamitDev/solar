@@ -116,7 +116,8 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
         namespace="/hosts",
     )
 
-    # Tell WebUI
+    # Tell WebUI: remove the pending entry, then announce the new host
+    await sio.emit("host_pending_removed", {"pending_id": pending_id}, namespace="/webui")
     await sio.emit(
         "host_status",
         {
