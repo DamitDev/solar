@@ -3,7 +3,6 @@
 All operations are atomic to ensure consistency across replicas.
 """
 
-
 from .connection import redis_client
 
 ACTIVE_PREFIX = "solar:active:"

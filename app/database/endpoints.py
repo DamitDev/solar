@@ -78,12 +78,14 @@ class EndpointDB:
             rows = await conn.fetch("SELECT * FROM api_endpoints ORDER BY created_at")
         return [self._row_to_endpoint(row) for row in rows]
 
+    _UNSET = object()
+
     async def update_endpoint(
         self,
         endpoint_id: str,
         *,
         name: Optional[str] = None,
-        description: Optional[str] = ...,  # type: ignore[assignment]
+        description: Optional[str] = _UNSET,
         api_key: Optional[str] = None,
     ) -> Optional[ApiEndpoint]:
         pool = db_pool()
@@ -95,7 +97,7 @@ class EndpointDB:
             sets.append(f"name = ${idx}")
             params.append(name)
             idx += 1
-        if description is not ...:
+        if description is not EndpointDB._UNSET:
             sets.append(f"description = ${idx}")
             params.append(description)
             idx += 1

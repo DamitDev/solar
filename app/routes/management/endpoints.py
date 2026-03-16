@@ -2,12 +2,14 @@
 
 from typing import Optional
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from app.database.endpoints import endpoint_db
 from app.auth import invalidate_endpoint_cache
 
 router = APIRouter(prefix="/endpoints", tags=["endpoints"])
+
+_UNSET = object()
 
 
 class EndpointCreate(BaseModel):
@@ -18,8 +20,16 @@ class EndpointCreate(BaseModel):
 
 class EndpointUpdate(BaseModel):
     name: Optional[str] = None
-    description: Optional[str] = ...  # type: ignore[assignment]
+    description: Optional[str] = None
     api_key: Optional[str] = None
+    _description_provided: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _track_description(cls, values):
+        if isinstance(values, dict) and "description" in values:
+            values["_description_provided"] = True
+        return values
 
 
 @router.get("")
@@ -57,7 +67,7 @@ async def update_endpoint(endpoint_id: str, data: EndpointUpdate):
     kwargs = {}
     if data.name is not None:
         kwargs["name"] = data.name
-    if data.description is not ...:
+    if data._description_provided:
         kwargs["description"] = data.description
     if data.api_key is not None:
         kwargs["api_key"] = data.api_key

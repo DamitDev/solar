@@ -10,12 +10,15 @@ Now uses the shared connection pool and tags requests with endpoint_id.
 
 import asyncio
 import json
+import logging
 import uuid
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .connection import db_pool
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now_iso() -> str:
@@ -171,7 +174,7 @@ class GatewayLogger:
                         ],
                     )
             except Exception as exc:
-                print(f"[GatewayLogger] Failed to flush events: {exc}")
+                logger.error("Failed to flush events: %s", exc)
 
         if requests:
             try:
@@ -220,7 +223,7 @@ class GatewayLogger:
                         ],
                     )
             except Exception as exc:
-                print(f"[GatewayLogger] Failed to flush requests: {exc}")
+                logger.error("Failed to flush requests: %s", exc)
 
     async def _queue_event(
         self,

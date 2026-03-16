@@ -5,6 +5,7 @@ All routing state is stored in Redis for multi-replica consistency.
 
 import aiohttp
 import asyncio
+import logging
 import re
 import uuid
 import time
@@ -16,6 +17,8 @@ from app.config import settings
 from app.database.hosts import host_db
 from app.models import HostStatus
 from app.redis_state import registry_store, health_store, routing_store
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAIGateway:
@@ -303,7 +306,6 @@ class OpenAIGateway:
             return {}
 
     async def get_available_models(self) -> List[Dict[str, Any]]:
-        await self.refresh_model_registry()
         await self._ensure_session()
         if not self.session:
             return []
@@ -497,13 +499,16 @@ class OpenAIGateway:
             if summary:
                 await broadcast_gateway_request(asdict(summary))
         except Exception as e:
-            print(f"[gateway] Logging error: {e}")
+            logger.error("Logging error: %s", e)
 
-        event_type = event_data.get("type", "unknown")
-        data = dict(event_data.get("data", event_data))
-        if endpoint_id is not None:
-            data["endpoint_id"] = endpoint_id
-        await broadcast_to_webui(event_type, data)
+        try:
+            event_type = event_data.get("type", "unknown")
+            data = dict(event_data.get("data", {}))
+            if endpoint_id is not None:
+                data["endpoint_id"] = endpoint_id
+            await broadcast_to_webui(event_type, data)
+        except Exception as e:
+            logger.warning("Failed to broadcast routing event to WebUI: %s", e)
 
     async def route_request(
         self,
