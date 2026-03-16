@@ -44,7 +44,7 @@ async def create_endpoint(data: EndpointCreate):
         ep = await endpoint_db.create_endpoint(
             name=data.name, description=data.description, api_key=data.api_key
         )
-        invalidate_endpoint_cache()
+        await invalidate_endpoint_cache()
         return ep.model_dump()
     except Exception as e:
         if "unique" in str(e).lower():
@@ -75,7 +75,7 @@ async def update_endpoint(endpoint_id: str, data: EndpointUpdate):
     ep = await endpoint_db.update_endpoint(endpoint_id, **kwargs)
     if not ep:
         raise HTTPException(status_code=404, detail="Endpoint not found")
-    invalidate_endpoint_cache()
+    await invalidate_endpoint_cache()
     return ep.model_dump()
 
 
@@ -85,7 +85,7 @@ async def delete_endpoint(endpoint_id: str):
     if not ep:
         raise HTTPException(status_code=404, detail="Endpoint not found")
     await endpoint_db.delete_endpoint(endpoint_id)
-    invalidate_endpoint_cache()
+    await invalidate_endpoint_cache()
     return {"message": f"Endpoint '{ep.name}' deleted", "id": endpoint_id}
 
 

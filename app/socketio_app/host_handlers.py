@@ -6,85 +6,45 @@ Two-phase connection:
 3. If the API key is unknown -> connection is accepted but held in
    "pending approval" state. Events are silently ignored until an
    admin approves the host from the WebUI.
+
+All connection state is stored in Redis for multi-replica consistency.
 """
 
 import asyncio
 import logging
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from .server import sio
 from app.database.hosts import host_db
 from app.models import HostStatus
+from app.redis_state import host_store
 
 logger = logging.getLogger(__name__)
 
-# ── Active hosts ──────────────────────────────────────────────
 
-# sid -> host_id  (only for approved/registered hosts)
-_sid_to_host: Dict[str, str] = {}
-# host_id -> list of instance dicts (cached from host events)
-_host_instances: Dict[str, list] = {}
+# ── Public helpers (async, backed by Redis) ───────────────────
 
 
-def get_host_instances(host_id: str) -> list:
-    return _host_instances.get(host_id, [])
+async def get_host_instances(host_id: str) -> list:
+    return await host_store.get_host_instances(host_id)
 
 
-def is_host_connected(host_id: str) -> bool:
-    return host_id in set(_sid_to_host.values())
+async def is_host_connected(host_id: str) -> bool:
+    return await host_store.is_host_connected(host_id)
 
 
-def get_connected_host_ids() -> list:
-    return list(set(_sid_to_host.values()))
+async def get_connected_host_ids() -> list:
+    return await host_store.get_connected_host_ids()
 
 
-# ── Pending hosts ─────────────────────────────────────────────
+async def get_pending_hosts() -> List[dict]:
+    return await host_store.get_all_pending()
 
 
-@dataclass
-class PendingHost:
-    pending_id: str
-    sid: str
-    api_key: str
-    host_name: str = ""
-    instances: list = field(default_factory=list)
-    connected_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-# pending_id -> PendingHost
-_pending_hosts: Dict[str, PendingHost] = {}
-# sid -> pending_id  (quick lookup on events/disconnect)
-_pending_sids: Dict[str, str] = {}
-
-
-def get_pending_hosts() -> List[dict]:
-    """Return serialisable list of all pending hosts."""
-    return [
-        {
-            "pending_id": p.pending_id,
-            "api_key_preview": (
-                p.api_key[:8] + "..." if len(p.api_key) > 8 else p.api_key
-            ),
-            "host_name": p.host_name,
-            "instance_count": len(p.instances),
-            "connected_at": p.connected_at.isoformat(),
-        }
-        for p in _pending_hosts.values()
-    ]
-
-
-def get_pending_host(pending_id: str) -> Optional[PendingHost]:
-    return _pending_hosts.get(pending_id)
-
-
-def remove_pending(pending_id: str) -> Optional[PendingHost]:
-    p = _pending_hosts.pop(pending_id, None)
-    if p:
-        _pending_sids.pop(p.sid, None)
-    return p
+async def get_pending_host(pending_id: str) -> Optional[dict]:
+    return await host_store.get_pending(pending_id)
 
 
 async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional[str]:
@@ -94,22 +54,23 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
     """
     from app.models import Host
 
-    p = remove_pending(pending_id)
+    p = await host_store.remove_pending(pending_id)
     if not p:
         return None
 
     host_id = str(uuid.uuid4())
     host = Host(
-        id=host_id, name=name, url=url, api_key=p.api_key, status=HostStatus.ONLINE
+        id=host_id, name=name, url=url, api_key=p["api_key"], status=HostStatus.ONLINE
     )
     await host_db.add_host(host)
 
-    # Promote: move sid from pending into active
-    _sid_to_host[p.sid] = host_id
-    if p.instances:
-        _host_instances[host_id] = p.instances
+    sid = p["sid"]
+    instances = p.get("instances", [])
 
-    # Tell the host it's been approved
+    await host_store.register_host(sid, host_id)
+    if instances:
+        await host_store.set_host_instances(host_id, instances)
+
     await sio.emit(
         "registration_ack",
         {
@@ -117,11 +78,10 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
             "host_name": name,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         },
-        to=p.sid,
+        to=sid,
         namespace="/hosts",
     )
 
-    # Tell WebUI: remove the pending entry, then announce the new host
     await sio.emit(
         "host_pending_removed", {"pending_id": pending_id}, namespace="/webui"
     )
@@ -139,15 +99,13 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
         namespace="/webui",
     )
 
-    # Send cached instances to WebUI
-    if p.instances:
+    if instances:
         await sio.emit(
             "instances_update",
-            {"host_id": host_id, "instances": p.instances},
+            {"host_id": host_id, "instances": instances},
             namespace="/webui",
         )
 
-    # Trigger registry refresh to pick up the new host's instances
     try:
         from app.gateway import gateway
 
@@ -160,19 +118,18 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
 
 
 async def reject_pending_host(pending_id: str) -> bool:
-    p = remove_pending(pending_id)
+    p = await host_store.remove_pending(pending_id)
     if not p:
         return False
 
-    # Tell the host it was rejected, then disconnect it
     try:
         await sio.emit(
             "rejected",
             {"reason": "Host registration rejected by admin"},
-            to=p.sid,
+            to=p["sid"],
             namespace="/hosts",
         )
-        await sio.disconnect(p.sid, namespace="/hosts")
+        await sio.disconnect(p["sid"], namespace="/hosts")
     except Exception:
         pass
 
@@ -194,12 +151,10 @@ async def host_connect(sid: str, environ: dict, auth: Optional[dict] = None):
 
     api_key = auth["api_key"]
 
-    # Try to match a registered host
     host = await host_db.get_host_by_api_key(api_key)
 
     if host:
-        # Known host -> activate immediately
-        _sid_to_host[sid] = host.id
+        await host_store.register_host(sid, host.id)
         await host_db.update_host_status(host.id, HostStatus.ONLINE)
         logger.info("Host '%s' (%s) connected [sid=%s]", host.name, host.id, sid)
 
@@ -228,22 +183,21 @@ async def host_connect(sid: str, environ: dict, auth: Optional[dict] = None):
             namespace="/webui",
         )
     else:
-        # Unknown API key -> pending approval
         pending_id = str(uuid.uuid4())
-        pending = PendingHost(
-            pending_id=pending_id,
-            sid=sid,
-            api_key=api_key,
-            host_name=auth.get("host_name", ""),
-        )
-        _pending_hosts[pending_id] = pending
-        _pending_sids[sid] = pending_id
+        pending_data = {
+            "pending_id": pending_id,
+            "sid": sid,
+            "api_key": api_key,
+            "host_name": auth.get("host_name", ""),
+            "instances": [],
+            "connected_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await host_store.add_pending(pending_id, sid, pending_data)
 
         logger.info(
             "Host %s connected with unknown key -> pending (id=%s)", sid, pending_id
         )
 
-        # Tell the host it's pending
         await sio.emit(
             "pending",
             {
@@ -255,14 +209,13 @@ async def host_connect(sid: str, environ: dict, auth: Optional[dict] = None):
             namespace="/hosts",
         )
 
-        # Tell WebUI about the pending host
         await sio.emit(
             "host_pending",
             {
                 "pending_id": pending_id,
                 "api_key_preview": api_key[:8] + "..." if len(api_key) > 8 else api_key,
-                "host_name": pending.host_name,
-                "connected_at": pending.connected_at.isoformat(),
+                "host_name": pending_data["host_name"],
+                "connected_at": pending_data["connected_at"],
             },
             namespace="/webui",
         )
@@ -270,10 +223,8 @@ async def host_connect(sid: str, environ: dict, auth: Optional[dict] = None):
 
 @sio.on("disconnect", namespace="/hosts")
 async def host_disconnect(sid: str):
-    # Check if it was an active host
-    host_id = _sid_to_host.pop(sid, None)
+    host_id = await host_store.unregister_host_by_sid(sid)
     if host_id:
-        _host_instances.pop(host_id, None)
         await host_db.update_host_status(host_id, HostStatus.OFFLINE)
 
         host = await host_db.get_host(host_id)
@@ -294,10 +245,8 @@ async def host_disconnect(sid: str):
         )
         return
 
-    # Check if it was a pending host
-    pending_id = _pending_sids.pop(sid, None)
+    pending_id = await host_store.remove_pending_by_sid(sid)
     if pending_id:
-        _pending_hosts.pop(pending_id, None)
         logger.info("Pending host disconnected (pending_id=%s)", pending_id)
         await sio.emit(
             "host_pending_removed", {"pending_id": pending_id}, namespace="/webui"
@@ -307,13 +256,11 @@ async def host_disconnect(sid: str):
 @sio.on("registration", namespace="/hosts")
 async def host_registration(sid: str, data: dict):
     """Receive initial instance list from host."""
-    # Active host -> process normally
-    host_id = _sid_to_host.get(sid)
+    host_id = await host_store.get_host_id_for_sid(sid)
     if host_id:
         instances = data.get("instances", [])
-        _host_instances[host_id] = instances
+        await host_store.set_host_instances(host_id, instances)
 
-        # Forward to WebUI so the dashboard gets the instance list
         await sio.emit(
             "instances_update",
             {"host_id": host_id, "instances": instances},
@@ -328,32 +275,34 @@ async def host_registration(sid: str, data: dict):
             pass
         return
 
-    # Pending host -> stash the data for when it gets approved
-    pending_id = _pending_sids.get(sid)
-    if pending_id and pending_id in _pending_hosts:
-        p = _pending_hosts[pending_id]
-        p.host_name = data.get("host_name", p.host_name)
-        p.instances = data.get("instances", [])
+    pending_id = await host_store.get_pending_id_for_sid(sid)
+    if pending_id:
+        p = await host_store.get_pending(pending_id)
+        if p:
+            p["host_name"] = data.get("host_name", p.get("host_name", ""))
+            p["instances"] = data.get("instances", [])
+            await host_store.update_pending(pending_id, p)
 
-        # Update the WebUI with the richer info now that we have host_name
-        await sio.emit(
-            "host_pending",
-            {
-                "pending_id": pending_id,
-                "api_key_preview": (
-                    p.api_key[:8] + "..." if len(p.api_key) > 8 else p.api_key
-                ),
-                "host_name": p.host_name,
-                "instance_count": len(p.instances),
-                "connected_at": p.connected_at.isoformat(),
-            },
-            namespace="/webui",
-        )
+            await sio.emit(
+                "host_pending",
+                {
+                    "pending_id": pending_id,
+                    "api_key_preview": (
+                        p["api_key"][:8] + "..."
+                        if len(p["api_key"]) > 8
+                        else p["api_key"]
+                    ),
+                    "host_name": p["host_name"],
+                    "instance_count": len(p["instances"]),
+                    "connected_at": p["connected_at"],
+                },
+                namespace="/webui",
+            )
 
 
 @sio.on("instance_state", namespace="/hosts")
 async def host_instance_state(sid: str, data: dict):
-    host_id = _sid_to_host.get(sid)
+    host_id = await host_store.get_host_id_for_sid(sid)
     if not host_id:
         return
 
@@ -373,7 +322,7 @@ async def host_instance_state(sid: str, data: dict):
 
 @sio.on("log", namespace="/hosts")
 async def host_log(sid: str, data: dict):
-    host_id = _sid_to_host.get(sid)
+    host_id = await host_store.get_host_id_for_sid(sid)
     if not host_id:
         return
 
@@ -393,7 +342,7 @@ async def host_log(sid: str, data: dict):
 
 @sio.on("host_health", namespace="/hosts")
 async def host_health(sid: str, data: dict):
-    host_id = _sid_to_host.get(sid)
+    host_id = await host_store.get_host_id_for_sid(sid)
     if not host_id:
         return
 
@@ -417,14 +366,13 @@ async def host_health(sid: str, data: dict):
 
 @sio.on("instances_update", namespace="/hosts")
 async def host_instances_update(sid: str, data: dict):
-    host_id = _sid_to_host.get(sid)
+    host_id = await host_store.get_host_id_for_sid(sid)
     if not host_id:
         return
 
     instances = data.get("data", {}).get("instances", data.get("instances", []))
-    _host_instances[host_id] = instances
+    await host_store.set_host_instances(host_id, instances)
 
-    # Forward to WebUI
     await sio.emit(
         "instances_update",
         {"host_id": host_id, "instances": instances},

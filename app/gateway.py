@@ -57,14 +57,14 @@ class OpenAIGateway:
         ws_hosts = []
         http_hosts = []
         for host in hosts:
-            if is_host_connected(host.id):
+            if await is_host_connected(host.id):
                 ws_hosts.append(host)
             else:
                 http_hosts.append(host)
 
         # WebSocket-connected hosts (instant, from cache)
         for host in ws_hosts:
-            ws_instances = get_host_instances(host.id)
+            ws_instances = await get_host_instances(host.id)
             await host_db.update_host_status(host.id, HostStatus.ONLINE)
 
             for instance in ws_instances:

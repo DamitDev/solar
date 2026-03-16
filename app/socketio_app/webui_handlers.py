@@ -48,11 +48,10 @@ async def webui_connect(sid: str, environ: dict, auth: Optional[dict] = None):
 
     logger.info("WebUI client connected [sid=%s]", sid)
 
-    # Send initial status of all hosts
     hosts = await host_db.get_all_hosts()
-    await sio.emit(
-        "initial_status",
-        [
+    initial = []
+    for h in hosts:
+        initial.append(
             {
                 "host_id": h.id,
                 "name": h.name,
@@ -60,17 +59,13 @@ async def webui_connect(sid: str, environ: dict, auth: Optional[dict] = None):
                 "url": h.url,
                 "last_seen": h.last_seen.isoformat() if h.last_seen else None,
                 "memory": h.memory.model_dump() if h.memory else None,
-                "connected": is_host_connected(h.id),
+                "connected": await is_host_connected(h.id),
             }
-            for h in hosts
-        ],
-        to=sid,
-        namespace="/webui",
-    )
+        )
+    await sio.emit("initial_status", initial, to=sid, namespace="/webui")
 
-    # Send cached instance lists for all connected hosts
-    for hid in get_connected_host_ids():
-        instances = get_host_instances(hid)
+    for hid in await get_connected_host_ids():
+        instances = await get_host_instances(hid)
         if instances:
             await sio.emit(
                 "instances_update",
@@ -79,8 +74,7 @@ async def webui_connect(sid: str, environ: dict, auth: Optional[dict] = None):
                 namespace="/webui",
             )
 
-    # Send current pending hosts (if any)
-    pending = get_pending_hosts()
+    pending = await get_pending_hosts()
     for p in pending:
         await sio.emit("host_pending", p, to=sid, namespace="/webui")
 

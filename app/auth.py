@@ -5,6 +5,8 @@ Two authentication modes:
 - /api/* routes: compared against MANAGEMENT_API_KEY env var
 """
 
+import json
+import logging
 from typing import Optional
 
 from fastapi import Request, status
@@ -12,6 +14,11 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.database.endpoints import endpoint_db, ApiEndpoint
+
+logger = logging.getLogger(__name__)
+
+ENDPOINT_CACHE_PREFIX = "solar:endpoint_cache:"
+ENDPOINT_CACHE_TTL = 300  # 5 minutes
 
 
 def _extract_api_key(request: Request) -> Optional[str]:
@@ -41,21 +48,46 @@ _CORS_HEADERS = {
 }
 
 
-# Cache for endpoint API key lookups to avoid DB round-trip on every request.
-# Invalidated when endpoints are created/updated/deleted.
-_endpoint_cache: dict[str, ApiEndpoint] = {}
+async def invalidate_endpoint_cache() -> None:
+    """Clear all cached endpoint lookups across all replicas."""
+    try:
+        from app.redis_state.connection import redis_client
 
-
-def invalidate_endpoint_cache() -> None:
-    _endpoint_cache.clear()
+        r = redis_client()
+        keys = []
+        async for key in r.scan_iter(f"{ENDPOINT_CACHE_PREFIX}*"):
+            keys.append(key)
+        if keys:
+            await r.delete(*keys)
+    except Exception as e:
+        logger.warning("Failed to invalidate endpoint cache: %s", e)
 
 
 async def _resolve_endpoint(api_key: str) -> Optional[ApiEndpoint]:
-    if api_key in _endpoint_cache:
-        return _endpoint_cache[api_key]
+    try:
+        from app.redis_state.connection import redis_client
+
+        r = redis_client()
+        cached = await r.get(f"{ENDPOINT_CACHE_PREFIX}{api_key}")
+        if cached:
+            data = json.loads(cached)
+            return ApiEndpoint(**data)
+    except Exception:
+        pass
+
     ep = await endpoint_db.get_endpoint_by_api_key(api_key)
     if ep:
-        _endpoint_cache[api_key] = ep
+        try:
+            from app.redis_state.connection import redis_client
+
+            r = redis_client()
+            await r.set(
+                f"{ENDPOINT_CACHE_PREFIX}{api_key}",
+                ep.model_dump_json(),
+                ex=ENDPOINT_CACHE_TTL,
+            )
+        except Exception:
+            pass
     return ep
 
 

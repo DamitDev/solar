@@ -25,14 +25,14 @@ class PendingApproveRequest(BaseModel):
 async def list_pending_hosts():
     from app.socketio_app.host_handlers import get_pending_hosts
 
-    return get_pending_hosts()
+    return await get_pending_hosts()
 
 
 @router.post("/pending/{pending_id}/approve", response_model=HostResponse)
 async def approve_host(pending_id: str, data: PendingApproveRequest):
     from app.socketio_app.host_handlers import approve_pending_host, get_pending_host
 
-    pending = get_pending_host(pending_id)
+    pending = await get_pending_host(pending_id)
     if not pending:
         raise HTTPException(
             status_code=404, detail="Pending host not found (may have disconnected)"
