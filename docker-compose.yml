@@ -12,22 +12,29 @@ services:
     networks:
       - solar-network
 
+  redis:
+    image: redis:7-alpine
+    container_name: solar-control-redis
+    restart: unless-stopped
+    networks:
+      - solar-network
+
   solar-control:
     build: .
     container_name: solar-control
     depends_on:
       - postgres
+      - redis
     ports:
       - "${PORT:-8000}:${PORT:-8000}"
     environment:
-      - API_KEY=${API_KEY:-change-me-please}
+      - MANAGEMENT_API_KEY=${MANAGEMENT_API_KEY:-change-me-management}
       - HOST=${HOST:-0.0.0.0}
       - PORT=${PORT:-8000}
       - DATABASE_URL=postgresql://solar:solar@postgres:5432/solar_gateway
-    volumes:
-      - ./data:/app/data
+      - REDIS_URL=redis://redis:6379/0
     extra_hosts:
-      - "host.docker.internal:host-gateway"  # Allow access to host machine
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     networks:
       - solar-network

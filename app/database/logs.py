@@ -1,21 +1,24 @@
-"""
-Gateway event logging - async PostgreSQL storage.
+"""Gateway event logging - async PostgreSQL storage.
 
 Stores events and request summaries in PostgreSQL tables:
-- gateway_events - All raw events
-- gateway_requests - Request summaries (on completion)
+- gateway_events  -- all raw events
+- gateway_requests -- request summaries (on completion)
 
 Uses a write queue with periodic batch inserts for high throughput.
+Now uses the shared connection pool and tags requests with endpoint_id.
 """
 
 import asyncio
 import json
+import logging
+import uuid
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from collections import defaultdict
 
-import asyncpg
+from .connection import db_pool
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now_iso() -> str:
@@ -23,7 +26,6 @@ def _utc_now_iso() -> str:
 
 
 def _parse_ts(ts_str: Optional[str]) -> Optional[datetime]:
-    """Parse an ISO timestamp string to a datetime object."""
     if not ts_str:
         return None
     try:
@@ -33,7 +35,6 @@ def _parse_ts(ts_str: Optional[str]) -> Optional[datetime]:
 
 
 def classify_request_type(endpoint: Optional[str]) -> str:
-    """Classify request type based on endpoint."""
     if not endpoint:
         return "unknown"
     ep = endpoint.lower()
@@ -56,13 +57,12 @@ def classify_request_type(endpoint: Optional[str]) -> str:
 
 @dataclass
 class RequestInProgress:
-    """Tracks an in-flight request for building the summary."""
-
     request_id: str
     request_type: str = "unknown"
     model: Optional[str] = None
     resolved_model: Optional[str] = None
     endpoint: Optional[str] = None
+    endpoint_id: Optional[str] = None
     client_ip: Optional[str] = None
     stream: Optional[bool] = None
     start_timestamp: Optional[str] = None
@@ -75,14 +75,13 @@ class RequestInProgress:
 
 @dataclass
 class RequestSummary:
-    """Final summary of a completed request."""
-
     request_id: str
     request_type: str
-    status: str  # success | error | missed
+    status: str
     model: Optional[str]
     resolved_model: Optional[str]
     endpoint: Optional[str]
+    endpoint_id: Optional[str]
     client_ip: Optional[str]
     stream: Optional[bool]
     attempts: int
@@ -101,52 +100,6 @@ class RequestSummary:
     decode_ms_per_token: Optional[float] = None
 
 
-# SQL for table and index creation
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS gateway_events (
-    id BIGSERIAL PRIMARY KEY,
-    event_type TEXT NOT NULL,
-    request_id TEXT,
-    data JSONB NOT NULL DEFAULT '{}',
-    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_events_timestamp ON gateway_events(timestamp);
-CREATE INDEX IF NOT EXISTS idx_events_type ON gateway_events(event_type);
-CREATE INDEX IF NOT EXISTS idx_events_request_id ON gateway_events(request_id);
-
-CREATE TABLE IF NOT EXISTS gateway_requests (
-    id BIGSERIAL PRIMARY KEY,
-    request_id TEXT NOT NULL UNIQUE,
-    request_type TEXT,
-    status TEXT NOT NULL,
-    model TEXT,
-    resolved_model TEXT,
-    endpoint TEXT,
-    client_ip TEXT,
-    stream BOOLEAN,
-    attempts INTEGER DEFAULT 1,
-    start_timestamp TIMESTAMPTZ,
-    end_timestamp TIMESTAMPTZ NOT NULL,
-    duration_s DOUBLE PRECISION,
-    host_id TEXT,
-    host_name TEXT,
-    instance_id TEXT,
-    instance_url TEXT,
-    error_message TEXT,
-    prompt_tokens INTEGER,
-    completion_tokens INTEGER,
-    total_tokens INTEGER,
-    decode_tps DOUBLE PRECISION,
-    decode_ms_per_token DOUBLE PRECISION
-);
-CREATE INDEX IF NOT EXISTS idx_requests_end_ts ON gateway_requests(end_timestamp);
-CREATE INDEX IF NOT EXISTS idx_requests_status ON gateway_requests(status);
-CREATE INDEX IF NOT EXISTS idx_requests_model ON gateway_requests(model);
-CREATE INDEX IF NOT EXISTS idx_requests_host ON gateway_requests(host_id);
-CREATE INDEX IF NOT EXISTS idx_requests_type ON gateway_requests(request_type);
-"""
-
-
 class GatewayLogger:
     """Async gateway event logger with PostgreSQL storage."""
 
@@ -154,38 +107,19 @@ class GatewayLogger:
     MAX_BUFFER_SIZE = 100
 
     def __init__(self) -> None:
-        try:
-            from app.config import settings
-            self.database_url = settings.database_url
-        except Exception:
-            self.database_url = "postgresql://solar:solar@localhost:5432/solar_gateway"
-
-        self._pool: Optional[asyncpg.Pool] = None
         self._inflight: Dict[str, RequestInProgress] = {}
         self._lock = asyncio.Lock()
-
-        # Write buffers for batch inserts
         self._event_buffer: List[dict] = []
         self._request_buffer: List[dict] = []
         self._buffer_lock = asyncio.Lock()
-
         self._flush_task: Optional[asyncio.Task] = None
         self._stop_event: Optional[asyncio.Event] = None
 
     async def start(self) -> None:
-        """Create connection pool and ensure schema exists."""
-        self._pool = await asyncpg.create_pool(
-            self.database_url, min_size=2, max_size=10
-        )
-        # Auto-create tables and indexes
-        async with self._pool.acquire() as conn:
-            await conn.execute(_SCHEMA_SQL)
-        # Start background flush loop
         self._stop_event = asyncio.Event()
         self._flush_task = asyncio.create_task(self._flush_loop())
 
     async def stop(self) -> None:
-        """Stop flush task and close pool."""
         if self._stop_event:
             self._stop_event.set()
         if self._flush_task:
@@ -194,14 +128,9 @@ class GatewayLogger:
             except asyncio.CancelledError:
                 pass
             self._flush_task = None
-        # Final flush of remaining buffer
         await self._flush_all()
-        if self._pool:
-            await self._pool.close()
-            self._pool = None
 
     async def _flush_loop(self) -> None:
-        """Background task that periodically flushes the write buffer."""
         while self._stop_event and not self._stop_event.is_set():
             try:
                 await asyncio.wait_for(
@@ -212,26 +141,32 @@ class GatewayLogger:
             await self._flush_all()
 
     async def _flush_all(self) -> None:
-        """Flush buffered events and requests to PostgreSQL."""
         async with self._buffer_lock:
             events = list(self._event_buffer)
             requests = list(self._request_buffer)
             self._event_buffer.clear()
             self._request_buffer.clear()
 
-        if not self._pool:
+        try:
+            pool = db_pool()
+        except RuntimeError:
             return
 
         if events:
             try:
-                async with self._pool.acquire() as conn:
+                async with pool.acquire() as conn:
                     await conn.executemany(
-                        """INSERT INTO gateway_events (event_type, request_id, data, timestamp)
-                           VALUES ($1, $2, $3::jsonb, $4)""",
+                        """INSERT INTO gateway_events (event_type, request_id, endpoint_id, data, timestamp)
+                           VALUES ($1, $2, $3::uuid, $4::jsonb, $5)""",
                         [
                             (
                                 e["event_type"],
                                 e.get("request_id"),
+                                (
+                                    uuid.UUID(e["endpoint_id"])
+                                    if e.get("endpoint_id")
+                                    else None
+                                ),
                                 json.dumps(e["data"], default=str),
                                 e["timestamp"],
                             )
@@ -239,19 +174,20 @@ class GatewayLogger:
                         ],
                     )
             except Exception as exc:
-                print(f"[GatewayLogger] Failed to flush events: {exc}")
+                logger.error("Failed to flush events: %s", exc)
 
         if requests:
             try:
-                async with self._pool.acquire() as conn:
+                async with pool.acquire() as conn:
                     await conn.executemany(
                         """INSERT INTO gateway_requests (
                             request_id, request_type, status, model, resolved_model,
-                            endpoint, client_ip, stream, attempts, start_timestamp,
-                            end_timestamp, duration_s, host_id, host_name, instance_id,
-                            instance_url, error_message, prompt_tokens, completion_tokens,
-                            total_tokens, decode_tps, decode_ms_per_token
-                        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+                            endpoint, endpoint_id, client_ip, stream, attempts,
+                            start_timestamp, end_timestamp, duration_s, host_id,
+                            host_name, instance_id, instance_url, error_message,
+                            prompt_tokens, completion_tokens, total_tokens,
+                            decode_tps, decode_ms_per_token
+                        ) VALUES ($1,$2,$3,$4,$5,$6,$7::uuid,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
                         ON CONFLICT (request_id) DO NOTHING""",
                         [
                             (
@@ -261,6 +197,11 @@ class GatewayLogger:
                                 r.get("model"),
                                 r.get("resolved_model"),
                                 r.get("endpoint"),
+                                (
+                                    uuid.UUID(r["endpoint_id"])
+                                    if r.get("endpoint_id")
+                                    else None
+                                ),
                                 r.get("client_ip"),
                                 r.get("stream"),
                                 r.get("attempts", 1),
@@ -282,18 +223,23 @@ class GatewayLogger:
                         ],
                     )
             except Exception as exc:
-                print(f"[GatewayLogger] Failed to flush requests: {exc}")
+                logger.error("Failed to flush requests: %s", exc)
 
     async def _queue_event(
-        self, event_type: str, request_id: Optional[str], data: dict, timestamp: datetime
+        self,
+        event_type: str,
+        request_id: Optional[str],
+        endpoint_id: Optional[str],
+        data: dict,
+        timestamp: datetime,
     ) -> None:
-        """Queue a raw event for batch insert."""
         should_flush = False
         async with self._buffer_lock:
             self._event_buffer.append(
                 {
                     "event_type": event_type,
                     "request_id": request_id,
+                    "endpoint_id": endpoint_id,
                     "data": data,
                     "timestamp": timestamp,
                 }
@@ -304,44 +250,42 @@ class GatewayLogger:
             asyncio.create_task(self._flush_all())
 
     async def _queue_request(self, summary_dict: dict) -> None:
-        """Queue a request summary for batch insert."""
         async with self._buffer_lock:
             self._request_buffer.append(summary_dict)
 
-    async def log_event(self, event: Dict[str, Any]) -> Optional[RequestSummary]:
-        """
-        Log a gateway event asynchronously.
+    async def log_event(
+        self, event: Dict[str, Any], *, endpoint_id: Optional[str] = None
+    ) -> Optional[RequestSummary]:
+        """Log a gateway event.
 
-        Returns a RequestSummary if this event completes a request (for WebSocket broadcast).
+        Returns a RequestSummary when the event completes a request lifecycle.
         """
         etype = event.get("type")
         data = event.get("data") or {}
         timestamp = data.get("timestamp") or event.get("timestamp") or _utc_now_iso()
         request_id = data.get("request_id")
 
-        # Add timestamp to event if missing
         if "timestamp" not in event:
             event["timestamp"] = timestamp
 
-        # Parse timestamp for DB storage
         ts_dt = _parse_ts(timestamp) or datetime.now(timezone.utc)
-
-        # Queue raw event write (non-blocking)
-        await self._queue_event(etype or "unknown", request_id, data, ts_dt)
+        await self._queue_event(
+            etype or "unknown", request_id, endpoint_id, data, ts_dt
+        )
 
         if not request_id:
             return None
 
-        # Track request state for summary building
         summary = None
         async with self._lock:
             if etype == "request_start":
-                endpoint = data.get("endpoint")
+                ep = data.get("endpoint")
                 self._inflight[request_id] = RequestInProgress(
                     request_id=request_id,
-                    request_type=classify_request_type(endpoint),
+                    request_type=classify_request_type(ep),
                     model=data.get("model"),
-                    endpoint=endpoint,
+                    endpoint=ep,
+                    endpoint_id=endpoint_id,
                     client_ip=data.get("client_ip"),
                     stream=(
                         bool(data.get("stream"))
@@ -354,13 +298,13 @@ class GatewayLogger:
             elif etype == "request_routed":
                 rip = self._inflight.get(request_id)
                 if not rip:
-                    # Missed the start, create minimal record
-                    endpoint = data.get("endpoint")
+                    ep = data.get("endpoint")
                     rip = RequestInProgress(
                         request_id=request_id,
-                        request_type=classify_request_type(endpoint),
+                        request_type=classify_request_type(ep),
                         model=data.get("model"),
-                        endpoint=endpoint,
+                        endpoint=ep,
+                        endpoint_id=endpoint_id,
                         start_timestamp=timestamp,
                     )
                     self._inflight[request_id] = rip
@@ -376,17 +320,16 @@ class GatewayLogger:
             elif etype in ("request_success", "request_error"):
                 rip = self._inflight.pop(request_id, None)
                 if not rip:
-                    # Missed start, create minimal
-                    endpoint = data.get("endpoint")
+                    ep = data.get("endpoint")
                     rip = RequestInProgress(
                         request_id=request_id,
-                        request_type=classify_request_type(endpoint),
+                        request_type=classify_request_type(ep),
                         model=data.get("model"),
-                        endpoint=endpoint,
+                        endpoint=ep,
+                        endpoint_id=endpoint_id,
                         start_timestamp=timestamp,
                     )
 
-                # Build summary
                 status = (
                     "success"
                     if etype == "request_success"
@@ -394,7 +337,6 @@ class GatewayLogger:
                 )
                 duration = data.get("duration")
 
-                # Token counts
                 p_tok = (
                     data.get("prompt_tokens")
                     if isinstance(data.get("prompt_tokens"), (int, float))
@@ -431,6 +373,7 @@ class GatewayLogger:
                     model=rip.model,
                     resolved_model=rip.resolved_model,
                     endpoint=rip.endpoint,
+                    endpoint_id=rip.endpoint_id or endpoint_id,
                     client_ip=rip.client_ip,
                     stream=rip.stream,
                     attempts=max(1, rip.attempts),
@@ -452,8 +395,6 @@ class GatewayLogger:
                     decode_tps=decode_tps,
                     decode_ms_per_token=decode_ms,
                 )
-
-                # Queue summary write (non-blocking)
                 await self._queue_request(asdict(summary))
 
         return summary
@@ -478,17 +419,20 @@ class GatewayLogger:
             return "missed"
         return "error"
 
-    async def read_requests_async(
+    async def read_requests(
         self,
         start: datetime,
         end: datetime,
+        *,
         status: Optional[str] = None,
         request_type: Optional[str] = None,
         model: Optional[str] = None,
         host_id: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
     ) -> List[dict]:
-        """Read request summaries from PostgreSQL with filtering."""
-        if not self._pool:
+        try:
+            pool = db_pool()
+        except RuntimeError:
             return []
 
         query = "SELECT * FROM gateway_requests WHERE end_timestamp >= $1 AND end_timestamp <= $2"
@@ -511,33 +455,39 @@ class GatewayLogger:
             query += f" AND host_id = ${idx}"
             params.append(host_id)
             idx += 1
+        if endpoint_id:
+            query += f" AND endpoint_id = ${idx}::uuid"
+            params.append(uuid.UUID(endpoint_id))
+            idx += 1
 
         query += " ORDER BY end_timestamp DESC"
 
-        async with self._pool.acquire() as conn:
+        async with pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
 
-        # Convert rows to dicts with ISO string timestamps
         results = []
         for row in rows:
             d = dict(row)
-            # Remove DB-internal id
             d.pop("id", None)
-            # Convert datetime fields to ISO strings for API compatibility
+            if d.get("endpoint_id"):
+                d["endpoint_id"] = str(d["endpoint_id"])
             for field in ("start_timestamp", "end_timestamp"):
                 if isinstance(d.get(field), datetime):
                     d[field] = d[field].isoformat()
             results.append(d)
         return results
 
-    async def read_events_async(
+    async def read_events(
         self,
         start: datetime,
         end: datetime,
+        *,
         types: Optional[List[str]] = None,
+        endpoint_id: Optional[str] = None,
     ) -> List[dict]:
-        """Read raw events from PostgreSQL with filtering."""
-        if not self._pool:
+        try:
+            pool = db_pool()
+        except RuntimeError:
             return []
 
         query = "SELECT * FROM gateway_events WHERE timestamp >= $1 AND timestamp <= $2"
@@ -550,22 +500,31 @@ class GatewayLogger:
             params.extend(types)
             idx += len(types)
 
+        if endpoint_id:
+            query += f" AND endpoint_id = ${idx}::uuid"
+            params.append(uuid.UUID(endpoint_id))
+            idx += 1
+
         query += " ORDER BY timestamp ASC"
 
-        async with self._pool.acquire() as conn:
+        async with pool.acquire() as conn:
             rows = await conn.fetch(query, *params)
 
-        # Reconstruct event dict format matching the old JSONL structure
         results = []
         for row in rows:
             evt = {
                 "type": row["event_type"],
-                "data": json.loads(row["data"]) if isinstance(row["data"], str) else row["data"],
+                "data": (
+                    json.loads(row["data"])
+                    if isinstance(row["data"], str)
+                    else row["data"]
+                ),
                 "timestamp": row["timestamp"].isoformat(),
             }
+            if row.get("endpoint_id"):
+                evt["endpoint_id"] = str(row["endpoint_id"])
             results.append(evt)
         return results
 
 
-# Global singleton
 gateway_logger = GatewayLogger()
