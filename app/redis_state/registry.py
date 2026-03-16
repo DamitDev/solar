@@ -4,7 +4,7 @@ Maps model aliases to lists of instance entries, shared across all replicas.
 """
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Dict, List
 
 from .connection import redis_client
 

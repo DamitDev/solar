@@ -3,7 +3,6 @@
 All operations are atomic to ensure consistency across replicas.
 """
 
-from typing import Optional
 
 from .connection import redis_client
 

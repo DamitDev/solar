@@ -4,7 +4,6 @@ Each API endpoint represents a tenant (dev, uat, prod) with its own API key.
 All endpoints serve the same models but have separate request logging.
 """
 
-import json
 import uuid
 import secrets
 from datetime import datetime, timezone
@@ -28,7 +27,13 @@ class ApiEndpoint(BaseModel):
 class EndpointDB:
     """Database-backed API endpoint management."""
 
-    async def create_endpoint(self, name: str, *, description: Optional[str] = None, api_key: Optional[str] = None) -> ApiEndpoint:
+    async def create_endpoint(
+        self,
+        name: str,
+        *,
+        description: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ) -> ApiEndpoint:
         ep = ApiEndpoint(name=name, description=description)
         if api_key:
             ep.api_key = api_key
@@ -49,7 +54,10 @@ class EndpointDB:
     async def get_endpoint(self, endpoint_id: str) -> Optional[ApiEndpoint]:
         pool = db_pool()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM api_endpoints WHERE id = $1::uuid", uuid.UUID(endpoint_id))
+            row = await conn.fetchrow(
+                "SELECT * FROM api_endpoints WHERE id = $1::uuid",
+                uuid.UUID(endpoint_id),
+            )
         if not row:
             return None
         return self._row_to_endpoint(row)
@@ -57,7 +65,9 @@ class EndpointDB:
     async def get_endpoint_by_api_key(self, api_key: str) -> Optional[ApiEndpoint]:
         pool = db_pool()
         async with pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT * FROM api_endpoints WHERE api_key = $1", api_key)
+            row = await conn.fetchrow(
+                "SELECT * FROM api_endpoints WHERE api_key = $1", api_key
+            )
         if not row:
             return None
         return self._row_to_endpoint(row)
@@ -110,7 +120,9 @@ class EndpointDB:
     async def delete_endpoint(self, endpoint_id: str) -> bool:
         pool = db_pool()
         async with pool.acquire() as conn:
-            result = await conn.execute("DELETE FROM api_endpoints WHERE id = $1::uuid", uuid.UUID(endpoint_id))
+            result = await conn.execute(
+                "DELETE FROM api_endpoints WHERE id = $1::uuid", uuid.UUID(endpoint_id)
+            )
         return result == "DELETE 1"
 
     async def get_usage_stats(self, endpoint_id: str, *, hours: int = 24) -> dict:
@@ -144,8 +156,12 @@ class EndpointDB:
             "total_prompt_tokens": row["total_prompt_tokens"],
             "total_completion_tokens": row["total_completion_tokens"],
             "total_tokens": row["total_tokens"],
-            "avg_duration_s": float(row["avg_duration_s"]) if row["avg_duration_s"] else None,
-            "avg_decode_tps": float(row["avg_decode_tps"]) if row["avg_decode_tps"] else None,
+            "avg_duration_s": (
+                float(row["avg_duration_s"]) if row["avg_duration_s"] else None
+            ),
+            "avg_decode_tps": (
+                float(row["avg_decode_tps"]) if row["avg_decode_tps"] else None
+            ),
         }
 
     def _row_to_endpoint(self, row) -> ApiEndpoint:

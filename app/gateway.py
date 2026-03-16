@@ -92,6 +92,7 @@ class OpenAIGateway:
 
         # HTTP hosts in parallel
         if http_hosts:
+
             async def poll_host(host):
                 result_entries = []
                 try:
@@ -112,9 +113,15 @@ class OpenAIGateway:
                                     instance_api_key = instance["config"]["api_key"]
                                     supported_endpoints = instance.get(
                                         "supported_endpoints",
-                                        ["/v1/chat/completions", "/v1/completions", "/v1/models"],
+                                        [
+                                            "/v1/chat/completions",
+                                            "/v1/completions",
+                                            "/v1/models",
+                                        ],
                                     )
-                                    backend_type = instance.get("config", {}).get("backend_type", "llamacpp")
+                                    backend_type = instance.get("config", {}).get(
+                                        "backend_type", "llamacpp"
+                                    )
                                     entry = {
                                         "host_id": host.id,
                                         "instance_id": instance["id"],
@@ -206,7 +213,9 @@ class OpenAIGateway:
         instances: List[Tuple[str, str, str]] = []  # (host_id, instance_id, url)
         for alias, inst_list in registry.items():
             for inst in inst_list:
-                instances.append((inst["host_id"], inst["instance_id"], inst.get("url", "")))
+                instances.append(
+                    (inst["host_id"], inst["instance_id"], inst.get("url", ""))
+                )
 
         sem = asyncio.Semaphore(20)
 
@@ -226,6 +235,7 @@ class OpenAIGateway:
     async def _tcp_connect_ok(self, url: str) -> bool:
         try:
             from urllib.parse import urlparse
+
             parsed = urlparse(url)
             hostname = parsed.hostname
             port = parsed.port
@@ -258,7 +268,9 @@ class OpenAIGateway:
             out["total_tokens"] = int(usage["total_tokens"])
         return out
 
-    async def _fetch_last_generation_metrics(self, host_id: str, instance_id: str) -> Dict[str, Any]:
+    async def _fetch_last_generation_metrics(
+        self, host_id: str, instance_id: str
+    ) -> Dict[str, Any]:
         try:
             await self._ensure_session()
             if not self.session:
@@ -279,7 +291,9 @@ class OpenAIGateway:
                 if isinstance(data.get("generated_tokens"), (int, float)):
                     out["completion_tokens"] = int(data["generated_tokens"])
                 if "prompt_tokens" in out and "completion_tokens" in out:
-                    out["total_tokens"] = out["prompt_tokens"] + out["completion_tokens"]
+                    out["total_tokens"] = (
+                        out["prompt_tokens"] + out["completion_tokens"]
+                    )
                 if isinstance(data.get("decode_tps"), (int, float)):
                     out["decode_tps"] = float(data["decode_tps"])
                 if isinstance(data.get("decode_ms_per_token"), (int, float)):
@@ -337,7 +351,9 @@ class OpenAIGateway:
     def _parse_model_size(self, alias: str) -> Optional[float]:
         try:
             size_token = alias.rsplit(":", 1)[-1] if ":" in alias else alias
-            match = re.fullmatch(r"(?:(\d+)\s*x\s*)?(\d+(?:\.\d+)?)\s*([bBmM])", size_token)
+            match = re.fullmatch(
+                r"(?:(\d+)\s*x\s*)?(\d+(?:\.\d+)?)\s*([bBmM])", size_token
+            )
             if not match:
                 return None
             multiplier_str, value_str, unit = match.groups()
@@ -373,7 +389,8 @@ class OpenAIGateway:
 
         if required_endpoint:
             available = [
-                inst for inst in available
+                inst
+                for inst in available
                 if required_endpoint in inst.get("supported_endpoints", [])
             ]
             if not available:
@@ -413,6 +430,7 @@ class OpenAIGateway:
                 free_hosts.append(hid)
 
         if free_hosts:
+
             async def host_name(hid: str) -> str:
                 h = await host_db.get_host(hid)
                 return h.name if h and h.name else hid
@@ -461,14 +479,21 @@ class OpenAIGateway:
     # Routing
     # -------------------------
 
-    async def _broadcast_routing_event(self, event_data: dict, *, endpoint_id: Optional[str] = None):
+    async def _broadcast_routing_event(
+        self, event_data: dict, *, endpoint_id: Optional[str] = None
+    ):
         """Broadcast a routing event to WebUI via Socket.IO and log to database."""
         from dataclasses import asdict
         from app.database.logs import gateway_logger
-        from app.socketio_app.webui_handlers import broadcast_to_webui, broadcast_gateway_request
+        from app.socketio_app.webui_handlers import (
+            broadcast_to_webui,
+            broadcast_gateway_request,
+        )
 
         try:
-            summary = await gateway_logger.log_event(event_data, endpoint_id=endpoint_id)
+            summary = await gateway_logger.log_event(
+                event_data, endpoint_id=endpoint_id
+            )
             if summary:
                 await broadcast_gateway_request(asdict(summary))
         except Exception as e:
@@ -517,7 +542,9 @@ class OpenAIGateway:
 
         for attempt in range(max(1, int(settings.route_max_attempts))):
             instance = await self._get_next_instance(
-                model, exclude_keys=attempted, required_endpoint=filter_endpoint,
+                model,
+                exclude_keys=attempted,
+                required_endpoint=filter_endpoint,
             )
             if not instance:
                 if not retried_once:
@@ -538,7 +565,9 @@ class OpenAIGateway:
             weight = self._parse_model_size(instance["model_alias"])
 
             # Atomically track active state in Redis
-            await routing_store.increment_active(instance["host_id"], instance["instance_id"])
+            await routing_store.increment_active(
+                instance["host_id"], instance["instance_id"]
+            )
             await routing_store.increment_host_active(instance["host_id"])
             if weight is not None:
                 await routing_store.add_weight(instance["host_id"], weight)
@@ -571,19 +600,27 @@ class OpenAIGateway:
                     "Authorization": f"Bearer {instance['api_key']}",
                     "Content-Type": "application/json",
                 }
-                timeout = aiohttp.ClientTimeout(total=None, connect=settings.route_connect_timeout_s)
+                timeout = aiohttp.ClientTimeout(
+                    total=None, connect=settings.route_connect_timeout_s
+                )
 
-                async with self.session.post(url, json=data, headers=headers, timeout=timeout) as response:
+                async with self.session.post(
+                    url, json=data, headers=headers, timeout=timeout
+                ) as response:
                     if response.status == 200:
                         await health_store.mark_healthy(
-                            instance["host_id"], instance["instance_id"],
+                            instance["host_id"],
+                            instance["instance_id"],
                             ttl_s=settings.health_ttl_s + 2,
                         )
                         result = await response.json()
                         duration = time.time() - start_time
 
                         usage_fields = self._extract_usage_from_result(result)
-                        if "prompt_tokens" not in usage_fields or "completion_tokens" not in usage_fields:
+                        if (
+                            "prompt_tokens" not in usage_fields
+                            or "completion_tokens" not in usage_fields
+                        ):
                             host_metrics = await self._fetch_last_generation_metrics(
                                 instance["host_id"], instance["instance_id"]
                             )
@@ -621,11 +658,14 @@ class OpenAIGateway:
                             },
                             endpoint_id=endpoint_id,
                         )
-                        raise Exception(f"Request failed: {response.status} - {error_text}")
+                        raise Exception(
+                            f"Request failed: {response.status} - {error_text}"
+                        )
 
             except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
                 await health_store.mark_failed(
-                    instance["host_id"], instance["instance_id"],
+                    instance["host_id"],
+                    instance["instance_id"],
                     cooldown_s=settings.health_cooldown_s,
                 )
                 last_error = e
@@ -653,7 +693,9 @@ class OpenAIGateway:
                             "request_id": request_id,
                             "model": model,
                             "host_id": instance.get("host_id") if instance else None,
-                            "instance_id": instance.get("instance_id") if instance else None,
+                            "instance_id": (
+                                instance.get("instance_id") if instance else None
+                            ),
                             "error_message": str(e),
                             "duration": duration,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -664,7 +706,9 @@ class OpenAIGateway:
                 raise
             finally:
                 try:
-                    await routing_store.decrement_active(instance["host_id"], instance["instance_id"])
+                    await routing_store.decrement_active(
+                        instance["host_id"], instance["instance_id"]
+                    )
                     await routing_store.decrement_host_active(instance["host_id"])
                     if weight is not None:
                         await routing_store.remove_weight(instance["host_id"], weight)
@@ -731,7 +775,9 @@ class OpenAIGateway:
 
         for attempt in range(max(1, int(settings.route_max_attempts))):
             instance = await self._get_next_instance(
-                model, exclude_keys=attempted, required_endpoint=filter_endpoint,
+                model,
+                exclude_keys=attempted,
+                required_endpoint=filter_endpoint,
             )
             if not instance:
                 if not retried_once:
@@ -751,7 +797,9 @@ class OpenAIGateway:
             attempted.add(instance_key)
             weight = self._parse_model_size(instance["model_alias"])
 
-            await routing_store.increment_active(instance["host_id"], instance["instance_id"])
+            await routing_store.increment_active(
+                instance["host_id"], instance["instance_id"]
+            )
             await routing_store.increment_host_active(instance["host_id"])
             if weight is not None:
                 await routing_store.add_weight(instance["host_id"], weight)
@@ -784,12 +832,17 @@ class OpenAIGateway:
                     "Authorization": f"Bearer {instance['api_key']}",
                     "Content-Type": "application/json",
                 }
-                timeout = aiohttp.ClientTimeout(total=None, connect=settings.route_connect_timeout_s)
+                timeout = aiohttp.ClientTimeout(
+                    total=None, connect=settings.route_connect_timeout_s
+                )
 
-                async with self.session.post(url, json=data, headers=headers, timeout=timeout) as response:
+                async with self.session.post(
+                    url, json=data, headers=headers, timeout=timeout
+                ) as response:
                     if response.status == 200:
                         await health_store.mark_healthy(
-                            instance["host_id"], instance["instance_id"],
+                            instance["host_id"],
+                            instance["instance_id"],
                             ttl_s=settings.health_ttl_s + 2,
                         )
                         async for line in response.content:
@@ -831,11 +884,14 @@ class OpenAIGateway:
                             },
                             endpoint_id=endpoint_id,
                         )
-                        raise Exception(f"Request failed: {response.status} - {error_text}")
+                        raise Exception(
+                            f"Request failed: {response.status} - {error_text}"
+                        )
 
             except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
                 await health_store.mark_failed(
-                    instance["host_id"], instance["instance_id"],
+                    instance["host_id"],
+                    instance["instance_id"],
                     cooldown_s=settings.health_cooldown_s,
                 )
                 last_error = e
@@ -863,7 +919,9 @@ class OpenAIGateway:
                             "request_id": request_id,
                             "model": model,
                             "host_id": instance.get("host_id") if instance else None,
-                            "instance_id": instance.get("instance_id") if instance else None,
+                            "instance_id": (
+                                instance.get("instance_id") if instance else None
+                            ),
                             "error_message": str(e),
                             "duration": duration,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -874,7 +932,9 @@ class OpenAIGateway:
                 raise
             finally:
                 try:
-                    await routing_store.decrement_active(instance["host_id"], instance["instance_id"])
+                    await routing_store.decrement_active(
+                        instance["host_id"], instance["instance_id"]
+                    )
                     await routing_store.decrement_host_active(instance["host_id"])
                     if weight is not None:
                         await routing_store.remove_weight(instance["host_id"], weight)

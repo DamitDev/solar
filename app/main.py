@@ -1,6 +1,5 @@
 """Solar Control - Stateless multi-replica coordinator with Socket.IO."""
 
-import asyncio
 import os
 import logging
 from contextlib import asynccontextmanager
@@ -108,6 +107,7 @@ async def readiness_check():
     try:
         from app.database.connection import db_pool
         from app.redis_state.connection import redis_client
+
         pool = db_pool()
         async with pool.acquire() as conn:
             await conn.execute("SELECT 1")
@@ -116,7 +116,10 @@ async def readiness_check():
         return {"status": "ready"}
     except Exception as e:
         from fastapi.responses import JSONResponse
-        return JSONResponse(status_code=503, content={"status": "not_ready", "error": str(e)})
+
+        return JSONResponse(
+            status_code=503, content={"status": "not_ready", "error": str(e)}
+        )
 
 
 @app.get("/")
@@ -126,9 +129,24 @@ async def root():
         "version": "3.0.0",
         "description": "Stateless multi-replica coordinator with multi-tenant OpenAI gateway",
         "endpoints": {
-            "openai": ["/v1/models", "/v1/chat/completions", "/v1/completions", "/v1/classify", "/v1/embeddings", "/v1/rerank"],
-            "management": ["/api/hosts", "/api/endpoints", "/api/gateway/stats", "/api/gateway/requests"],
-            "realtime": ["Socket.IO /hosts (host connections)", "Socket.IO /webui (WebUI connections)"],
+            "openai": [
+                "/v1/models",
+                "/v1/chat/completions",
+                "/v1/completions",
+                "/v1/classify",
+                "/v1/embeddings",
+                "/v1/rerank",
+            ],
+            "management": [
+                "/api/hosts",
+                "/api/endpoints",
+                "/api/gateway/stats",
+                "/api/gateway/requests",
+            ],
+            "realtime": [
+                "Socket.IO /hosts (host connections)",
+                "Socket.IO /webui (WebUI connections)",
+            ],
         },
     }
 
@@ -140,4 +158,7 @@ sio_asgi_app = socketio.ASGIApp(sio, other_asgi_app=app)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:sio_asgi_app", host=settings.host, port=settings.port, reload=True)
+
+    uvicorn.run(
+        "app.main:sio_asgi_app", host=settings.host, port=settings.port, reload=True
+    )

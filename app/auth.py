@@ -5,7 +5,7 @@ Two authentication modes:
 - /api/* routes: compared against MANAGEMENT_API_KEY env var
 """
 
-from typing import Optional, Tuple
+from typing import Optional
 
 from fastapi import Request, status
 from fastapi.responses import JSONResponse

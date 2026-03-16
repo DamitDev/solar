@@ -17,7 +17,6 @@ from app.models import (
 )
 from app.gateway import gateway
 
-
 router = APIRouter(prefix="/v1", tags=["openai"])
 
 
@@ -42,11 +41,15 @@ async def chat_completions(request: ChatCompletionRequest, client: Request):
         request_data = request.model_dump(exclude_none=True)
 
         if request.stream:
+
             async def stream_generator():
                 try:
                     async for chunk in gateway.stream_request(
-                        request.model, "/v1/chat/completions", request_data,
-                        client_ip, endpoint_id=endpoint_id,
+                        request.model,
+                        "/v1/chat/completions",
+                        request_data,
+                        client_ip,
+                        endpoint_id=endpoint_id,
                     ):
                         yield chunk
                 except Exception as e:
@@ -55,8 +58,11 @@ async def chat_completions(request: ChatCompletionRequest, client: Request):
             return StreamingResponse(stream_generator(), media_type="text/event-stream")
         else:
             response = await gateway.route_request(
-                request.model, "/v1/chat/completions", request_data,
-                client_ip, endpoint_id=endpoint_id,
+                request.model,
+                "/v1/chat/completions",
+                request_data,
+                client_ip,
+                endpoint_id=endpoint_id,
             )
             return response
     except ValueError as e:
@@ -73,11 +79,15 @@ async def completions(request: CompletionRequest, client: Request):
         request_data = request.model_dump(exclude_none=True)
 
         if request.stream:
+
             async def stream_generator():
                 try:
                     async for chunk in gateway.stream_request(
-                        request.model, "/v1/completions", request_data,
-                        client_ip, endpoint_id=endpoint_id,
+                        request.model,
+                        "/v1/completions",
+                        request_data,
+                        client_ip,
+                        endpoint_id=endpoint_id,
                     ):
                         yield chunk
                 except Exception as e:
@@ -86,8 +96,11 @@ async def completions(request: CompletionRequest, client: Request):
             return StreamingResponse(stream_generator(), media_type="text/event-stream")
         else:
             response = await gateway.route_request(
-                request.model, "/v1/completions", request_data,
-                client_ip, endpoint_id=endpoint_id,
+                request.model,
+                "/v1/completions",
+                request_data,
+                client_ip,
+                endpoint_id=endpoint_id,
             )
             return response
     except ValueError as e:
@@ -103,8 +116,12 @@ async def classify(request: ClassifyRequest, client: Request):
         endpoint_id = _get_endpoint_id(client)
         request_data = request.model_dump(exclude_none=True)
         response = await gateway.route_request(
-            request.model, "/v1/classify", request_data,
-            client_ip, required_endpoint="/v1/classify", endpoint_id=endpoint_id,
+            request.model,
+            "/v1/classify",
+            request_data,
+            client_ip,
+            required_endpoint="/v1/classify",
+            endpoint_id=endpoint_id,
         )
         return response
     except ValueError as e:
@@ -120,8 +137,12 @@ async def embeddings(request: EmbeddingRequest, client: Request):
         endpoint_id = _get_endpoint_id(client)
         request_data = request.model_dump(exclude_none=True)
         response = await gateway.route_request(
-            request.model, "/v1/embeddings", request_data,
-            client_ip, required_endpoint="/v1/embeddings", endpoint_id=endpoint_id,
+            request.model,
+            "/v1/embeddings",
+            request_data,
+            client_ip,
+            required_endpoint="/v1/embeddings",
+            endpoint_id=endpoint_id,
         )
         return response
     except ValueError as e:
@@ -137,8 +158,12 @@ async def rerank(request: RerankRequest, client: Request):
         endpoint_id = _get_endpoint_id(client)
         request_data = request.model_dump(exclude_none=True)
         response = await gateway.route_request(
-            request.model, "/v1/rerank", request_data,
-            client_ip, required_endpoint="/v1/rerank", endpoint_id=endpoint_id,
+            request.model,
+            "/v1/rerank",
+            request_data,
+            client_ip,
+            required_endpoint="/v1/rerank",
+            endpoint_id=endpoint_id,
         )
         return response
     except ValueError as e:

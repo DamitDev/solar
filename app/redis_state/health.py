@@ -6,7 +6,6 @@ and optional cooldown period.
 
 import json
 import time
-from typing import Optional
 
 from .connection import redis_client
 
@@ -20,22 +19,33 @@ def _key(host_id: str, instance_id: str) -> str:
 class HealthStore:
     """Instance health tracking in Redis."""
 
-    async def mark_healthy(self, host_id: str, instance_id: str, *, ttl_s: float = 5.0) -> None:
+    async def mark_healthy(
+        self, host_id: str, instance_id: str, *, ttl_s: float = 5.0
+    ) -> None:
         r = redis_client()
         data = json.dumps({"last_ok": time.time(), "cooldown_until": 0})
         await r.set(_key(host_id, instance_id), data, ex=int(ttl_s + 2))
 
     async def mark_failed(
-        self, host_id: str, instance_id: str, *, cooldown_s: float = 5.0, ttl_s: float = 10.0
+        self,
+        host_id: str,
+        instance_id: str,
+        *,
+        cooldown_s: float = 5.0,
+        ttl_s: float = 10.0,
     ) -> None:
         r = redis_client()
-        data = json.dumps({
-            "last_ok": 0,
-            "cooldown_until": time.time() + cooldown_s,
-        })
+        data = json.dumps(
+            {
+                "last_ok": 0,
+                "cooldown_until": time.time() + cooldown_s,
+            }
+        )
         await r.set(_key(host_id, instance_id), data, ex=int(ttl_s + 2))
 
-    async def is_healthy(self, host_id: str, instance_id: str, *, health_ttl_s: float = 3.0) -> bool:
+    async def is_healthy(
+        self, host_id: str, instance_id: str, *, health_ttl_s: float = 3.0
+    ) -> bool:
         """Check if an instance is considered healthy.
 
         Healthy means: has a recent probe success AND is not in cooldown.

@@ -1,12 +1,11 @@
 """API endpoint management routes (under /api/endpoints)."""
 
-from typing import List, Optional
+from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app.database.endpoints import endpoint_db, ApiEndpoint
+from app.database.endpoints import endpoint_db
 from app.auth import invalidate_endpoint_cache
-
 
 router = APIRouter(prefix="/endpoints", tags=["endpoints"])
 
@@ -39,7 +38,9 @@ async def create_endpoint(data: EndpointCreate):
         return ep.model_dump()
     except Exception as e:
         if "unique" in str(e).lower():
-            raise HTTPException(status_code=409, detail=f"Endpoint name or API key already exists")
+            raise HTTPException(
+                status_code=409, detail="Endpoint name or API key already exists"
+            )
         raise HTTPException(status_code=500, detail=str(e))
 
 

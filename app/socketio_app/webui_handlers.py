@@ -9,7 +9,6 @@ Features:
 """
 
 import logging
-from datetime import datetime, timezone
 from typing import Optional
 
 from .server import sio
@@ -28,7 +27,9 @@ logger = logging.getLogger(__name__)
 def _extract_key_from_environ(environ: dict) -> Optional[str]:
     """Extract API key from ASGI scope headers (set by reverse proxy)."""
     for name, value in environ.get("headers", []):
-        header = name.decode("latin-1").lower() if isinstance(name, bytes) else name.lower()
+        header = (
+            name.decode("latin-1").lower() if isinstance(name, bytes) else name.lower()
+        )
         val = value.decode("latin-1") if isinstance(value, bytes) else value
         if header == "x-api-key":
             return val

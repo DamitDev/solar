@@ -12,7 +12,7 @@ import asyncio
 import json
 import uuid
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .connection import db_pool
@@ -159,7 +159,11 @@ class GatewayLogger:
                             (
                                 e["event_type"],
                                 e.get("request_id"),
-                                uuid.UUID(e["endpoint_id"]) if e.get("endpoint_id") else None,
+                                (
+                                    uuid.UUID(e["endpoint_id"])
+                                    if e.get("endpoint_id")
+                                    else None
+                                ),
                                 json.dumps(e["data"], default=str),
                                 e["timestamp"],
                             )
@@ -190,7 +194,11 @@ class GatewayLogger:
                                 r.get("model"),
                                 r.get("resolved_model"),
                                 r.get("endpoint"),
-                                uuid.UUID(r["endpoint_id"]) if r.get("endpoint_id") else None,
+                                (
+                                    uuid.UUID(r["endpoint_id"])
+                                    if r.get("endpoint_id")
+                                    else None
+                                ),
                                 r.get("client_ip"),
                                 r.get("stream"),
                                 r.get("attempts", 1),
@@ -258,7 +266,9 @@ class GatewayLogger:
             event["timestamp"] = timestamp
 
         ts_dt = _parse_ts(timestamp) or datetime.now(timezone.utc)
-        await self._queue_event(etype or "unknown", request_id, endpoint_id, data, ts_dt)
+        await self._queue_event(
+            etype or "unknown", request_id, endpoint_id, data, ts_dt
+        )
 
         if not request_id:
             return None
@@ -386,7 +396,9 @@ class GatewayLogger:
 
         return summary
 
-    def _compute_duration(self, start_iso: Optional[str], end_iso: str) -> Optional[float]:
+    def _compute_duration(
+        self, start_iso: Optional[str], end_iso: str
+    ) -> Optional[float]:
         if not start_iso:
             return None
         try:
@@ -499,7 +511,11 @@ class GatewayLogger:
         for row in rows:
             evt = {
                 "type": row["event_type"],
-                "data": json.loads(row["data"]) if isinstance(row["data"], str) else row["data"],
+                "data": (
+                    json.loads(row["data"])
+                    if isinstance(row["data"], str)
+                    else row["data"]
+                ),
                 "timestamp": row["timestamp"].isoformat(),
             }
             if row.get("endpoint_id"):

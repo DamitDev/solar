@@ -13,7 +13,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from .server import sio
 from app.database.hosts import host_db
@@ -43,6 +43,7 @@ def get_connected_host_ids() -> list:
 
 # ── Pending hosts ─────────────────────────────────────────────
 
+
 @dataclass
 class PendingHost:
     pending_id: str
@@ -64,7 +65,9 @@ def get_pending_hosts() -> List[dict]:
     return [
         {
             "pending_id": p.pending_id,
-            "api_key_preview": p.api_key[:8] + "..." if len(p.api_key) > 8 else p.api_key,
+            "api_key_preview": (
+                p.api_key[:8] + "..." if len(p.api_key) > 8 else p.api_key
+            ),
             "host_name": p.host_name,
             "instance_count": len(p.instances),
             "connected_at": p.connected_at.isoformat(),
@@ -96,7 +99,9 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
         return None
 
     host_id = str(uuid.uuid4())
-    host = Host(id=host_id, name=name, url=url, api_key=p.api_key, status=HostStatus.ONLINE)
+    host = Host(
+        id=host_id, name=name, url=url, api_key=p.api_key, status=HostStatus.ONLINE
+    )
     await host_db.add_host(host)
 
     # Promote: move sid from pending into active
@@ -117,7 +122,9 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
     )
 
     # Tell WebUI: remove the pending entry, then announce the new host
-    await sio.emit("host_pending_removed", {"pending_id": pending_id}, namespace="/webui")
+    await sio.emit(
+        "host_pending_removed", {"pending_id": pending_id}, namespace="/webui"
+    )
     await sio.emit(
         "host_status",
         {
@@ -143,6 +150,7 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
     # Trigger registry refresh to pick up the new host's instances
     try:
         from app.gateway import gateway
+
         asyncio.create_task(gateway.refresh_model_registry())
     except Exception:
         pass
@@ -158,17 +166,25 @@ async def reject_pending_host(pending_id: str) -> bool:
 
     # Tell the host it was rejected, then disconnect it
     try:
-        await sio.emit("rejected", {"reason": "Host registration rejected by admin"}, to=p.sid, namespace="/hosts")
+        await sio.emit(
+            "rejected",
+            {"reason": "Host registration rejected by admin"},
+            to=p.sid,
+            namespace="/hosts",
+        )
         await sio.disconnect(p.sid, namespace="/hosts")
     except Exception:
         pass
 
-    await sio.emit("host_pending_removed", {"pending_id": pending_id}, namespace="/webui")
+    await sio.emit(
+        "host_pending_removed", {"pending_id": pending_id}, namespace="/webui"
+    )
     logger.info("Pending host rejected (pending_id=%s)", pending_id)
     return True
 
 
 # ── Socket.IO event handlers ─────────────────────────────────
+
 
 @sio.on("connect", namespace="/hosts")
 async def host_connect(sid: str, environ: dict, auth: Optional[dict] = None):
@@ -223,7 +239,9 @@ async def host_connect(sid: str, environ: dict, auth: Optional[dict] = None):
         _pending_hosts[pending_id] = pending
         _pending_sids[sid] = pending_id
 
-        logger.info("Host %s connected with unknown key -> pending (id=%s)", sid, pending_id)
+        logger.info(
+            "Host %s connected with unknown key -> pending (id=%s)", sid, pending_id
+        )
 
         # Tell the host it's pending
         await sio.emit(
@@ -281,7 +299,9 @@ async def host_disconnect(sid: str):
     if pending_id:
         _pending_hosts.pop(pending_id, None)
         logger.info("Pending host disconnected (pending_id=%s)", pending_id)
-        await sio.emit("host_pending_removed", {"pending_id": pending_id}, namespace="/webui")
+        await sio.emit(
+            "host_pending_removed", {"pending_id": pending_id}, namespace="/webui"
+        )
 
 
 @sio.on("registration", namespace="/hosts")
@@ -302,6 +322,7 @@ async def host_registration(sid: str, data: dict):
 
         try:
             from app.gateway import gateway
+
             asyncio.create_task(gateway.refresh_model_registry())
         except Exception:
             pass
@@ -319,7 +340,9 @@ async def host_registration(sid: str, data: dict):
             "host_pending",
             {
                 "pending_id": pending_id,
-                "api_key_preview": p.api_key[:8] + "..." if len(p.api_key) > 8 else p.api_key,
+                "api_key_preview": (
+                    p.api_key[:8] + "..." if len(p.api_key) > 8 else p.api_key
+                ),
                 "host_name": p.host_name,
                 "instance_count": len(p.instances),
                 "connected_at": p.connected_at.isoformat(),
@@ -410,6 +433,7 @@ async def host_instances_update(sid: str, data: dict):
 
     try:
         from app.gateway import gateway
+
         asyncio.create_task(gateway.refresh_model_registry())
     except Exception:
         pass

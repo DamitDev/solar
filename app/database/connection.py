@@ -13,9 +13,13 @@ def db_pool() -> asyncpg.Pool:
     return _pool
 
 
-async def init_db(database_url: str, *, min_size: int = 2, max_size: int = 10) -> asyncpg.Pool:
+async def init_db(
+    database_url: str, *, min_size: int = 2, max_size: int = 10
+) -> asyncpg.Pool:
     global _pool
-    _pool = await asyncpg.create_pool(database_url, min_size=min_size, max_size=max_size)
+    _pool = await asyncpg.create_pool(
+        database_url, min_size=min_size, max_size=max_size
+    )
     return _pool
 
 

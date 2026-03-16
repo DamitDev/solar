@@ -1,11 +1,10 @@
 """Gateway monitoring REST API endpoints (under /api/gateway)."""
 
 from fastapi import APIRouter, Query
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 from datetime import datetime, timezone, timedelta
 
 from app.database.logs import gateway_logger
-
 
 router = APIRouter(prefix="/gateway", tags=["gateway"])
 
@@ -14,7 +13,9 @@ def _parse_iso(ts: Optional[str]) -> Optional[datetime]:
     if not ts:
         return None
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc)
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(
+            timezone.utc
+        )
     except Exception:
         return None
 
@@ -27,11 +28,14 @@ async def get_stats(
     endpoint_id: Optional[str] = Query(None),
 ):
     now = datetime.now(timezone.utc)
-    start = _parse_iso(from_ts) or datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    start = _parse_iso(from_ts) or datetime(
+        now.year, now.month, now.day, tzinfo=timezone.utc
+    )
     end = _parse_iso(to_ts) or now
 
     summaries = await gateway_logger.read_requests(
-        start, end,
+        start,
+        end,
         request_type=request_type if request_type and request_type != "all" else None,
         endpoint_id=endpoint_id,
     )
@@ -40,22 +44,44 @@ async def get_stats(
     missed = sum(1 for s in summaries if s.get("status") == "missed")
     error = sum(1 for s in summaries if s.get("status") == "error")
 
-    events = await gateway_logger.read_events(start, end, types=["request_reroute"], endpoint_id=endpoint_id)
-    rerouted_unique = len({
-        e.get("data", {}).get("request_id")
-        for e in events if e.get("data", {}).get("request_id")
-    })
+    events = await gateway_logger.read_events(
+        start, end, types=["request_reroute"], endpoint_id=endpoint_id
+    )
+    rerouted_unique = len(
+        {
+            e.get("data", {}).get("request_id")
+            for e in events
+            if e.get("data", {}).get("request_id")
+        }
+    )
 
     succ = [s for s in summaries if s.get("status") == "success"]
-    p_vals = [int(s["prompt_tokens"]) for s in succ if isinstance(s.get("prompt_tokens"), (int, float))]
-    c_vals = [int(s["completion_tokens"]) for s in succ if isinstance(s.get("completion_tokens"), (int, float))]
+    p_vals = [
+        int(s["prompt_tokens"])
+        for s in succ
+        if isinstance(s.get("prompt_tokens"), (int, float))
+    ]
+    c_vals = [
+        int(s["completion_tokens"])
+        for s in succ
+        if isinstance(s.get("completion_tokens"), (int, float))
+    ]
     token_in_total = sum(p_vals) if p_vals else 0
     token_out_total = sum(c_vals) if c_vals else 0
 
     by_model: Dict[str, Dict[str, Any]] = {}
     for s in succ:
         key = s.get("resolved_model") or s.get("model") or "unknown"
-        rec = by_model.setdefault(key, {"model": key, "completed": 0, "token_in": 0, "token_out": 0, "dur_sum": 0.0})
+        rec = by_model.setdefault(
+            key,
+            {
+                "model": key,
+                "completed": 0,
+                "token_in": 0,
+                "token_out": 0,
+                "dur_sum": 0.0,
+            },
+        )
         rec["completed"] += 1
         if isinstance(s.get("prompt_tokens"), (int, float)):
             rec["token_in"] += int(s["prompt_tokens"])
@@ -103,7 +129,8 @@ async def list_requests(
     end = _parse_iso(to_ts) or now
 
     items = await gateway_logger.read_requests(
-        start, end,
+        start,
+        end,
         status=status if status != "all" else None,
         request_type=request_type if request_type and request_type != "all" else None,
         model=model,
@@ -113,7 +140,7 @@ async def list_requests(
 
     total = len(items)
     start_idx = max(0, (page - 1) * max(1, limit))
-    page_items = items[start_idx:start_idx + max(1, limit)]
+    page_items = items[start_idx : start_idx + max(1, limit)]
 
     return {
         "from": start.isoformat(),
@@ -138,7 +165,9 @@ async def recent_events(
     end = _parse_iso(to_ts) or now
     wanted = [t.strip() for t in types.split(",") if t.strip()]
 
-    events = await gateway_logger.read_events(start, end, types=wanted, endpoint_id=endpoint_id)
+    events = await gateway_logger.read_events(
+        start, end, types=wanted, endpoint_id=endpoint_id
+    )
     return {
         "from": start.isoformat(),
         "to": end.isoformat(),

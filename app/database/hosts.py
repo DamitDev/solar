@@ -82,17 +82,23 @@ class HostDB:
             if memory_json is not None and now is not None:
                 result = await conn.execute(
                     "UPDATE hosts SET status = $2, last_seen = $3, memory = $4::jsonb WHERE id = $1",
-                    host_id, status.value, now, memory_json,
+                    host_id,
+                    status.value,
+                    now,
+                    memory_json,
                 )
             elif now is not None:
                 result = await conn.execute(
                     "UPDATE hosts SET status = $2, last_seen = $3 WHERE id = $1",
-                    host_id, status.value, now,
+                    host_id,
+                    status.value,
+                    now,
                 )
             else:
                 result = await conn.execute(
                     "UPDATE hosts SET status = $2 WHERE id = $1",
-                    host_id, status.value,
+                    host_id,
+                    status.value,
                 )
         return result == "UPDATE 1"
 
@@ -102,14 +108,20 @@ class HostDB:
         async with pool.acquire() as conn:
             result = await conn.execute(
                 "UPDATE hosts SET memory = $2::jsonb, last_seen = $3 WHERE id = $1",
-                host_id, json.dumps(memory), now,
+                host_id,
+                json.dumps(memory),
+                now,
             )
         return result == "UPDATE 1"
 
     def _row_to_host(self, row) -> Host:
         memory = None
         if row["memory"]:
-            raw = row["memory"] if isinstance(row["memory"], dict) else json.loads(row["memory"])
+            raw = (
+                row["memory"]
+                if isinstance(row["memory"], dict)
+                else json.loads(row["memory"])
+            )
             memory = MemoryInfo(**raw)
         return Host(
             id=row["id"],
