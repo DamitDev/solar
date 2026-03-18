@@ -18,8 +18,8 @@ There are some key principles that must be followed.
 
 ## Branching Convention
 
-- **Supervisor** creates a feature branch from `master`, named after the issue ID: `feature/{issue-id}` (e.g. `feature/S-014`, `feature/D-007`).
-- If an issue touches multiple repos, the **supervisor** creates the same-named branch in each repo.
+- **Agent** creates a feature branch from `master`, named after the issue ID: `feature/{issue-id}` (e.g. `feature/S-014`, `feature/D-007`).
+- If an issue touches multiple repos, the **agent** creates the same-named branch in each repo.
 - One branch per issue. Do not mix unrelated changes.
 
 ## Workflow
