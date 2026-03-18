@@ -33,8 +33,9 @@ The workflow is as follows:
 5. **Agent** verifies consistency, runs linting and formatting checks as described in the given repository's rules and guides, and runs tests if applicable.
 6. **Agent** verifies the implementation by running the application or service in a local environment, if possible.
 7. **Supervisor** reviews the implementation and provides necessary clarifications and adjustments, which the **agent** will implement. This continues until the issue is resolved to the supervisor's satisfaction.
-8. **Agent** provides a PR title and description for the supervisor to review and approve.
-9. **Supervisor** commits the changes to the repository, creates the PR, and merges it if approved. The agent should never commit or push directly.
+8. **Agent** will update the repo documentations if necessary.
+9. **Agent** provides a PR title and description for the supervisor to review and approve.
+10. **Supervisor** commits the changes to the repository, creates the PR, and merges it if approved. The agent should never commit or push directly.
 
 ## Prompting the agent
 
@@ -88,6 +89,7 @@ The README mentions: "Metadata storage: PostgreSQL (in existing cluster) - train
 
 ## Context, Rules, and Guides
 - Implementation workflow: `/mnt/nvme/AI/damit-aiops/training-platform-project/workflows/issue-implementation.md`
+- PR template: `/mnt/nvme/AI/damit-aiops/training-platform-project/templates/pr-template.md`
 - General info about the project: `/mnt/nvme/AI/damit-aiops/training-platform-project/README.md`
 - Roadmap for context: `/mnt/nvme/AI/damit-aiops/ROADMAP.md`
 ```
