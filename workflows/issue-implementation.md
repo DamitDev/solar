@@ -57,7 +57,10 @@ Today's issue is: {issue-title}
 {provided text by the supervisor, which is not in the issue text}
 
 ## Context, Rules, and Guides
-{context, rules, and guides added by the supervisor, which is not mentioned or referenced in the issue text}
+- Implementation workflow: `/mnt/nvme/AI/damit-aiops/training-platform-project/workflows/issue-implementation.md`
+- PR template: `/mnt/nvme/AI/damit-aiops/training-platform-project/templates/pr-template.md`
+- General info about the project: `/mnt/nvme/AI/damit-aiops/training-platform-project/README.md`
+- Roadmap for context: `/mnt/nvme/AI/damit-aiops/ROADMAP.md`
 ```
 
 ## Example Prompt
