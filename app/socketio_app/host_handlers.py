@@ -59,8 +59,14 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
         return None
 
     host_id = str(uuid.uuid4())
+    gpu_type = p.get("gpu_type")
     host = Host(
-        id=host_id, name=name, url=url, api_key=p["api_key"], status=HostStatus.ONLINE
+        id=host_id,
+        name=name,
+        url=url,
+        api_key=p["api_key"],
+        status=HostStatus.ONLINE,
+        gpu_type=gpu_type,
     )
     await host_db.add_host(host)
 
@@ -93,6 +99,7 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
             "status": "online",
             "url": url,
             "memory": None,
+            "gpu_type": gpu_type,
             "connected": True,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         },
@@ -177,6 +184,7 @@ async def host_connect(sid: str, environ: dict, auth: Optional[dict] = None):
                 "status": "online",
                 "url": host.url,
                 "memory": host.memory.model_dump() if host.memory else None,
+                "gpu_type": host.gpu_type,
                 "connected": True,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
@@ -238,6 +246,7 @@ async def host_disconnect(sid: str):
                 "status": "offline",
                 "url": host.url if host else None,
                 "memory": host.memory.model_dump() if host and host.memory else None,
+                "gpu_type": host.gpu_type if host else None,
                 "connected": False,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
@@ -255,11 +264,15 @@ async def host_disconnect(sid: str):
 
 @sio.on("registration", namespace="/hosts")
 async def host_registration(sid: str, data: dict):
-    """Receive initial instance list from host."""
+    """Receive initial instance list and gpu_type from host."""
     host_id = await host_store.get_host_id_for_sid(sid)
     if host_id:
         instances = data.get("instances", [])
+        gpu_type = data.get("gpu_type")
         await host_store.set_host_instances(host_id, instances)
+
+        if gpu_type:
+            await host_db.update_host_gpu_type(host_id, gpu_type)
 
         await sio.emit(
             "instances_update",
@@ -281,6 +294,7 @@ async def host_registration(sid: str, data: dict):
         if p:
             p["host_name"] = data.get("host_name", p.get("host_name", ""))
             p["instances"] = data.get("instances", [])
+            p["gpu_type"] = data.get("gpu_type")
             await host_store.update_pending(pending_id, p)
 
             await sio.emit(
@@ -348,8 +362,11 @@ async def host_health(sid: str, data: dict):
 
     health_data = data.get("data", data)
     memory = health_data.get("memory")
+    gpu_type = health_data.get("gpu_type")
     if memory:
-        await host_db.update_host_memory(host_id, memory)
+        await host_db.update_host_memory(host_id, memory, gpu_type=gpu_type)
+    elif gpu_type:
+        await host_db.update_host_gpu_type(host_id, gpu_type)
 
     host = await host_db.get_host(host_id)
     await sio.emit(

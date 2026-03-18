@@ -2,6 +2,10 @@
 
 from .connection import db_pool
 
+MIGRATIONS_SQL = """
+ALTER TABLE hosts ADD COLUMN IF NOT EXISTS gpu_type TEXT;
+"""
+
 SCHEMA_SQL = """
 -- API endpoints (multi-tenant OpenAI gateways)
 CREATE TABLE IF NOT EXISTS api_endpoints (
@@ -76,7 +80,8 @@ CREATE INDEX IF NOT EXISTS idx_requests_endpoint ON gateway_requests(endpoint_id
 
 
 async def ensure_schema() -> None:
-    """Create all tables and indexes if they don't exist."""
+    """Create all tables and indexes if they don't exist, then run migrations."""
     pool = db_pool()
     async with pool.acquire() as conn:
         await conn.execute(SCHEMA_SQL)
+        await conn.execute(MIGRATIONS_SQL)
