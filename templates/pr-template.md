@@ -12,8 +12,9 @@ PR Title
 ## Changes
 <list of the changes made in the PR>
 
-<optional>## Reproduction Steps
+<optional> ## Reproduction Steps
 <steps to reproduce the issue if it is a bug fix>
+</optional>
 
 ## Related Issues
 Fixes/Resolves/Closes #<issue-id>
