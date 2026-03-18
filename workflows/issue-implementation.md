@@ -1,8 +1,11 @@
 # Implementing Issues with Agents
+
 This serves as a guide for managing agents with the correct prompts and context to achieve the best solution for a given issue in the roadmap. It is intended for both supervisors (human programmers) and agents.
 
 ## Key Principles
+
 There are some key principles that must be followed.
+
 - The supervisor and the agent should always understand the issue and the goal, and share the same perspective on the implementation approach and overall plan.
 - The agent must always have the correct context. The issues already provide some guidance, but the supervisor should always check whether additional information is needed. This includes pointing the agent at the relevant repo(s) with `@` references and ensuring it reads the source files mentioned in the issue's "Additional Notes" section.
 - The supervisor should always provide architectural decisions and guidelines. Agents should not come up with their own solutions and decisions.
@@ -14,12 +17,15 @@ There are some key principles that must be followed.
 - The supervisor and agent dynamically adjust the plan if necessary, but only after consultation.
 
 ## Branching Convention
+
 - **Supervisor** creates a feature branch from `master`, named after the issue ID: `feature/{issue-id}` (e.g. `feature/S-014`, `feature/D-007`).
 - If an issue touches multiple repos, the **supervisor** creates the same-named branch in each repo.
 - One branch per issue. Do not mix unrelated changes.
 
 ## Workflow
+
 The workflow is as follows:
+
 1. **Supervisor** prompts the agent with the issue text and provides additional info when they find it necessary. For issues that touch multiple repos, the supervisor should specify which repo to work on first and provide context for each one.
 2. **Agent** generates a plan for the issue with steps. Steps should be logical and easy for the supervisor to verify between stops. The agent should ask questions if clarification is needed.
 3. **Supervisor** reviews the plan, provides necessary clarifications and adjustments. Agent and supervisor iterate on the plan until it is approved by both parties.
@@ -31,13 +37,15 @@ The workflow is as follows:
 9. **Supervisor** commits the changes to the repository, creates the PR, and merges it if approved. The agent should never commit or push directly.
 
 ## Prompting the agent
+
 The supervisor prompts the agent with the issue text and provides additional info when they find it necessary. For issues that touch multiple repos, the supervisor should specify which repo to work on first and provide context for each one.
+
 - For additional info, the supervisor will provide some ideas, and talk about potential concerns which would need extra attention.
 - For references, the supervisor will provide files or paths which is related to the issue and possibly needed for the implementation.
 - For context, rules, and guides, the supervisor will provide files or paths which serves as a general context for the agent about behavior best practices, standards, and rules - as the title suggests.
 
-
 The prompt template is as follows:
+
 ```
 Today's issue is: {issue-title}
 
@@ -52,6 +60,7 @@ Today's issue is: {issue-title}
 ```
 
 ## Example Prompt
+
 ```
 Today's issue is: # D-002: Design PostgreSQL schema for Data Repository metadata
 
@@ -78,7 +87,8 @@ The README mentions: "Metadata storage: PostgreSQL (in existing cluster) - train
 - Consider Alembic from the start for migration management (D-005).
 
 ## Context, Rules, and Guides
-- Implementation workflow: `training-platform-project/workflows/issue-implementation.md`
-- General info about the project: `training-platform-project/README.md`
-- Roadmap for context: `ROADMAP.md`
+- Implementation workflow: `/mnt/nvme/AI/damit-aiops/training-platform-project/workflows/issue-implementation.md`
+- General info about the project: `/mnt/nvme/AI/damit-aiops/training-platform-project/README.md`
+- Roadmap for context: `/mnt/nvme/AI/damit-aiops/ROADMAP.md`
 ```
+
