@@ -1,0 +1,45 @@
+name: Build Test Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag (e.g., test-feature-x, dev-john)'
+        required: true
+        default: 'test'
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: imgrepo.damit.hu
+  IMAGE: imgrepo.damit.hu/aiops/solar-control
+
+jobs:
+  build:
+    runs-on: [self-hosted, fast]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.AIOPS_HARBOR_USERNAME }}
+          password: ${{ secrets.AIOPS_HARBOR_PASSWORD }}
+
+      - name: Build image
+        run: |
+          docker build -t ${{ env.IMAGE }}:${{ github.event.inputs.image_tag }} .
+
+      - name: Push image
+        run: |
+          docker push ${{ env.IMAGE }}:${{ github.event.inputs.image_tag }}
+
+      - name: Summary
+        run: |
+          echo "## Image built and pushed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.IMAGE }}:${{ github.event.inputs.image_tag }}\`" >> $GITHUB_STEP_SUMMARY
