@@ -19,15 +19,16 @@ class HostDB:
         memory_json = json.dumps(host.memory.model_dump()) if host.memory else None
         async with pool.acquire() as conn:
             await conn.execute(
-                """INSERT INTO hosts (id, name, url, api_key, status, last_seen, memory, created_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+                """INSERT INTO hosts (id, name, url, api_key, status, last_seen, memory, gpu_type, created_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
                    ON CONFLICT (id) DO UPDATE SET
                        name = EXCLUDED.name,
                        url = EXCLUDED.url,
                        api_key = EXCLUDED.api_key,
                        status = EXCLUDED.status,
                        last_seen = EXCLUDED.last_seen,
-                       memory = EXCLUDED.memory""",
+                       memory = EXCLUDED.memory,
+                       gpu_type = EXCLUDED.gpu_type""",
                 host.id,
                 host.name,
                 host.url,
@@ -35,6 +36,7 @@ class HostDB:
                 host.status.value,
                 host.last_seen,
                 memory_json,
+                host.gpu_type,
                 host.created_at,
             )
         return host
@@ -102,15 +104,40 @@ class HostDB:
                 )
         return result == "UPDATE 1"
 
-    async def update_host_memory(self, host_id: str, memory: Dict[str, Any]) -> bool:
+    async def update_host_memory(
+        self,
+        host_id: str,
+        memory: Dict[str, Any],
+        *,
+        gpu_type: Optional[str] = None,
+    ) -> bool:
         pool = db_pool()
         now = datetime.now(timezone.utc)
         async with pool.acquire() as conn:
+            if gpu_type is not None:
+                result = await conn.execute(
+                    "UPDATE hosts SET memory = $2::jsonb, gpu_type = $3, last_seen = $4 WHERE id = $1",
+                    host_id,
+                    json.dumps(memory),
+                    gpu_type,
+                    now,
+                )
+            else:
+                result = await conn.execute(
+                    "UPDATE hosts SET memory = $2::jsonb, last_seen = $3 WHERE id = $1",
+                    host_id,
+                    json.dumps(memory),
+                    now,
+                )
+        return result == "UPDATE 1"
+
+    async def update_host_gpu_type(self, host_id: str, gpu_type: str) -> bool:
+        pool = db_pool()
+        async with pool.acquire() as conn:
             result = await conn.execute(
-                "UPDATE hosts SET memory = $2::jsonb, last_seen = $3 WHERE id = $1",
+                "UPDATE hosts SET gpu_type = $2 WHERE id = $1",
                 host_id,
-                json.dumps(memory),
-                now,
+                gpu_type,
             )
         return result == "UPDATE 1"
 
@@ -131,6 +158,7 @@ class HostDB:
             status=HostStatus(row["status"]),
             last_seen=row["last_seen"],
             memory=memory,
+            gpu_type=row.get("gpu_type"),
             created_at=row["created_at"],
         )
 

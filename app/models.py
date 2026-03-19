@@ -31,6 +31,7 @@ class Host(BaseModel):
     status: HostStatus = HostStatus.OFFLINE
     last_seen: Optional[datetime] = None
     memory: Optional[MemoryInfo] = None
+    gpu_type: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -297,6 +298,7 @@ class WSRegistration(BaseModel):
     api_key: str  # Used to identify which host this is
     host_name: Optional[str] = None  # Optional display name override
     instances: List[Dict[str, Any]] = Field(default_factory=list)
+    gpu_type: Optional[str] = None
 
 
 class WSLogMessage(BaseModel):
@@ -328,5 +330,6 @@ class WSHostHealth(BaseModel):
     """Host health/memory update"""
 
     memory: Optional[MemoryInfo] = None
+    gpu_type: Optional[str] = None
     instance_count: int = 0
     running_instance_count: int = 0
