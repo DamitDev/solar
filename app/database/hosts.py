@@ -77,10 +77,16 @@ class HostDB:
             return None
         return self._row_to_host(row)
 
-    async def get_all_hosts(self) -> List[Host]:
+    async def get_all_hosts(self, *, role: Optional[str] = None) -> List[Host]:
         pool = db_pool()
         async with pool.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM hosts ORDER BY created_at")
+            if role:
+                rows = await conn.fetch(
+                    "SELECT * FROM hosts WHERE roles @> $1::jsonb ORDER BY created_at",
+                    json.dumps([role]),
+                )
+            else:
+                rows = await conn.fetch("SELECT * FROM hosts ORDER BY created_at")
         return [self._row_to_host(row) for row in rows]
 
     async def update_host_status(

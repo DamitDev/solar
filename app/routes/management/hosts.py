@@ -3,8 +3,8 @@
 import asyncio
 import uuid
 import aiohttp
-from typing import List
-from fastapi import APIRouter, HTTPException
+from typing import List, Optional
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.models import Host, HostCreate, HostResponse, HostStatus
@@ -73,8 +73,8 @@ async def register_host(data: HostCreate):
 
 
 @router.get("", response_model=List[Host])
-async def list_hosts():
-    return await host_db.get_all_hosts()
+async def list_hosts(role: Optional[str] = Query(None, description="Filter by role")):
+    return await host_db.get_all_hosts(role=role)
 
 
 @router.get("/{host_id}", response_model=Host)
