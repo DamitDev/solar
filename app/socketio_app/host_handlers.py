@@ -376,6 +376,7 @@ async def host_health(sid: str, data: dict):
     health_data = data.get("data", data)
     memory = health_data.get("memory")
     gpu_type = health_data.get("gpu_type")
+    roles = health_data.get("roles")
     disk_total_gb = health_data.get("disk_total_gb")
     disk_used_gb = health_data.get("disk_used_gb")
     disk_available_gb = health_data.get("disk_available_gb")
@@ -391,6 +392,9 @@ async def host_health(sid: str, data: dict):
         )
     elif gpu_type:
         await host_db.update_host_gpu_type(host_id, gpu_type)
+
+    if roles is not None:
+        await host_db.update_host_roles(host_id, roles)
 
     host = await host_db.get_host(host_id)
     await sio.emit(
