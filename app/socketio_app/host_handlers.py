@@ -60,6 +60,7 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
 
     host_id = str(uuid.uuid4())
     gpu_type = p.get("gpu_type")
+    roles = p.get("roles", [])
     host = Host(
         id=host_id,
         name=name,
@@ -67,6 +68,7 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
         api_key=p["api_key"],
         status=HostStatus.ONLINE,
         gpu_type=gpu_type,
+        roles=roles,
     )
     await host_db.add_host(host)
 
@@ -100,6 +102,7 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> Optional
             "url": url,
             "memory": None,
             "gpu_type": gpu_type,
+            "roles": roles,
             "connected": True,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         },
@@ -185,6 +188,7 @@ async def host_connect(sid: str, environ: dict, auth: Optional[dict] = None):
                 "url": host.url,
                 "memory": host.memory.model_dump() if host.memory else None,
                 "gpu_type": host.gpu_type,
+                "roles": host.roles,
                 "connected": True,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
@@ -247,6 +251,7 @@ async def host_disconnect(sid: str):
                 "url": host.url if host else None,
                 "memory": host.memory.model_dump() if host and host.memory else None,
                 "gpu_type": host.gpu_type if host else None,
+                "roles": host.roles if host else [],
                 "connected": False,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             },
@@ -264,15 +269,22 @@ async def host_disconnect(sid: str):
 
 @sio.on("registration", namespace="/hosts")
 async def host_registration(sid: str, data: dict):
-    """Receive initial instance list and gpu_type from host."""
+    """Receive initial instance list, gpu_type, and roles from host."""
     host_id = await host_store.get_host_id_for_sid(sid)
     if host_id:
         instances = data.get("instances", [])
         gpu_type = data.get("gpu_type")
+        roles = data.get("roles", [])
         await host_store.set_host_instances(host_id, instances)
 
-        if gpu_type:
-            await host_db.update_host_gpu_type(host_id, gpu_type)
+        logger.info(
+            "Registration from %s: gpu_type=%s, roles=%s, instances=%d",
+            host_id, gpu_type, roles, len(instances),
+        )
+        if gpu_type or roles:
+            await host_db.update_host_registration(
+                host_id, gpu_type=gpu_type, roles=roles or None,
+            )
 
         await sio.emit(
             "instances_update",
@@ -295,6 +307,7 @@ async def host_registration(sid: str, data: dict):
             p["host_name"] = data.get("host_name", p.get("host_name", ""))
             p["instances"] = data.get("instances", [])
             p["gpu_type"] = data.get("gpu_type")
+            p["roles"] = data.get("roles", [])
             await host_store.update_pending(pending_id, p)
 
             await sio.emit(
@@ -363,10 +376,25 @@ async def host_health(sid: str, data: dict):
     health_data = data.get("data", data)
     memory = health_data.get("memory")
     gpu_type = health_data.get("gpu_type")
+    roles = health_data.get("roles")
+    disk_total_gb = health_data.get("disk_total_gb")
+    disk_used_gb = health_data.get("disk_used_gb")
+    disk_available_gb = health_data.get("disk_available_gb")
+
     if memory:
-        await host_db.update_host_memory(host_id, memory, gpu_type=gpu_type)
+        await host_db.update_host_memory(
+            host_id,
+            memory,
+            gpu_type=gpu_type,
+            disk_total_gb=disk_total_gb,
+            disk_used_gb=disk_used_gb,
+            disk_available_gb=disk_available_gb,
+        )
     elif gpu_type:
         await host_db.update_host_gpu_type(host_id, gpu_type)
+
+    if roles is not None:
+        await host_db.update_host_roles(host_id, roles)
 
     host = await host_db.get_host(host_id)
     await sio.emit(

@@ -36,6 +36,11 @@ class Host(BaseModel):
     last_seen: Optional[datetime] = None
     memory: Optional[MemoryInfo] = None
     gpu_type: Optional[str] = None
+    roles: List[str] = Field(default_factory=list)
+    disk_total_gb: Optional[float] = None
+    disk_used_gb: Optional[float] = None
+    disk_available_gb: Optional[float] = None
+    memory_available_gb: Optional[float] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -303,6 +308,7 @@ class WSRegistration(BaseModel):
     host_name: Optional[str] = None  # Optional display name override
     instances: List[Dict[str, Any]] = Field(default_factory=list)
     gpu_type: Optional[str] = None
+    roles: List[str] = Field(default_factory=list)
 
 
 class WSLogMessage(BaseModel):
@@ -337,3 +343,6 @@ class WSHostHealth(BaseModel):
     gpu_type: Optional[str] = None
     instance_count: int = 0
     running_instance_count: int = 0
+    disk_total_gb: Optional[float] = None
+    disk_used_gb: Optional[float] = None
+    disk_available_gb: Optional[float] = None
