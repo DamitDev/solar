@@ -277,10 +277,14 @@ async def host_registration(sid: str, data: dict):
         roles = data.get("roles", [])
         await host_store.set_host_instances(host_id, instances)
 
-        if gpu_type:
-            await host_db.update_host_gpu_type(host_id, gpu_type)
-        if roles:
-            await host_db.update_host_roles(host_id, roles)
+        logger.info(
+            "Registration from %s: gpu_type=%s, roles=%s, instances=%d",
+            host_id, gpu_type, roles, len(instances),
+        )
+        if gpu_type or roles:
+            await host_db.update_host_registration(
+                host_id, gpu_type=gpu_type, roles=roles or None,
+            )
 
         await sio.emit(
             "instances_update",

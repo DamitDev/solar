@@ -178,6 +178,36 @@ class HostDB:
             )
         return result == "UPDATE 1"
 
+    async def update_host_registration(
+        self,
+        host_id: str,
+        *,
+        gpu_type: Optional[str] = None,
+        roles: Optional[list] = None,
+    ) -> bool:
+        """Persist gpu_type and roles from a registration event in a single UPDATE."""
+        pool = db_pool()
+        sets = []
+        params: list = [host_id]
+        idx = 2
+
+        if gpu_type is not None:
+            sets.append(f"gpu_type = ${idx}")
+            params.append(gpu_type)
+            idx += 1
+        if roles is not None:
+            sets.append(f"roles = ${idx}::jsonb")
+            params.append(json.dumps(roles))
+            idx += 1
+
+        if not sets:
+            return True
+
+        sql = f"UPDATE hosts SET {', '.join(sets)} WHERE id = $1"
+        async with pool.acquire() as conn:
+            result = await conn.execute(sql, *params)
+        return result == "UPDATE 1"
+
     def _row_to_host(self, row) -> Host:
         memory = None
         if row["memory"]:
