@@ -60,6 +60,11 @@ async def webui_connect(sid: str, environ: dict, auth: Optional[dict] = None):
                 "last_seen": h.last_seen.isoformat() if h.last_seen else None,
                 "memory": h.memory.model_dump() if h.memory else None,
                 "gpu_type": h.gpu_type,
+                "roles": h.roles,
+                "disk_total_gb": h.disk_total_gb,
+                "disk_used_gb": h.disk_used_gb,
+                "disk_available_gb": h.disk_available_gb,
+                "memory_available_gb": h.memory_available_gb,
                 "connected": await is_host_connected(h.id),
             }
         )
