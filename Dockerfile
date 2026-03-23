@@ -1,34 +1,27 @@
 FROM python:3.12-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+ARG APP_VERSION=0.0.0-dev
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# Set working directory
 WORKDIR /app
 
-# Install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
 COPY . .
 
-# Create non-root user and set up directories
+RUN sed -i "s/^version = .*/version = \"${APP_VERSION}\"/" pyproject.toml && \
+    pip install --no-cache-dir -e .
+
 RUN useradd --create-home --uid 1000 appuser && \
     mkdir -p /app/data && \
     chown -R appuser:appuser /app
 
-# Switch to non-root user
 USER appuser
 
-# Note: With host networking, EXPOSE is just documentation
-# The actual port is determined by the PORT environment variable at runtime
-
-# Default environment variables
 ENV HOST=0.0.0.0
 ENV PORT=8000
 
 CMD ["sh", "-c", "uvicorn app.main:sio_asgi_app --host $HOST --port $PORT"]
-

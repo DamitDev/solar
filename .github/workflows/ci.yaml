@@ -61,6 +61,8 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
+          build-args: |
+            APP_VERSION=${{ github.event.release.tag_name }}
           tags: |
             ${{ env.IMAGE }}:${{ github.event.release.tag_name }}
             ${{ steps.latest.outputs.also == 'true' && format('{0}:latest', env.IMAGE) || '' }}

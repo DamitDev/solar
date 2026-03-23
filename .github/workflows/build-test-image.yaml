@@ -32,7 +32,9 @@ jobs:
 
       - name: Build image
         run: |
-          docker build -t ${{ env.IMAGE }}:${{ github.event.inputs.image_tag }} .
+          docker build \
+            --build-arg APP_VERSION=0.0.0-${{ github.event.inputs.image_tag }} \
+            -t ${{ env.IMAGE }}:${{ github.event.inputs.image_tag }} .
 
       - name: Push image
         run: |

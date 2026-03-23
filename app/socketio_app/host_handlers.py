@@ -279,11 +279,16 @@ async def host_registration(sid: str, data: dict):
 
         logger.info(
             "Registration from %s: gpu_type=%s, roles=%s, instances=%d",
-            host_id, gpu_type, roles, len(instances),
+            host_id,
+            gpu_type,
+            roles,
+            len(instances),
         )
         if gpu_type or roles:
             await host_db.update_host_registration(
-                host_id, gpu_type=gpu_type, roles=roles or None,
+                host_id,
+                gpu_type=gpu_type,
+                roles=roles or None,
             )
 
         await sio.emit(

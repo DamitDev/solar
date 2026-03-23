@@ -3,6 +3,7 @@
 import os
 import logging
 from contextlib import asynccontextmanager
+from importlib.metadata import version, PackageNotFoundError
 
 import socketio
 from fastapi import FastAPI
@@ -10,6 +11,16 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.auth import auth_middleware
+
+
+def _get_version() -> str:
+    try:
+        return version("solar-control")
+    except PackageNotFoundError:
+        return "0.0.0-dev"
+
+
+__version__ = _get_version()
 
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -29,7 +40,7 @@ async def lifespan(app: FastAPI):
     from app.redis_state import init_redis, close_redis
     from app.gateway import gateway
 
-    logger.info("Starting Solar Control v3.0.0 ...")
+    logger.info("Starting Solar Control v%s ...", __version__)
 
     # Initialize PostgreSQL
     await init_db(settings.database_url)
@@ -71,7 +82,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Solar Control",
     description="Stateless coordinator for solar-host instances with multi-tenant OpenAI-compatible API gateway.",
-    version="3.0.0",
+    version=__version__,
     lifespan=lifespan,
     swagger_ui_parameters={"persistAuthorization": True},
 )
@@ -98,7 +109,7 @@ app.include_router(management_router)
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "solar-control", "version": "3.0.0"}
+    return {"status": "healthy", "service": "solar-control", "version": __version__}
 
 
 @app.get("/ready")
@@ -126,7 +137,7 @@ async def readiness_check():
 async def root():
     return {
         "service": "solar-control",
-        "version": "3.0.0",
+        "version": __version__,
         "description": "Stateless multi-replica coordinator with multi-tenant OpenAI gateway",
         "endpoints": {
             "openai": [
