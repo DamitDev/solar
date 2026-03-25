@@ -593,7 +593,7 @@ Architectural decisions made during the planning phase.
 
 ## 9. Open Questions
 
-- Define custom OCI media types for model artifacts vs training datasets (e.g. `application/vnd.supernova.model.`*, `application/vnd.supernova.dataset.`*)
+- ~~Define custom OCI media types for model artifacts vs training datasets~~ — Resolved in D-003. Four media types defined and validated: `model.config.v1+json`, `model.weights.v1+tar+gzip`, `dataset.config.v1+json`, `dataset.content.v1+tar+gzip`. See `data-repository/docs/harbor.md`.
 - Detailed design of step shared volume layout (how steps pass data to each other on host filesystem)
 - Model selection strategy implementation details (how SuperNova communicates selection criteria to Etalon via training config extension)
 
