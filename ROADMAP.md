@@ -78,9 +78,9 @@ The core training capability. Solar Host can execute a sequence of Docker contai
 | S-025 | Implement step log capture and streaming. Container stdout/stderr → Socket.IO `step_log` event → solar-control → SuperNova. Per-step log buffers. | solar-host | M | S-023 |
 | S-026 | Implement step status reporting. New Socket.IO events: `step_started`, `step_completed`, `step_failed`, `job_completed`. Include step name, duration, exit code. | solar-host | M | S-023 |
 | S-027 | Implement step execution REST API on solar-host. `POST /jobs` - accept step list and config, start execution. `GET /jobs/{id}` - status. `DELETE /jobs/{id}` - cancel. | solar-host | M | S-023 |
-| S-028 | Build `supernova-step-download-model` Docker image. Pulls model artifact from Data Repository API to workspace. Args: repo URI, output path. | supernova-steps | M | Phase 1.2 |
-| S-029 | Build `supernova-step-download-dataset` Docker image. Pulls dataset artifact from Data Repository API to workspace. Args: repo URI, output path. | supernova-steps | S | Phase 1.2 |
-| S-030 | Build `supernova-step-upload-model` Docker image. Pushes trained model from workspace to Data Repository API. Args: source path, repo target, metadata. | supernova-steps | M | Phase 1.2 |
+| S-028 | Build `supernova-step-download-model` Docker image. Resolves model via Data Repository API, pulls directly from Harbor (ORAS) to workspace. Args: repo URI, output path. | supernova-steps | M | Phase 1.2 |
+| S-029 | Build `supernova-step-download-dataset` Docker image. Resolves dataset via Data Repository API, pulls directly from Harbor (ORAS) to workspace. Args: repo URI, output path. | supernova-steps | S | Phase 1.2 |
+| S-030 | Build `supernova-step-upload-model` Docker image. Pushes trained model to Harbor (ORAS), then registers artifact with Data Repository API. Args: source path, harbor target, metadata. | supernova-steps | M | Phase 1.2 |
 | S-031 | Build `supernova-step-convert-model` Docker image. Converts HuggingFace model to GGUF using llama.cpp conversion tools. Args: input path, output path, quantization params. | supernova-steps | M | - |
 | S-032 | Implement job step submission proxy in solar-control. Accept step execution request, route to appropriate host based on roles and resources. Forward status events to clients. | solar-control | M | S-027, S-006 |
 | S-033 | Add active job step awareness to solar-control host status. Show running jobs alongside inference instances. Broadcast job status to WebUI. | solar-control | S | S-032 |
@@ -113,7 +113,7 @@ Enables Solar to autonomously manage resources, migrate instances, and fulfill d
 
 | ID | Issue | Repo | Size | Depends on |
 |----|-------|------|------|------------|
-| D-001 | Create `supernova` project in Harbor. Set up `supernova/models` and `supernova/datasets` repositories. | infra | S | - |
+| D-001 | Create `supernova` project in Harbor. Repositories are created on first push (one per artifact, e.g. `supernova/iris-osl`). Configure access credentials. | infra | S | - |
 | D-002 | Design PostgreSQL schema for Data Repository metadata. Tables: `artifacts`, `artifact_versions`, `artifact_metadata`. Define indexes for search. | data-repository | M | - |
 | D-003 | ORAS Python library evaluation. Build POC: push a model directory as OCI artifact to Harbor, pull it back, verify integrity. Document findings and API patterns. | data-repository | M | D-001 |
 | D-004 | Scaffold Data Repository FastAPI project. Project structure, configuration, database connection, health endpoint, Docker/Helm setup. | data-repository | M | - |
@@ -125,15 +125,15 @@ Enables Solar to autonomously manage resources, migrate instances, and fulfill d
 
 | ID | Issue | Repo | Size | Depends on |
 |----|-------|------|------|------------|
-| D-006 | Implement ORAS integration layer. Wrapper module for push/pull operations to Harbor. Handle authentication, streaming, error handling. Define custom OCI media types (`application/vnd.supernova.model.*`, `application/vnd.supernova.dataset.*`). | data-repository | L | D-003 |
-| D-007 | Implement model upload endpoint. `POST /api/models/{name}/versions` - streaming upload, ORAS push to Harbor, create metadata record in Postgres. Return version ID. | data-repository | M | D-005, D-006 |
-| D-008 | Implement model download endpoint. `GET /api/models/{name}/versions/{version}/download` - resolve from Postgres, ORAS pull from Harbor, stream to client. | data-repository | M | D-006 |
-| D-009 | Implement dataset upload endpoint. `POST /api/datasets/{name}/versions` - same pattern as model upload, different media types. | data-repository | M | D-006 |
-| D-010 | Implement dataset download endpoint. `GET /api/datasets/{name}/versions/{version}/download` - same pattern as model download. | data-repository | S | D-006 |
+| D-006 | Implement Harbor API integration layer. Wrapper module for artifact verification (HEAD request to validate harbor_ref exists), deletion, and metadata queries against Harbor. Define custom OCI media types. Consumers (step containers, Solar) do ORAS push/pull directly. | data-repository | M | D-003 |
+| D-007 | Implement model registration endpoint. `POST /api/models/{name}/versions` - accept harbor_ref + metadata, verify artifact exists in Harbor (HEAD), create metadata record in Postgres. Return version ID. | data-repository | M | D-005, D-006 |
+| D-008 | Implement model version detail endpoint. `GET /api/models/{name}/versions/{version}` - return metadata and harbor_ref for direct ORAS pull by clients. Support `latest` alias. | data-repository | S | D-005 |
+| D-009 | Implement dataset registration endpoint. `POST /api/datasets/{name}/versions` - accept harbor_ref + metadata, verify artifact exists in Harbor (HEAD), create metadata record in Postgres. | data-repository | M | D-005, D-006 |
+| D-010 | Implement dataset version detail endpoint. `GET /api/datasets/{name}/versions/{version}` - return metadata and harbor_ref for direct ORAS pull by clients. Support `latest` alias. | data-repository | S | D-005 |
 | D-011 | Implement metadata CRUD. `GET/PUT /api/models/{name}`, `GET/PUT /api/datasets/{name}`. Store and retrieve: type, description, training config, eval metrics, lineage (source trainer, source dataset, parent model). | data-repository | M | D-005 |
 | D-012 | Implement version listing and management. `GET /api/models/{name}/versions` - list all versions with metadata. Auto-increment version numbers. Support `latest` alias. | data-repository | M | D-005 |
 | D-013 | Implement search and browse endpoints. `GET /api/models` - list, filter, search by name/type/metadata. `GET /api/datasets` - same. Pagination. | data-repository | M | D-005 |
-| D-014 | Implement URI resolution endpoint. `GET /api/resolve?uri=repo://iris-osl:v3` - returns artifact metadata and download URL. Used by Solar Control's `repo://` resolver. | data-repository | S | D-008 |
+| D-014 | Implement URI resolution endpoint. `GET /api/resolve?uri=repo://iris-osl:v3` - returns artifact metadata and harbor_ref for direct ORAS pull. Used by Solar Control's `repo://` resolver. | data-repository | S | D-008 |
 | D-015 | Deploy Data Repository to aiops-k8s. Create Helm chart, ArgoCD app, environment values for dev/uat. | data-repository, aiops-k8s | M | D-007 |
 
 ---
@@ -142,7 +142,7 @@ Enables Solar to autonomously manage resources, migrate instances, and fulfill d
 
 | ID | Issue | Repo | Size | Depends on |
 |----|-------|------|------|------------|
-| D-016 | Complete `repo://` resolver in solar-control. Connect to Data Repository's resolve and download endpoints. Download model to host's managed models directory. Cache by version. | solar-control | M | S-013, D-014 |
+| D-016 | Complete `repo://` resolver in solar-control. Connect to Data Repository's resolve endpoint, obtain harbor_ref, pull from Harbor (ORAS) to host's managed models directory. Cache by version. | solar-control | M | S-013, D-014 |
 | D-017 | End-to-end integration test. Upload model to Data Repository → create intent with `repo://` URI in Solar Control → model pulled to host → instance started → inference served. | test | M | D-016, S-040 |
 | D-018 | Add model catalog endpoint to solar-control for Solar WebUI. `GET /api/catalog/models` - proxy to Data Repository's model list with deployment status enrichment. | solar-control | S | D-013 |
 

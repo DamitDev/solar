@@ -207,11 +207,11 @@ SuperNova is the **brain** (Slurm-like orchestrator). Solar is the **muscle** (e
    Reports back if resources cannot be fulfilled.
                     │
 5. Solar Host executes job steps sequentially:
-   a. download_model  → Pull base model from Data Repository
-   b. download_dataset → Pull training data from Data Repository
+   a. download_model  → Resolve via Data Repository, pull from Harbor (ORAS)
+   b. download_dataset → Resolve via Data Repository, pull from Harbor (ORAS)
    c. train           → Run Etalon container (streams logs via Socket.IO → Solar Control → SuperNova)
    d. convert_model   → (optional) Convert HF output to GGUF
-   e. upload_model    → Upload trained model to Data Repository
+   e. upload_model    → Push to Harbor (ORAS), register with Data Repository
                     │
 6. SuperNova receives completion, applies model selection strategy
    (best F1, last checkpoint, etc.)
@@ -220,8 +220,8 @@ SuperNova is the **brain** (Slurm-like orchestrator). Solar is the **muscle** (e
    to Solar Control (target model alias, replicas, strategy)
                     │
 8. Solar Control resolves host placement (one replica per host),
-   pulls model from Data Repository, creates/updates instances
-   (rolling or immediate), serves inference
+   resolves model via Data Repository, pulls from Harbor (ORAS),
+   creates/updates instances (rolling or immediate), serves inference
 ```
 
 ### Component responsibilities
@@ -261,8 +261,8 @@ The orchestrator. Runs on Kubernetes. Does the thinking, not the work.
 ```json
 {
   "name": "iris-osl-retrain-2026-03",
-  "base_model": "repo://models/IRIS-BERT-base",
-  "training_data": "repo://datasets/iris-tickets-2026-03",
+  "base_model": "repo://IRIS-BERT-base:v1",
+  "training_data": "repo://iris-tickets:2026-03",
   "trainer": "etalon-categorizer:latest",
   "training_config": {
     "target_label": "osl",
@@ -294,11 +294,11 @@ The orchestrator. Runs on Kubernetes. Does the thinking, not the work.
 
 | Step               | Container                                   | Purpose                                                    |
 | ------------------ | ------------------------------------------- | ---------------------------------------------------------- |
-| `download_model`   | System image                                | Pull base model from Data Repository to host               |
-| `download_dataset` | System image                                | Pull training data from Data Repository to host            |
-| `train`            | Etalon image (e.g. `etalon-categorizer:v2`) | Execute training run                                       |
-| `convert_model`    | System image                                | Convert HF model to GGUF (optional, for llama.cpp serving) |
-| `upload_model`     | System image                                | Upload trained model to Data Repository                    |
+| `download_model`   | System image                                | Resolve via Data Repository, pull base model from Harbor (ORAS) |
+| `download_dataset` | System image                                | Resolve via Data Repository, pull training data from Harbor (ORAS) |
+| `train`            | Etalon image (e.g. `etalon-categorizer:v2`) | Execute training run                                            |
+| `convert_model`    | System image                                | Convert HF model to GGUF (optional, for llama.cpp serving)      |
+| `upload_model`     | System image                                | Push trained model to Harbor (ORAS), register with Data Repository |
 
 
 Steps can be composed freely - e.g. a job that only needs GGUF conversion without training would use `["download_model", "convert_model", "upload_model"]`.
@@ -321,7 +321,7 @@ Solar Control handles all host selection and scheduling autonomously. SuperNova 
 
 - **Trainers** are Docker images built from Etalon branches, tagged and stored in Harbor (e.g. `etalon-categorizer:v2`, `etalon-icinga-classifier:v1`). Built via GitHub Actions on local runners.
 - **Etalon is a black box**: Solar Host mounts input volumes (data, base model, config) and collects output volumes (checkpoints, trained model). Etalon doesn't know about the platform.
-- **Dataset creation**: Automated runs can include pre-configured scripts (e.g. `create_dataset.py` for IRIS tickets). User-submitted jobs follow a **bring-your-own-dataset** approach - upload to Data Repository first, reference in job config.
+- **Dataset creation**: Automated runs can include pre-configured scripts (e.g. `create_dataset.py` for IRIS tickets). User-submitted jobs follow a **bring-your-own-dataset** approach — push to Harbor (ORAS) and register with Data Repository first, reference in job config.
 - **Experiment tracking**: No W&B dependency. SuperNova parses console logs and checkpoint eval metrics directly. Mature Etalon branches produce stable, parseable output.
 - **Communication**: SuperNova talks to Solar Control API only (authenticated via API key). Never directly to Solar Hosts.
 - **Job history**: All job submissions, parameters, results, and metrics stored in PostgreSQL for audit trails and reporting.
@@ -353,35 +353,39 @@ Standalone microservice. Centralized catalog for model artifacts and training da
 
 **Two types of content:**
 
-1. **Model Repository**: Trained models (HF Transformers format, GGUF files) with versioning and metadata
-2. **Training Data Repository**: Datasets (Parquet, HDF5, JSON) with metadata
+1. **Models**: Trained models (HF Transformers format, GGUF files) with versioning and metadata
+2. **Datasets**: Training datasets (Parquet, HDF5, JSON) with metadata
 
 **Architecture:**
 
-- **Blob storage**: Harbor (`imgrepo.damit.hu`) via ORAS - models and datasets stored as OCI artifacts with custom media types. Zero new storage infrastructure.
-- **Metadata storage**: PostgreSQL (in existing cluster) - training config, eval metrics, lineage, cross-references between models and datasets
-- **API**: FastAPI REST facade. Uses ORAS Python library under the hood for Harbor push/pull. Streams large files.
+- **Blob storage**: Harbor (`imgrepo.damit.hu`) via ORAS — models and datasets stored as OCI artifacts under the `supernova` project. Consumers push/pull directly to/from Harbor. Zero new storage infrastructure.
+- **Metadata storage**: PostgreSQL (in existing cluster) — artifact names, versions, category (model/dataset), training config, eval metrics, lineage, cross-references
+- **API**: FastAPI REST metadata catalog. Does NOT proxy blob data. Provides artifact registration (with Harbor ref verification), metadata CRUD, catalog/search, and URI resolution.
 
 **OCI artifact layout in Harbor:**
 
+Each artifact is a repository directly under the `supernova` project. The category (model vs dataset) is tracked in Data Repository metadata, not in the Harbor path.
+
 ```
-imgrepo.damit.hu/supernova/models/iris-osl:v3             (model artifact)
-imgrepo.damit.hu/supernova/models/IRIS-BERT-base:v1        (base model)
-imgrepo.damit.hu/supernova/datasets/iris-tickets:2026-03   (training dataset)
+imgrepo.damit.hu/supernova/iris-osl:v3             (model)
+imgrepo.damit.hu/supernova/IRIS-BERT-base:v1        (base model)
+imgrepo.damit.hu/supernova/iris-tickets:2026-03     (dataset)
 ```
 
 **Core API:**
 
-- Upload / download artifacts (streaming, ORAS push/pull to Harbor under the hood)
-- Metadata CRUD (model type, training config, eval metrics, lineage, source trainer)
+- Artifact registration — accept harbor_ref + metadata after a client pushes to Harbor; verify the artifact exists in Harbor before accepting
+- Metadata CRUD (category, description, training config, eval metrics, lineage, source trainer)
 - Version management (maps to OCI tags in Harbor)
-- List, search, browse (metadata-driven queries via PostgreSQL)
-- URI resolution: `repo://iris-osl:v3` resolves to Harbor artifact, streams content
-- Consumed by both SuperNova Control (training data pulls, model uploads) and Solar Control (model pulls for deployment)
+- Catalog — list, search, browse models and datasets (category-filtered queries via PostgreSQL)
+- URI resolution: `repo://iris-osl:v3` → returns harbor_ref (`imgrepo.damit.hu/supernova/iris-osl:v3`) + metadata for direct ORAS pull
+- Consumed by SuperNova Control (job validation, metadata queries), Solar Control (model resolution), and step containers (resolve before direct Harbor pull/push)
+
+**Interaction pattern:** Consumers (step containers, Solar Control) interact with Data Repository for metadata only. Blob upload/download happens directly between the consumer and Harbor via ORAS. This keeps the Data Repository lightweight — no temp storage, no streaming, no bandwidth bottleneck.
 
 **Retention:** Managed by SuperNova, not the Data Repository itself. Retention policy is configurable per-job at submission time. Cleanup is executed as a step-based action (specialized Docker container), keeping the Data Repository API stateless and simple.
 
-**Deployment:** Deployed via `aiops-k8s` GitOps repo. No separate UI - SuperNova WebUI provides browsing.
+**Deployment:** Deployed via `aiops-k8s` GitOps repo. No separate UI — SuperNova WebUI provides browsing.
 
 ### 4.4 Solar System (Evolution for SuperNova)
 
@@ -392,12 +396,12 @@ Solar v3.0 already provides a solid foundation: stateless multi-replica control 
 - Job step execution (run specialized Docker containers in sequence: download, train, convert, upload)
 - Configurable host roles: `inference`, `training`, or both
 - Resource reporting (available VRAM/RAM, disk space, active job steps)
-- Model file management (upload, download, list) via Data Repository integration
+- Model file management (upload, download, list) via Harbor (ORAS) with Data Repository for metadata
 
 **New Solar Control capabilities needed:**
 
 - Model source abstraction: `repo://`, `huggingface://`, `local://`
-- Data Repository awareness (pull models for deployment, pull data/models for training)
+- Data Repository awareness (resolve model refs, get harbor_ref for direct ORAS pull)
 - Resource reservation and coordination (free GPU for training, migrate inference if needed)
 - Job step orchestration on Solar Hosts (via SuperNova instructions, communicated through Socket.IO)
 - Declarative intent-based instance management (submit desired state, Solar arranges)
@@ -483,14 +487,14 @@ The following capabilities need to be built on top of this foundation to support
 **Target state:** Unified model source resolution.
 
 ```
-repo://iris-osl:v3              → Pull from Data Repository
+repo://iris-osl:v3              → Resolve via Data Repository, pull from Harbor (ORAS)
 huggingface://microsoft/phi-3   → Pull from HuggingFace Hub
 local:///path/to/model.gguf     → Use local filesystem path (legacy/fallback)
 ```
 
 - Solar Control resolves the source and ensures the model is available on the target host
 - Enables pulling 3rd party models from HuggingFace Hub directly (already done informally)
-- Data Repository becomes the primary source for production models
+- Data Repository is the metadata authority for `repo://` URIs; blobs are pulled directly from Harbor
 
 ### 6.3 Model File Management
 
@@ -500,7 +504,7 @@ local:///path/to/model.gguf     → Use local filesystem path (legacy/fallback)
 
 - Solar Host exposes model file APIs (list, upload, download) backed by a managed models directory
 - Solar Control orchestrates model distribution between hosts
-- Solar Control pulls models from Data Repository (or HuggingFace) and pushes to target hosts
+- Solar Control resolves models via Data Repository, pulls from Harbor (ORAS) or HuggingFace, and pushes to target hosts
 - Free space awareness in health reporting
 
 ### 6.4 Job Step Execution
@@ -543,9 +547,9 @@ local:///path/to/model.gguf     → Use local filesystem path (legacy/fallback)
 
 ### 6.7 Data Repository Integration
 
-- Solar Control can pull models from Data Repository for deployment
-- Solar Control can pull training data and base models from Data Repository for training jobs
-- Model catalog awareness in Solar WebUI
+- Solar Control resolves `repo://` URIs via Data Repository API, obtaining harbor_ref + metadata for direct Harbor (ORAS) pull
+- Step containers pull/push blobs directly from/to Harbor; register artifacts with Data Repository after upload
+- Model catalog awareness in Solar WebUI (via Data Repository catalog API)
 
 ---
 
