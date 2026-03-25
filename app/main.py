@@ -1,0 +1,67 @@
+"""Data Repository — lightweight metadata catalog for OCI artifacts."""
+
+import os
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+
+from app.config import settings
+
+__version__ = "0.1.0"
+
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+logging.getLogger("uvicorn").setLevel(getattr(logging, log_level, logging.INFO))
+logging.getLogger("uvicorn.error").setLevel(getattr(logging, log_level, logging.INFO))
+logging.getLogger("uvicorn.access").setLevel(getattr(logging, log_level, logging.INFO))
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from app.database import init_db, close_db
+
+    logger.info("Starting Data Repository v%s ...", __version__)
+
+    await init_db(settings.database_url)
+    logger.info("PostgreSQL connected")
+
+    logger.info("Data Repository started successfully")
+
+    yield
+
+    logger.info("Shutting down Data Repository...")
+    await close_db()
+    logger.info("Data Repository shut down")
+
+
+app = FastAPI(
+    title="Data Repository",
+    description="Metadata catalog for OCI artifacts stored in Harbor. "
+    "Provides registration, catalog, search, and URI resolution.",
+    version=__version__,
+    lifespan=lifespan,
+)
+
+from app.routes.health import router as health_router  # noqa: E402
+
+app.include_router(health_router)
+
+
+@app.get("/")
+async def root():
+    return {
+        "service": "data-repository",
+        "version": __version__,
+        "description": "Metadata catalog for models and datasets",
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("app.main:app", host=settings.host, port=settings.port, reload=True)
