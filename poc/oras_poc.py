@@ -39,7 +39,6 @@ import oras.defaults
 import oras.oci
 import oras.provider
 import oras.utils
-from oras.decorator import ensure_container
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 REPO_ROOT = SCRIPT_DIR.parent
@@ -70,6 +69,7 @@ log = logging.getLogger("oras-poc")
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def load_credentials() -> tuple[str, str]:
     if not CREDENTIALS_PATH.exists():
@@ -107,33 +107,45 @@ def create_test_model_dir(base_dir: str) -> str:
     os.makedirs(model_dir, exist_ok=True)
 
     with open(os.path.join(model_dir, "config.json"), "w") as f:
-        json.dump({
-            "architectures": ["DebertaV2ForSequenceClassification"],
-            "model_type": "deberta-v2",
-            "hidden_size": 768,
-            "num_hidden_layers": 12,
-            "num_attention_heads": 12,
-            "vocab_size": 32203,
-            "torch_dtype": "bfloat16",
-        }, f, indent=2)
+        json.dump(
+            {
+                "architectures": ["DebertaV2ForSequenceClassification"],
+                "model_type": "deberta-v2",
+                "hidden_size": 768,
+                "num_hidden_layers": 12,
+                "num_attention_heads": 12,
+                "vocab_size": 32203,
+                "torch_dtype": "bfloat16",
+            },
+            f,
+            indent=2,
+        )
 
     with open(os.path.join(model_dir, "tokenizer.json"), "w") as f:
-        json.dump({
-            "type": "BPE",
-            "vocab_size": 32203,
-            "special_tokens": ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"],
-        }, f, indent=2)
+        json.dump(
+            {
+                "type": "BPE",
+                "vocab_size": 32203,
+                "special_tokens": ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"],
+            },
+            f,
+            indent=2,
+        )
 
     with open(os.path.join(model_dir, "model.safetensors"), "wb") as f:
         f.write(os.urandom(1 * 1024 * 1024))  # 1MB dummy weights
 
     with open(os.path.join(model_dir, "training_args.json"), "w") as f:
-        json.dump({
-            "learning_rate": 5e-5,
-            "batch_size": 96,
-            "max_steps": 16000,
-            "optimizer": "adamw_8bit",
-        }, f, indent=2)
+        json.dump(
+            {
+                "learning_rate": 5e-5,
+                "batch_size": 96,
+                "max_steps": 16000,
+                "optimizer": "adamw_8bit",
+            },
+            f,
+            indent=2,
+        )
 
     return model_dir
 
@@ -160,6 +172,7 @@ def get_harbor_token(host: str, repo: str, actions: str, auth_b64: str) -> str |
 # ---------------------------------------------------------------------------
 # Test runner
 # ---------------------------------------------------------------------------
+
 
 class OrasPOC:
     def __init__(self):
@@ -199,9 +212,15 @@ class OrasPOC:
         )
         log.info(f"Harbor API check: {resp.status_code}")
         if resp.status_code != 200:
-            self._record("auth_harbor_api", "FAIL", f"status {resp.status_code}: {resp.text[:200]}")
+            self._record(
+                "auth_harbor_api",
+                "FAIL",
+                f"status {resp.status_code}: {resp.text[:200]}",
+            )
             raise RuntimeError("Harbor API auth failed")
-        self._record("auth_harbor_api", "PASS", f"listed {len(resp.json())} repositories")
+        self._record(
+            "auth_harbor_api", "PASS", f"listed {len(resp.json())} repositories"
+        )
 
         # Initialize oras client with token-based auth
         self.client = oras.client.OrasClient(hostname=HARBOR_HOST, auth_backend="token")
@@ -224,7 +243,9 @@ class OrasPOC:
 
         model_dir = create_test_model_dir(self.tmpdir)
         files = sorted(str(f) for f in Path(model_dir).rglob("*") if f.is_file())
-        log.info(f"Test model dir: {len(files)} files — {[os.path.basename(f) for f in files]}")
+        log.info(
+            f"Test model dir: {len(files)} files — {[os.path.basename(f) for f in files]}"
+        )
 
         checksums_before = sha256_dir(model_dir)
         cksum_path = os.path.join(self.tmpdir, "checksums_push.json")
@@ -243,8 +264,9 @@ class OrasPOC:
         log.info(f"Push response: {response.status_code}")
         log.info(f"Digest: {response.headers.get('Docker-Content-Digest', 'N/A')}")
         self._record(
-            "push_multifile", "PASS",
-            f"{len(files)} files, {total_kb:.0f} KB, {elapsed:.2f}s"
+            "push_multifile",
+            "PASS",
+            f"{len(files)} files, {total_kb:.0f} KB, {elapsed:.2f}s",
         )
 
     # ------------------------------------------------------------------
@@ -286,7 +308,11 @@ class OrasPOC:
         if mismatches:
             self._record("pull_verify", "FAIL", f"mismatched: {mismatches}")
         else:
-            self._record("pull_verify", "PASS", f"{matched}/{len(checksums_before)} files verified")
+            self._record(
+                "pull_verify",
+                "PASS",
+                f"{matched}/{len(checksums_before)} files verified",
+            )
 
     # ------------------------------------------------------------------
     # Test 4: Push single large file
@@ -304,9 +330,13 @@ class OrasPOC:
 
         t0 = time.time()
         with oras.utils.workdir(self.tmpdir):
-            response = self.client.push(files=[os.path.basename(large_file)], target=TEST_SINGLE_REF)
+            response = self.client.push(
+                files=[os.path.basename(large_file)], target=TEST_SINGLE_REF
+            )
         push_elapsed = time.time() - t0
-        log.info(f"Push: {response.status_code}, {push_elapsed:.2f}s ({size_mb / push_elapsed:.1f} MB/s)")
+        log.info(
+            f"Push: {response.status_code}, {push_elapsed:.2f}s ({size_mb / push_elapsed:.1f} MB/s)"
+        )
 
         pull_dir = os.path.join(self.tmpdir, "pulled-single")
         os.makedirs(pull_dir, exist_ok=True)
@@ -325,8 +355,9 @@ class OrasPOC:
         if pulled_checksum == original_checksum:
             log.info(f"Checksum verified: sha256:{pulled_checksum[:16]}...")
             self._record(
-                "push_single", "PASS",
-                f"{size_mb} MB, push={push_elapsed:.2f}s, pull={pull_elapsed:.2f}s, checksum OK"
+                "push_single",
+                "PASS",
+                f"{size_mb} MB, push={push_elapsed:.2f}s, pull={pull_elapsed:.2f}s, checksum OK",
             )
         else:
             self._record("push_single", "FAIL", "checksum mismatch")
@@ -355,28 +386,46 @@ class OrasPOC:
                 continue
 
             url = f"https://{HARBOR_HOST}/v2/{repo}/manifests/{tag}"
-            resp = requests.head(url, headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.oci.image.manifest.v1+json",
-            })
+            resp = requests.head(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.oci.image.manifest.v1+json",
+                },
+            )
             results[label] = resp.status_code
             digest = resp.headers.get("Docker-Content-Digest", "N/A")
             length = resp.headers.get("Content-Length", "N/A")
-            log.info(f"  HEAD {label}: {resp.status_code}  digest={digest}  length={length}")
+            log.info(
+                f"  HEAD {label}: {resp.status_code}  digest={digest}  length={length}"
+            )
 
         # --- Harbor v2.0 API (basic auth, supports GET) ---
         log.info("")
-        for artifact, label in [("test-model", "harbor_api_exists"), ("nonexistent", "harbor_api_missing")]:
+        for artifact, label in [
+            ("test-model", "harbor_api_exists"),
+            ("nonexistent", "harbor_api_missing"),
+        ]:
             url = f"https://{HARBOR_HOST}/api/v2.0/projects/{HARBOR_PROJECT}/repositories/{artifact}/artifacts"
-            resp = requests.get(url, headers={"Authorization": f"Basic {self.auth_b64}"})
+            resp = requests.get(
+                url, headers={"Authorization": f"Basic {self.auth_b64}"}
+            )
             results[label] = resp.status_code
             count = len(resp.json()) if resp.status_code == 200 else 0
             log.info(f"  GET  {label}: {resp.status_code}  artifacts={count}")
 
         existing_ok = results.get("test-model:v1 (exists)") == 200
-        missing_ok = results.get("nonexistent:v999 (missing)") in (404, 401, "token_error")
+        missing_ok = results.get("nonexistent:v999 (missing)") in (
+            404,
+            401,
+            "token_error",
+        )
         if existing_ok and missing_ok:
-            self._record("head_request", "PASS", f"existing=200, missing={results.get('nonexistent:v999 (missing)')}")
+            self._record(
+                "head_request",
+                "PASS",
+                f"existing=200, missing={results.get('nonexistent:v999 (missing)')}",
+            )
         else:
             self._record("head_request", "FAIL", f"results={results}")
 
@@ -416,12 +465,16 @@ class OrasPOC:
         layer = oras.oci.NewLayer(blob, MEDIA_TYPES["model_weights"], is_dir=True)
         layer["annotations"] = {
             oras.defaults.annotation_title: "model.tar.gz",
-            "org.opencontainers.image.created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "org.opencontainers.image.created": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+            ),
         }
         manifest["layers"].append(layer)
         manifest["config"] = conf
         manifest["annotations"] = {
-            "org.opencontainers.image.created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "org.opencontainers.image.created": time.strftime(
+                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+            ),
         }
 
         # OrasClient IS a Registry — use its methods directly
@@ -447,16 +500,20 @@ class OrasPOC:
         # Verify: fetch manifest and check media types are preserved
         fetched = self.client.get_manifest(container)
         config_mt = fetched.get("config", {}).get("mediaType", "")
-        layer_mts = [l.get("mediaType", "") for l in fetched.get("layers", [])]
+        layer_mts = [layer.get("mediaType", "") for layer in fetched.get("layers", [])]
         log.info(f"Fetched manifest — config mediaType: {config_mt}")
         log.info(f"Fetched manifest — layer mediaTypes:  {layer_mts}")
 
         config_ok = config_mt == MEDIA_TYPES["model_config"]
         weights_ok = MEDIA_TYPES["model_weights"] in layer_mts
         if config_ok and weights_ok:
-            self._record("custom_media", "PASS", f"config={config_mt}, layers={layer_mts}")
+            self._record(
+                "custom_media", "PASS", f"config={config_mt}, layers={layer_mts}"
+            )
         else:
-            self._record("custom_media", "FAIL", f"config={config_mt}, layers={layer_mts}")
+            self._record(
+                "custom_media", "FAIL", f"config={config_mt}, layers={layer_mts}"
+            )
 
     # ------------------------------------------------------------------
     # Runner
@@ -516,12 +573,15 @@ class OrasPOC:
 def main():
     parser = argparse.ArgumentParser(description="D-003: ORAS Python Library POC")
     parser.add_argument("--test", default="all", help="Test to run (default: all)")
-    parser.add_argument("--keep-temp", action="store_true", help="Keep temp directory after run")
+    parser.add_argument(
+        "--keep-temp", action="store_true", help="Keep temp directory after run"
+    )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
 
     if args.debug:
         from oras.logger import setup_logger
+
         setup_logger(quiet=False, debug=True)
         logging.getLogger().setLevel(logging.DEBUG)
 
