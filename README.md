@@ -47,9 +47,10 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-PostgreSQL-t külön kell futtatni (pl. `docker compose up postgres -d`), utána:
+PostgreSQL-t külön kell futtatni (pl. `docker compose up postgres -d`), utána migráció és indítás:
 
 ```bash
+./migrate.sh
 uvicorn app.main:app --reload
 ```
 
@@ -75,19 +76,66 @@ Az `.env.example` fájl tartalmazza az összes beállítást. Másolás és szer
 
 ---
 
+## Migrációk
+
+Az adatbázis séma kezelése [Alembic](https://alembic.sqlalchemy.org/) segítségével történik. A migráció szkriptek az `app/database/migrations/versions/` mappában vannak.
+
+### Migráció futtatása (lokális fejlesztés)
+
+```bash
+./migrate.sh
+```
+
+Ez betölti a `.env` fájlból a környezeti változókat és futtatja az `alembic upgrade head` parancsot.
+
+Manuálisan is futtatható:
+
+```bash
+source .env
+python -m alembic upgrade head
+```
+
+### Új migráció létrehozása
+
+```bash
+source .env
+python -m alembic revision --autogenerate -m "leírás"
+```
+
+### Migráció állapot ellenőrzése
+
+```bash
+source .env
+python -m alembic current   # aktuális revízió
+python -m alembic history   # migráció történet
+```
+
+### Konténerben
+
+A `docker compose up` automatikusan futtatja a migrációkat az `entrypoint.sh`-n keresztül, mielőtt az API elindul.
+
+---
+
 ## Projekt struktúra
 
 ```
-app/
-├── main.py            # FastAPI app, lifespan
-├── config.py          # Settings (pydantic-settings)
-├── database/
-│   ├── connection.py  # asyncpg connection pool
-│   └── schema.py      # placeholder (D-005)
-├── harbor/
-│   └── __init__.py    # placeholder (D-006)
-└── routes/
-    └── health.py      # GET /health
+├── alembic.ini            # Alembic konfiguráció
+├── migrate.sh             # Lokális migráció script
+├── entrypoint.sh          # Konténer indítás (migráció + API)
+├── app/
+│   ├── main.py            # FastAPI app, lifespan
+│   ├── config.py          # Settings (pydantic-settings)
+│   ├── database/
+│   │   ├── connection.py  # asyncpg connection pool
+│   │   ├── models.py      # SQLAlchemy ORM modellek (Alembic-hez)
+│   │   └── migrations/    # Alembic migrációk
+│   │       ├── env.py
+│   │       ├── script.py.mako
+│   │       └── versions/
+│   ├── harbor/
+│   │   └── __init__.py    # placeholder (D-006)
+│   └── routes/
+│       └── health.py      # GET /health
 ```
 
 ---
@@ -102,6 +150,6 @@ app/
 
 ## Roadmap
 
-- **D-005** — Schema provisioning (Alembic initial migration)
+- ~~**D-005** — Schema provisioning (Alembic initial migration)~~
 - **D-006** — Harbor API client integráció
 - **D-007+** — API route-ok (registration, catalog, search, URI resolution)
