@@ -24,17 +24,24 @@ logging.getLogger("uvicorn.access").setLevel(getattr(logging, log_level, logging
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from app.database import init_db, close_db
+    from app.harbor import init_harbor, close_harbor
 
     logger.info("Starting Data Repository v%s ...", __version__)
 
     await init_db(settings.database_url)
     logger.info("PostgreSQL connected")
 
+    await init_harbor(
+        settings.harbor_url, settings.harbor_username, settings.harbor_password
+    )
+    logger.info("Harbor client initialized (%s)", settings.harbor_url)
+
     logger.info("Data Repository started successfully")
 
     yield
 
     logger.info("Shutting down Data Repository...")
+    await close_harbor()
     await close_db()
     logger.info("Data Repository shut down")
 

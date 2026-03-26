@@ -5,5 +5,4 @@ __pycache__/
 *.pyc
 poc/
 docs/
-temp/
 *.md
