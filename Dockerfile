@@ -15,9 +15,12 @@ WORKDIR /app
 
 COPY --from=builder /install /usr/local
 
+COPY alembic.ini ./
+COPY entrypoint.sh ./
 COPY app/ ./app/
 
-RUN useradd --create-home --uid 1000 appuser && \
+RUN chmod +x entrypoint.sh && \
+    useradd --create-home --uid 1000 appuser && \
     chown -R appuser:appuser /app
 
 USER appuser
@@ -25,4 +28,5 @@ USER appuser
 ENV HOST=0.0.0.0
 ENV PORT=8000
 
+ENTRYPOINT ["./entrypoint.sh"]
 CMD ["sh", "-c", "uvicorn app.main:app --host $HOST --port $PORT"]
