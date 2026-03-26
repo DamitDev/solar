@@ -11,7 +11,7 @@ SuperNova is a job-based AI training platform that orchestrates the full model l
 | **SuperNova Control API** | Job orchestration, scheduling, deployment strategy | FastAPI, PostgreSQL |
 | **SuperNova WebUI** | Training job submission, monitoring, catalog browsing | React, TypeScript, Vite, Tailwind |
 | **Data Repository** | Centralized model & dataset storage with metadata and versioning | FastAPI, Harbor/ORAS, PostgreSQL |
-| **Solar Control API** | Stateless execution layer — host management, model distribution, job step execution, inference routing | Node.js, Redis, PostgreSQL, Socket.IO |
+| **Solar Control API** | Stateless execution layer — host management, model distribution, job step execution, inference routing | Python (FastAPI), PostgreSQL, Redis, Socket.IO |
 | **Solar Host** | Process manager for inference instances and job step containers, resource reporting | Python (FastAPI) |
 | **Solar WebUI** | Operations monitoring, declarative instance management | React, TypeScript, Vite, Tailwind |
 
@@ -23,12 +23,13 @@ Communication topology: SuperNova → Solar Control API → Solar Hosts. SuperNo
 |------|------|-------------|
 | `training-platform-project` | `/mnt/nvme/AI/damit-aiops/training-platform-project` | This repo — project management, issues, roadmap |
 | `solar-host` | `/mnt/nvme/AI/solar/solar-host` | Solar Host agent (Python/FastAPI) |
-| `solar-control` | `/mnt/nvme/AI/solar/solar-control` | Solar Control API (Node.js) |
+| `solar-control` | `/mnt/nvme/AI/solar/solar-control` | Solar Control API (Python/FastAPI) |
 | `solar-webui` | `/mnt/nvme/AI/solar/solar-webui` | Solar WebUI (React) |
 | `data-repository` | `/mnt/nvme/AI/damit-aiops/data-repository` | Data Repository API (FastAPI) |
 | `supernova-control` | `/mnt/nvme/AI/damit-aiops/supernova-control` | SuperNova Control API (FastAPI) |
 | `supernova-webui` | `/mnt/nvme/AI/damit-aiops/supernova-webui` | SuperNova WebUI (React) |
 | `supernova-steps` | `/mnt/nvme/AI/damit-aiops/supernova-steps` | Step Docker images (download, upload, convert) |
+| `harbor-oci-client` | `/mnt/nvme/AI/damit-aiops/harbor-oci-client` | Shared Python library for Harbor OCI/ORAS operations ([GitHub](https://github.com/DamitDev/harbor-oci-client)) |
 | `etalon` | `/mnt/nvme/AI/etalon` | Training framework (black box — do not modify) |
 | `aiops-k8s` | `/mnt/nvme/AI/damit-aiops/aiops-k8s` | GitOps repo (ArgoCD App-of-Apps) |
 
@@ -96,6 +97,7 @@ Fixes/Resolves/Closes #<issue-id>
 - **No external experiment tracking.** SuperNova parses console logs and checkpoint eval metrics directly. No W&B or MLflow dependency.
 - **Model source URIs.** Models are referenced via `repo://`, `huggingface://`, or `local://` — not raw filesystem paths.
 - **Harbor for blobs, Postgres for metadata.** Data Repository uses ORAS to push/pull OCI artifacts to Harbor, with PostgreSQL for metadata and search.
+- **Shared Harbor client.** All Python services that interact with Harbor (Data Repository, Solar Control, step containers) use the `harbor-oci-client` library (`pip install git+https://github.com/DamitDev/harbor-oci-client.git`). It provides async `HarborClient` (verify, delete, info), sync `OrasHelper` (push, pull), typed exceptions, and SuperNova media type constants. Do not duplicate Harbor/ORAS logic in individual repos.
 
 ## References
 
