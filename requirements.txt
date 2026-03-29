@@ -1,8 +1,8 @@
-fastapi==0.115.0
-uvicorn[standard]==0.32.0
-pydantic==2.9.2
-pydantic-settings==2.5.2
-asyncpg==0.30.0
+fastapi==0.135.2
+uvicorn[standard]==0.42.0
+pydantic==2.12.5
+pydantic-settings==2.13.1
+asyncpg==0.31.0
 sqlalchemy==2.0.48
 alembic==1.18.4
 psycopg2-binary==2.9.11

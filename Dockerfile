@@ -1,9 +1,18 @@
 FROM python:3.12-slim AS builder
 
+ARG APP_VERSION=0.0.0.dev0
+
 WORKDIR /build
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt pyproject.toml ./
+COPY app/ ./app/
+
+RUN sed -i "s/^version = .*/version = \"${APP_VERSION}\"/" pyproject.toml && \
+    pip install --no-cache-dir --prefix=/install -r requirements.txt && \
+    pip install --no-cache-dir --prefix=/install --no-deps .
 
 
 FROM python:3.12-slim

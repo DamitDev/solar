@@ -3,12 +3,16 @@
 import os
 import logging
 from contextlib import asynccontextmanager
+from importlib.metadata import version as _pkg_version, PackageNotFoundError
 
 from fastapi import FastAPI
 
 from app.config import settings
 
-__version__ = "0.1.0"
+try:
+    __version__ = _pkg_version("data-repository")
+except PackageNotFoundError:
+    __version__ = "0.0.0-dev"
 
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -55,8 +59,10 @@ app = FastAPI(
 )
 
 from app.routes.health import router as health_router  # noqa: E402
+from app.routes.models import router as models_router  # noqa: E402
 
 app.include_router(health_router)
+app.include_router(models_router)
 
 
 @app.get("/")
