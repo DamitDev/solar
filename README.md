@@ -361,7 +361,7 @@ Standalone microservice. Centralized catalog for model artifacts and training da
 - **Blob storage**: Harbor (`imgrepo.damit.hu`) via ORAS — models and datasets stored as OCI artifacts under the `supernova` project. Consumers push/pull directly to/from Harbor. Zero new storage infrastructure.
 - **Metadata storage**: PostgreSQL (in existing cluster) — artifact names, versions, category (model/dataset), training config, eval metrics, lineage, cross-references
 - **API**: FastAPI REST metadata catalog. Does NOT proxy blob data. Provides artifact registration (with Harbor ref verification), metadata CRUD, catalog/search, and URI resolution.
-- **Harbor client**: All Harbor interactions (artifact verification, deletion, ORAS push/pull) use the shared [`harbor-oci-client`](https://github.com/DamitDev/harbor-oci-client) Python library, also used by Solar Control and step containers.
+- **Harbor client**: All Harbor interactions (artifact verification, deletion, ORAS push/pull) use the shared [`harbor-oci-client`](https://pypi.org/project/harbor-oci-client/) Python library, also used by Solar Control and step containers.
 
 **OCI artifact layout in Harbor:**
 
@@ -444,7 +444,7 @@ Solar v3.0 already provides a solid foundation: stateless multi-replica control 
 - The Data Repository API is a thin facade: ORAS for blobs, Postgres for metadata, REST API for consumers
 - Tight integration with both Solar Control (model consumer) and SuperNova Control (model producer + training data consumer)
 - No company bucket storage (S3/MinIO) available; Harbor is the existing artifact infrastructure
-- The [`harbor-oci-client`](https://github.com/DamitDev/harbor-oci-client) shared Python library provides Harbor API and ORAS operations to all Python consumers (Data Repository, Solar Control, step containers), avoiding code duplication across repos
+- The [`harbor-oci-client`](https://pypi.org/project/harbor-oci-client/) shared Python library provides Harbor API and ORAS operations to all Python consumers (Data Repository, Solar Control, step containers), avoiding code duplication across repos
 
 **Harbor operations:**
 
@@ -551,7 +551,7 @@ local:///path/to/model.gguf     → Use local filesystem path (legacy/fallback)
 
 - Solar Control resolves `repo://` URIs via Data Repository API, obtaining harbor_ref + metadata for direct Harbor (ORAS) pull
 - Step containers pull/push blobs directly from/to Harbor; register artifacts with Data Repository after upload
-- All Harbor/ORAS operations in Solar Control and step containers use the shared [`harbor-oci-client`](https://github.com/DamitDev/harbor-oci-client) library (same as Data Repository)
+- All Harbor/ORAS operations in Solar Control and step containers use the shared [`harbor-oci-client`](https://pypi.org/project/harbor-oci-client/) library (same as Data Repository)
 - Model catalog awareness in Solar WebUI (via Data Repository catalog API)
 
 ---
@@ -590,7 +590,7 @@ Architectural decisions made during the planning phase.
 | 20  | GitOps                              | **Extend `aiops-k8s`**                                                 | SuperNova Control + Data Repository deployed via existing ArgoCD App-of-Apps pattern.                                                                                                                                                    |
 | 21  | Etalon image CI/CD                  | **GitHub Actions on local runners**                                    | Same pattern as all other services. Per-branch images.                                                                                                                                                                                   |
 | 22  | Artifact retention                  | **SuperNova-managed**                                                  | Retention policy configurable per-job. Cleanup executed as a step-based action.                                                                                                                                                          |
-| 23  | Harbor client library               | **Shared package (`harbor-oci-client`)**                               | Data Repository, Solar Control, and step containers all need Harbor API and/or ORAS operations. Extracted into a shared library to avoid maintaining identical code in 3+ repos. Installed via `pip install git+https://github.com/DamitDev/harbor-oci-client.git`. |
+| 23  | Harbor client library               | **Shared package (`harbor-oci-client`)**                               | Data Repository, Solar Control, and step containers all need Harbor API and/or ORAS operations. Extracted into a shared library to avoid maintaining identical code in 3+ repos. Installed via `pip install harbor-oci-client`. |
 
 
 ---
