@@ -183,10 +183,10 @@ All Python services that interact with Harbor use the [`harbor-oci-client`](http
 Install:
 
 ```bash
-pip install git+https://github.com/DamitDev/harbor-oci-client.git
+pip install harbor-oci-client
 ```
 
-See the [harbor-oci-client README](https://github.com/DamitDev/harbor-oci-client) for full API reference.
+See the [harbor-oci-client on PyPI](https://pypi.org/project/harbor-oci-client/) and the [GitHub repository](https://github.com/DamitDev/harbor-oci-client) for full API reference.
 
 ## Data Repository Module API (`app/harbor`)
 

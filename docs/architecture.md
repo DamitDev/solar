@@ -73,7 +73,7 @@ The service registers artifacts on behalf of producers (SuperNova Control) and r
 | Database | PostgreSQL |
 | ORM / async driver | SQLAlchemy 2 (async) + asyncpg |
 | Migrations | Alembic |
-| Harbor client | harbor-oci-client (DamitDev/harbor-oci-client) |
+| Harbor client | harbor-oci-client ([PyPI](https://pypi.org/project/harbor-oci-client/)) |
 | Linting / formatting | Ruff + Black |
 | Testing | pytest + pytest-asyncio |
 

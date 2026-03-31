@@ -7,4 +7,4 @@ sqlalchemy==2.0.48
 alembic==1.18.4
 psycopg2-binary==2.9.11
 python-dotenv==1.2.2
-harbor-oci-client @ git+https://github.com/DamitDev/harbor-oci-client.git
+harbor-oci-client==0.1.0
