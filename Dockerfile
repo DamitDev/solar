@@ -4,9 +4,6 @@ ARG APP_VERSION=0.0.0.dev0
 
 WORKDIR /build
 
-RUN apt-get update && apt-get install -y --no-install-recommends git && \
-    rm -rf /var/lib/apt/lists/*
-
 COPY requirements.txt pyproject.toml ./
 COPY app/ ./app/
 
