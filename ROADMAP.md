@@ -44,7 +44,7 @@ Replaces raw filesystem paths with a URI scheme. Enables Solar to pull models fr
 | S-009 | Implement managed models directory on solar-host. Env-configurable path (`MODELS_DIR`). Track downloaded models with manifest file. | solar-host | M | - |
 | S-010 | Update instance creation on solar-host to accept `model_source` URI alongside existing `model` / `model_id` fields. Resolve `local://` URIs to filesystem paths (backward compatible). | solar-host | M | S-009 |
 | S-011 | Implement URI parser and resolver dispatcher in solar-control. Route `repo://`, `huggingface://`, `local://` to appropriate resolver. | solar-control | M | S-008 |
-| S-012 | Implement `huggingface://` resolver in solar-control. Download model from HuggingFace Hub to target host's models directory via solar-host API. | solar-control | M | S-011, S-014 |
+| S-012 | Implement `huggingface://` resolver in solar-control. Send pull command to Solar Host, which downloads from HuggingFace Hub directly. | solar-control | M | S-011, S-015 |
 | S-013 | Implement `repo://` resolver stub in solar-control. Returns error until Data Repository is available. Will be completed in Phase 1. | solar-control | S | S-011 |
 
 ---
@@ -56,11 +56,11 @@ Gives Solar the ability to manage model files on hosts programmatically.
 | ID | Issue | Repo | Size | Depends on |
 |----|-------|------|------|------------|
 | S-014 | Implement `GET /models` on solar-host. List all models in the managed models directory with file sizes and metadata. | solar-host | S | S-009 |
-| S-015 | Implement `POST /models/upload` on solar-host. Streaming upload of model files/directories to managed models directory. Include integrity checks (checksum). | solar-host | M | S-009 |
-| S-016 | Implement `GET /models/{name}/download` on solar-host. Streaming download of model files from managed models directory. | solar-host | M | S-009 |
+| S-015 | Implement `POST /models/pull` on solar-host. Solar Host pulls models directly from source (Harbor via ORAS, HuggingFace Hub). Cache check via manifest, download on miss. | solar-host | M | S-009 |
+| S-016 | *(Deprioritized)* Implement `GET /models/{name}/download` on solar-host. Streaming download of model files from managed models directory. Not needed for primary flow. | solar-host | M | S-009 |
 | S-017 | Implement `DELETE /models/{name}` on solar-host. Remove model from managed models directory. Reject if model is in use by a running instance. | solar-host | S | S-014 |
-| S-018 | Add free space validation before model operations. Reject uploads/downloads that would exceed available disk space. | solar-host | S | S-003, S-015 |
-| S-019 | Implement model distribution in solar-control. `POST /api/models/distribute` - download model from one host and upload to another. | solar-control | M | S-015, S-016 |
+| S-018 | Add free space validation before model operations. Reject pulls that would exceed available disk space. | solar-host | S | S-003, S-015 |
+| S-019 | Implement model distribution in solar-control. `POST /api/models/distribute` - tell target host to pull model from authoritative source (Harbor/HuggingFace). | solar-control | S | S-015 |
 | S-020 | Implement model availability query in solar-control. `GET /api/models/availability` - which models exist on which hosts. | solar-control | S | S-014 |
 
 ---
@@ -142,7 +142,7 @@ Enables Solar to autonomously manage resources, migrate instances, and fulfill d
 
 | ID | Issue | Repo | Size | Depends on |
 |----|-------|------|------|------------|
-| D-016 | Complete `repo://` resolver in solar-control. Connect to Data Repository's resolve endpoint, obtain harbor_ref, pull from Harbor (ORAS) to host's managed models directory. Cache by version. | solar-control | M | S-013, D-014 |
+| D-016 | Complete `repo://` resolver in solar-control. Connect to Data Repository's resolve endpoint, obtain harbor_ref, send pull command to Solar Host via `POST /models/pull`. Host pulls from Harbor (ORAS) directly. Cache by version. | solar-control | M | S-013, D-014 |
 | D-017 | End-to-end integration test. Upload model to Data Repository → create intent with `repo://` URI in Solar Control → model pulled to host → instance started → inference served. | test | M | D-016, S-040 |
 | D-018 | Add model catalog endpoint to solar-control for Solar WebUI. `GET /api/catalog/models` - proxy to Data Repository's model list with deployment status enrichment. | solar-control | S | D-013 |
 
