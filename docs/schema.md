@@ -289,12 +289,18 @@ The full `config.json` can be stored verbatim — the GIN index makes all nested
 | Field | Type | Description |
 |-------|------|-------------|
 | `description` | `string` | What the dataset covers and what problem it targets |
-| `format` | `string` | Storage format: `parquet`, `h5`, `jsonl`, `csv` |
+| `format` | `string` | Storage format: `parquet`, `hdf5`, `json` |
 | `record_count` | `int` | Number of records/rows |
 | `columns` | `string[]` | Column names in the dataset |
 | `source_system` | `string` | Origin system (e.g. `iris-tickets`, `icinga`) |
 | `date_range` | `object` | Time range of the data (`from`, `to` as ISO dates) |
 | `preprocessing` | `object` | Any preprocessing applied before storage |
+
+Dataset registration endpoint:
+
+- `POST /api/datasets/{name}/versions`
+- Request body mirrors model registration and requires `harbor_ref`
+- If `version` is omitted, Data Repository auto-increments to the next `vN`
 
 ### Lineage Convention
 

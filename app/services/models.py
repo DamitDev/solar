@@ -1,21 +1,30 @@
-"""Service layer for model version registration and querying.
+"""Service layer for artifact version registration and querying.
 
 Orchestrates input validation, Harbor verification, and the DB transaction.
 Raises only domain exceptions from :mod:`app.exceptions`; callers map those to
 HTTP status codes.
 
-This module exposes two services:
-- :class:`ModelRegistrationService` for write operations (registration)
+This module exposes three services:
+- :class:`ModelRegistrationService` for model write operations (registration)
+- :class:`DatasetRegistrationService` for dataset write operations (registration)
 - :class:`ModelQueryService` for read operations (version lookup)
 
-Both services build a :class:`~app.repositories.models.ModelArtifactRepository`
-from the injected :class:`~sqlalchemy.ext.asyncio.AsyncSession`.
+The canonical interfaces are :class:`ModelRegistrationService` and
+:class:`DatasetRegistrationService`, both constructed with a
+:class:`~harbor_oci_client.HarborClient` and an
+:class:`~sqlalchemy.ext.asyncio.AsyncSession`. Shared registration logic is
+kept in :class:`BaseArtifactRegistrationService`.
+
+Routes use dependency providers in :mod:`app.dependencies`; the services never
+call global singleton accessors.
 """
 
+from dataclasses import dataclass
 import logging
 import re
-from typing import Any
+from typing import Any, Protocol
 
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.exceptions import (
@@ -30,12 +39,17 @@ from app.harbor import (
     HarborClient,
     HarborConnectionError,
 )
-from app.repositories.models import ModelArtifactRepository
+from app.repositories.artifacts import ArtifactRepository
+from app.schemas.datasets import (
+    RegisterDatasetVersionRequest,
+    RegisterDatasetVersionResponse,
+)
 from app.schemas.models import (
     GetModelVersionResponse,
     RegisterModelVersionRequest,
     RegisterModelVersionResponse,
 )
+from app.types import ArtifactCategory
 
 logger = logging.getLogger(__name__)
 
@@ -52,47 +66,41 @@ def _validate_artifact_name(name: str) -> None:
     """
     if len(name) > 255 or not _NAME_RE.match(name):
         raise InvalidArtifactNameError(
-            "Artifact name must be 1–255 characters and contain only "
+            "Artifact name must be 1\u2013255 characters and contain only "
             "lowercase alphanumeric characters, hyphens, underscores, or dots."
         )
 
 
-class ModelRegistrationService:
-    """Orchestrates model-version registration using injected dependencies.
+class ArtifactRegistrationRequest(Protocol):
+    harbor_ref: str
+    version: str | None
+    checksum: str | None
+    size_bytes: int | None
+    metadata: dict[str, Any] | BaseModel | None
 
-    Receives a :class:`~harbor_oci_client.HarborClient` and an
-    :class:`~sqlalchemy.ext.asyncio.AsyncSession` via the constructor.  A
-    :class:`~app.repositories.models.ModelArtifactRepository` is built
-    internally from the session so callers never construct it themselves.
 
-    The transaction boundary is owned by the caller (e.g. the
-    ``get_db_session`` FastAPI dependency).
-    """
+@dataclass(frozen=True)
+class RegistrationResult:
+    name: str
+    version: str
+    harbor_ref: str
+    category: ArtifactCategory
+
+
+class BaseArtifactRegistrationService:
+    """Shared Harbor verify + persistence flow for artifact registrations."""
 
     def __init__(self, harbor: HarborClient, session: AsyncSession) -> None:
         self._harbor = harbor
-        self._repo = ModelArtifactRepository(session)
+        self._repo = ArtifactRepository(session)
 
-    async def register_model_version(
+    async def register_artifact_version(
         self,
         name: str,
-        request: RegisterModelVersionRequest,
-    ) -> RegisterModelVersionResponse:
-        """Validate, verify in Harbor, and persist a new model artifact version.
-
-        Raises
-        ------
-        InvalidArtifactNameError
-            When *name* fails the length or character-set rules.
-        ArtifactNotFoundInHarborError
-            When the Harbor reference in *request.harbor_ref* cannot be resolved.
-        HarborVerificationError
-            When Harbor returns an auth, connection, or API-level error.
-        ArtifactCategoryConflictError
-            When an artifact with *name* already exists with a different category.
-        VersionAlreadyExistsError
-            When the resolved version already exists for this artifact.
-        """
+        request: ArtifactRegistrationRequest,
+        *,
+        category: ArtifactCategory,
+    ) -> RegistrationResult:
         _validate_artifact_name(name)
 
         if request.version is not None and request.version.lower() == "latest":
@@ -116,10 +124,9 @@ class ModelRegistrationService:
 
         digest = request.checksum or info.digest
         size_bytes = request.size_bytes or info.content_length
+        metadata = self._to_metadata_dict(request.metadata)
 
-        metadata: dict[str, Any] = request.metadata or {}
-
-        artifact_id = await self._repo.upsert_or_fetch_artifact(name)
+        artifact_id = await self._repo.upsert_or_fetch_artifact(name, category=category)
 
         if request.version is not None:
             version = request.version
@@ -141,11 +148,89 @@ class ModelRegistrationService:
         )
         await self._repo.touch_artifact_updated_at(artifact_id)
 
-        return RegisterModelVersionResponse(
+        return RegistrationResult(
             name=name,
             version=version,
             harbor_ref=request.harbor_ref,
+            category=category,
+        )
+
+    @staticmethod
+    def _to_metadata_dict(
+        metadata: dict[str, Any] | BaseModel | None,
+    ) -> dict[str, Any]:
+        if metadata is None:
+            return {}
+        if isinstance(metadata, dict):
+            return metadata
+        return metadata.model_dump(exclude_none=True)
+
+
+class ModelRegistrationService(BaseArtifactRegistrationService):
+    """Orchestrates model-version registration using injected dependencies.
+
+    Receives a :class:`~harbor_oci_client.HarborClient` and an
+    :class:`~sqlalchemy.ext.asyncio.AsyncSession` via the constructor.  An
+    :class:`~app.repositories.artifacts.ArtifactRepository` is built
+    internally from the session so callers never construct it themselves.
+
+    The transaction boundary is owned by the caller (e.g. the
+    ``get_db_session`` FastAPI dependency).
+    """
+
+    async def register_model_version(
+        self,
+        name: str,
+        request: RegisterModelVersionRequest,
+    ) -> RegisterModelVersionResponse:
+        """Validate, verify in Harbor, and persist a new model artifact version.
+
+        Raises
+        ------
+        InvalidArtifactNameError
+            When *name* fails the length or character-set rules.
+        ArtifactNotFoundInHarborError
+            When the Harbor reference in *request.harbor_ref* cannot be resolved.
+        HarborVerificationError
+            When Harbor returns an auth, connection, or API-level error.
+        ArtifactCategoryConflictError
+            When an artifact with *name* already exists with a different category.
+        VersionAlreadyExistsError
+            When the resolved version already exists for this artifact.
+        """
+        result = await self.register_artifact_version(
+            name,
+            request,
             category="model",
+        )
+
+        return RegisterModelVersionResponse(
+            name=result.name,
+            version=result.version,
+            harbor_ref=result.harbor_ref,
+            category=result.category,
+        )
+
+
+class DatasetRegistrationService(BaseArtifactRegistrationService):
+    """Orchestrates dataset-version registration using injected dependencies."""
+
+    async def register_dataset_version(
+        self,
+        name: str,
+        request: RegisterDatasetVersionRequest,
+    ) -> RegisterDatasetVersionResponse:
+        result = await self.register_artifact_version(
+            name,
+            request,
+            category="dataset",
+        )
+
+        return RegisterDatasetVersionResponse(
+            name=result.name,
+            version=result.version,
+            harbor_ref=result.harbor_ref,
+            category=result.category,
         )
 
 
@@ -153,7 +238,7 @@ class ModelQueryService:
     """Read-only model query operations using injected dependencies."""
 
     def __init__(self, session: AsyncSession) -> None:
-        self._repo = ModelArtifactRepository(session)
+        self._repo = ArtifactRepository(session)
 
     async def get_model_version(
         self, name: str, version: str

@@ -21,6 +21,12 @@ get_model_query_service
     wiring the per-request :class:`~sqlalchemy.ext.asyncio.AsyncSession`
     (from :func:`app.database.get_db_session`).
 
+get_dataset_registration_service
+    Builds a :class:`~app.services.models.DatasetRegistrationService` per request,
+    wiring the per-request :class:`~sqlalchemy.ext.asyncio.AsyncSession`
+    (from :func:`app.database.get_db_session`) and the Harbor singleton
+    (from :func:`get_harbor_client`).
+
 Usage::
 
     from typing import Annotated
@@ -44,7 +50,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db_session
 from app.harbor import HarborClient, harbor_client
-from app.services.models import ModelQueryService, ModelRegistrationService
+from app.services.models import (
+    DatasetRegistrationService,
+    ModelQueryService,
+    ModelRegistrationService,
+)
 
 
 def get_harbor_client() -> HarborClient:
@@ -79,3 +89,15 @@ def get_model_query_service(
 ) -> ModelQueryService:
     """Construct a :class:`~app.services.models.ModelQueryService` per request."""
     return ModelQueryService(session=session)
+
+
+def get_dataset_registration_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+    harbor: Annotated[HarborClient, Depends(get_harbor_client)],
+) -> DatasetRegistrationService:
+    """Construct a :class:`~app.services.models.DatasetRegistrationService` per request.
+
+    Wires together the per-request :class:`~sqlalchemy.ext.asyncio.AsyncSession`
+    and the app-level :class:`~harbor_oci_client.HarborClient` singleton.
+    """
+    return DatasetRegistrationService(harbor=harbor, session=session)

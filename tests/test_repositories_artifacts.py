@@ -1,4 +1,4 @@
-"""Unit tests for app/repositories/models.py — ModelArtifactRepository.
+"""Unit tests for app/repositories/artifacts.py — ArtifactRepository.
 
 All SQLAlchemy I/O is replaced with AsyncMock so these tests run without a
 live database.  The session is injected via the constructor, making it trivial
@@ -18,7 +18,7 @@ from app.exceptions import (
     ModelVersionNotFoundError,
     VersionAlreadyExistsError,
 )
-from app.repositories.models import ModelArtifactRepository
+from app.repositories.artifacts import ArtifactRepository
 
 pytestmark = pytest.mark.asyncio
 
@@ -53,7 +53,7 @@ def _execute_returning(row):
 async def test_upsert_inserts_new_artifact_and_returns_id(mock_session):
     """INSERT succeeds (row returned) — returns the artifact UUID directly."""
     mock_session.execute = _execute_returning(_make_row())
-    repo = ModelArtifactRepository(mock_session)
+    repo = ArtifactRepository(mock_session)
 
     result = await repo.upsert_or_fetch_artifact("my-model")
 
@@ -68,7 +68,7 @@ async def test_upsert_falls_back_to_select_for_existing_model(mock_session):
     select_result.fetchone.return_value = _make_row()
 
     mock_session.execute = AsyncMock(side_effect=[insert_result, select_result])
-    repo = ModelArtifactRepository(mock_session)
+    repo = ArtifactRepository(mock_session)
 
     result = await repo.upsert_or_fetch_artifact("my-model")
 
@@ -84,10 +84,26 @@ async def test_upsert_raises_category_conflict_for_non_model(mock_session):
     select_result.fetchone.return_value = _make_row(category="dataset")
 
     mock_session.execute = AsyncMock(side_effect=[insert_result, select_result])
-    repo = ModelArtifactRepository(mock_session)
+    repo = ArtifactRepository(mock_session)
 
     with pytest.raises(ArtifactCategoryConflictError):
         await repo.upsert_or_fetch_artifact("my-model")
+
+
+async def test_upsert_raises_category_conflict_for_non_dataset(mock_session):
+    """INSERT returns None; SELECT finds a 'model' row for dataset request."""
+    insert_result = MagicMock()
+    insert_result.fetchone.return_value = None
+    select_result = MagicMock()
+    select_result.fetchone.return_value = _make_row(category="model")
+
+    mock_session.execute = AsyncMock(side_effect=[insert_result, select_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(
+        ArtifactCategoryConflictError, match="cannot register as a 'dataset'"
+    ):
+        await repo.upsert_or_fetch_artifact("iris-tickets", category="dataset")
 
 
 async def test_upsert_raises_runtime_error_when_row_missing(mock_session):
@@ -96,7 +112,7 @@ async def test_upsert_raises_runtime_error_when_row_missing(mock_session):
     none_result.fetchone.return_value = None
 
     mock_session.execute = AsyncMock(side_effect=[none_result, none_result])
-    repo = ModelArtifactRepository(mock_session)
+    repo = ArtifactRepository(mock_session)
 
     with pytest.raises(RuntimeError, match="Could not find or create"):
         await repo.upsert_or_fetch_artifact("my-model")
@@ -114,7 +130,7 @@ async def test_get_existing_auto_versions_returns_list(mock_session):
     result.scalars.return_value = scalars
     mock_session.execute = AsyncMock(return_value=result)
 
-    repo = ModelArtifactRepository(mock_session)
+    repo = ArtifactRepository(mock_session)
     versions = await repo.get_existing_auto_versions(_ARTIFACT_ID)
 
     assert list(versions) == ["v1", "v2", "v3"]
@@ -128,7 +144,7 @@ async def test_get_existing_auto_versions_returns_empty_list(mock_session):
     result.scalars.return_value = scalars
     mock_session.execute = AsyncMock(return_value=result)
 
-    repo = ModelArtifactRepository(mock_session)
+    repo = ArtifactRepository(mock_session)
     versions = await repo.get_existing_auto_versions(_ARTIFACT_ID)
 
     assert list(versions) == []
@@ -141,7 +157,7 @@ async def test_get_existing_auto_versions_returns_empty_list(mock_session):
 
 async def test_insert_artifact_version_succeeds(mock_session):
     """flush() succeeds — add() is called once and no exception is raised."""
-    repo = ModelArtifactRepository(mock_session)
+    repo = ArtifactRepository(mock_session)
 
     await repo.insert_artifact_version(
         artifact_id=_ARTIFACT_ID,
@@ -161,7 +177,7 @@ async def test_insert_artifact_version_raises_on_duplicate(mock_session):
     mock_session.flush = AsyncMock(
         side_effect=IntegrityError(None, None, Exception("duplicate"))
     )
-    repo = ModelArtifactRepository(mock_session)
+    repo = ArtifactRepository(mock_session)
 
     with pytest.raises(VersionAlreadyExistsError, match="v1"):
         await repo.insert_artifact_version(
@@ -180,7 +196,7 @@ async def test_insert_artifact_version_raises_on_duplicate(mock_session):
 
 
 async def test_touch_artifact_updated_at_executes_once(mock_session):
-    repo = ModelArtifactRepository(mock_session)
+    repo = ArtifactRepository(mock_session)
 
     await repo.touch_artifact_updated_at(_ARTIFACT_ID)
 
@@ -218,7 +234,7 @@ async def test_get_model_version_exact_returns_record(mock_session):
     join_result.fetchone.return_value = version_row
 
     mock_session.execute = AsyncMock(return_value=join_result)
-    repo = ModelArtifactRepository(mock_session)
+    repo = ArtifactRepository(mock_session)
 
     result = await repo.get_model_version(name="mymodel", version="v3")
 
@@ -239,7 +255,7 @@ async def test_get_model_version_latest_returns_most_recent_row(mock_session):
     join_result.fetchone.return_value = latest_row
 
     mock_session.execute = AsyncMock(return_value=join_result)
-    repo = ModelArtifactRepository(mock_session)
+    repo = ArtifactRepository(mock_session)
 
     result = await repo.get_model_version(name="mymodel", version="latest")
 
@@ -255,7 +271,7 @@ async def test_get_model_version_raises_when_model_missing(mock_session):
     exists_result.fetchone.return_value = None
 
     mock_session.execute = AsyncMock(side_effect=[join_result, exists_result])
-    repo = ModelArtifactRepository(mock_session)
+    repo = ArtifactRepository(mock_session)
 
     with pytest.raises(ModelNotFoundError):
         await repo.get_model_version(name="mymodel", version="v1")
@@ -269,7 +285,7 @@ async def test_get_model_version_raises_when_name_belongs_to_dataset(mock_sessio
     exists_result.fetchone.return_value = _make_row(category="dataset")
 
     mock_session.execute = AsyncMock(side_effect=[join_result, exists_result])
-    repo = ModelArtifactRepository(mock_session)
+    repo = ArtifactRepository(mock_session)
 
     with pytest.raises(ModelNotFoundError):
         await repo.get_model_version(name="mymodel", version="v1")
@@ -283,7 +299,7 @@ async def test_get_model_version_raises_when_version_missing(mock_session):
     exists_result.fetchone.return_value = _make_row(category="model")
 
     mock_session.execute = AsyncMock(side_effect=[join_result, exists_result])
-    repo = ModelArtifactRepository(mock_session)
+    repo = ArtifactRepository(mock_session)
 
     with pytest.raises(ModelVersionNotFoundError):
         await repo.get_model_version(name="mymodel", version="v99")
@@ -297,7 +313,7 @@ async def test_get_model_version_latest_no_versions_gives_clear_message(mock_ses
     exists_result.fetchone.return_value = _make_row(category="model")
 
     mock_session.execute = AsyncMock(side_effect=[join_result, exists_result])
-    repo = ModelArtifactRepository(mock_session)
+    repo = ArtifactRepository(mock_session)
 
     with pytest.raises(ModelVersionNotFoundError, match="has no versions"):
         await repo.get_model_version(name="mymodel", version="latest")

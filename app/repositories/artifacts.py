@@ -1,10 +1,8 @@
 """SQL access layer for artifact and artifact_version rows.
 
-The canonical interface is :class:`ModelArtifactRepository`, which is
-constructed with an :class:`~sqlalchemy.ext.asyncio.AsyncSession` whose
-transaction the caller owns.  Module-level helper functions are thin wrappers
-that delegate to the class; they exist only to ease the US-012 migration and
-will be removed once the service layer switches to the class directly.
+The canonical interface is :class:`ArtifactRepository`, constructed with an
+:class:`~sqlalchemy.ext.asyncio.AsyncSession` whose transaction the caller
+owns.
 
 No Harbor imports, no HTTPException references, no business logic beyond
 executing SQL.
@@ -27,6 +25,7 @@ from app.exceptions import (
     ModelVersionNotFoundError,
     VersionAlreadyExistsError,
 )
+from app.types import ArtifactCategory
 
 
 @dataclass(frozen=True)
@@ -41,8 +40,8 @@ class ModelVersionRecord:
     metadata: dict[str, Any]
 
 
-class ModelArtifactRepository:
-    """Persistence operations for model artifacts and their versions.
+class ArtifactRepository:
+    """Persistence operations for artifacts and their versions.
 
     Construct with an :class:`~sqlalchemy.ext.asyncio.AsyncSession` whose
     transaction boundary is owned by the caller (e.g. the
@@ -52,16 +51,20 @@ class ModelArtifactRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def upsert_or_fetch_artifact(self, name: str) -> uuid.UUID:
-        """Insert a model artifact if it does not exist, or fetch the existing row.
+    async def upsert_or_fetch_artifact(
+        self,
+        name: str,
+        category: ArtifactCategory = "model",
+    ) -> uuid.UUID:
+        """Insert an artifact if it does not exist, or fetch the existing row.
 
-        Returns the artifact ``id`` when the row has ``category = 'model'``.
+        Returns the artifact ``id`` when the row has the requested category.
         Raises :exc:`~app.exceptions.ArtifactCategoryConflictError` when the
         row already exists with a different category.
         """
         insert_stmt = (
             pg_insert(Artifact)
-            .values(name=name, category="model")
+            .values(name=name, category=category)
             .on_conflict_do_nothing(index_elements=["name"])
             .returning(Artifact.id, Artifact.category)
         )
@@ -79,12 +82,11 @@ class ModelArtifactRepository:
             raise RuntimeError(f"Could not find or create artifact '{name}'.")
 
         artifact_id: uuid.UUID = row.id
-        category: str = row.category
 
-        if category != "model":
+        if row.category != category:
             raise ArtifactCategoryConflictError(
-                f"Artifact '{name}' already exists as a '{category}'; "
-                "cannot register as a model."
+                f"Artifact '{name}' already exists as a '{row.category}'; "
+                f"cannot register as a '{category}'."
             )
 
         return artifact_id

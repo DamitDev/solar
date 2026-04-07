@@ -4,7 +4,7 @@ All database and Harbor I/O is replaced with unittest.mock fakes so these
 tests run without a live database or Harbor instance.
 
 HarborClient is injected directly into the constructor (no patching needed).
-ModelArtifactRepository is intercepted via patch so the session mock is never
+ArtifactRepository is intercepted via patch so the session mock is never
 exercised — the service builds the repo internally and the test swaps it out.
 """
 
@@ -29,7 +29,7 @@ from app.harbor import (
     HarborAuthError,
     HarborConnectionError,
 )
-from app.repositories.models import ModelVersionRecord
+from app.repositories.artifacts import ModelVersionRecord
 from app.schemas.models import RegisterModelVersionRequest
 from app.services.models import ModelQueryService, ModelRegistrationService
 
@@ -92,7 +92,7 @@ def _make_service(
     harbor: AsyncMock,
     repo: AsyncMock,
 ) -> tuple["ModelRegistrationService", "patch"]:
-    """Return (service, active patch context) with ModelArtifactRepository swapped."""
+    """Return (service, active patch context) with ArtifactRepository swapped."""
     return ModelRegistrationService(harbor=harbor, session=AsyncMock()), repo
 
 
@@ -116,7 +116,7 @@ async def _svc(
         for attr, val in repo_overrides.items():
             setattr(mock_repo, attr, val)
 
-    with patch("app.services.models.ModelArtifactRepository", return_value=mock_repo):
+    with patch("app.services.models.ArtifactRepository", return_value=mock_repo):
         svc = ModelRegistrationService(harbor=mock_harbor, session=AsyncMock())
         yield svc, mock_harbor, mock_repo
 
@@ -128,7 +128,7 @@ async def _query_svc(*, repo_overrides=None):
         for attr, val in repo_overrides.items():
             setattr(mock_repo, attr, val)
 
-    with patch("app.services.models.ModelArtifactRepository", return_value=mock_repo):
+    with patch("app.services.models.ArtifactRepository", return_value=mock_repo):
         svc = ModelQueryService(session=AsyncMock())
         yield svc, mock_repo
 
