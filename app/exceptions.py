@@ -43,3 +43,19 @@ class VersionAlreadyExistsError(Exception):
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
         self.detail = detail
+
+
+class ModelNotFoundError(Exception):
+    """Raised when a model artifact with the requested name does not exist."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+class ModelVersionNotFoundError(Exception):
+    """Raised when the requested model version does not exist."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail

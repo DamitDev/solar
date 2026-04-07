@@ -1,18 +1,15 @@
-"""Service layer for model version registration.
+"""Service layer for model version registration and querying.
 
 Orchestrates input validation, Harbor verification, and the DB transaction.
 Raises only domain exceptions from :mod:`app.exceptions`; callers map those to
 HTTP status codes.
 
-The canonical interface is :class:`ModelRegistrationService`, constructed with
-a :class:`~harbor_oci_client.HarborClient` and an
-:class:`~sqlalchemy.ext.asyncio.AsyncSession`.  The service builds a
-:class:`~app.repositories.models.ModelArtifactRepository` from the session
-(one clear rule: session in → repository constructed internally).
+This module exposes two services:
+- :class:`ModelRegistrationService` for write operations (registration)
+- :class:`ModelQueryService` for read operations (version lookup)
 
-Routes use :func:`app.dependencies.get_model_registration_service` to obtain an
-instance via FastAPI ``Depends``; the service itself never calls global singleton
-accessors.
+Both services build a :class:`~app.repositories.models.ModelArtifactRepository`
+from the injected :class:`~sqlalchemy.ext.asyncio.AsyncSession`.
 """
 
 import logging
@@ -34,11 +31,30 @@ from app.harbor import (
     HarborConnectionError,
 )
 from app.repositories.models import ModelArtifactRepository
-from app.schemas.models import RegisterModelVersionRequest, RegisterModelVersionResponse
+from app.schemas.models import (
+    GetModelVersionResponse,
+    RegisterModelVersionRequest,
+    RegisterModelVersionResponse,
+)
 
 logger = logging.getLogger(__name__)
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,254}$")
+
+
+def _validate_artifact_name(name: str) -> None:
+    """Validate artifact name format and length.
+
+    Raises
+    ------
+    InvalidArtifactNameError
+        When *name* fails the length or character-set rules.
+    """
+    if len(name) > 255 or not _NAME_RE.match(name):
+        raise InvalidArtifactNameError(
+            "Artifact name must be 1–255 characters and contain only "
+            "lowercase alphanumeric characters, hyphens, underscores, or dots."
+        )
 
 
 class ModelRegistrationService:
@@ -77,10 +93,11 @@ class ModelRegistrationService:
         VersionAlreadyExistsError
             When the resolved version already exists for this artifact.
         """
-        if len(name) > 255 or not _NAME_RE.match(name):
+        _validate_artifact_name(name)
+
+        if request.version is not None and request.version.lower() == "latest":
             raise InvalidArtifactNameError(
-                "Artifact name must be 1–255 characters and contain only "
-                "lowercase alphanumeric characters, hyphens, underscores, or dots."
+                "'latest' is a reserved alias and cannot be used as a version tag."
             )
 
         try:
@@ -129,4 +146,40 @@ class ModelRegistrationService:
             version=version,
             harbor_ref=request.harbor_ref,
             category="model",
+        )
+
+
+class ModelQueryService:
+    """Read-only model query operations using injected dependencies."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._repo = ModelArtifactRepository(session)
+
+    async def get_model_version(
+        self, name: str, version: str
+    ) -> GetModelVersionResponse:
+        """Resolve and return one model version by tag or ``latest`` alias.
+
+        Raises
+        ------
+        InvalidArtifactNameError
+            When *name* fails the length or character-set rules.
+        ModelNotFoundError
+            When model artifact *name* does not exist.
+        ModelVersionNotFoundError
+            When *version* does not exist for model *name*.
+        """
+        _validate_artifact_name(name)
+
+        record = await self._repo.get_model_version(name=name, version=version)
+
+        return GetModelVersionResponse(
+            name=record.name,
+            version=record.version,
+            category=record.category,
+            harbor_ref=record.harbor_ref,
+            size_bytes=record.size_bytes,
+            checksum=record.checksum,
+            created_at=record.created_at,
+            metadata=record.metadata,
         )

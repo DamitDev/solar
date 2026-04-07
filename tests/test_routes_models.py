@@ -5,22 +5,25 @@ app.dependency_overrides so HTTP-status mapping for every domain exception is
 verified without a DB, Harbor, or singleton dependency.
 """
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.dependencies import get_model_registration_service
+from app.dependencies import get_model_query_service, get_model_registration_service
 from app.exceptions import (
     ArtifactCategoryConflictError,
     ArtifactNotFoundInHarborError,
     HarborVerificationError,
     InvalidArtifactNameError,
+    ModelNotFoundError,
+    ModelVersionNotFoundError,
     VersionAlreadyExistsError,
 )
 from app.routes.models import router
-from app.schemas.models import RegisterModelVersionResponse
+from app.schemas.models import GetModelVersionResponse, RegisterModelVersionResponse
 
 _HARBOR_REF = "registry.example.com/proj/my-model:v1"
 _VALID_BODY = {"harbor_ref": _HARBOR_REF, "version": "v1"}
@@ -32,14 +35,20 @@ _SUCCESS_RESPONSE = RegisterModelVersionResponse(
     category="model",
 )
 
+_SUCCESS_GET_RESPONSE = GetModelVersionResponse(
+    name="mymodel",
+    version="v3",
+    category="model",
+    harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v3",
+    size_bytes=123,
+    checksum="sha256:abc",
+    created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+    metadata={"trainer": "etalon"},
+)
 
-def _make_client(return_value=None, side_effect=None) -> TestClient:
-    """Return a TestClient where ModelRegistrationService is a controlled mock.
 
-    The ``get_model_registration_service`` dependency is overridden to return a
-    mock whose ``register_model_version`` coroutine either returns *return_value*
-    or raises *side_effect*.
-    """
+def _make_post_client(return_value=None, side_effect=None) -> TestClient:
+    """Return a TestClient with ``ModelRegistrationService`` mocked for POST tests."""
     app = FastAPI()
     app.include_router(router)
 
@@ -48,8 +57,22 @@ def _make_client(return_value=None, side_effect=None) -> TestClient:
         return_value=return_value,
         side_effect=side_effect,
     )
-
     app.dependency_overrides[get_model_registration_service] = lambda: mock_service
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def _make_get_client(return_value=None, side_effect=None) -> TestClient:
+    """Return a TestClient with ``ModelQueryService`` mocked for GET tests."""
+    app = FastAPI()
+    app.include_router(router)
+
+    mock_service = MagicMock()
+    mock_service.get_model_version = AsyncMock(
+        return_value=return_value,
+        side_effect=side_effect,
+    )
+    app.dependency_overrides[get_model_query_service] = lambda: mock_service
 
     return TestClient(app, raise_server_exceptions=False)
 
@@ -60,7 +83,7 @@ def _make_client(return_value=None, side_effect=None) -> TestClient:
 
 
 def test_register_returns_201_on_success():
-    client = _make_client(return_value=_SUCCESS_RESPONSE)
+    client = _make_post_client(return_value=_SUCCESS_RESPONSE)
     resp = client.post("/api/models/mymodel/versions", json=_VALID_BODY)
 
     assert resp.status_code == 201
@@ -76,7 +99,7 @@ def test_register_returns_201_on_success():
 
 
 def test_invalid_name_returns_422():
-    client = _make_client(side_effect=InvalidArtifactNameError("bad name"))
+    client = _make_post_client(side_effect=InvalidArtifactNameError("bad name"))
     resp = client.post("/api/models/BAD/versions", json=_VALID_BODY)
 
     assert resp.status_code == 422
@@ -88,7 +111,7 @@ def test_invalid_name_returns_422():
 
 
 def test_harbor_not_found_returns_404():
-    client = _make_client(side_effect=ArtifactNotFoundInHarborError("not found"))
+    client = _make_post_client(side_effect=ArtifactNotFoundInHarborError("not found"))
     resp = client.post("/api/models/mymodel/versions", json=_VALID_BODY)
 
     assert resp.status_code == 404
@@ -100,7 +123,7 @@ def test_harbor_not_found_returns_404():
 
 
 def test_harbor_error_returns_502():
-    client = _make_client(side_effect=HarborVerificationError("upstream error"))
+    client = _make_post_client(side_effect=HarborVerificationError("upstream error"))
     resp = client.post("/api/models/mymodel/versions", json=_VALID_BODY)
 
     assert resp.status_code == 502
@@ -119,7 +142,7 @@ def test_harbor_error_returns_502():
     ],
 )
 def test_conflict_returns_409(exc):
-    client = _make_client(side_effect=exc)
+    client = _make_post_client(side_effect=exc)
     resp = client.post("/api/models/mymodel/versions", json=_VALID_BODY)
 
     assert resp.status_code == 409
@@ -140,5 +163,43 @@ def test_missing_harbor_ref_returns_422():
 
     with TestClient(app, raise_server_exceptions=False) as client:
         resp = client.post("/api/models/mymodel/versions", json={})
+
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# GET /api/models/{name}/versions/{version}
+# ---------------------------------------------------------------------------
+
+
+def test_get_model_version_returns_200_on_success():
+    client = _make_get_client(return_value=_SUCCESS_GET_RESPONSE)
+    resp = client.get("/api/models/mymodel/versions/v3")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "mymodel"
+    assert data["version"] == "v3"
+    assert data["category"] == "model"
+    assert data["harbor_ref"] == "imgrepo.damit.hu/supernova/iris-osl:v3"
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ModelNotFoundError("missing model"),
+        ModelVersionNotFoundError("missing version"),
+    ],
+)
+def test_get_model_version_not_found_returns_404(exc):
+    client = _make_get_client(side_effect=exc)
+    resp = client.get("/api/models/mymodel/versions/v9")
+
+    assert resp.status_code == 404
+
+
+def test_get_model_version_invalid_name_returns_422():
+    client = _make_get_client(side_effect=InvalidArtifactNameError("bad name"))
+    resp = client.get("/api/models/BAD/versions/v1")
 
     assert resp.status_code == 422

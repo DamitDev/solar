@@ -16,6 +16,11 @@ get_model_registration_service
     (from :func:`app.database.get_db_session`) and the Harbor singleton
     (from :func:`get_harbor_client`).
 
+get_model_query_service
+    Builds a :class:`~app.services.models.ModelQueryService` per request,
+    wiring the per-request :class:`~sqlalchemy.ext.asyncio.AsyncSession`
+    (from :func:`app.database.get_db_session`).
+
 Usage::
 
     from typing import Annotated
@@ -39,7 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db_session
 from app.harbor import HarborClient, harbor_client
-from app.services.models import ModelRegistrationService
+from app.services.models import ModelQueryService, ModelRegistrationService
 
 
 def get_harbor_client() -> HarborClient:
@@ -67,3 +72,10 @@ def get_model_registration_service(
     app-level :class:`~harbor_oci_client.HarborClient` singleton.
     """
     return ModelRegistrationService(harbor=harbor, session=session)
+
+
+def get_model_query_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ModelQueryService:
+    """Construct a :class:`~app.services.models.ModelQueryService` per request."""
+    return ModelQueryService(session=session)

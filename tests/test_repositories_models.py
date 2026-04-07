@@ -6,12 +6,18 @@ to substitute.
 """
 
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from app.exceptions import ArtifactCategoryConflictError, VersionAlreadyExistsError
+from app.exceptions import (
+    ArtifactCategoryConflictError,
+    ModelNotFoundError,
+    ModelVersionNotFoundError,
+    VersionAlreadyExistsError,
+)
 from app.repositories.models import ModelArtifactRepository
 
 pytestmark = pytest.mark.asyncio
@@ -179,3 +185,119 @@ async def test_touch_artifact_updated_at_executes_once(mock_session):
     await repo.touch_artifact_updated_at(_ARTIFACT_ID)
 
     mock_session.execute.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# get_model_version
+# ---------------------------------------------------------------------------
+
+
+def _make_version_row(
+    *,
+    version: str = "v3",
+    harbor_ref: str = "imgrepo.damit.hu/supernova/mymodel:v3",
+    size_bytes: int | None = 1024,
+    digest: str | None = "sha256:abc",
+    created_at: datetime = datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+    metadata: dict | None = None,
+):
+    row = MagicMock()
+    row.version = version
+    row.harbor_ref = harbor_ref
+    row.size_bytes = size_bytes
+    row.digest = digest
+    row.created_at = created_at
+    row.metadata_ = metadata if metadata is not None else {"a": 1}
+    return row
+
+
+async def test_get_model_version_exact_returns_record(mock_session):
+    """JOIN query hits — single execute call returns the version row."""
+    version_row = _make_version_row(version="v3")
+    join_result = MagicMock()
+    join_result.fetchone.return_value = version_row
+
+    mock_session.execute = AsyncMock(return_value=join_result)
+    repo = ModelArtifactRepository(mock_session)
+
+    result = await repo.get_model_version(name="mymodel", version="v3")
+
+    assert result.name == "mymodel"
+    assert result.version == "v3"
+    assert result.category == "model"
+    assert result.harbor_ref == "imgrepo.damit.hu/supernova/mymodel:v3"
+    assert result.checksum == "sha256:abc"
+    assert isinstance(result.created_at, datetime)
+    assert result.created_at.tzinfo is not None
+    mock_session.execute.assert_awaited_once()
+
+
+async def test_get_model_version_latest_returns_most_recent_row(mock_session):
+    """JOIN query with ORDER BY created_at DESC LIMIT 1 returns the newest row."""
+    latest_row = _make_version_row(version="v7")
+    join_result = MagicMock()
+    join_result.fetchone.return_value = latest_row
+
+    mock_session.execute = AsyncMock(return_value=join_result)
+    repo = ModelArtifactRepository(mock_session)
+
+    result = await repo.get_model_version(name="mymodel", version="latest")
+
+    assert result.version == "v7"
+    mock_session.execute.assert_awaited_once()
+
+
+async def test_get_model_version_raises_when_model_missing(mock_session):
+    """JOIN misses, existence check returns None — ModelNotFoundError."""
+    join_result = MagicMock()
+    join_result.fetchone.return_value = None
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = None
+
+    mock_session.execute = AsyncMock(side_effect=[join_result, exists_result])
+    repo = ModelArtifactRepository(mock_session)
+
+    with pytest.raises(ModelNotFoundError):
+        await repo.get_model_version(name="mymodel", version="v1")
+
+
+async def test_get_model_version_raises_when_name_belongs_to_dataset(mock_session):
+    """JOIN misses (category filter), existence check finds a dataset row."""
+    join_result = MagicMock()
+    join_result.fetchone.return_value = None
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="dataset")
+
+    mock_session.execute = AsyncMock(side_effect=[join_result, exists_result])
+    repo = ModelArtifactRepository(mock_session)
+
+    with pytest.raises(ModelNotFoundError):
+        await repo.get_model_version(name="mymodel", version="v1")
+
+
+async def test_get_model_version_raises_when_version_missing(mock_session):
+    """JOIN misses, existence check finds a model row — ModelVersionNotFoundError."""
+    join_result = MagicMock()
+    join_result.fetchone.return_value = None
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="model")
+
+    mock_session.execute = AsyncMock(side_effect=[join_result, exists_result])
+    repo = ModelArtifactRepository(mock_session)
+
+    with pytest.raises(ModelVersionNotFoundError):
+        await repo.get_model_version(name="mymodel", version="v99")
+
+
+async def test_get_model_version_latest_no_versions_gives_clear_message(mock_session):
+    """Model exists but has zero versions — error message says 'has no versions'."""
+    join_result = MagicMock()
+    join_result.fetchone.return_value = None
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="model")
+
+    mock_session.execute = AsyncMock(side_effect=[join_result, exists_result])
+    repo = ModelArtifactRepository(mock_session)
+
+    with pytest.raises(ModelVersionNotFoundError, match="has no versions"):
+        await repo.get_model_version(name="mymodel", version="latest")

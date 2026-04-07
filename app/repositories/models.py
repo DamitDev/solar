@@ -11,6 +11,8 @@ executing SQL.
 """
 
 import uuid
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Sequence
 
 from sqlalchemy import func, select, update
@@ -19,7 +21,24 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import Artifact, ArtifactVersion
-from app.exceptions import ArtifactCategoryConflictError, VersionAlreadyExistsError
+from app.exceptions import (
+    ArtifactCategoryConflictError,
+    ModelNotFoundError,
+    ModelVersionNotFoundError,
+    VersionAlreadyExistsError,
+)
+
+
+@dataclass(frozen=True)
+class ModelVersionRecord:
+    name: str
+    version: str
+    category: str
+    harbor_ref: str
+    size_bytes: int | None
+    checksum: str | None
+    created_at: datetime
+    metadata: dict[str, Any]
 
 
 class ModelArtifactRepository:
@@ -120,3 +139,65 @@ class ModelArtifactRepository:
             .values(updated_at=func.now())
         )
         await self._session.execute(stmt)
+
+    async def get_model_version(self, name: str, version: str) -> ModelVersionRecord:
+        """Fetch one model version by exact tag or by the ``latest`` alias.
+
+        Uses a single JOIN query for the happy path. A lightweight second
+        query runs only on miss to distinguish "model not found" from
+        "version not found".
+
+        Raises
+        ------
+        ModelNotFoundError
+            When a model artifact with *name* does not exist.
+        ModelVersionNotFoundError
+            When the requested *version* does not exist for the model.
+        """
+        base = (
+            select(
+                ArtifactVersion.version,
+                ArtifactVersion.harbor_ref,
+                ArtifactVersion.size_bytes,
+                ArtifactVersion.digest,
+                ArtifactVersion.created_at,
+                ArtifactVersion.metadata_,
+            )
+            .join(Artifact, ArtifactVersion.artifact_id == Artifact.id)
+            .where(Artifact.name == name, Artifact.category == "model")
+        )
+
+        if version == "latest":
+            stmt = base.order_by(ArtifactVersion.created_at.desc()).limit(1)
+        else:
+            stmt = base.where(ArtifactVersion.version == version)
+
+        result = await self._session.execute(stmt)
+        row = result.fetchone()
+
+        if row is not None:
+            return ModelVersionRecord(
+                name=name,
+                version=row.version,
+                category="model",
+                harbor_ref=row.harbor_ref,
+                size_bytes=row.size_bytes,
+                checksum=row.digest,
+                created_at=row.created_at,
+                metadata=row.metadata_ or {},
+            )
+
+        exists_result = await self._session.execute(
+            select(Artifact.id, Artifact.category).where(Artifact.name == name)
+        )
+        exists_row = exists_result.fetchone()
+
+        if exists_row is None or exists_row.category != "model":
+            raise ModelNotFoundError(f"Model '{name}' was not found.")
+
+        if version == "latest":
+            raise ModelVersionNotFoundError(f"Model '{name}' has no versions.")
+
+        raise ModelVersionNotFoundError(
+            f"Version '{version}' was not found for model '{name}'."
+        )

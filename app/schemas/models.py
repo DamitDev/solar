@@ -1,5 +1,6 @@
-"""Pydantic schemas for model version registration."""
+"""Pydantic schemas for model version registration and lookup."""
 
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -34,3 +35,14 @@ class RegisterModelVersionResponse(BaseModel):
     version: str
     harbor_ref: str
     category: str
+
+
+class GetModelVersionResponse(BaseModel):
+    name: str
+    version: str
+    category: str
+    harbor_ref: str
+    size_bytes: int | None
+    checksum: str | None
+    created_at: datetime
+    metadata: dict[str, Any]

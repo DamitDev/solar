@@ -1,4 +1,4 @@
-"""Unit tests for app/services/models.py — ModelRegistrationService.
+"""Unit tests for app/services/models.py services.
 
 All database and Harbor I/O is replaced with unittest.mock fakes so these
 tests run without a live database or Harbor instance.
@@ -9,6 +9,7 @@ exercised — the service builds the repo internally and the test swaps it out.
 """
 
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,6 +19,8 @@ from app.exceptions import (
     ArtifactNotFoundInHarborError,
     HarborVerificationError,
     InvalidArtifactNameError,
+    ModelNotFoundError,
+    ModelVersionNotFoundError,
     VersionAlreadyExistsError,
 )
 from app.harbor import (
@@ -26,8 +29,9 @@ from app.harbor import (
     HarborAuthError,
     HarborConnectionError,
 )
+from app.repositories.models import ModelVersionRecord
 from app.schemas.models import RegisterModelVersionRequest
-from app.services.models import ModelRegistrationService
+from app.services.models import ModelQueryService, ModelRegistrationService
 
 # Context-manager helper used by many tests.
 from contextlib import asynccontextmanager
@@ -117,6 +121,18 @@ async def _svc(
         yield svc, mock_harbor, mock_repo
 
 
+@asynccontextmanager
+async def _query_svc(*, repo_overrides=None):
+    mock_repo = _make_repo_mock()
+    if repo_overrides:
+        for attr, val in repo_overrides.items():
+            setattr(mock_repo, attr, val)
+
+    with patch("app.services.models.ModelArtifactRepository", return_value=mock_repo):
+        svc = ModelQueryService(session=AsyncMock())
+        yield svc, mock_repo
+
+
 # ---------------------------------------------------------------------------
 # Name-validation tests
 # ---------------------------------------------------------------------------
@@ -138,6 +154,13 @@ async def test_invalid_artifact_name_raises(bad_name: str):
     async with _svc() as (svc, _, __):
         with pytest.raises(InvalidArtifactNameError):
             await svc.register_model_version(bad_name, _make_request())
+
+
+@pytest.mark.parametrize("reserved", ["latest", "Latest", "LATEST"])
+async def test_register_rejects_latest_as_version(reserved: str):
+    async with _svc() as (svc, _, __):
+        with pytest.raises(InvalidArtifactNameError, match="reserved"):
+            await svc.register_model_version("mymodel", _make_request(version=reserved))
 
 
 @pytest.mark.parametrize(
@@ -275,3 +298,78 @@ async def test_response_shape():
     assert result.version == "v7"
     assert result.harbor_ref == _HARBOR_REF
     assert result.category == "model"
+
+
+# ---------------------------------------------------------------------------
+# Retrieval logic (GET /models/{name}/versions/{version})
+# ---------------------------------------------------------------------------
+
+
+async def test_get_model_version_success():
+    record = ModelVersionRecord(
+        name="mymodel",
+        version="v3",
+        category="model",
+        harbor_ref="imgrepo.damit.hu/supernova/mymodel:v3",
+        size_bytes=2048,
+        checksum="sha256:abc",
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        metadata={"k": "v"},
+    )
+
+    async with _query_svc(
+        repo_overrides={"get_model_version": AsyncMock(return_value=record)}
+    ) as (svc, __):
+        result = await svc.get_model_version("mymodel", "v3")
+
+    assert result.name == "mymodel"
+    assert result.version == "v3"
+    assert result.category == "model"
+    assert result.harbor_ref == "imgrepo.damit.hu/supernova/mymodel:v3"
+    assert result.size_bytes == 2048
+    assert result.checksum == "sha256:abc"
+    assert result.metadata == {"k": "v"}
+
+
+async def test_get_model_version_latest_alias_passed_through():
+    record = ModelVersionRecord(
+        name="mymodel",
+        version="v7",
+        category="model",
+        harbor_ref="imgrepo.damit.hu/supernova/mymodel:v7",
+        size_bytes=None,
+        checksum=None,
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        metadata={},
+    )
+    get_mock = AsyncMock(return_value=record)
+
+    async with _query_svc(repo_overrides={"get_model_version": get_mock}) as (
+        svc,
+        __,
+    ):
+        result = await svc.get_model_version("mymodel", "latest")
+
+    assert result.version == "v7"
+    get_mock.assert_awaited_once_with(name="mymodel", version="latest")
+
+
+async def test_get_model_version_invalid_name_raises():
+    async with _query_svc() as (svc, __):
+        with pytest.raises(InvalidArtifactNameError):
+            await svc.get_model_version("BAD", "v1")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ModelNotFoundError("missing model"),
+        ModelVersionNotFoundError("missing version"),
+    ],
+)
+async def test_get_model_version_not_found_propagates(exc):
+    async with _query_svc(
+        repo_overrides={"get_model_version": AsyncMock(side_effect=exc)}
+    ) as (svc, __):
+        with pytest.raises(type(exc)):
+            await svc.get_model_version("mymodel", "v99")
