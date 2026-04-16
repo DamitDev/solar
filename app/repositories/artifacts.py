@@ -21,6 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.models import Artifact, ArtifactVersion
 from app.exceptions import (
     ArtifactCategoryConflictError,
+    DatasetNotFoundError,
+    DatasetVersionNotFoundError,
     ModelNotFoundError,
     ModelVersionNotFoundError,
     VersionAlreadyExistsError,
@@ -29,7 +31,7 @@ from app.types import ArtifactCategory
 
 
 @dataclass(frozen=True)
-class ModelVersionRecord:
+class ArtifactVersionRecord:
     name: str
     version: str
     category: str
@@ -142,12 +144,8 @@ class ArtifactRepository:
         )
         await self._session.execute(stmt)
 
-    async def get_model_version(self, name: str, version: str) -> ModelVersionRecord:
+    async def get_model_version(self, name: str, version: str) -> ArtifactVersionRecord:
         """Fetch one model version by exact tag or by the ``latest`` alias.
-
-        Uses a single JOIN query for the happy path. A lightweight second
-        query runs only on miss to distinguish "model not found" from
-        "version not found".
 
         Raises
         ------
@@ -156,6 +154,51 @@ class ArtifactRepository:
         ModelVersionNotFoundError
             When the requested *version* does not exist for the model.
         """
+        return await self._get_artifact_version(
+            name=name,
+            version=version,
+            category="model",
+            not_found_exc=ModelNotFoundError,
+            version_not_found_exc=ModelVersionNotFoundError,
+        )
+
+    async def get_dataset_version(
+        self, name: str, version: str
+    ) -> ArtifactVersionRecord:
+        """Fetch one dataset version by exact tag or by the ``latest`` alias.
+
+        Raises
+        ------
+        DatasetNotFoundError
+            When a dataset artifact with *name* does not exist.
+        DatasetVersionNotFoundError
+            When the requested *version* does not exist for the dataset.
+        """
+        return await self._get_artifact_version(
+            name=name,
+            version=version,
+            category="dataset",
+            not_found_exc=DatasetNotFoundError,
+            version_not_found_exc=DatasetVersionNotFoundError,
+        )
+
+    async def _get_artifact_version(
+        self,
+        *,
+        name: str,
+        version: str,
+        category: ArtifactCategory,
+        not_found_exc: type[Exception],
+        version_not_found_exc: type[Exception],
+    ) -> ArtifactVersionRecord:
+        """Shared lookup for model and dataset version queries.
+
+        Uses a single JOIN query for the happy path.  A lightweight second
+        query runs only on miss to distinguish "artifact not found" from
+        "version not found".
+        """
+        label = category.capitalize()
+
         base = (
             select(
                 ArtifactVersion.version,
@@ -166,7 +209,7 @@ class ArtifactRepository:
                 ArtifactVersion.metadata_,
             )
             .join(Artifact, ArtifactVersion.artifact_id == Artifact.id)
-            .where(Artifact.name == name, Artifact.category == "model")
+            .where(Artifact.name == name, Artifact.category == category)
         )
 
         if version == "latest":
@@ -178,10 +221,10 @@ class ArtifactRepository:
         row = result.fetchone()
 
         if row is not None:
-            return ModelVersionRecord(
+            return ArtifactVersionRecord(
                 name=name,
                 version=row.version,
-                category="model",
+                category=category,
                 harbor_ref=row.harbor_ref,
                 size_bytes=row.size_bytes,
                 checksum=row.digest,
@@ -194,12 +237,12 @@ class ArtifactRepository:
         )
         exists_row = exists_result.fetchone()
 
-        if exists_row is None or exists_row.category != "model":
-            raise ModelNotFoundError(f"Model '{name}' was not found.")
+        if exists_row is None or exists_row.category != category:
+            raise not_found_exc(f"{label} '{name}' was not found.")
 
         if version == "latest":
-            raise ModelVersionNotFoundError(f"Model '{name}' has no versions.")
+            raise version_not_found_exc(f"{label} '{name}' has no versions.")
 
-        raise ModelVersionNotFoundError(
-            f"Version '{version}' was not found for model '{name}'."
+        raise version_not_found_exc(
+            f"Version '{version}' was not found for {category} '{name}'."
         )

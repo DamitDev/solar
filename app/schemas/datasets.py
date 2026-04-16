@@ -1,6 +1,7 @@
-"""Pydantic schemas for dataset version registration."""
+"""Pydantic schemas for dataset version registration and lookup."""
 
-from typing import Literal
+from datetime import datetime
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -45,3 +46,14 @@ class RegisterDatasetVersionResponse(BaseModel):
     version: str
     harbor_ref: str
     category: str
+
+
+class GetDatasetVersionResponse(BaseModel):
+    name: str
+    version: str
+    category: str
+    harbor_ref: str
+    size_bytes: int | None
+    checksum: str | None
+    created_at: datetime
+    metadata: dict[str, Any]

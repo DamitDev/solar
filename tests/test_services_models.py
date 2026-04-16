@@ -17,6 +17,8 @@ import pytest
 from app.exceptions import (
     ArtifactCategoryConflictError,
     ArtifactNotFoundInHarborError,
+    DatasetNotFoundError,
+    DatasetVersionNotFoundError,
     HarborVerificationError,
     InvalidArtifactNameError,
     ModelNotFoundError,
@@ -29,9 +31,13 @@ from app.harbor import (
     HarborAuthError,
     HarborConnectionError,
 )
-from app.repositories.artifacts import ModelVersionRecord
+from app.repositories.artifacts import ArtifactVersionRecord
 from app.schemas.models import RegisterModelVersionRequest
-from app.services.models import ModelQueryService, ModelRegistrationService
+from app.services.models import (
+    DatasetQueryService,
+    ModelQueryService,
+    ModelRegistrationService,
+)
 
 # Context-manager helper used by many tests.
 from contextlib import asynccontextmanager
@@ -130,6 +136,18 @@ async def _query_svc(*, repo_overrides=None):
 
     with patch("app.services.models.ArtifactRepository", return_value=mock_repo):
         svc = ModelQueryService(session=AsyncMock())
+        yield svc, mock_repo
+
+
+@asynccontextmanager
+async def _dataset_query_svc(*, repo_overrides=None):
+    mock_repo = _make_repo_mock()
+    if repo_overrides:
+        for attr, val in repo_overrides.items():
+            setattr(mock_repo, attr, val)
+
+    with patch("app.services.models.ArtifactRepository", return_value=mock_repo):
+        svc = DatasetQueryService(session=AsyncMock())
         yield svc, mock_repo
 
 
@@ -306,7 +324,7 @@ async def test_response_shape():
 
 
 async def test_get_model_version_success():
-    record = ModelVersionRecord(
+    record = ArtifactVersionRecord(
         name="mymodel",
         version="v3",
         category="model",
@@ -332,7 +350,7 @@ async def test_get_model_version_success():
 
 
 async def test_get_model_version_latest_alias_passed_through():
-    record = ModelVersionRecord(
+    record = ArtifactVersionRecord(
         name="mymodel",
         version="v7",
         category="model",
@@ -373,3 +391,73 @@ async def test_get_model_version_not_found_propagates(exc):
     ) as (svc, __):
         with pytest.raises(type(exc)):
             await svc.get_model_version("mymodel", "v99")
+
+
+async def test_get_dataset_version_success():
+    record = ArtifactVersionRecord(
+        name="iris-tickets",
+        version="v3",
+        category="dataset",
+        harbor_ref="imgrepo.damit.hu/supernova/iris-tickets:v3",
+        size_bytes=2048,
+        checksum="sha256:def",
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        metadata={"format": "parquet"},
+    )
+
+    async with _dataset_query_svc(
+        repo_overrides={"get_dataset_version": AsyncMock(return_value=record)}
+    ) as (svc, __):
+        result = await svc.get_dataset_version("iris-tickets", "v3")
+
+    assert result.name == "iris-tickets"
+    assert result.version == "v3"
+    assert result.category == "dataset"
+    assert result.harbor_ref == "imgrepo.damit.hu/supernova/iris-tickets:v3"
+    assert result.size_bytes == 2048
+    assert result.checksum == "sha256:def"
+    assert result.metadata == {"format": "parquet"}
+
+
+async def test_get_dataset_version_latest_alias_passed_through():
+    record = ArtifactVersionRecord(
+        name="iris-tickets",
+        version="v7",
+        category="dataset",
+        harbor_ref="imgrepo.damit.hu/supernova/iris-tickets:v7",
+        size_bytes=None,
+        checksum=None,
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        metadata={},
+    )
+    get_mock = AsyncMock(return_value=record)
+
+    async with _dataset_query_svc(repo_overrides={"get_dataset_version": get_mock}) as (
+        svc,
+        __,
+    ):
+        result = await svc.get_dataset_version("iris-tickets", "latest")
+
+    assert result.version == "v7"
+    get_mock.assert_awaited_once_with(name="iris-tickets", version="latest")
+
+
+async def test_get_dataset_version_invalid_name_raises():
+    async with _dataset_query_svc() as (svc, __):
+        with pytest.raises(InvalidArtifactNameError):
+            await svc.get_dataset_version("BAD", "v1")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        DatasetNotFoundError("missing dataset"),
+        DatasetVersionNotFoundError("missing version"),
+    ],
+)
+async def test_get_dataset_version_not_found_propagates(exc):
+    async with _dataset_query_svc(
+        repo_overrides={"get_dataset_version": AsyncMock(side_effect=exc)}
+    ) as (svc, __):
+        with pytest.raises(type(exc)):
+            await svc.get_dataset_version("iris-tickets", "v99")

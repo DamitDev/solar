@@ -14,6 +14,8 @@ from sqlalchemy.exc import IntegrityError
 
 from app.exceptions import (
     ArtifactCategoryConflictError,
+    DatasetNotFoundError,
+    DatasetVersionNotFoundError,
     ModelNotFoundError,
     ModelVersionNotFoundError,
     VersionAlreadyExistsError,
@@ -317,3 +319,98 @@ async def test_get_model_version_latest_no_versions_gives_clear_message(mock_ses
 
     with pytest.raises(ModelVersionNotFoundError, match="has no versions"):
         await repo.get_model_version(name="mymodel", version="latest")
+
+
+async def test_get_dataset_version_exact_returns_record(mock_session):
+    """JOIN query hits — single execute call returns the dataset version row."""
+    version_row = _make_version_row(
+        version="v3",
+        harbor_ref="imgrepo.damit.hu/supernova/iris-tickets:v3",
+    )
+    join_result = MagicMock()
+    join_result.fetchone.return_value = version_row
+
+    mock_session.execute = AsyncMock(return_value=join_result)
+    repo = ArtifactRepository(mock_session)
+
+    result = await repo.get_dataset_version(name="iris-tickets", version="v3")
+
+    assert result.name == "iris-tickets"
+    assert result.version == "v3"
+    assert result.category == "dataset"
+    assert result.harbor_ref == "imgrepo.damit.hu/supernova/iris-tickets:v3"
+    assert result.checksum == "sha256:abc"
+    assert isinstance(result.created_at, datetime)
+    assert result.created_at.tzinfo is not None
+    mock_session.execute.assert_awaited_once()
+
+
+async def test_get_dataset_version_latest_returns_most_recent_row(mock_session):
+    """JOIN query with ORDER BY created_at DESC LIMIT 1 returns newest row."""
+    latest_row = _make_version_row(version="v7")
+    join_result = MagicMock()
+    join_result.fetchone.return_value = latest_row
+
+    mock_session.execute = AsyncMock(return_value=join_result)
+    repo = ArtifactRepository(mock_session)
+
+    result = await repo.get_dataset_version(name="iris-tickets", version="latest")
+
+    assert result.version == "v7"
+    mock_session.execute.assert_awaited_once()
+
+
+async def test_get_dataset_version_raises_when_dataset_missing(mock_session):
+    """JOIN misses, existence check returns None — DatasetNotFoundError."""
+    join_result = MagicMock()
+    join_result.fetchone.return_value = None
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = None
+
+    mock_session.execute = AsyncMock(side_effect=[join_result, exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(DatasetNotFoundError):
+        await repo.get_dataset_version(name="iris-tickets", version="v1")
+
+
+async def test_get_dataset_version_raises_when_name_belongs_to_model(mock_session):
+    """JOIN misses (category filter), existence check finds a model row."""
+    join_result = MagicMock()
+    join_result.fetchone.return_value = None
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="model")
+
+    mock_session.execute = AsyncMock(side_effect=[join_result, exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(DatasetNotFoundError):
+        await repo.get_dataset_version(name="iris-tickets", version="v1")
+
+
+async def test_get_dataset_version_raises_when_version_missing(mock_session):
+    """JOIN misses, existence check finds dataset row — DatasetVersionNotFoundError."""
+    join_result = MagicMock()
+    join_result.fetchone.return_value = None
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="dataset")
+
+    mock_session.execute = AsyncMock(side_effect=[join_result, exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(DatasetVersionNotFoundError):
+        await repo.get_dataset_version(name="iris-tickets", version="v99")
+
+
+async def test_get_dataset_version_latest_no_versions_gives_clear_message(mock_session):
+    """Dataset exists but has zero versions — error says 'has no versions'."""
+    join_result = MagicMock()
+    join_result.fetchone.return_value = None
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="dataset")
+
+    mock_session.execute = AsyncMock(side_effect=[join_result, exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(DatasetVersionNotFoundError, match="has no versions"):
+        await repo.get_dataset_version(name="iris-tickets", version="latest")

@@ -51,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db_session
 from app.harbor import HarborClient, harbor_client
 from app.services.models import (
+    DatasetQueryService,
     DatasetRegistrationService,
     ModelQueryService,
     ModelRegistrationService,
@@ -101,3 +102,10 @@ def get_dataset_registration_service(
     and the app-level :class:`~harbor_oci_client.HarborClient` singleton.
     """
     return DatasetRegistrationService(harbor=harbor, session=session)
+
+
+def get_dataset_query_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> DatasetQueryService:
+    """Construct a :class:`~app.services.models.DatasetQueryService` per request."""
+    return DatasetQueryService(session=session)

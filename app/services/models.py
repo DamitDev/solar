@@ -4,10 +4,11 @@ Orchestrates input validation, Harbor verification, and the DB transaction.
 Raises only domain exceptions from :mod:`app.exceptions`; callers map those to
 HTTP status codes.
 
-This module exposes three services:
+This module exposes four services:
 - :class:`ModelRegistrationService` for model write operations (registration)
 - :class:`DatasetRegistrationService` for dataset write operations (registration)
-- :class:`ModelQueryService` for read operations (version lookup)
+- :class:`ModelQueryService` for model read operations (version lookup)
+- :class:`DatasetQueryService` for dataset read operations (version lookup)
 
 The canonical interfaces are :class:`ModelRegistrationService` and
 :class:`DatasetRegistrationService`, both constructed with a
@@ -41,6 +42,7 @@ from app.harbor import (
 )
 from app.repositories.artifacts import ArtifactRepository
 from app.schemas.datasets import (
+    GetDatasetVersionResponse,
     RegisterDatasetVersionRequest,
     RegisterDatasetVersionResponse,
 )
@@ -259,6 +261,42 @@ class ModelQueryService:
         record = await self._repo.get_model_version(name=name, version=version)
 
         return GetModelVersionResponse(
+            name=record.name,
+            version=record.version,
+            category=record.category,
+            harbor_ref=record.harbor_ref,
+            size_bytes=record.size_bytes,
+            checksum=record.checksum,
+            created_at=record.created_at,
+            metadata=record.metadata,
+        )
+
+
+class DatasetQueryService:
+    """Read-only dataset query operations using injected dependencies."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._repo = ArtifactRepository(session)
+
+    async def get_dataset_version(
+        self, name: str, version: str
+    ) -> GetDatasetVersionResponse:
+        """Resolve and return one dataset version by tag or ``latest`` alias.
+
+        Raises
+        ------
+        InvalidArtifactNameError
+            When *name* fails the length or character-set rules.
+        DatasetNotFoundError
+            When dataset artifact *name* does not exist.
+        DatasetVersionNotFoundError
+            When *version* does not exist for dataset *name*.
+        """
+        _validate_artifact_name(name)
+
+        record = await self._repo.get_dataset_version(name=name, version=version)
+
+        return GetDatasetVersionResponse(
             name=record.name,
             version=record.version,
             category=record.category,

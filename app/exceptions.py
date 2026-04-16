@@ -59,3 +59,19 @@ class ModelVersionNotFoundError(Exception):
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
         self.detail = detail
+
+
+class DatasetNotFoundError(Exception):
+    """Raised when a dataset artifact with the requested name does not exist."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+class DatasetVersionNotFoundError(Exception):
+    """Raised when the requested dataset version does not exist."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
