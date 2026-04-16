@@ -21,8 +21,10 @@ class RoutingStore:
     async def increment_active(self, host_id: str, instance_id: str) -> int:
         r = redis_client()
         key = f"{ACTIVE_PREFIX}{host_id}:{instance_id}"
-        val = await r.incr(key)
-        await r.expire(key, ACTIVE_TTL_S)
+        pipe = r.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, ACTIVE_TTL_S)
+        val, _ = await pipe.execute()
         return val
 
     async def decrement_active(self, host_id: str, instance_id: str) -> int:
@@ -44,8 +46,10 @@ class RoutingStore:
     async def add_weight(self, host_id: str, weight: float) -> float:
         r = redis_client()
         key = f"{WEIGHT_PREFIX}{host_id}"
-        val = await r.incrbyfloat(key, weight)
-        await r.expire(key, ACTIVE_TTL_S)
+        pipe = r.pipeline()
+        pipe.incrbyfloat(key, weight)
+        pipe.expire(key, ACTIVE_TTL_S)
+        val, _ = await pipe.execute()
         return val
 
     async def remove_weight(self, host_id: str, weight: float) -> float:
@@ -67,8 +71,10 @@ class RoutingStore:
     async def increment_host_active(self, host_id: str) -> int:
         r = redis_client()
         key = f"{ACTIVE_PREFIX}host:{host_id}"
-        val = await r.incr(key)
-        await r.expire(key, ACTIVE_TTL_S)
+        pipe = r.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, ACTIVE_TTL_S)
+        val, _ = await pipe.execute()
         return val
 
     async def decrement_host_active(self, host_id: str) -> int:
@@ -87,7 +93,14 @@ class RoutingStore:
 
     # --- Round-robin per model ---
 
+    RR_TTL_S = 3600
+
     async def next_rr_index(self, model: str) -> int:
         """Get and increment the round-robin index for a model."""
         r = redis_client()
-        return await r.incr(f"{RR_PREFIX}{model}")
+        key = f"{RR_PREFIX}{model}"
+        pipe = r.pipeline()
+        pipe.incr(key)
+        pipe.expire(key, self.RR_TTL_S)
+        val, _ = await pipe.execute()
+        return val

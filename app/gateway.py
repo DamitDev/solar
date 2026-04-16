@@ -23,20 +23,48 @@ from app.redis_state import registry_store, health_store, routing_store, host_st
 logger = logging.getLogger(__name__)
 
 
+def _task_done_callback(task: asyncio.Task) -> None:
+    """Log exceptions from fire-and-forget tasks."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.error("Background task %s failed: %s", task.get_name(), exc)
+
+
+_RETRYABLE_STATUSES = frozenset({502, 503, 504})
+
+
 class OpenAIGateway:
 
     def __init__(self) -> None:
         self.session: aiohttp.ClientSession | None = None
+        self._session_lock = asyncio.Lock()
         self._bg_tasks: list[asyncio.Task[None]] = []
+        self._pending_tasks: set[asyncio.Task] = set()
         self._stop_event: asyncio.Event | None = None
 
     async def _ensure_session(self) -> None:
-        if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
+        if self.session is not None and not self.session.closed:
+            return
+        async with self._session_lock:
+            if self.session is None or self.session.closed:
+                self.session = aiohttp.ClientSession()
 
     async def close(self) -> None:
         if self.session and not self.session.closed:
             await self.session.close()
+        for t in self._pending_tasks:
+            t.cancel()
+        self._pending_tasks.clear()
+
+    def _spawn_task(self, coro, *, name: str | None = None) -> asyncio.Task:
+        """Create a tracked fire-and-forget task with error logging."""
+        task = asyncio.create_task(coro, name=name)
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+        task.add_done_callback(_task_done_callback)
+        return task
 
     # ── Model registry ────────────────────────────────────────
 
@@ -90,7 +118,10 @@ class OpenAIGateway:
                     if dc_ts is not None:
                         last_req = await host_store.get_reconnect_request_time(host.id)
                         if last_req is None or (now - last_req) >= reconnect_interval:
-                            asyncio.create_task(self._request_host_reconnect(host))
+                            self._spawn_task(
+                                self._request_host_reconnect(host),
+                                name=f"reconnect-{host.id[:8]}",
+                            )
                     poll_hosts.append(host)
 
             for host in grace_hosts:
@@ -234,7 +265,7 @@ class OpenAIGateway:
             try:
                 await self.refresh_model_registry()
             except Exception:
-                pass
+                logger.exception("Registry refresh failed")
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(),
@@ -249,7 +280,7 @@ class OpenAIGateway:
             try:
                 await self._probe_all_instances_once()
             except Exception:
-                pass
+                logger.exception("Health probe failed")
             try:
                 await asyncio.wait_for(
                     self._stop_event.wait(),
@@ -469,13 +500,15 @@ class OpenAIGateway:
                 free_hosts.append(hid)
 
         if free_hosts:
-
-            async def host_name(hid: str) -> str:
-                h = await host_db.get_host(hid)
-                return h.name if h and h.name else hid
-
-            names = {hid: await host_name(hid) for hid in free_hosts}
-            chosen_host = sorted(free_hosts, key=lambda h: names.get(h, h))[0]
+            host_names = dict(
+                zip(
+                    free_hosts,
+                    await asyncio.gather(
+                        *[self._get_host_name(hid) for hid in free_hosts]
+                    ),
+                )
+            )
+            chosen_host = sorted(free_hosts, key=lambda h: host_names.get(h, h))[0]
         else:
             host_weights: dict[str, float] = {}
             for hid in candidate_host_ids:
@@ -484,12 +517,15 @@ class OpenAIGateway:
             min_weight = min(host_weights.values()) if host_weights else 0.0
             min_hosts = [hid for hid, w in host_weights.items() if w == min_weight]
 
-            async def host_name(hid: str) -> str:
-                h = await host_db.get_host(hid)
-                return h.name if h and h.name else hid
-
-            names = {hid: await host_name(hid) for hid in min_hosts}
-            chosen_host = sorted(min_hosts, key=lambda h: names.get(h, h))[0]
+            host_names = dict(
+                zip(
+                    min_hosts,
+                    await asyncio.gather(
+                        *[self._get_host_name(hid) for hid in min_hosts]
+                    ),
+                )
+            )
+            chosen_host = sorted(min_hosts, key=lambda h: host_names.get(h, h))[0]
 
         host_insts = host_to_instances[chosen_host]
         if len(host_insts) == 1:
@@ -510,6 +546,10 @@ class OpenAIGateway:
 
         rr_idx = await routing_store.next_rr_index(resolved_model)
         return best[rr_idx % len(best)]
+
+    async def _get_host_name(self, host_id: str) -> str:
+        h = await host_db.get_host(host_id)
+        return h.name if h and h.name else host_id
 
     # ── Routing infrastructure ────────────────────────────────
 
@@ -635,11 +675,27 @@ class OpenAIGateway:
                 await routing_store.decrement_active(
                     instance.host_id, instance.instance_id
                 )
-                await routing_store.decrement_host_active(instance.host_id)
-                if weight is not None:
-                    await routing_store.remove_weight(instance.host_id, weight)
             except Exception:
-                pass
+                logger.warning(
+                    "Failed to decrement instance active for %s/%s",
+                    instance.host_id,
+                    instance.instance_id,
+                )
+            try:
+                await routing_store.decrement_host_active(instance.host_id)
+            except Exception:
+                logger.warning(
+                    "Failed to decrement host active for %s",
+                    instance.host_id,
+                )
+            if weight is not None:
+                try:
+                    await routing_store.remove_weight(instance.host_id, weight)
+                except Exception:
+                    logger.warning(
+                        "Failed to remove weight for %s",
+                        instance.host_id,
+                    )
 
     async def _find_instance_or_retry(
         self,
@@ -669,6 +725,12 @@ class OpenAIGateway:
                 model, exclude_keys=attempted, required_endpoint=filter_endpoint
             )
         return None
+
+    def _make_route_timeout(self) -> aiohttp.ClientTimeout:
+        return aiohttp.ClientTimeout(
+            total=settings.route_total_timeout_s,
+            connect=settings.route_connect_timeout_s,
+        )
 
     # ── Public routing API ────────────────────────────────────
 
@@ -747,9 +809,7 @@ class OpenAIGateway:
                         "Authorization": f"Bearer {instance.api_key}",
                         "Content-Type": "application/json",
                     }
-                    timeout = aiohttp.ClientTimeout(
-                        total=None, connect=settings.route_connect_timeout_s
-                    )
+                    timeout = self._make_route_timeout()
 
                     async with self.session.post(
                         url, json=data, headers=headers, timeout=timeout
@@ -784,6 +844,28 @@ class OpenAIGateway:
                                 endpoint_id,
                             )
                             return result
+                        elif response.status in _RETRYABLE_STATUSES:
+                            error_text = await response.text()
+                            logger.warning(
+                                "Retryable %d from %s: %s",
+                                response.status,
+                                instance.url,
+                                error_text[:200],
+                            )
+                            await health_store.mark_failed(
+                                instance.host_id,
+                                instance.instance_id,
+                                cooldown_s=settings.health_cooldown_s,
+                            )
+                            last_error = Exception(f"Upstream {response.status}")
+                            await self._emit_reroute(
+                                request_id,
+                                model,
+                                instance,
+                                attempt + 1,
+                                endpoint_id,
+                            )
+                            continue
                         else:
                             error_text = await response.text()
                             duration = time.time() - start_time
@@ -848,6 +930,7 @@ class OpenAIGateway:
     ):
         request_id = str(uuid.uuid4())
         start_time = time.time()
+        completed = False
 
         await self._broadcast_routing_event(
             {
@@ -913,9 +996,7 @@ class OpenAIGateway:
                         "Authorization": f"Bearer {instance.api_key}",
                         "Content-Type": "application/json",
                     }
-                    timeout = aiohttp.ClientTimeout(
-                        total=None, connect=settings.route_connect_timeout_s
-                    )
+                    timeout = self._make_route_timeout()
 
                     async with self.session.post(
                         url, json=data, headers=headers, timeout=timeout
@@ -929,6 +1010,7 @@ class OpenAIGateway:
                             async for line in response.content:
                                 yield line
 
+                            completed = True
                             duration = time.time() - start_time
                             usage_fields = await self._fetch_last_generation_metrics(
                                 instance.host_id, instance.instance_id
@@ -942,6 +1024,28 @@ class OpenAIGateway:
                                 endpoint_id,
                             )
                             return
+                        elif response.status in _RETRYABLE_STATUSES:
+                            error_text = await response.text()
+                            logger.warning(
+                                "Retryable %d from %s: %s",
+                                response.status,
+                                instance.url,
+                                error_text[:200],
+                            )
+                            await health_store.mark_failed(
+                                instance.host_id,
+                                instance.instance_id,
+                                cooldown_s=settings.health_cooldown_s,
+                            )
+                            last_error = Exception(f"Upstream {response.status}")
+                            await self._emit_reroute(
+                                request_id,
+                                model,
+                                instance,
+                                attempt + 1,
+                                endpoint_id,
+                            )
+                            continue
                         else:
                             error_text = await response.text()
                             duration = time.time() - start_time
@@ -966,6 +1070,21 @@ class OpenAIGateway:
                     await self._emit_reroute(
                         request_id, model, instance, attempt + 1, endpoint_id
                     )
+                except GeneratorExit:
+                    if not completed:
+                        try:
+                            await self._emit_error(
+                                request_id,
+                                model,
+                                "Client disconnected",
+                                time.time() - start_time,
+                                endpoint_id,
+                                instance=instance,
+                                client_ip=client_ip,
+                            )
+                        except Exception:
+                            pass
+                    return
                 except Exception as e:
                     duration = time.time() - start_time
                     await self._emit_error(
