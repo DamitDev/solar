@@ -48,6 +48,18 @@ class RegisterDatasetVersionResponse(BaseModel):
     category: str
 
 
+class DatasetVersionListItem(BaseModel):
+    version: str
+    harbor_ref: str
+    created_at: datetime
+    size_bytes: int | None
+    checksum: str | None
+
+
+class ListDatasetVersionsResponse(BaseModel):
+    versions: list[DatasetVersionListItem]
+
+
 class GetDatasetVersionResponse(BaseModel):
     name: str
     version: str

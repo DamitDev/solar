@@ -13,8 +13,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Sequence
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.engine import Row
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -162,6 +163,38 @@ class ArtifactRepository:
             version_not_found_exc=ModelVersionNotFoundError,
         )
 
+    async def list_model_versions(self, name: str) -> list[ArtifactVersionRecord]:
+        """List all model versions sorted by ``created_at`` descending.
+
+        Raises
+        ------
+        ModelNotFoundError
+            When a model artifact with *name* does not exist.
+        """
+        return await self._list_artifact_versions(
+            name=name,
+            category="model",
+            not_found_exc=ModelNotFoundError,
+        )
+
+    async def delete_model_version(self, name: str, version: str) -> None:
+        """Delete a single model version row.
+
+        Raises
+        ------
+        ModelNotFoundError
+            When a model artifact with *name* does not exist.
+        ModelVersionNotFoundError
+            When the requested *version* does not exist for the model.
+        """
+        await self._delete_artifact_version(
+            name=name,
+            version=version,
+            category="model",
+            not_found_exc=ModelNotFoundError,
+            version_not_found_exc=ModelVersionNotFoundError,
+        )
+
     async def get_dataset_version(
         self, name: str, version: str
     ) -> ArtifactVersionRecord:
@@ -175,6 +208,38 @@ class ArtifactRepository:
             When the requested *version* does not exist for the dataset.
         """
         return await self._get_artifact_version(
+            name=name,
+            version=version,
+            category="dataset",
+            not_found_exc=DatasetNotFoundError,
+            version_not_found_exc=DatasetVersionNotFoundError,
+        )
+
+    async def list_dataset_versions(self, name: str) -> list[ArtifactVersionRecord]:
+        """List all dataset versions sorted by ``created_at`` descending.
+
+        Raises
+        ------
+        DatasetNotFoundError
+            When a dataset artifact with *name* does not exist.
+        """
+        return await self._list_artifact_versions(
+            name=name,
+            category="dataset",
+            not_found_exc=DatasetNotFoundError,
+        )
+
+    async def delete_dataset_version(self, name: str, version: str) -> None:
+        """Delete a single dataset version row.
+
+        Raises
+        ------
+        DatasetNotFoundError
+            When a dataset artifact with *name* does not exist.
+        DatasetVersionNotFoundError
+            When the requested *version* does not exist for the dataset.
+        """
+        await self._delete_artifact_version(
             name=name,
             version=version,
             category="dataset",
@@ -213,7 +278,10 @@ class ArtifactRepository:
         )
 
         if version == "latest":
-            stmt = base.order_by(ArtifactVersion.created_at.desc()).limit(1)
+            stmt = base.order_by(
+                ArtifactVersion.created_at.desc(),
+                ArtifactVersion.id.desc(),
+            ).limit(1)
         else:
             stmt = base.where(ArtifactVersion.version == version)
 
@@ -232,10 +300,7 @@ class ArtifactRepository:
                 metadata=row.metadata_ or {},
             )
 
-        exists_result = await self._session.execute(
-            select(Artifact.id, Artifact.category).where(Artifact.name == name)
-        )
-        exists_row = exists_result.fetchone()
+        exists_row = await self._fetch_artifact_identity(name)
 
         if exists_row is None or exists_row.category != category:
             raise not_found_exc(f"{label} '{name}' was not found.")
@@ -246,3 +311,95 @@ class ArtifactRepository:
         raise version_not_found_exc(
             f"Version '{version}' was not found for {category} '{name}'."
         )
+
+    async def _list_artifact_versions(
+        self,
+        *,
+        name: str,
+        category: ArtifactCategory,
+        not_found_exc: type[Exception],
+    ) -> list[ArtifactVersionRecord]:
+        stmt = (
+            select(
+                ArtifactVersion.version,
+                ArtifactVersion.harbor_ref,
+                ArtifactVersion.size_bytes,
+                ArtifactVersion.digest,
+                ArtifactVersion.created_at,
+                ArtifactVersion.metadata_,
+            )
+            .join(Artifact, ArtifactVersion.artifact_id == Artifact.id)
+            .where(Artifact.name == name, Artifact.category == category)
+            .order_by(
+                ArtifactVersion.created_at.desc(),
+                ArtifactVersion.id.desc(),
+            )
+        )
+        result = await self._session.execute(stmt)
+        rows = result.fetchall()
+
+        if rows:
+            return [
+                ArtifactVersionRecord(
+                    name=name,
+                    version=row.version,
+                    category=category,
+                    harbor_ref=row.harbor_ref,
+                    size_bytes=row.size_bytes,
+                    checksum=row.digest,
+                    created_at=row.created_at,
+                    metadata=row.metadata_ or {},
+                )
+                for row in rows
+            ]
+
+        exists_row = await self._fetch_artifact_identity(name)
+        if exists_row is None or exists_row.category != category:
+            label = category.capitalize()
+            raise not_found_exc(f"{label} '{name}' was not found.")
+
+        return []
+
+    async def _delete_artifact_version(
+        self,
+        *,
+        name: str,
+        version: str,
+        category: ArtifactCategory,
+        not_found_exc: type[Exception],
+        version_not_found_exc: type[Exception],
+    ) -> None:
+        """Shared delete for model and dataset versions.
+
+        Attempts a single DELETE filtered by artifact name and category.  When
+        nothing was deleted, a lightweight existence query disambiguates
+        "artifact not found" from "version not found".  Harbor-side deletion
+        is intentionally not performed here — see N-029 for retention policy.
+        """
+        stmt = delete(ArtifactVersion).where(
+            ArtifactVersion.version == version,
+            ArtifactVersion.artifact_id.in_(
+                select(Artifact.id).where(
+                    Artifact.name == name,
+                    Artifact.category == category,
+                )
+            ),
+        )
+        result = await self._session.execute(stmt)
+        if result.rowcount:
+            return
+
+        label = category.capitalize()
+        exists_row = await self._fetch_artifact_identity(name)
+        if exists_row is None or exists_row.category != category:
+            raise not_found_exc(f"{label} '{name}' was not found.")
+
+        raise version_not_found_exc(
+            f"Version '{version}' was not found for {category} '{name}'."
+        )
+
+    async def _fetch_artifact_identity(self, name: str) -> Row[Any] | None:
+        exists_result = await self._session.execute(
+            select(Artifact.id, Artifact.category).where(Artifact.name == name)
+        )
+        return exists_result.fetchone()

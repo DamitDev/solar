@@ -321,6 +321,119 @@ async def test_get_model_version_latest_no_versions_gives_clear_message(mock_ses
         await repo.get_model_version(name="mymodel", version="latest")
 
 
+async def test_list_model_versions_returns_rows_in_db_order(mock_session):
+    list_result = MagicMock()
+    list_result.fetchall.return_value = [
+        _make_version_row(version="v3"),
+        _make_version_row(version="v2"),
+    ]
+    mock_session.execute = AsyncMock(return_value=list_result)
+    repo = ArtifactRepository(mock_session)
+
+    result = await repo.list_model_versions(name="mymodel")
+
+    assert [item.version for item in result] == ["v3", "v2"]
+    mock_session.execute.assert_awaited_once()
+
+
+async def test_list_model_versions_empty_when_model_exists(mock_session):
+    list_result = MagicMock()
+    list_result.fetchall.return_value = []
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="model")
+
+    mock_session.execute = AsyncMock(side_effect=[list_result, exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    result = await repo.list_model_versions(name="mymodel")
+
+    assert result == []
+
+
+async def test_list_model_versions_raises_when_model_missing(mock_session):
+    list_result = MagicMock()
+    list_result.fetchall.return_value = []
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = None
+
+    mock_session.execute = AsyncMock(side_effect=[list_result, exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(ModelNotFoundError):
+        await repo.list_model_versions(name="mymodel")
+
+
+async def test_list_model_versions_raises_when_name_belongs_to_dataset(mock_session):
+    """JOIN misses (category filter), existence check finds a dataset row."""
+    list_result = MagicMock()
+    list_result.fetchall.return_value = []
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="dataset")
+
+    mock_session.execute = AsyncMock(side_effect=[list_result, exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(ModelNotFoundError):
+        await repo.list_model_versions(name="iris-tickets")
+
+
+# ---------------------------------------------------------------------------
+# delete_model_version
+# ---------------------------------------------------------------------------
+
+
+def _delete_result(rowcount: int):
+    result = MagicMock()
+    result.rowcount = rowcount
+    return result
+
+
+async def test_delete_model_version_success(mock_session):
+    """DELETE affects one row — no existence probe is issued."""
+    mock_session.execute = AsyncMock(return_value=_delete_result(1))
+    repo = ArtifactRepository(mock_session)
+
+    await repo.delete_model_version(name="mymodel", version="v3")
+
+    mock_session.execute.assert_awaited_once()
+
+
+async def test_delete_model_version_raises_when_model_missing(mock_session):
+    """DELETE affected zero rows and artifact row is absent — model 404."""
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = None
+
+    mock_session.execute = AsyncMock(side_effect=[_delete_result(0), exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(ModelNotFoundError):
+        await repo.delete_model_version(name="mymodel", version="v3")
+
+
+async def test_delete_model_version_raises_when_version_missing(mock_session):
+    """DELETE affected zero rows but the model exists — version 404."""
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="model")
+
+    mock_session.execute = AsyncMock(side_effect=[_delete_result(0), exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(ModelVersionNotFoundError, match="v99"):
+        await repo.delete_model_version(name="mymodel", version="v99")
+
+
+async def test_delete_model_version_raises_when_name_belongs_to_dataset(mock_session):
+    """DELETE affected zero rows (category filter) and exists row is dataset."""
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="dataset")
+
+    mock_session.execute = AsyncMock(side_effect=[_delete_result(0), exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(ModelNotFoundError):
+        await repo.delete_model_version(name="iris-tickets", version="v1")
+
+
 async def test_get_dataset_version_exact_returns_record(mock_session):
     """JOIN query hits — single execute call returns the dataset version row."""
     version_row = _make_version_row(
@@ -414,3 +527,107 @@ async def test_get_dataset_version_latest_no_versions_gives_clear_message(mock_s
 
     with pytest.raises(DatasetVersionNotFoundError, match="has no versions"):
         await repo.get_dataset_version(name="iris-tickets", version="latest")
+
+
+async def test_list_dataset_versions_returns_rows_in_db_order(mock_session):
+    list_result = MagicMock()
+    list_result.fetchall.return_value = [
+        _make_version_row(version="v7"),
+        _make_version_row(version="v6"),
+    ]
+    mock_session.execute = AsyncMock(return_value=list_result)
+    repo = ArtifactRepository(mock_session)
+
+    result = await repo.list_dataset_versions(name="iris-tickets")
+
+    assert [item.version for item in result] == ["v7", "v6"]
+    mock_session.execute.assert_awaited_once()
+
+
+async def test_list_dataset_versions_empty_when_dataset_exists(mock_session):
+    """Dataset row exists but has zero versions — returns []."""
+    list_result = MagicMock()
+    list_result.fetchall.return_value = []
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="dataset")
+
+    mock_session.execute = AsyncMock(side_effect=[list_result, exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    result = await repo.list_dataset_versions(name="iris-tickets")
+
+    assert result == []
+
+
+async def test_list_dataset_versions_raises_when_dataset_missing(mock_session):
+    list_result = MagicMock()
+    list_result.fetchall.return_value = []
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = None
+
+    mock_session.execute = AsyncMock(side_effect=[list_result, exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(DatasetNotFoundError):
+        await repo.list_dataset_versions(name="iris-tickets")
+
+
+async def test_list_dataset_versions_raises_when_name_belongs_to_model(mock_session):
+    """JOIN misses (category filter), existence check finds a model row."""
+    list_result = MagicMock()
+    list_result.fetchall.return_value = []
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="model")
+
+    mock_session.execute = AsyncMock(side_effect=[list_result, exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(DatasetNotFoundError):
+        await repo.list_dataset_versions(name="mymodel")
+
+
+# ---------------------------------------------------------------------------
+# delete_dataset_version
+# ---------------------------------------------------------------------------
+
+
+async def test_delete_dataset_version_success(mock_session):
+    mock_session.execute = AsyncMock(return_value=_delete_result(1))
+    repo = ArtifactRepository(mock_session)
+
+    await repo.delete_dataset_version(name="iris-tickets", version="v3")
+
+    mock_session.execute.assert_awaited_once()
+
+
+async def test_delete_dataset_version_raises_when_dataset_missing(mock_session):
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = None
+
+    mock_session.execute = AsyncMock(side_effect=[_delete_result(0), exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(DatasetNotFoundError):
+        await repo.delete_dataset_version(name="iris-tickets", version="v3")
+
+
+async def test_delete_dataset_version_raises_when_version_missing(mock_session):
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="dataset")
+
+    mock_session.execute = AsyncMock(side_effect=[_delete_result(0), exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(DatasetVersionNotFoundError, match="v99"):
+        await repo.delete_dataset_version(name="iris-tickets", version="v99")
+
+
+async def test_delete_dataset_version_raises_when_name_belongs_to_model(mock_session):
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="model")
+
+    mock_session.execute = AsyncMock(side_effect=[_delete_result(0), exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(DatasetNotFoundError):
+        await repo.delete_dataset_version(name="mymodel", version="v1")

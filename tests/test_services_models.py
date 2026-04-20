@@ -34,7 +34,9 @@ from app.harbor import (
 from app.repositories.artifacts import ArtifactVersionRecord
 from app.schemas.models import RegisterModelVersionRequest
 from app.services.models import (
+    DatasetDeletionService,
     DatasetQueryService,
+    ModelDeletionService,
     ModelQueryService,
     ModelRegistrationService,
 )
@@ -148,6 +150,30 @@ async def _dataset_query_svc(*, repo_overrides=None):
 
     with patch("app.services.models.ArtifactRepository", return_value=mock_repo):
         svc = DatasetQueryService(session=AsyncMock())
+        yield svc, mock_repo
+
+
+@asynccontextmanager
+async def _model_delete_svc(*, repo_overrides=None):
+    mock_repo = _make_repo_mock()
+    if repo_overrides:
+        for attr, val in repo_overrides.items():
+            setattr(mock_repo, attr, val)
+
+    with patch("app.services.models.ArtifactRepository", return_value=mock_repo):
+        svc = ModelDeletionService(session=AsyncMock())
+        yield svc, mock_repo
+
+
+@asynccontextmanager
+async def _dataset_delete_svc(*, repo_overrides=None):
+    mock_repo = _make_repo_mock()
+    if repo_overrides:
+        for attr, val in repo_overrides.items():
+            setattr(mock_repo, attr, val)
+
+    with patch("app.services.models.ArtifactRepository", return_value=mock_repo):
+        svc = DatasetDeletionService(session=AsyncMock())
         yield svc, mock_repo
 
 
@@ -393,6 +419,65 @@ async def test_get_model_version_not_found_propagates(exc):
             await svc.get_model_version("mymodel", "v99")
 
 
+async def test_list_model_versions_success_extracts_top_level_metadata():
+    records = [
+        ArtifactVersionRecord(
+            name="mymodel",
+            version="v3",
+            category="model",
+            harbor_ref="imgrepo.damit.hu/supernova/mymodel:v3",
+            size_bytes=2048,
+            checksum="sha256:abc",
+            created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+            metadata={
+                "training_config": {"epochs": 3},
+                "eval_metrics": {"accuracy": 0.98},
+            },
+        ),
+        ArtifactVersionRecord(
+            name="mymodel",
+            version="v2",
+            category="model",
+            harbor_ref="imgrepo.damit.hu/supernova/mymodel:v2",
+            size_bytes=1024,
+            checksum="sha256:def",
+            created_at=datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc),
+            metadata={},
+        ),
+    ]
+
+    async with _query_svc(
+        repo_overrides={"list_model_versions": AsyncMock(return_value=records)}
+    ) as (svc, __):
+        result = await svc.list_model_versions("mymodel")
+
+    assert len(result.versions) == 2
+    assert result.versions[0].version == "v3"
+    assert result.versions[0].training_config == {"epochs": 3}
+    assert result.versions[0].eval_metrics == {"accuracy": 0.98}
+    assert result.versions[1].version == "v2"
+    assert result.versions[1].training_config is None
+    assert result.versions[1].eval_metrics is None
+
+
+async def test_list_model_versions_invalid_name_raises():
+    async with _query_svc() as (svc, __):
+        with pytest.raises(InvalidArtifactNameError):
+            await svc.list_model_versions("BAD")
+
+
+async def test_list_model_versions_not_found_propagates():
+    async with _query_svc(
+        repo_overrides={
+            "list_model_versions": AsyncMock(
+                side_effect=ModelNotFoundError("missing model")
+            )
+        }
+    ) as (svc, __):
+        with pytest.raises(ModelNotFoundError):
+            await svc.list_model_versions("mymodel")
+
+
 async def test_get_dataset_version_success():
     record = ArtifactVersionRecord(
         name="iris-tickets",
@@ -461,3 +546,144 @@ async def test_get_dataset_version_not_found_propagates(exc):
     ) as (svc, __):
         with pytest.raises(type(exc)):
             await svc.get_dataset_version("iris-tickets", "v99")
+
+
+async def test_list_dataset_versions_success_returns_core_fields():
+    records = [
+        ArtifactVersionRecord(
+            name="iris-tickets",
+            version="v4",
+            category="dataset",
+            harbor_ref="imgrepo.damit.hu/supernova/iris-tickets:v4",
+            size_bytes=4096,
+            checksum="sha256:ghi",
+            created_at=datetime(2026, 4, 3, 10, 0, tzinfo=timezone.utc),
+            metadata={"description": "2026-03 export", "format": "parquet"},
+        ),
+        ArtifactVersionRecord(
+            name="iris-tickets",
+            version="v3",
+            category="dataset",
+            harbor_ref="imgrepo.damit.hu/supernova/iris-tickets:v3",
+            size_bytes=2048,
+            checksum="sha256:def",
+            created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+            metadata={},
+        ),
+    ]
+
+    async with _dataset_query_svc(
+        repo_overrides={"list_dataset_versions": AsyncMock(return_value=records)}
+    ) as (svc, __):
+        result = await svc.list_dataset_versions("iris-tickets")
+
+    assert len(result.versions) == 2
+    assert result.versions[0].version == "v4"
+    assert result.versions[0].harbor_ref == (
+        "imgrepo.damit.hu/supernova/iris-tickets:v4"
+    )
+    assert result.versions[0].size_bytes == 4096
+    assert result.versions[0].checksum == "sha256:ghi"
+    assert result.versions[1].version == "v3"
+    first = result.versions[0].model_dump()
+    assert "training_config" not in first
+    assert "eval_metrics" not in first
+
+
+async def test_list_dataset_versions_invalid_name_raises():
+    async with _dataset_query_svc() as (svc, __):
+        with pytest.raises(InvalidArtifactNameError):
+            await svc.list_dataset_versions("BAD")
+
+
+async def test_list_dataset_versions_not_found_propagates():
+    async with _dataset_query_svc(
+        repo_overrides={
+            "list_dataset_versions": AsyncMock(
+                side_effect=DatasetNotFoundError("missing dataset")
+            )
+        }
+    ) as (svc, __):
+        with pytest.raises(DatasetNotFoundError):
+            await svc.list_dataset_versions("iris-tickets")
+
+
+# ---------------------------------------------------------------------------
+# Delete logic (DELETE /models/{name}/versions/{version})
+# ---------------------------------------------------------------------------
+
+
+async def test_delete_model_version_success_delegates_to_repo():
+    delete_mock = AsyncMock(return_value=None)
+    async with _model_delete_svc(
+        repo_overrides={"delete_model_version": delete_mock}
+    ) as (svc, __):
+        await svc.delete_model_version("mymodel", "v3")
+
+    delete_mock.assert_awaited_once_with(name="mymodel", version="v3")
+
+
+async def test_delete_model_version_invalid_name_raises():
+    async with _model_delete_svc() as (svc, __):
+        with pytest.raises(InvalidArtifactNameError):
+            await svc.delete_model_version("BAD", "v1")
+
+
+@pytest.mark.parametrize("reserved", ["latest", "Latest", "LATEST"])
+async def test_delete_model_version_rejects_latest_alias(reserved):
+    async with _model_delete_svc() as (svc, __):
+        with pytest.raises(InvalidArtifactNameError, match="reserved"):
+            await svc.delete_model_version("mymodel", reserved)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ModelNotFoundError("missing model"),
+        ModelVersionNotFoundError("missing version"),
+    ],
+)
+async def test_delete_model_version_not_found_propagates(exc):
+    async with _model_delete_svc(
+        repo_overrides={"delete_model_version": AsyncMock(side_effect=exc)}
+    ) as (svc, __):
+        with pytest.raises(type(exc)):
+            await svc.delete_model_version("mymodel", "v99")
+
+
+async def test_delete_dataset_version_success_delegates_to_repo():
+    delete_mock = AsyncMock(return_value=None)
+    async with _dataset_delete_svc(
+        repo_overrides={"delete_dataset_version": delete_mock}
+    ) as (svc, __):
+        await svc.delete_dataset_version("iris-tickets", "v3")
+
+    delete_mock.assert_awaited_once_with(name="iris-tickets", version="v3")
+
+
+async def test_delete_dataset_version_invalid_name_raises():
+    async with _dataset_delete_svc() as (svc, __):
+        with pytest.raises(InvalidArtifactNameError):
+            await svc.delete_dataset_version("BAD", "v1")
+
+
+@pytest.mark.parametrize("reserved", ["latest", "Latest", "LATEST"])
+async def test_delete_dataset_version_rejects_latest_alias(reserved):
+    async with _dataset_delete_svc() as (svc, __):
+        with pytest.raises(InvalidArtifactNameError, match="reserved"):
+            await svc.delete_dataset_version("iris-tickets", reserved)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        DatasetNotFoundError("missing dataset"),
+        DatasetVersionNotFoundError("missing version"),
+    ],
+)
+async def test_delete_dataset_version_not_found_propagates(exc):
+    async with _dataset_delete_svc(
+        repo_overrides={"delete_dataset_version": AsyncMock(side_effect=exc)}
+    ) as (svc, __):
+        with pytest.raises(type(exc)):
+            await svc.delete_dataset_version("iris-tickets", "v99")

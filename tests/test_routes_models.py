@@ -12,7 +12,11 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.dependencies import get_model_query_service, get_model_registration_service
+from app.dependencies import (
+    get_model_deletion_service,
+    get_model_query_service,
+    get_model_registration_service,
+)
 from app.exceptions import (
     ArtifactCategoryConflictError,
     ArtifactNotFoundInHarborError,
@@ -23,7 +27,12 @@ from app.exceptions import (
     VersionAlreadyExistsError,
 )
 from app.routes.models import router
-from app.schemas.models import GetModelVersionResponse, RegisterModelVersionResponse
+from app.schemas.models import (
+    GetModelVersionResponse,
+    ListModelVersionsResponse,
+    ModelVersionListItem,
+    RegisterModelVersionResponse,
+)
 
 _HARBOR_REF = "registry.example.com/proj/my-model:v1"
 _VALID_BODY = {"harbor_ref": _HARBOR_REF, "version": "v1"}
@@ -46,6 +55,29 @@ _SUCCESS_GET_RESPONSE = GetModelVersionResponse(
     metadata={"trainer": "etalon"},
 )
 
+_SUCCESS_LIST_RESPONSE = ListModelVersionsResponse(
+    versions=[
+        ModelVersionListItem(
+            version="v3",
+            harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v3",
+            created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+            size_bytes=123,
+            checksum="sha256:abc",
+            training_config={"epochs": 3},
+            eval_metrics={"accuracy": 0.98},
+        ),
+        ModelVersionListItem(
+            version="v2",
+            harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v2",
+            created_at=datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc),
+            size_bytes=120,
+            checksum="sha256:def",
+            training_config=None,
+            eval_metrics=None,
+        ),
+    ]
+)
+
 
 def _make_post_client(return_value=None, side_effect=None) -> TestClient:
     """Return a TestClient with ``ModelRegistrationService`` mocked for POST tests."""
@@ -62,15 +94,24 @@ def _make_post_client(return_value=None, side_effect=None) -> TestClient:
     return TestClient(app, raise_server_exceptions=False)
 
 
-def _make_get_client(return_value=None, side_effect=None) -> TestClient:
+def _make_get_client(
+    get_return_value=None,
+    get_side_effect=None,
+    list_return_value=None,
+    list_side_effect=None,
+) -> TestClient:
     """Return a TestClient with ``ModelQueryService`` mocked for GET tests."""
     app = FastAPI()
     app.include_router(router)
 
     mock_service = MagicMock()
     mock_service.get_model_version = AsyncMock(
-        return_value=return_value,
-        side_effect=side_effect,
+        return_value=get_return_value,
+        side_effect=get_side_effect,
+    )
+    mock_service.list_model_versions = AsyncMock(
+        return_value=list_return_value,
+        side_effect=list_side_effect,
     )
     app.dependency_overrides[get_model_query_service] = lambda: mock_service
 
@@ -173,7 +214,7 @@ def test_missing_harbor_ref_returns_422():
 
 
 def test_get_model_version_returns_200_on_success():
-    client = _make_get_client(return_value=_SUCCESS_GET_RESPONSE)
+    client = _make_get_client(get_return_value=_SUCCESS_GET_RESPONSE)
     resp = client.get("/api/models/mymodel/versions/v3")
 
     assert resp.status_code == 200
@@ -192,14 +233,100 @@ def test_get_model_version_returns_200_on_success():
     ],
 )
 def test_get_model_version_not_found_returns_404(exc):
-    client = _make_get_client(side_effect=exc)
+    client = _make_get_client(get_side_effect=exc)
     resp = client.get("/api/models/mymodel/versions/v9")
 
     assert resp.status_code == 404
 
 
 def test_get_model_version_invalid_name_returns_422():
-    client = _make_get_client(side_effect=InvalidArtifactNameError("bad name"))
+    client = _make_get_client(get_side_effect=InvalidArtifactNameError("bad name"))
     resp = client.get("/api/models/BAD/versions/v1")
+
+    assert resp.status_code == 422
+
+
+def test_list_model_versions_returns_200_on_success():
+    client = _make_get_client(list_return_value=_SUCCESS_LIST_RESPONSE)
+    resp = client.get("/api/models/mymodel/versions")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["versions"][0]["version"] == "v3"
+    assert data["versions"][0]["training_config"] == {"epochs": 3}
+    assert data["versions"][1]["version"] == "v2"
+    assert data["versions"][1]["eval_metrics"] is None
+
+
+def test_list_model_versions_not_found_returns_404():
+    client = _make_get_client(list_side_effect=ModelNotFoundError("missing model"))
+    resp = client.get("/api/models/mymodel/versions")
+
+    assert resp.status_code == 404
+
+
+def test_list_model_versions_invalid_name_returns_422():
+    client = _make_get_client(
+        list_side_effect=InvalidArtifactNameError("bad name"),
+    )
+    resp = client.get("/api/models/BAD/versions")
+
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/models/{name}/versions/{version}
+# ---------------------------------------------------------------------------
+
+
+def _make_delete_client(side_effect=None) -> TestClient:
+    """Return a TestClient with ``ModelDeletionService`` mocked for DELETE tests."""
+    app = FastAPI()
+    app.include_router(router)
+
+    mock_service = MagicMock()
+    mock_service.delete_model_version = AsyncMock(
+        return_value=None,
+        side_effect=side_effect,
+    )
+    app.dependency_overrides[get_model_deletion_service] = lambda: mock_service
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_delete_model_version_returns_204_on_success():
+    client = _make_delete_client()
+    resp = client.delete("/api/models/mymodel/versions/v3")
+
+    assert resp.status_code == 204
+    assert resp.content == b""
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ModelNotFoundError("missing model"),
+        ModelVersionNotFoundError("missing version"),
+    ],
+)
+def test_delete_model_version_not_found_returns_404(exc):
+    client = _make_delete_client(side_effect=exc)
+    resp = client.delete("/api/models/mymodel/versions/v99")
+
+    assert resp.status_code == 404
+
+
+def test_delete_model_version_invalid_name_returns_422():
+    client = _make_delete_client(side_effect=InvalidArtifactNameError("bad name"))
+    resp = client.delete("/api/models/BAD/versions/v1")
+
+    assert resp.status_code == 422
+
+
+def test_delete_model_version_latest_alias_returns_422():
+    client = _make_delete_client(
+        side_effect=InvalidArtifactNameError("'latest' is a reserved alias")
+    )
+    resp = client.delete("/api/models/mymodel/versions/latest")
 
     assert resp.status_code == 422

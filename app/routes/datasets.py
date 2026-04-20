@@ -2,9 +2,10 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.dependencies import (
+    get_dataset_deletion_service,
     get_dataset_query_service,
     get_dataset_registration_service,
 )
@@ -16,10 +17,15 @@ from app.exceptions import (
 from app.routes._error_handling import handle_registration_errors
 from app.schemas.datasets import (
     GetDatasetVersionResponse,
+    ListDatasetVersionsResponse,
     RegisterDatasetVersionRequest,
     RegisterDatasetVersionResponse,
 )
-from app.services.models import DatasetQueryService, DatasetRegistrationService
+from app.services.models import (
+    DatasetDeletionService,
+    DatasetQueryService,
+    DatasetRegistrationService,
+)
 
 router = APIRouter(prefix="/api/datasets")
 
@@ -36,6 +42,19 @@ async def register_dataset_version(
     return await service.register_dataset_version(name, request)
 
 
+@router.get("/{name}/versions", status_code=200)
+async def list_dataset_versions(
+    name: str,
+    service: Annotated[DatasetQueryService, Depends(get_dataset_query_service)],
+) -> ListDatasetVersionsResponse:
+    try:
+        return await service.list_dataset_versions(name=name)
+    except InvalidArtifactNameError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail)
+    except DatasetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=exc.detail)
+
+
 @router.get("/{name}/versions/{version}", status_code=200)
 async def get_dataset_version(
     name: str,
@@ -48,3 +67,18 @@ async def get_dataset_version(
         raise HTTPException(status_code=422, detail=exc.detail)
     except (DatasetNotFoundError, DatasetVersionNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=exc.detail)
+
+
+@router.delete("/{name}/versions/{version}", status_code=204)
+async def delete_dataset_version(
+    name: str,
+    version: str,
+    service: Annotated[DatasetDeletionService, Depends(get_dataset_deletion_service)],
+) -> Response:
+    try:
+        await service.delete_dataset_version(name=name, version=version)
+    except InvalidArtifactNameError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail)
+    except (DatasetNotFoundError, DatasetVersionNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=exc.detail)
+    return Response(status_code=204)

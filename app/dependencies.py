@@ -27,6 +27,16 @@ get_dataset_registration_service
     (from :func:`app.database.get_db_session`) and the Harbor singleton
     (from :func:`get_harbor_client`).
 
+get_model_deletion_service
+    Builds a :class:`~app.services.models.ModelDeletionService` per request,
+    wiring the per-request :class:`~sqlalchemy.ext.asyncio.AsyncSession`
+    (from :func:`app.database.get_db_session`).
+
+get_dataset_deletion_service
+    Builds a :class:`~app.services.models.DatasetDeletionService` per request,
+    wiring the per-request :class:`~sqlalchemy.ext.asyncio.AsyncSession`
+    (from :func:`app.database.get_db_session`).
+
 Usage::
 
     from typing import Annotated
@@ -51,8 +61,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db_session
 from app.harbor import HarborClient, harbor_client
 from app.services.models import (
+    DatasetDeletionService,
     DatasetQueryService,
     DatasetRegistrationService,
+    ModelDeletionService,
     ModelQueryService,
     ModelRegistrationService,
 )
@@ -109,3 +121,17 @@ def get_dataset_query_service(
 ) -> DatasetQueryService:
     """Construct a :class:`~app.services.models.DatasetQueryService` per request."""
     return DatasetQueryService(session=session)
+
+
+def get_model_deletion_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ModelDeletionService:
+    """Construct a :class:`~app.services.models.ModelDeletionService` per request."""
+    return ModelDeletionService(session=session)
+
+
+def get_dataset_deletion_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> DatasetDeletionService:
+    """Construct a :class:`~app.services.models.DatasetDeletionService` per request."""
+    return DatasetDeletionService(session=session)

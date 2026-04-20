@@ -37,6 +37,20 @@ class RegisterModelVersionResponse(BaseModel):
     category: str
 
 
+class ModelVersionListItem(BaseModel):
+    version: str
+    harbor_ref: str
+    created_at: datetime
+    size_bytes: int | None
+    checksum: str | None
+    training_config: dict[str, Any] | None
+    eval_metrics: dict[str, Any] | None
+
+
+class ListModelVersionsResponse(BaseModel):
+    versions: list[ModelVersionListItem]
+
+
 class GetModelVersionResponse(BaseModel):
     name: str
     version: str

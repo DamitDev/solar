@@ -1,20 +1,23 @@
-"""Service layer for artifact version registration and querying.
+"""Service layer for artifact version registration, querying, and deletion.
 
 Orchestrates input validation, Harbor verification, and the DB transaction.
 Raises only domain exceptions from :mod:`app.exceptions`; callers map those to
 HTTP status codes.
 
-This module exposes four services:
+This module exposes six services:
 - :class:`ModelRegistrationService` for model write operations (registration)
 - :class:`DatasetRegistrationService` for dataset write operations (registration)
-- :class:`ModelQueryService` for model read operations (version lookup)
-- :class:`DatasetQueryService` for dataset read operations (version lookup)
+- :class:`ModelQueryService` for model read operations (version lookup/listing)
+- :class:`DatasetQueryService` for dataset read operations (version lookup/listing)
+- :class:`ModelDeletionService` for model write operations (version removal)
+- :class:`DatasetDeletionService` for dataset write operations (version removal)
 
-The canonical interfaces are :class:`ModelRegistrationService` and
-:class:`DatasetRegistrationService`, both constructed with a
-:class:`~harbor_oci_client.HarborClient` and an
+Registration services take a :class:`~harbor_oci_client.HarborClient` (for
+pre-flight verification) and an :class:`~sqlalchemy.ext.asyncio.AsyncSession`.
+Query and deletion services take only an
 :class:`~sqlalchemy.ext.asyncio.AsyncSession`. Shared registration logic is
-kept in :class:`BaseArtifactRegistrationService`.
+kept in :class:`BaseArtifactRegistrationService`; shared deletion logic is
+kept in :class:`BaseArtifactDeletionService`.
 
 Routes use dependency providers in :mod:`app.dependencies`; the services never
 call global singleton accessors.
@@ -42,12 +45,16 @@ from app.harbor import (
 )
 from app.repositories.artifacts import ArtifactRepository
 from app.schemas.datasets import (
+    DatasetVersionListItem,
     GetDatasetVersionResponse,
+    ListDatasetVersionsResponse,
     RegisterDatasetVersionRequest,
     RegisterDatasetVersionResponse,
 )
 from app.schemas.models import (
     GetModelVersionResponse,
+    ListModelVersionsResponse,
+    ModelVersionListItem,
     RegisterModelVersionRequest,
     RegisterModelVersionResponse,
 )
@@ -71,6 +78,20 @@ def _validate_artifact_name(name: str) -> None:
             "Artifact name must be 1\u2013255 characters and contain only "
             "lowercase alphanumeric characters, hyphens, underscores, or dots."
         )
+
+
+def _extract_object_metadata(
+    metadata: dict[str, Any],
+    key: str,
+) -> dict[str, Any] | None:
+    """Project a top-level JSONB field as a dict, or ``None`` if absent/non-object.
+
+    Scalars and arrays at *key* are intentionally dropped so the response stays
+    strictly typed. The metadata conventions in :doc:`/docs/schema.md` define
+    these top-level fields as objects.
+    """
+    value = metadata.get(key)
+    return value if isinstance(value, dict) else None
 
 
 class ArtifactRegistrationRequest(Protocol):
@@ -271,6 +292,31 @@ class ModelQueryService:
             metadata=record.metadata,
         )
 
+    async def list_model_versions(self, name: str) -> ListModelVersionsResponse:
+        """List all model versions ordered from newest to oldest."""
+        _validate_artifact_name(name)
+
+        records = await self._repo.list_model_versions(name=name)
+        items = [
+            ModelVersionListItem(
+                version=record.version,
+                harbor_ref=record.harbor_ref,
+                created_at=record.created_at,
+                size_bytes=record.size_bytes,
+                checksum=record.checksum,
+                training_config=_extract_object_metadata(
+                    record.metadata,
+                    "training_config",
+                ),
+                eval_metrics=_extract_object_metadata(
+                    record.metadata,
+                    "eval_metrics",
+                ),
+            )
+            for record in records
+        ]
+        return ListModelVersionsResponse(versions=items)
+
 
 class DatasetQueryService:
     """Read-only dataset query operations using injected dependencies."""
@@ -306,3 +352,85 @@ class DatasetQueryService:
             created_at=record.created_at,
             metadata=record.metadata,
         )
+
+    async def list_dataset_versions(self, name: str) -> ListDatasetVersionsResponse:
+        """List all dataset versions ordered from newest to oldest."""
+        _validate_artifact_name(name)
+
+        records = await self._repo.list_dataset_versions(name=name)
+        items = [
+            DatasetVersionListItem(
+                version=record.version,
+                harbor_ref=record.harbor_ref,
+                created_at=record.created_at,
+                size_bytes=record.size_bytes,
+                checksum=record.checksum,
+            )
+            for record in records
+        ]
+        return ListDatasetVersionsResponse(versions=items)
+
+
+class BaseArtifactDeletionService:
+    """Shared version-deletion flow for model and dataset services.
+
+    The session's transaction boundary is owned by the caller (the
+    ``get_db_session`` FastAPI dependency), so a failed delete leaves the
+    database untouched.  Harbor blob retention is handled separately — see
+    N-029 and :doc:`/docs/schema.md`.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._repo = ArtifactRepository(session)
+
+    @staticmethod
+    def _reject_latest_alias(version: str) -> None:
+        if version.lower() == "latest":
+            raise InvalidArtifactNameError(
+                "'latest' is a reserved alias and cannot be deleted; "
+                "delete a concrete version tag instead."
+            )
+
+
+class ModelDeletionService(BaseArtifactDeletionService):
+    """Remove a single model version row."""
+
+    async def delete_model_version(self, name: str, version: str) -> None:
+        """Validate *name* / *version* and delete the matching model version.
+
+        Raises
+        ------
+        InvalidArtifactNameError
+            When *name* fails the length or character-set rules, or *version*
+            is the reserved ``latest`` alias.
+        ModelNotFoundError
+            When the model artifact *name* does not exist.
+        ModelVersionNotFoundError
+            When *version* does not exist for model *name*.
+        """
+        _validate_artifact_name(name)
+        self._reject_latest_alias(version)
+
+        await self._repo.delete_model_version(name=name, version=version)
+
+
+class DatasetDeletionService(BaseArtifactDeletionService):
+    """Remove a single dataset version row."""
+
+    async def delete_dataset_version(self, name: str, version: str) -> None:
+        """Validate *name* / *version* and delete the matching dataset version.
+
+        Raises
+        ------
+        InvalidArtifactNameError
+            When *name* fails the length or character-set rules, or *version*
+            is the reserved ``latest`` alias.
+        DatasetNotFoundError
+            When the dataset artifact *name* does not exist.
+        DatasetVersionNotFoundError
+            When *version* does not exist for dataset *name*.
+        """
+        _validate_artifact_name(name)
+        self._reject_latest_alias(version)
+
+        await self._repo.delete_dataset_version(name=name, version=version)
