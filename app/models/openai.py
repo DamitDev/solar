@@ -4,7 +4,13 @@ from datetime import datetime, timezone
 
 
 class ModelInfo(BaseModel):
-    """Model information for OpenAI compatibility"""
+    """Model information for OpenAI compatibility.
+
+    The ``capabilities`` field is forwarded from llama.cpp / hf_server upstream
+    so downstream apps can differentiate text vs multimodal models without
+    trial-and-error. Typical values: ``["completion"]``,
+    ``["completion", "multimodal"]``, ``["embedding"]``, ``["classification"]``.
+    """
 
     id: str
     object: str = "model"
@@ -12,12 +18,18 @@ class ModelInfo(BaseModel):
         default_factory=lambda: int(datetime.now(timezone.utc).timestamp())
     )
     owned_by: str = "solar"
+    capabilities: list[str] | None = None
 
 
 class ModelsResponse(BaseModel):
-    """OpenAI /v1/models response"""
+    """OpenAI /v1/models response.
+
+    Includes both the Ollama-style ``models`` array and the OpenAI-style
+    ``data`` array, mirroring llama.cpp's response shape.
+    """
 
     object: str = "list"
+    models: list[dict[str, Any]] = Field(default_factory=list)
     data: list[ModelInfo]
 
 

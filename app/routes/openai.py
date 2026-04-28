@@ -56,8 +56,12 @@ def _safe_stream(
 @router.get("/models")
 async def list_models():
     try:
-        models = await gateway.get_available_models()
-        return {"object": "list", "data": models}
+        result = await gateway.get_available_models()
+        return {
+            "object": "list",
+            "models": result.get("models", []),
+            "data": result.get("data", []),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -379,13 +379,24 @@ class OpenAIGateway:
         except Exception:
             return {}
 
-    async def get_available_models(self) -> list[dict[str, Any]]:
+    async def get_available_models(self) -> dict[str, list[dict[str, Any]]]:
+        """Aggregate /v1/models from all registered upstream instances.
+
+        Returns a dict with both an Ollama-style ``models`` array and an
+        OpenAI-style ``data`` array (matching llama.cpp's exact response shape).
+        Both arrays carry a ``capabilities`` field on each entry, which is what
+        downstream apps (Orchestrator, etc.) use to differentiate text-only
+        from multimodal models. For llama.cpp upstreams the ``data[*]`` entry
+        has no ``capabilities``, so we copy it over from the parallel
+        ``models[*]`` entry (matched by ``name == id``).
+        """
         await self._ensure_session()
         if not self.session:
-            return []
+            return {"models": [], "data": []}
 
         registry = await registry_store.get_registry()
-        models_dict: dict[str, dict[str, Any]] = {}
+        data_dict: dict[str, dict[str, Any]] = {}
+        ollama_dict: dict[str, dict[str, Any]] = {}
 
         for alias, instances in registry.items():
             if not instances:
@@ -398,22 +409,78 @@ class OpenAIGateway:
                     url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)
                 ) as response:
                     if response.status == 200:
-                        data = await response.json()
-                        if "data" in data and data["data"]:
-                            for model in data["data"]:
-                                model_id = model.get("id", alias)
-                                if model_id not in models_dict:
-                                    models_dict[model_id] = model
+                        payload = await response.json()
+
+                        ollama_models = payload.get("models") or []
+                        caps_by_name: dict[str, list[str]] = {}
+                        for m in ollama_models:
+                            if not isinstance(m, dict):
+                                continue
+                            name = m.get("name") or m.get("model")
+                            if name and name not in ollama_dict:
+                                ollama_dict[name] = m
+                            caps = m.get("capabilities")
+                            if name and isinstance(caps, list):
+                                caps_by_name[name] = caps
+
+                        oai_data = payload.get("data") or []
+                        for model in oai_data:
+                            if not isinstance(model, dict):
+                                continue
+                            model_id = model.get("id", alias)
+                            if "capabilities" not in model and model_id in caps_by_name:
+                                model = {
+                                    **model,
+                                    "capabilities": caps_by_name[model_id],
+                                }
+                            if model_id not in data_dict:
+                                data_dict[model_id] = model
             except Exception:
-                if alias not in models_dict:
-                    models_dict[alias] = {
+                if alias not in data_dict:
+                    fallback_caps = self._fallback_capabilities(instance.backend_type)
+                    created = int(datetime.now(timezone.utc).timestamp())
+                    data_dict[alias] = {
                         "id": alias,
                         "object": "model",
-                        "created": int(datetime.now(timezone.utc).timestamp()),
+                        "created": created,
                         "owned_by": "solar",
+                        "capabilities": fallback_caps,
                     }
+                    if alias not in ollama_dict:
+                        ollama_dict[alias] = {
+                            "name": alias,
+                            "model": alias,
+                            "modified_at": "",
+                            "size": "",
+                            "digest": "",
+                            "type": "model",
+                            "description": "",
+                            "tags": [""],
+                            "capabilities": fallback_caps,
+                            "parameters": "",
+                            "details": {
+                                "parent_model": "",
+                                "format": "",
+                                "family": "",
+                                "families": [""],
+                                "parameter_size": "",
+                                "quantization_level": "",
+                            },
+                        }
 
-        return list(models_dict.values())
+        return {
+            "models": list(ollama_dict.values()),
+            "data": list(data_dict.values()),
+        }
+
+    @staticmethod
+    def _fallback_capabilities(backend_type: str) -> list[str]:
+        """Best-effort capabilities when upstream /v1/models is unreachable."""
+        if backend_type == "huggingface_classification":
+            return ["classification"]
+        if backend_type == "huggingface_embedding":
+            return ["embedding"]
+        return ["completion"]
 
     async def _resolve_model_name(self, model: str) -> str | None:
         registry = await registry_store.get_registry()
