@@ -5,6 +5,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.schemas.artifacts import ArtifactListResponse, ArtifactSummary
+
+__all__ = [
+    "ArtifactListResponse",
+    "ArtifactSummary",
+]
+
 
 class DatasetMetadata(BaseModel):
     description: str | None = Field(

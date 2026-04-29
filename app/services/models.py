@@ -43,7 +43,9 @@ from app.harbor import (
     HarborClient,
     HarborConnectionError,
 )
+from app.catalog_search import normalize_artifact_list_search
 from app.repositories.artifacts import ArtifactRepository
+from app.schemas.artifacts import ArtifactListResponse, ArtifactSummary
 from app.schemas.datasets import (
     DatasetVersionListItem,
     GetDatasetVersionResponse,
@@ -317,6 +319,47 @@ class ModelQueryService:
         ]
         return ListModelVersionsResponse(versions=items)
 
+    async def list_models(
+        self,
+        search: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> ArtifactListResponse[ArtifactSummary]:
+        """List models with optional search and pagination.
+
+        Parameters
+        ----------
+        search
+            Optional search term to filter by name or description (case-insensitive).
+        limit
+            Maximum number of results to return (default: 50).
+        offset
+            Number of results to skip for pagination (default: 0).
+
+        Returns
+        -------
+        ArtifactListResponse[ArtifactSummary]
+            Paginated list of models with version counts and latest version.
+        """
+        normalized = normalize_artifact_list_search(search)
+        total, records = await self._repo.list_artifacts_by_category(
+            "model", search=normalized, limit=limit, offset=offset
+        )
+
+        items = [
+            ArtifactSummary(
+                name=record.name,
+                category=record.category,
+                description=record.description,
+                versions_count=record.versions_count,
+                latest_version=record.latest_version,
+                created_at=record.created_at,
+            )
+            for record in records
+        ]
+
+        return ArtifactListResponse(total=total, items=items)
+
 
 class DatasetQueryService:
     """Read-only dataset query operations using injected dependencies."""
@@ -369,6 +412,47 @@ class DatasetQueryService:
             for record in records
         ]
         return ListDatasetVersionsResponse(versions=items)
+
+    async def list_datasets(
+        self,
+        search: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> ArtifactListResponse[ArtifactSummary]:
+        """List datasets with optional search and pagination.
+
+        Parameters
+        ----------
+        search
+            Optional search term to filter by name or description (case-insensitive).
+        limit
+            Maximum number of results to return (default: 50).
+        offset
+            Number of results to skip for pagination (default: 0).
+
+        Returns
+        -------
+        ArtifactListResponse[ArtifactSummary]
+            Paginated list of datasets with version counts and latest version.
+        """
+        normalized = normalize_artifact_list_search(search)
+        total, records = await self._repo.list_artifacts_by_category(
+            "dataset", search=normalized, limit=limit, offset=offset
+        )
+
+        items = [
+            ArtifactSummary(
+                name=record.name,
+                category=record.category,
+                description=record.description,
+                versions_count=record.versions_count,
+                latest_version=record.latest_version,
+                created_at=record.created_at,
+            )
+            for record in records
+        ]
+
+        return ArtifactListResponse(total=total, items=items)
 
 
 class BaseArtifactDeletionService:

@@ -687,3 +687,196 @@ async def test_delete_dataset_version_not_found_propagates(exc):
     ) as (svc, __):
         with pytest.raises(type(exc)):
             await svc.delete_dataset_version("iris-tickets", "v99")
+
+
+# ---------------------------------------------------------------------------
+# list_models (ModelQueryService)
+# ---------------------------------------------------------------------------
+
+from app.repositories.artifacts import ArtifactListRecord  # noqa: E402
+
+
+def _make_list_record(
+    *,
+    name: str = "my-model",
+    category: str = "model",
+    description: str | None = None,
+    versions_count: int = 2,
+    latest_version: str | None = "v2",
+    created_at: datetime = datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc),
+) -> ArtifactListRecord:
+    return ArtifactListRecord(
+        name=name,
+        category=category,
+        description=description,
+        versions_count=versions_count,
+        latest_version=latest_version,
+        created_at=created_at,
+    )
+
+
+async def test_list_models_returns_paginated_response():
+    records = [
+        _make_list_record(name="alpha", versions_count=3, latest_version="v3"),
+        _make_list_record(name="beta", versions_count=1, latest_version="v1"),
+    ]
+    async with _query_svc(
+        repo_overrides={
+            "list_artifacts_by_category": AsyncMock(return_value=(2, records)),
+        }
+    ) as (svc, mock_repo):
+        result = await svc.list_models()
+
+    assert result.total == 2
+    assert len(result.items) == 2
+    assert result.items[0].name == "alpha"
+    assert result.items[0].versions_count == 3
+    assert result.items[0].latest_version == "v3"
+    assert result.items[1].name == "beta"
+
+
+async def test_list_models_calls_repo_with_correct_category_and_filters():
+    list_mock = AsyncMock(return_value=(0, []))
+    async with _query_svc(
+        repo_overrides={
+            "list_artifacts_by_category": list_mock,
+        }
+    ) as (svc, __):
+        await svc.list_models(search="iris", limit=10, offset=5)
+
+    list_mock.assert_awaited_once_with("model", search="iris", limit=10, offset=5)
+
+
+async def test_list_models_normalizes_search_whitespace():
+    list_mock = AsyncMock(return_value=(0, []))
+    async with _query_svc(
+        repo_overrides={
+            "list_artifacts_by_category": list_mock,
+        }
+    ) as (svc, __):
+        await svc.list_models(search="  \t  ")
+
+    list_mock.assert_awaited_once_with("model", search=None, limit=50, offset=0)
+
+
+async def test_list_models_strips_search_edges():
+    list_mock = AsyncMock(return_value=(0, []))
+    async with _query_svc(
+        repo_overrides={
+            "list_artifacts_by_category": list_mock,
+        }
+    ) as (svc, __):
+        await svc.list_models(search="  iris  ")
+
+    list_mock.assert_awaited_once_with("model", search="iris", limit=50, offset=0)
+
+
+async def test_list_models_empty_returns_zero_total():
+    async with _query_svc(
+        repo_overrides={
+            "list_artifacts_by_category": AsyncMock(return_value=(0, [])),
+        }
+    ) as (svc, __):
+        result = await svc.list_models()
+
+    assert result.total == 0
+    assert result.items == []
+
+
+async def test_list_models_maps_description_and_created_at():
+    ts = datetime(2026, 1, 15, 8, 0, tzinfo=timezone.utc)
+    records = [
+        _make_list_record(
+            name="described-model", description="A great model", created_at=ts
+        )
+    ]
+    async with _query_svc(
+        repo_overrides={
+            "list_artifacts_by_category": AsyncMock(return_value=(1, records)),
+        }
+    ) as (svc, __):
+        result = await svc.list_models()
+
+    item = result.items[0]
+    assert item.description == "A great model"
+    assert item.created_at == ts
+    assert item.category == "model"
+
+
+# ---------------------------------------------------------------------------
+# list_datasets (DatasetQueryService)
+# ---------------------------------------------------------------------------
+
+
+async def test_list_datasets_returns_paginated_response():
+    records = [
+        _make_list_record(
+            name="iris-tickets",
+            category="dataset",
+            versions_count=4,
+            latest_version="v4",
+        ),
+        _make_list_record(
+            name="cifar-10", category="dataset", versions_count=2, latest_version="v2"
+        ),
+    ]
+    async with _dataset_query_svc(
+        repo_overrides={
+            "list_artifacts_by_category": AsyncMock(return_value=(2, records)),
+        }
+    ) as (svc, __):
+        result = await svc.list_datasets()
+
+    assert result.total == 2
+    assert len(result.items) == 2
+    assert result.items[0].name == "iris-tickets"
+    assert result.items[0].versions_count == 4
+    assert result.items[0].latest_version == "v4"
+    assert result.items[1].name == "cifar-10"
+
+
+async def test_list_datasets_calls_repo_with_correct_category_and_filters():
+    list_mock = AsyncMock(return_value=(0, []))
+    async with _dataset_query_svc(
+        repo_overrides={
+            "list_artifacts_by_category": list_mock,
+        }
+    ) as (svc, __):
+        await svc.list_datasets(search="cifar", limit=20, offset=10)
+
+    list_mock.assert_awaited_once_with("dataset", search="cifar", limit=20, offset=10)
+
+
+async def test_list_datasets_empty_returns_zero_total():
+    async with _dataset_query_svc(
+        repo_overrides={
+            "list_artifacts_by_category": AsyncMock(return_value=(0, [])),
+        }
+    ) as (svc, __):
+        result = await svc.list_datasets()
+
+    assert result.total == 0
+    assert result.items == []
+
+
+async def test_list_datasets_maps_description_and_created_at():
+    ts = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
+    records = [
+        _make_list_record(
+            name="annotated-data",
+            category="dataset",
+            description="Annotated parquet dataset",
+            created_at=ts,
+        )
+    ]
+    async with _dataset_query_svc(
+        repo_overrides={
+            "list_artifacts_by_category": AsyncMock(return_value=(1, records)),
+        }
+    ) as (svc, __):
+        result = await svc.list_datasets()
+
+    item = result.items[0]
+    assert item.description == "Annotated parquet dataset"
+    assert item.created_at == ts
+    assert item.category == "dataset"

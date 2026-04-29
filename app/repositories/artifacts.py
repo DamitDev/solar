@@ -8,17 +8,30 @@ No Harbor imports, no HTTPException references, no business logic beyond
 executing SQL.
 """
 
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Sequence
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import (
+    and_,
+    cast,
+    delete,
+    func,
+    lateral,
+    or_,
+    select,
+    String,
+    true,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Row
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import catalog_search
 from app.database.models import Artifact, ArtifactVersion
 from app.exceptions import (
     ArtifactCategoryConflictError,
@@ -28,6 +41,7 @@ from app.exceptions import (
     ModelVersionNotFoundError,
     VersionAlreadyExistsError,
 )
+
 from app.types import ArtifactCategory
 
 
@@ -41,6 +55,18 @@ class ArtifactVersionRecord:
     checksum: str | None
     created_at: datetime
     metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ArtifactListRecord:
+    """Record for artifact list endpoints."""
+
+    name: str
+    category: ArtifactCategory
+    description: str | None
+    versions_count: int
+    latest_version: str | None
+    created_at: datetime
 
 
 class ArtifactRepository:
@@ -403,3 +429,175 @@ class ArtifactRepository:
             select(Artifact.id, Artifact.category).where(Artifact.name == name)
         )
         return exists_result.fetchone()
+
+    @staticmethod
+    def _artifact_list_search_conditions(
+        *,
+        search: str | None,
+        version_stats: Any,
+    ) -> list[Any]:
+        """Build extra ``WHERE`` fragments for name, description, and metadata."""
+        if not search:
+            return []
+        pattern = catalog_search.ilike_substring_pattern(search)
+        text_match = (
+            Artifact.name.ilike(pattern)
+            | Artifact.description.ilike(pattern)
+            | cast(version_stats.c.latest_metadata, String).ilike(pattern)
+        )
+        try:
+            parsed = json.loads(search)
+        except json.JSONDecodeError:
+            return [text_match]
+        if isinstance(parsed, dict) and parsed:
+            return [
+                or_(
+                    text_match,
+                    and_(
+                        version_stats.c.latest_metadata.isnot(None),
+                        version_stats.c.latest_metadata.contains(parsed),
+                    ),
+                )
+            ]
+        return [text_match]
+
+    async def list_artifacts_by_category(
+        self,
+        category: ArtifactCategory,
+        search: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[int, Sequence[ArtifactListRecord]]:
+        """List artifacts by category with optional search and pagination.
+
+        Uses a single database round-trip: a count over the filtered set plus
+        a ``LATERAL`` page slice, so ``total`` is correct even when ``offset``
+        lies past the last row.
+
+        Search matches (OR): artifact ``name``, ``description`` (``ILIKE``),
+        the **latest** version's ``metadata`` as text (``ILIKE``), and when
+        *search* parses as a JSON object, ``metadata @>`` that object.
+
+        Parameters
+        ----------
+        category
+            The artifact category to filter by (``model`` or ``dataset``).
+        search
+            Optional search term (see module :mod:`app.catalog_search`).
+        limit
+            Maximum number of results to return (default: 50).
+        offset
+            Number of results to skip for pagination (default: 0).
+
+        Returns
+        -------
+        tuple[int, Sequence[ArtifactListRecord]]
+            ``(total, records)`` where *total* counts matching artifacts.
+        """
+        version_counts = (
+            select(
+                ArtifactVersion.artifact_id.label("artifact_id"),
+                func.count(ArtifactVersion.id).label("versions_count"),
+            )
+            .group_by(ArtifactVersion.artifact_id)
+            .subquery()
+        )
+
+        ranked_versions = (
+            select(
+                ArtifactVersion.artifact_id.label("artifact_id"),
+                ArtifactVersion.version.label("latest_version"),
+                ArtifactVersion.metadata_.label("latest_metadata"),
+                func.row_number()
+                .over(
+                    partition_by=ArtifactVersion.artifact_id,
+                    order_by=(
+                        ArtifactVersion.created_at.desc(),
+                        ArtifactVersion.id.desc(),
+                    ),
+                )
+                .label("version_rank"),
+            )
+        ).subquery()
+
+        version_stats = (
+            select(
+                version_counts.c.artifact_id,
+                version_counts.c.versions_count,
+                ranked_versions.c.latest_version,
+                ranked_versions.c.latest_metadata,
+            )
+            .join(
+                ranked_versions,
+                and_(
+                    version_counts.c.artifact_id == ranked_versions.c.artifact_id,
+                    ranked_versions.c.version_rank == 1,
+                ),
+            )
+            .subquery()
+        )
+
+        base_conditions = [Artifact.category == category]
+        base_conditions.extend(
+            self._artifact_list_search_conditions(
+                search=search, version_stats=version_stats
+            )
+        )
+
+        count_from = (
+            select(func.count(Artifact.id).label("match_total"))
+            .select_from(Artifact)
+            .outerjoin(version_stats, Artifact.id == version_stats.c.artifact_id)
+            .where(and_(*base_conditions))
+        ).subquery()
+
+        page_inner = (
+            select(
+                Artifact.name,
+                Artifact.category,
+                Artifact.description,
+                version_stats.c.versions_count,
+                version_stats.c.latest_version,
+                Artifact.created_at,
+            )
+            .select_from(Artifact)
+            .outerjoin(version_stats, Artifact.id == version_stats.c.artifact_id)
+            .where(and_(*base_conditions))
+            .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+
+        page_lat = lateral(page_inner).alias("p")
+
+        stmt = select(
+            count_from.c.match_total,
+            page_lat.c.name,
+            page_lat.c.category,
+            page_lat.c.description,
+            page_lat.c.versions_count,
+            page_lat.c.latest_version,
+            page_lat.c.created_at,
+        ).select_from(count_from.outerjoin(page_lat, true()))
+
+        result = await self._session.execute(stmt)
+        rows = result.fetchall()
+        if not rows:
+            return 0, []
+
+        total = int(rows[0].match_total)
+        records: list[ArtifactListRecord] = []
+        for row in rows:
+            if row.name is None:
+                continue
+            records.append(
+                ArtifactListRecord(
+                    name=row.name,
+                    category=row.category,
+                    description=row.description,
+                    versions_count=row.versions_count or 0,
+                    latest_version=row.latest_version,
+                    created_at=row.created_at,
+                )
+            )
+        return total, records

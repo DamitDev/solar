@@ -22,6 +22,7 @@ docker compose up -d
 - **API**: `http://localhost:8000`
 - **Swagger UI**: `http://localhost:8000/docs`
 - **Health Check**: `http://localhost:8000/health`
+- **Catalog lists**: `GET /api/artifacts` (kötelező `category`: `model` vagy `dataset`), `GET /api/models`, `GET /api/datasets` — lapozás (`limit`/`offset` vagy `page`/`page_size`), opcionális `search` (részletes leírás: `docs/schema.md`)
 
 ---
 

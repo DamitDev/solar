@@ -27,6 +27,7 @@ from app.exceptions import (
     VersionAlreadyExistsError,
 )
 from app.routes.models import router
+from app.schemas.artifacts import ArtifactListResponse, ArtifactSummary
 from app.schemas.models import (
     GetModelVersionResponse,
     ListModelVersionsResponse,
@@ -328,5 +329,173 @@ def test_delete_model_version_latest_alias_returns_422():
         side_effect=InvalidArtifactNameError("'latest' is a reserved alias")
     )
     resp = client.delete("/api/models/mymodel/versions/latest")
+
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# GET /api/models  (list models)
+# ---------------------------------------------------------------------------
+
+_LIST_MODELS_RESPONSE = ArtifactListResponse[ArtifactSummary](
+    total=2,
+    items=[
+        ArtifactSummary(
+            name="iris-osl",
+            category="model",
+            description="Iris OSL model",
+            versions_count=3,
+            latest_version="v3",
+            created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        ),
+        ArtifactSummary(
+            name="bert-base",
+            category="model",
+            description=None,
+            versions_count=1,
+            latest_version="v1",
+            created_at=datetime(2026, 3, 1, 8, 0, tzinfo=timezone.utc),
+        ),
+    ],
+)
+
+
+def _make_list_models_client(return_value=None, side_effect=None) -> TestClient:
+    """Return a TestClient with ModelQueryService.list_models mocked."""
+    app = FastAPI()
+    app.include_router(router)
+
+    mock_service = MagicMock()
+    mock_service.list_models = AsyncMock(
+        return_value=return_value,
+        side_effect=side_effect,
+    )
+    app.dependency_overrides[get_model_query_service] = lambda: mock_service
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_list_models_returns_200_with_items():
+    client = _make_list_models_client(return_value=_LIST_MODELS_RESPONSE)
+    resp = client.get("/api/models")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 2
+    assert len(data["items"]) == 2
+    assert data["items"][0]["name"] == "iris-osl"
+    assert data["items"][0]["versions_count"] == 3
+    assert data["items"][0]["latest_version"] == "v3"
+    assert data["items"][1]["name"] == "bert-base"
+    assert data["items"][1]["description"] is None
+
+
+def test_list_models_returns_200_empty():
+    empty_response = ArtifactListResponse[ArtifactSummary](total=0, items=[])
+    client = _make_list_models_client(return_value=empty_response)
+    resp = client.get("/api/models")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 0
+    assert data["items"] == []
+
+
+def test_list_models_passes_search_limit_offset():
+    mock_service = MagicMock()
+    mock_service.list_models = AsyncMock(
+        return_value=ArtifactListResponse[ArtifactSummary](total=0, items=[])
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_model_query_service] = lambda: mock_service
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/api/models?search=iris&limit=10&offset=5")
+
+    assert resp.status_code == 200
+    mock_service.list_models.assert_awaited_once_with(search="iris", limit=10, offset=5)
+
+
+def test_list_models_default_pagination():
+    mock_service = MagicMock()
+    mock_service.list_models = AsyncMock(
+        return_value=ArtifactListResponse[ArtifactSummary](total=0, items=[])
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_model_query_service] = lambda: mock_service
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/api/models")
+
+    assert resp.status_code == 200
+    mock_service.list_models.assert_awaited_once_with(search=None, limit=50, offset=0)
+
+
+def test_list_models_page_based_pagination():
+    mock_service = MagicMock()
+    mock_service.list_models = AsyncMock(
+        return_value=ArtifactListResponse[ArtifactSummary](total=0, items=[])
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_model_query_service] = lambda: mock_service
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/api/models?page=2&page_size=10")
+
+    assert resp.status_code == 200
+    mock_service.list_models.assert_awaited_once_with(search=None, limit=10, offset=10)
+
+
+def test_list_models_page_only_uses_default_page_size():
+    mock_service = MagicMock()
+    mock_service.list_models = AsyncMock(
+        return_value=ArtifactListResponse[ArtifactSummary](total=0, items=[])
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_model_query_service] = lambda: mock_service
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/api/models?page=3")
+
+    assert resp.status_code == 200
+    mock_service.list_models.assert_awaited_once_with(search=None, limit=50, offset=100)
+
+
+def test_list_models_trailing_slash():
+    """Starlette redirects collection URLs with a trailing slash by default."""
+    mock_service = MagicMock()
+    mock_service.list_models = AsyncMock(
+        return_value=ArtifactListResponse[ArtifactSummary](total=0, items=[])
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_model_query_service] = lambda: mock_service
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/api/models/", follow_redirects=False)
+
+    assert resp.status_code in (200, 307, 308)
+
+
+def test_list_models_invalid_limit_returns_422():
+    client = _make_list_models_client(return_value=_LIST_MODELS_RESPONSE)
+    resp = client.get("/api/models?limit=0")
+
+    assert resp.status_code == 422
+
+
+def test_list_models_limit_exceeds_max_returns_422():
+    client = _make_list_models_client(return_value=_LIST_MODELS_RESPONSE)
+    resp = client.get("/api/models?limit=1001")
+
+    assert resp.status_code == 422
+
+
+def test_list_models_negative_offset_returns_422():
+    client = _make_list_models_client(return_value=_LIST_MODELS_RESPONSE)
+    resp = client.get("/api/models?offset=-1")
 
     assert resp.status_code == 422

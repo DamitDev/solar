@@ -631,3 +631,123 @@ async def test_delete_dataset_version_raises_when_name_belongs_to_model(mock_ses
 
     with pytest.raises(DatasetNotFoundError):
         await repo.delete_dataset_version(name="mymodel", version="v1")
+
+
+# ---------------------------------------------------------------------------
+# list_artifacts_by_category
+# ---------------------------------------------------------------------------
+
+
+def _make_list_row(
+    *,
+    name: str | None = "mymodel",
+    category: str | None = "model",
+    description: str | None = None,
+    versions_count: int | None = 2,
+    latest_version: str | None = "v2",
+    created_at: datetime | None = datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc),
+    match_total: int = 2,
+):
+    row = MagicMock()
+    row.match_total = match_total
+    row.name = name
+    row.category = category
+    row.description = description
+    row.versions_count = versions_count
+    row.latest_version = latest_version
+    row.created_at = created_at
+    return row
+
+
+async def test_list_artifacts_by_category_returns_records(mock_session):
+    """Returns ``(total, records)`` with one ArtifactListRecord per page row."""
+    list_result = MagicMock()
+    list_result.fetchall.return_value = [
+        _make_list_row(name="model-a", versions_count=3, latest_version="v3"),
+        _make_list_row(name="model-b", versions_count=1, latest_version="v1"),
+    ]
+    mock_session.execute = AsyncMock(return_value=list_result)
+    repo = ArtifactRepository(mock_session)
+
+    total, result = await repo.list_artifacts_by_category("model")
+
+    assert total == 2
+    assert len(result) == 2
+    assert result[0].name == "model-a"
+    assert result[0].versions_count == 3
+    assert result[0].latest_version == "v3"
+    assert result[1].name == "model-b"
+    mock_session.execute.assert_awaited_once()
+
+
+async def test_list_artifacts_by_category_returns_empty_when_no_matches(mock_session):
+    """Single summary row with ``total`` 0 and no page rows yields empty list."""
+    list_result = MagicMock()
+    list_result.fetchall.return_value = [
+        _make_list_row(
+            name=None,
+            category=None,
+            description=None,
+            versions_count=None,
+            latest_version=None,
+            created_at=None,
+            match_total=0,
+        )
+    ]
+    mock_session.execute = AsyncMock(return_value=list_result)
+    repo = ArtifactRepository(mock_session)
+
+    total, result = await repo.list_artifacts_by_category("model")
+
+    assert total == 0
+    assert result == []
+
+
+async def test_list_artifacts_by_category_zero_versions_coerced(mock_session):
+    """versions_count of None (no versions, outer join) is coerced to 0."""
+    list_result = MagicMock()
+    row = _make_list_row(versions_count=None, latest_version=None)  # type: ignore[arg-type]
+    list_result.fetchall.return_value = [row]
+    mock_session.execute = AsyncMock(return_value=list_result)
+    repo = ArtifactRepository(mock_session)
+
+    total, result = await repo.list_artifacts_by_category("model")
+
+    assert total == 2
+    assert result[0].versions_count == 0
+    assert result[0].latest_version is None
+
+
+async def test_list_artifacts_by_category_passes_search_and_pagination(mock_session):
+    """Verify execute is called once (single round-trip) for search + pagination."""
+    list_result = MagicMock()
+    list_result.fetchall.return_value = []
+    mock_session.execute = AsyncMock(return_value=list_result)
+    repo = ArtifactRepository(mock_session)
+
+    await repo.list_artifacts_by_category("dataset", search="iris", limit=10, offset=5)
+
+    mock_session.execute.assert_awaited_once()
+
+
+async def test_list_artifacts_by_category_total_when_page_is_empty(mock_session):
+    """Offset past last row: one row with ``match_total`` and null page columns."""
+    list_result = MagicMock()
+    list_result.fetchall.return_value = [
+        _make_list_row(
+            name=None,
+            category=None,
+            description=None,
+            versions_count=None,
+            latest_version=None,
+            created_at=None,
+            match_total=42,
+        )
+    ]
+    mock_session.execute = AsyncMock(return_value=list_result)
+    repo = ArtifactRepository(mock_session)
+
+    total, result = await repo.list_artifacts_by_category("model", limit=10, offset=999)
+
+    assert total == 42
+    assert result == []

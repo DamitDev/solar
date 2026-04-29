@@ -8,12 +8,21 @@ Artifact names are globally unique and map 1:1 to a Harbor repository under `sup
 
 ## Entity Relationship
 
+PostgreSQL stores ``category`` as the ``artifact_category`` enum type (not a
+separate table). The diagram below shows that **logical** domain as a lookup
+entity so the ER view matches how clients filter (``GET /api/artifacts`` and
+typed list routes all constrain ``artifacts.category``).
+
 ```mermaid
 erDiagram
+    artifact_category_value {
+        string code PK "model | dataset"
+    }
+
     artifacts {
         uuid id PK
         varchar name UK "globally unique"
-        artifact_category category "model | dataset"
+        artifact_category category "enum value"
         text description
         timestamptz created_at
         timestamptz updated_at
@@ -30,7 +39,25 @@ erDiagram
         timestamptz created_at
     }
 
+    artifacts }o--|| artifact_category_value : "category in {model,dataset}"
     artifacts ||--o{ artifact_versions : "has versions"
+```
+
+**Logical catalog access (HTTP ↔ discriminator column)**
+
+```mermaid
+flowchart LR
+    subgraph HTTP["HTTP list endpoints"]
+        A["GET /api/artifacts?category="]
+        M["GET /api/models"]
+        D["GET /api/datasets"]
+    end
+    C["artifacts.category"]
+    HTTP --> C
+    M -->|"implicit model"| C
+    D -->|"implicit dataset"| C
+    T["JOIN latest artifact_versions\nfor counts + metadata search"]
+    C --> T
 ```
 
 ## DDL
@@ -80,7 +107,39 @@ CREATE INDEX idx_artifact_versions_created_at ON artifact_versions (created_at);
 CREATE INDEX idx_artifact_versions_metadata ON artifact_versions USING GIN (metadata);
 ```
 
+`pg_trgm` GIN indexes on `artifacts` (migration **0002**) accelerate case-insensitive substring search on `name` and `description` for catalog list queries:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
+CREATE INDEX idx_artifacts_name_trgm ON artifacts USING GIN (name gin_trgm_ops);
+CREATE INDEX idx_artifacts_description_trgm ON artifacts USING GIN (description gin_trgm_ops);
+```
+
 `artifacts.name` is already indexed via the `UNIQUE` constraint.
+
+## HTTP catalog — list and search
+
+Browsers and services discover artifacts via:
+
+| Method | Path | Role |
+|--------|------|------|
+| `GET` | `/api/artifacts` | Paginated list; **required** query `category` = `model` or `dataset` (same semantics as the typed routes) |
+| `GET` | `/api/models` | Paginated list of **model** artifacts (`category` fixed to `model`) |
+| `GET` | `/api/datasets` | Paginated list of **dataset** artifacts (`category` fixed to `dataset`) |
+
+**Query parameters**
+
+| Parameter | Description |
+|-----------|-------------|
+| `category` | **Required** on `GET /api/artifacts` only: `model` or `dataset`. |
+| `search` | Optional. Case-insensitive `ILIKE` on `artifacts.name`, `artifacts.description`, and the **latest** row’s `artifact_versions.metadata` serialized as text. `%` and `_` are SQL wildcards; values are bound as parameters (no SQL injection). If the entire string parses as a JSON **object**, rows also match when latest `metadata` **contains** that object (`@>`). Leading/trailing whitespace is stripped; an empty string is ignored. |
+| `limit`, `offset` | Offset pagination (`limit` default 50, max 1000). |
+| `page`, `page_size` | Page-based pagination. When `page` is set, `limit` and `offset` are ignored; `page_size` defaults to 50 (max 1000). |
+
+**Response:** `{"total": <int>, "items": [...]}` where each item includes `name`, `category`, `description`, `versions_count`, `latest_version` (from the version with the newest `created_at`), and `created_at` (artifact row).
+
+The repository resolves `total` and the page slice in **one** SQL round-trip (count subquery plus `LEFT JOIN LATERAL` page), so `total` stays correct when `offset` is past the last row.
 
 ## Design Decisions
 

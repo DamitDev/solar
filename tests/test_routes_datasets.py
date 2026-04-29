@@ -23,6 +23,8 @@ from app.exceptions import (
 )
 from app.routes.datasets import router
 from app.schemas.datasets import (
+    ArtifactListResponse,
+    ArtifactSummary,
     DatasetVersionListItem,
     GetDatasetVersionResponse,
     ListDatasetVersionsResponse,
@@ -312,5 +314,160 @@ def test_delete_dataset_version_latest_alias_returns_422():
         side_effect=InvalidArtifactNameError("'latest' is a reserved alias")
     )
     resp = client.delete("/api/datasets/iris-tickets/versions/latest")
+
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# GET /api/datasets  (list datasets)
+# ---------------------------------------------------------------------------
+
+_LIST_DATASETS_RESPONSE = ArtifactListResponse[ArtifactSummary](
+    total=2,
+    items=[
+        ArtifactSummary(
+            name="iris-tickets",
+            category="dataset",
+            description="Iris tickets export",
+            versions_count=4,
+            latest_version="v4",
+            created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        ),
+        ArtifactSummary(
+            name="cifar-10",
+            category="dataset",
+            description=None,
+            versions_count=1,
+            latest_version="v1",
+            created_at=datetime(2026, 3, 1, 8, 0, tzinfo=timezone.utc),
+        ),
+    ],
+)
+
+
+def _make_list_datasets_client(return_value=None, side_effect=None) -> TestClient:
+    """Return a TestClient with DatasetQueryService.list_datasets mocked."""
+    app = FastAPI()
+    app.include_router(router)
+
+    mock_service = MagicMock()
+    mock_service.list_datasets = AsyncMock(
+        return_value=return_value,
+        side_effect=side_effect,
+    )
+    app.dependency_overrides[get_dataset_query_service] = lambda: mock_service
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_list_datasets_returns_200_with_items():
+    client = _make_list_datasets_client(return_value=_LIST_DATASETS_RESPONSE)
+    resp = client.get("/api/datasets")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 2
+    assert len(data["items"]) == 2
+    assert data["items"][0]["name"] == "iris-tickets"
+    assert data["items"][0]["versions_count"] == 4
+    assert data["items"][0]["latest_version"] == "v4"
+    assert data["items"][1]["name"] == "cifar-10"
+    assert data["items"][1]["description"] is None
+
+
+def test_list_datasets_returns_200_empty():
+    empty_response = ArtifactListResponse[ArtifactSummary](total=0, items=[])
+    client = _make_list_datasets_client(return_value=empty_response)
+    resp = client.get("/api/datasets")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 0
+    assert data["items"] == []
+
+
+def test_list_datasets_passes_search_limit_offset():
+    mock_service = MagicMock()
+    mock_service.list_datasets = AsyncMock(
+        return_value=ArtifactListResponse[ArtifactSummary](total=0, items=[])
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_dataset_query_service] = lambda: mock_service
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/api/datasets?search=cifar&limit=20&offset=10")
+
+    assert resp.status_code == 200
+    mock_service.list_datasets.assert_awaited_once_with(
+        search="cifar", limit=20, offset=10
+    )
+
+
+def test_list_datasets_default_pagination():
+    mock_service = MagicMock()
+    mock_service.list_datasets = AsyncMock(
+        return_value=ArtifactListResponse[ArtifactSummary](total=0, items=[])
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_dataset_query_service] = lambda: mock_service
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/api/datasets")
+
+    assert resp.status_code == 200
+    mock_service.list_datasets.assert_awaited_once_with(search=None, limit=50, offset=0)
+
+
+def test_list_datasets_page_based_pagination():
+    mock_service = MagicMock()
+    mock_service.list_datasets = AsyncMock(
+        return_value=ArtifactListResponse[ArtifactSummary](total=0, items=[])
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_dataset_query_service] = lambda: mock_service
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/api/datasets?page=2&page_size=15")
+
+    assert resp.status_code == 200
+    mock_service.list_datasets.assert_awaited_once_with(
+        search=None, limit=15, offset=15
+    )
+
+
+def test_list_datasets_trailing_slash():
+    mock_service = MagicMock()
+    mock_service.list_datasets = AsyncMock(
+        return_value=ArtifactListResponse[ArtifactSummary](total=0, items=[])
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[get_dataset_query_service] = lambda: mock_service
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/api/datasets/", follow_redirects=False)
+
+    assert resp.status_code in (200, 307, 308)
+
+
+def test_list_datasets_invalid_limit_returns_422():
+    client = _make_list_datasets_client(return_value=_LIST_DATASETS_RESPONSE)
+    resp = client.get("/api/datasets?limit=0")
+
+    assert resp.status_code == 422
+
+
+def test_list_datasets_limit_exceeds_max_returns_422():
+    client = _make_list_datasets_client(return_value=_LIST_DATASETS_RESPONSE)
+    resp = client.get("/api/datasets?limit=1001")
+
+    assert resp.status_code == 422
+
+
+def test_list_datasets_negative_offset_returns_422():
+    client = _make_list_datasets_client(return_value=_LIST_DATASETS_RESPONSE)
+    resp = client.get("/api/datasets?offset=-1")
 
     assert resp.status_code == 422

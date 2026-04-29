@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.dependencies import (
     get_dataset_deletion_service,
@@ -14,7 +14,17 @@ from app.exceptions import (
     DatasetVersionNotFoundError,
     InvalidArtifactNameError,
 )
+from app.pagination import resolve_list_pagination
+from app.routes._artifact_list_params import (
+    ARTIFACT_LIST_PAGE_DESCRIPTION,
+    ARTIFACT_LIST_PAGE_SIZE_DESCRIPTION,
+    ARTIFACT_LIST_SEARCH_DESCRIPTION,
+)
 from app.routes._error_handling import handle_registration_errors
+from app.schemas.artifacts import (
+    ArtifactListResponse,
+    ArtifactSummary,
+)
 from app.schemas.datasets import (
     GetDatasetVersionResponse,
     ListDatasetVersionsResponse,
@@ -28,6 +38,35 @@ from app.services.models import (
 )
 
 router = APIRouter(prefix="/api/datasets")
+
+
+@router.get("", status_code=200)
+async def list_datasets(
+    *,
+    search: str | None = Query(None, description=ARTIFACT_LIST_SEARCH_DESCRIPTION),
+    limit: int = Query(50, ge=1, le=1000, description="Results per page"),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    page: int | None = Query(None, ge=1, description=ARTIFACT_LIST_PAGE_DESCRIPTION),
+    page_size: int | None = Query(
+        None, ge=1, le=1000, description=ARTIFACT_LIST_PAGE_SIZE_DESCRIPTION
+    ),
+    service: Annotated[DatasetQueryService, Depends(get_dataset_query_service)],
+) -> ArtifactListResponse[ArtifactSummary]:
+    """List all datasets with optional search and pagination.
+
+    Query parameters
+    ----------------
+    - ``search``: See parameter description (wildcards and optional JSON containment).
+    - ``limit`` / ``offset``: Offset-based pagination (defaults: 50 / 0).
+    - ``page`` / ``page_size``: Page-based pagination; when ``page`` is set,
+      ``limit`` and ``offset`` are ignored.
+
+    Returns ``total`` (match count) and ``items`` (artifact summaries).
+    """
+    lim, off = resolve_list_pagination(
+        limit=limit, offset=offset, page=page, page_size=page_size
+    )
+    return await service.list_datasets(search=search, limit=lim, offset=off)
 
 
 @router.post("/{name}/versions", status_code=201)
