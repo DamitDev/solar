@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from importlib.metadata import version as _pkg_version, PackageNotFoundError
 
 from fastapi import FastAPI
+from fastapi.responses import Response
 
 from app.config import settings
 
@@ -78,6 +79,12 @@ async def root():
         "version": __version__,
         "description": "Metadata catalog for models and datasets",
     }
+
+
+@app.head("/")
+async def root_head() -> Response:
+    """Support HEAD for load balancers (e.g. KEMP) that probe ``/`` without a body."""
+    return Response(status_code=200)
 
 
 if __name__ == "__main__":
