@@ -68,7 +68,11 @@ Communication topology: SuperNova → Solar Control API → Solar Hosts. SuperNo
 
 ## PR Format
 
-When the implementation is complete, provide a PR title and description for the supervisor using this format:
+When the implementation is complete, provide a PR title and description for the supervisor using this format.
+
+**PR title (Conventional Commits).** Prefer a short [Conventional Commits](https://www.conventionalcommits.org/) style title so history stays scannable, for example `feat(api): add catalog list endpoints`, `fix(db): correct migration order`, or `docs: update schema for D-013`. Use types such as `feat`, `fix`, `docs`, `chore`, `refactor`, or `test` as appropriate. The supervisor may still adjust wording.
+
+Body format:
 
 ```
 PR Title
