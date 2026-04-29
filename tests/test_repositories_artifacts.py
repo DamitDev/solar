@@ -14,6 +14,8 @@ from sqlalchemy.exc import IntegrityError
 
 from app.exceptions import (
     ArtifactCategoryConflictError,
+    CatalogArtifactNotFoundError,
+    CatalogVersionNotFoundError,
     DatasetNotFoundError,
     DatasetVersionNotFoundError,
     ModelNotFoundError,
@@ -912,3 +914,67 @@ async def test_update_artifact_version_metadata_updates_resolved_version(mock_se
 
     assert result.version == "v3"
     assert result.metadata == {"a": 2}
+
+
+# ---------------------------------------------------------------------------
+# resolve_artifact_version
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_artifact_version_exact_returns_record(mock_session):
+    """JOIN query hits — returns the artifact version row regardless of category."""
+    version_row = _make_version_row(version="v3")
+    version_row.category = "model"
+    join_result = MagicMock()
+    join_result.fetchone.return_value = version_row
+
+    mock_session.execute = AsyncMock(return_value=join_result)
+    repo = ArtifactRepository(mock_session)
+
+    result = await repo.resolve_artifact_version(name="any-artifact", version="v3")
+
+    assert result.name == "any-artifact"
+    assert result.version == "v3"
+    assert result.category == "model"
+    mock_session.execute.assert_awaited_once()
+
+
+async def test_resolve_artifact_version_latest_returns_newest(mock_session):
+    latest_row = _make_version_row(version="v10")
+    latest_row.category = "dataset"
+    join_result = MagicMock()
+    join_result.fetchone.return_value = latest_row
+
+    mock_session.execute = AsyncMock(return_value=join_result)
+    repo = ArtifactRepository(mock_session)
+
+    result = await repo.resolve_artifact_version(name="any-artifact", version="latest")
+
+    assert result.version == "v10"
+    assert result.category == "dataset"
+
+
+async def test_resolve_artifact_version_raises_when_artifact_missing(mock_session):
+    join_result = MagicMock()
+    join_result.fetchone.return_value = None
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = None
+
+    mock_session.execute = AsyncMock(side_effect=[join_result, exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(CatalogArtifactNotFoundError):
+        await repo.resolve_artifact_version(name="missing", version="v1")
+
+
+async def test_resolve_artifact_version_raises_when_version_missing(mock_session):
+    join_result = MagicMock()
+    join_result.fetchone.return_value = None
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row()
+
+    mock_session.execute = AsyncMock(side_effect=[join_result, exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(CatalogVersionNotFoundError):
+        await repo.resolve_artifact_version(name="exists", version="v99")

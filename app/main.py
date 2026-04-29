@@ -62,11 +62,13 @@ from app.routes.artifacts import router as artifacts_router  # noqa: E402
 from app.routes.datasets import router as datasets_router  # noqa: E402
 from app.routes.health import router as health_router  # noqa: E402
 from app.routes.models import router as models_router  # noqa: E402
+from app.routes.resolve import router as resolve_router  # noqa: E402
 
 app.include_router(health_router)
 app.include_router(artifacts_router)
 app.include_router(models_router)
 app.include_router(datasets_router)
+app.include_router(resolve_router)
 
 
 @app.get("/")

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -28,3 +28,16 @@ class ArtifactListResponse(BaseModel, Generic[T]):
 
     total: int = Field(..., ge=0)
     items: list[T]
+
+
+class ResolveUriResponse(BaseModel):
+    """Response for URI resolution."""
+
+    category: ArtifactCategory
+    name: str
+    version: str
+    harbor_ref: str
+    size_bytes: int | None
+    checksum: str | None
+    metadata: dict[str, Any]
+    created_at: datetime

@@ -35,6 +35,8 @@ from app import catalog_search
 from app.database.models import Artifact, ArtifactVersion
 from app.exceptions import (
     ArtifactCategoryConflictError,
+    CatalogArtifactNotFoundError,
+    CatalogVersionNotFoundError,
     DatasetNotFoundError,
     DatasetVersionNotFoundError,
     ModelNotFoundError,
@@ -281,6 +283,71 @@ class ArtifactRepository:
             category="dataset",
             not_found_exc=DatasetNotFoundError,
             version_not_found_exc=DatasetVersionNotFoundError,
+        )
+
+    async def resolve_artifact_version(
+        self, name: str, version: str
+    ) -> ArtifactVersionRecord:
+        """Resolve an artifact version without category enforcement.
+
+        Used for repo:// URI resolution.
+
+        Raises
+        ------
+        CatalogArtifactNotFoundError
+            When no artifact with *name* exists.
+        CatalogVersionNotFoundError
+            When *version* does not exist for the artifact.
+        """
+        label = "Artifact"
+        base = (
+            select(
+                ArtifactVersion.version,
+                ArtifactVersion.harbor_ref,
+                ArtifactVersion.size_bytes,
+                ArtifactVersion.digest,
+                ArtifactVersion.created_at,
+                ArtifactVersion.metadata_,
+                Artifact.category,
+            )
+            .join(Artifact, ArtifactVersion.artifact_id == Artifact.id)
+            .where(Artifact.name == name)
+        )
+
+        if version == "latest":
+            stmt = base.order_by(
+                ArtifactVersion.created_at.desc(),
+                ArtifactVersion.id.desc(),
+            ).limit(1)
+        else:
+            stmt = base.where(ArtifactVersion.version == version)
+
+        result = await self._session.execute(stmt)
+        row = result.fetchone()
+
+        if row is not None:
+            return ArtifactVersionRecord(
+                name=name,
+                version=row.version,
+                category=row.category,
+                harbor_ref=row.harbor_ref,
+                size_bytes=row.size_bytes,
+                checksum=row.digest,
+                created_at=row.created_at,
+                metadata=row.metadata_ or {},
+            )
+
+        exists_result = await self._session.execute(
+            select(Artifact.id).where(Artifact.name == name)
+        )
+        if exists_result.fetchone() is None:
+            raise CatalogArtifactNotFoundError(f"{label} '{name}' was not found.")
+
+        if version == "latest":
+            raise CatalogVersionNotFoundError(f"{label} '{name}' has no versions.")
+
+        raise CatalogVersionNotFoundError(
+            f"Version '{version}' was not found for artifact '{name}'."
         )
 
     async def get_artifact_metadata(

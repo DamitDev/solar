@@ -127,6 +127,7 @@ Browsers and services discover artifacts via:
 | `GET` | `/api/artifacts` | Paginated list; **required** query `category` = `model` or `dataset` (same semantics as the typed routes) |
 | `GET` | `/api/models` | Paginated list of **model** artifacts (`category` fixed to `model`) |
 | `GET` | `/api/datasets` | Paginated list of **dataset** artifacts (`category` fixed to `dataset`) |
+| `GET` | `/api/resolve` | Resolve a `repo://` URI to its Harbor reference and metadata. |
 
 **Query parameters**
 
@@ -136,10 +137,35 @@ Browsers and services discover artifacts via:
 | `search` | Optional. Case-insensitive `ILIKE` on `artifacts.name`, `artifacts.description`, and the **latest** row’s `artifact_versions.metadata` serialized as text. `%` and `_` are SQL wildcards; values are bound as parameters (no SQL injection). If the entire string parses as a JSON **object**, rows also match when latest `metadata` **contains** that object (`@>`). Leading/trailing whitespace is stripped; an empty string is ignored. |
 | `limit`, `offset` | Offset pagination (`limit` default 50, max 1000). |
 | `page`, `page_size` | Page-based pagination. When `page` is set, `limit` and `offset` are ignored; `page_size` defaults to 50 (max 1000). |
+| `uri` | **Required** on `GET /api/resolve` only: `repo://{name}:{version}` URI to resolve. |
 
 **Response:** `{"total": <int>, "items": [...]}` where each item includes `name`, `category`, `description`, `versions_count`, `latest_version` (from the version with the newest `created_at`), and `created_at` (artifact row).
 
 The repository resolves `total` and the page slice in **one** SQL round-trip (count subquery plus `LEFT JOIN LATERAL` page), so `total` stays correct when `offset` is past the last row.
+
+### URI Resolution (`GET /api/resolve`)
+
+Used by Solar Control's `repo://` resolver and SuperNova job validation. It provides a single point of authority for mapping `repo://` URIs to their OCI references in Harbor.
+
+**URI Format:** `repo://{name}:{version}` (e.g., `repo://iris-osl:v3`). Version is required; use `latest` for the most recent version of the artifact.
+
+**Response Shape:**
+```json
+{
+  "category": "model",
+  "name": "iris-osl",
+  "version": "v3",
+  "harbor_ref": "imgrepo.damit.hu/supernova/iris-osl:v3",
+  "size_bytes": 1024,
+  "checksum": "sha256:...",
+  "metadata": { ... },
+  "created_at": "2026-04-29T10:00:00Z"
+}
+```
+
+**Errors:**
+- **422**: Invalid URI format or invalid artifact name.
+- **404**: Artifact or version not found.
 
 ## HTTP artifact metadata — read and update
 

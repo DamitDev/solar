@@ -91,3 +91,19 @@ class LineageReferenceNotFoundError(Exception):
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
         self.detail = detail
+
+
+class CatalogArtifactNotFoundError(Exception):
+    """Raised when an artifact with the requested name does not exist in the catalog."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+class CatalogVersionNotFoundError(Exception):
+    """Raised when the requested version does not exist in the catalog."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail

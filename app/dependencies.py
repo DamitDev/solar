@@ -58,6 +58,7 @@ from app.services.models import (
     ModelRegistrationService,
     ModelUpdateService,
 )
+from app.services.resolve import ResolveService
 
 
 def get_harbor_client() -> HarborClient:
@@ -142,3 +143,10 @@ def get_dataset_deletion_service(
 ) -> DatasetDeletionService:
     """Construct a :class:`~app.services.models.DatasetDeletionService` per request."""
     return DatasetDeletionService(session=session)
+
+
+def get_resolve_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ResolveService:
+    """Construct a :class:`~app.services.resolve.ResolveService` per request."""
+    return ResolveService(session=session)
