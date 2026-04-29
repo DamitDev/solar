@@ -75,3 +75,19 @@ class DatasetVersionNotFoundError(Exception):
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
         self.detail = detail
+
+
+class InvalidLineageReferenceError(Exception):
+    """Raised when lineage contains an invalid artifact reference format."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+class LineageReferenceNotFoundError(Exception):
+    """Raised when a lineage artifact reference cannot be resolved."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail

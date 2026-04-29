@@ -141,11 +141,38 @@ Browsers and services discover artifacts via:
 
 The repository resolves `total` and the page slice in **one** SQL round-trip (count subquery plus `LEFT JOIN LATERAL` page), so `total` stays correct when `offset` is past the last row.
 
+## HTTP artifact metadata — read and update
+
+Artifact-level browsing and editing (SuperNova WebUI, catalog enrichment) use dedicated routes. These endpoints touch **PostgreSQL only** — they do not push, pull, or mutate blobs in Harbor.
+
+| Method | Path | Role |
+|--------|------|------|
+| `GET` | `/api/models/{name}` | Return model artifact metadata (see response shape below). |
+| `PUT` | `/api/models/{name}` | Update metadata fields allowed in the request body (partial update). |
+| `GET` | `/api/datasets/{name}` | Return dataset artifact metadata (same response shape as models). |
+| `PUT` | `/api/datasets/{name}` | Update dataset metadata (partial update). |
+
+**404** if no row exists in `artifacts` for `{name}` with the expected category (`model` vs `dataset`). Artifact rows are created when the first version is registered; metadata CRUD assumes that registration has already happened.
+
+**Where fields live**
+
+| Response / PUT field | Storage |
+|---------------------|---------|
+| `description` | `artifacts.description` (artifact-level). |
+| `training_config`, `eval_metrics`, `lineage` | Read from and written to the **`artifact_versions.metadata` JSONB** row for the artifact’s **latest** version (newest `created_at`, tie-break by `id`). PUT merges into that JSON object; omitted keys are left unchanged unless you send explicit `null` for a supported key to clear it (see OpenAPI / Pydantic behaviour). |
+| `created_at`, `versions_count`, `category`, `name` | From `artifacts` (and version count / category as implemented); `name` is the path parameter. |
+
+**Lineage shape** matches [`metadata.lineage`](#lineage-convention): `parent_model` and `source_dataset` use `<artifact-name>:<version>`; `source_trainer` is the **SuperNova job ID** string (not an artifact reference). On PUT, when `lineage` is sent, the API validates that `parent_model` and `source_dataset` references resolve to an existing version of the correct category; `source_trainer` is stored as provided and is **not** validated against the catalog.
+
+**Typical errors:** malformed `{name}` → **422**; unknown artifact → **404**; invalid lineage reference format → **422**; lineage points at a missing version → **404**.
+
+Version-level registration still uses `POST /api/{models,datasets}/{name}/versions`. Metadata GET/PUT does not replace version listing or version-detail routes.
+
 ## Design Decisions
 
 **No separate `artifact_metadata` table.** JSONB on `artifact_versions.metadata` provides the needed flexibility with GIN index support. Avoids unnecessary joins for what are fundamentally version-scoped attributes.
 
-**Lineage in JSONB, not FK columns.** `parent_model`, `source_dataset`, and `source_trainer` live in `metadata.lineage` as string references (artifact name + version). This avoids tight coupling and complex FK graphs while keeping lineage queryable via the GIN index. Can be promoted to first-class FK columns later if referential integrity becomes critical.
+**Lineage in JSONB, not FK columns.** `parent_model` and `source_dataset` in `metadata.lineage` are soft references as `<artifact-name>:<version>` strings. `source_trainer` is the **SuperNova job ID** (opaque string), not an artifact reference — see [Lineage convention](#lineage-convention). This avoids tight FK graphs while keeping lineage queryable via the GIN index. Can be promoted to first-class FK columns later if referential integrity becomes critical.
 
 **UUID primary keys.** Better for distributed systems and avoids sequential ID leaking.
 
@@ -363,13 +390,15 @@ Dataset registration endpoint:
 
 ### Lineage Convention
 
-Lineage references use the format `<artifact-name>:<version>`, matching the Harbor naming convention. This is a soft reference — the referenced artifact must exist but is not enforced by FK constraints.
+`lineage.parent_model` and `lineage.source_dataset` use the format `<artifact-name>:<version>` (same naming rules as Harbor artifact tags). They are soft references — not enforced by FK constraints in PostgreSQL, though the **metadata PUT** API checks that these references resolve to an existing artifact version of the expected category (`model` vs `dataset`).
+
+`lineage.source_trainer` is **not** an artifact reference: it stores the **SuperNova training job ID** that produced the version (opaque string, e.g. `supernova-job-12345`).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `lineage.parent_model` | `string` | Base model this was fine-tuned from |
-| `lineage.source_dataset` | `string` | Dataset used for training |
-| `lineage.source_trainer` | `string` | SuperNova job ID that produced this version |
+| `lineage.parent_model` | `string` | Base model artifact (`name:version`) this was fine-tuned from |
+| `lineage.source_dataset` | `string` | Dataset artifact (`name:version`) used for training |
+| `lineage.source_trainer` | `string` | SuperNova job ID that produced this version (not `name:version`) |
 
 ## Example Queries
 

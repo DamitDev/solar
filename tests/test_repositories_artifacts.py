@@ -39,6 +39,23 @@ def _make_row(artifact_id: uuid.UUID = _ARTIFACT_ID, category: str = "model"):
     return row
 
 
+def _make_artifact_row(
+    artifact_id: uuid.UUID = _ARTIFACT_ID,
+    *,
+    name: str = "mymodel",
+    category: str = "model",
+    description: str | None = "desc",
+    created_at: datetime = datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+):
+    row = MagicMock()
+    row.id = artifact_id
+    row.name = name
+    row.category = category
+    row.description = description
+    row.created_at = created_at
+    return row
+
+
 def _execute_returning(row):
     """Return an AsyncMock for session.execute() whose .fetchone() gives *row*."""
     result = MagicMock()
@@ -751,3 +768,147 @@ async def test_list_artifacts_by_category_total_when_page_is_empty(mock_session)
 
     assert total == 42
     assert result == []
+
+
+async def test_get_artifact_metadata_returns_latest_metadata_and_count(mock_session):
+    artifact_result = MagicMock()
+    artifact_result.fetchone.return_value = _make_artifact_row(
+        name="mymodel",
+        category="model",
+        description="Classifier",
+    )
+
+    count_result = MagicMock()
+    count_result.scalar_one.return_value = 3
+
+    latest_row = MagicMock()
+    latest_row.metadata_ = {"training_config": {"epochs": 3}}
+    latest_result = MagicMock()
+    latest_result.fetchone.return_value = latest_row
+
+    mock_session.execute = AsyncMock(
+        side_effect=[artifact_result, count_result, latest_result]
+    )
+    repo = ArtifactRepository(mock_session)
+
+    result = await repo.get_artifact_metadata(category="model", name="mymodel")
+
+    assert result.name == "mymodel"
+    assert result.category == "model"
+    assert result.description == "Classifier"
+    assert result.versions_count == 3
+    assert result.metadata == {"training_config": {"epochs": 3}}
+
+
+async def test_get_artifact_metadata_raises_not_found_for_missing_model(mock_session):
+    artifact_result = MagicMock()
+    artifact_result.fetchone.return_value = None
+
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = None
+
+    mock_session.execute = AsyncMock(side_effect=[artifact_result, exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(ModelNotFoundError):
+        await repo.get_artifact_metadata(category="model", name="mymodel")
+
+
+async def test_update_artifact_metadata_updates_description_and_latest_version_jsonb(
+    mock_session,
+):
+    first_artifact_result = MagicMock()
+    first_artifact_result.fetchone.return_value = _make_artifact_row(
+        name="mymodel",
+        category="model",
+        description="old",
+    )
+
+    update_artifact_result = MagicMock()
+
+    latest_id_row = MagicMock()
+    latest_id_row.id = uuid.UUID("bbbbbbbb-0000-0000-0000-000000000001")
+    latest_id_result = MagicMock()
+    latest_id_result.fetchone.return_value = latest_id_row
+
+    update_latest_result = MagicMock()
+
+    second_artifact_result = MagicMock()
+    second_artifact_result.fetchone.return_value = _make_artifact_row(
+        name="mymodel",
+        category="model",
+        description="new",
+    )
+
+    count_result = MagicMock()
+    count_result.scalar_one.return_value = 2
+
+    final_latest_row = MagicMock()
+    final_latest_row.metadata_ = {"eval_metrics": {"accuracy": 0.99}}
+    final_latest_result = MagicMock()
+    final_latest_result.fetchone.return_value = final_latest_row
+
+    mock_session.execute = AsyncMock(
+        side_effect=[
+            first_artifact_result,
+            update_artifact_result,
+            latest_id_result,
+            update_latest_result,
+            second_artifact_result,
+            count_result,
+            final_latest_result,
+        ]
+    )
+    repo = ArtifactRepository(mock_session)
+
+    result = await repo.update_artifact_metadata(
+        category="model",
+        name="mymodel",
+        description="new",
+        set_description=True,
+        raw_metadata={"eval_metrics": {"accuracy": 0.99}},
+        set_metadata=True,
+    )
+
+    assert result.description == "new"
+    assert result.metadata == {"eval_metrics": {"accuracy": 0.99}}
+
+
+async def test_artifact_version_reference_exists_respects_category_filter(mock_session):
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = MagicMock()
+
+    mock_session.execute = AsyncMock(return_value=exists_result)
+    repo = ArtifactRepository(mock_session)
+
+    result = await repo.artifact_version_reference_exists(
+        name="mymodel",
+        version="v3",
+        category="model",
+    )
+
+    assert result is True
+    mock_session.execute.assert_awaited_once()
+
+
+async def test_update_artifact_version_metadata_updates_resolved_version(mock_session):
+    current_version_row = _make_version_row(version="v3", metadata={"a": 1})
+    current_result = MagicMock()
+    current_result.fetchone.return_value = current_version_row
+
+    updated_version_row = _make_version_row(version="v3", metadata={"a": 2})
+    updated_result = MagicMock()
+    updated_result.fetchone.return_value = updated_version_row
+
+    mock_session.execute = AsyncMock(side_effect=[current_result, updated_result])
+    repo = ArtifactRepository(mock_session)
+
+    result = await repo.update_artifact_version_metadata(
+        category="model",
+        name="mymodel",
+        version="latest",
+        metadata={"a": 2},
+    )
+
+    assert result.version == "v3"
+    assert result.metadata == {"a": 2}

@@ -1,7 +1,7 @@
 """Unit tests for app/routes/datasets.py."""
 
-from unittest.mock import AsyncMock, MagicMock
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -11,6 +11,7 @@ from app.dependencies import (
     get_dataset_deletion_service,
     get_dataset_query_service,
     get_dataset_registration_service,
+    get_dataset_update_service,
 )
 from app.exceptions import (
     ArtifactCategoryConflictError,
@@ -19,6 +20,8 @@ from app.exceptions import (
     DatasetVersionNotFoundError,
     HarborVerificationError,
     InvalidArtifactNameError,
+    InvalidLineageReferenceError,
+    LineageReferenceNotFoundError,
     VersionAlreadyExistsError,
 )
 from app.routes.datasets import router
@@ -26,10 +29,12 @@ from app.schemas.datasets import (
     ArtifactListResponse,
     ArtifactSummary,
     DatasetVersionListItem,
+    GetDatasetMetadataResponse,
     GetDatasetVersionResponse,
     ListDatasetVersionsResponse,
     RegisterDatasetVersionResponse,
 )
+from app.schemas.models import LineageMetadata
 
 _HARBOR_REF = "registry.example.com/proj/iris-tickets:2026-03"
 _VALID_BODY = {
@@ -75,6 +80,21 @@ _SUCCESS_LIST_RESPONSE = ListDatasetVersionsResponse(
     ]
 )
 
+_SUCCESS_METADATA_RESPONSE = GetDatasetMetadataResponse(
+    name="iris-tickets",
+    category="dataset",
+    description="Ticket dataset",
+    training_config={"format": "parquet"},
+    eval_metrics=None,
+    lineage=LineageMetadata(
+        parent_model=None,
+        source_dataset="iris-tickets:v2",
+        source_trainer="supernova-job-12345",
+    ),
+    created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+    versions_count=2,
+)
+
 
 def _make_post_client(return_value=None, side_effect=None) -> TestClient:
     app = FastAPI()
@@ -82,6 +102,15 @@ def _make_post_client(return_value=None, side_effect=None) -> TestClient:
 
     mock_service = MagicMock()
     mock_service.register_dataset_version = AsyncMock(
+        return_value=return_value,
+        side_effect=side_effect,
+    )
+    mock_service.update_dataset_metadata = AsyncMock(
+        return_value=return_value,
+        side_effect=side_effect,
+    )
+    mock_service.delete_dataset_version = AsyncMock(side_effect=side_effect)
+    mock_service.get_dataset_metadata = AsyncMock(
         return_value=return_value,
         side_effect=side_effect,
     )
@@ -95,6 +124,8 @@ def _make_get_client(
     get_side_effect=None,
     list_return_value=None,
     list_side_effect=None,
+    metadata_return_value=None,
+    metadata_side_effect=None,
 ) -> TestClient:
     app = FastAPI()
     app.include_router(router)
@@ -108,8 +139,26 @@ def _make_get_client(
         return_value=list_return_value,
         side_effect=list_side_effect,
     )
+    mock_service.get_dataset_metadata = AsyncMock(
+        return_value=metadata_return_value,
+        side_effect=metadata_side_effect,
+    )
 
     app.dependency_overrides[get_dataset_query_service] = lambda: mock_service
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def _make_metadata_put_client(return_value=None, side_effect=None) -> TestClient:
+    app = FastAPI()
+    app.include_router(router)
+
+    mock_service = MagicMock()
+    mock_service.update_dataset_metadata = AsyncMock(
+        return_value=return_value,
+        side_effect=side_effect,
+    )
+    app.dependency_overrides[get_dataset_update_service] = lambda: mock_service
+
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -257,6 +306,76 @@ def test_list_dataset_versions_invalid_name_returns_422():
         list_side_effect=InvalidArtifactNameError("bad name"),
     )
     resp = client.get("/api/datasets/BAD/versions")
+
+    assert resp.status_code == 422
+
+
+def test_get_dataset_metadata_returns_200_on_success():
+    client = _make_get_client(metadata_return_value=_SUCCESS_METADATA_RESPONSE)
+    resp = client.get("/api/datasets/iris-tickets")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "iris-tickets"
+    assert data["lineage"]["source_trainer"] == "supernova-job-12345"
+
+
+def test_get_dataset_metadata_not_found_returns_404():
+    client = _make_get_client(
+        metadata_side_effect=DatasetNotFoundError("missing dataset"),
+    )
+    resp = client.get("/api/datasets/iris-tickets")
+
+    assert resp.status_code == 404
+
+
+def test_get_dataset_metadata_invalid_name_returns_422():
+    client = _make_get_client(
+        metadata_side_effect=InvalidArtifactNameError("bad name"),
+    )
+    resp = client.get("/api/datasets/BAD")
+
+    assert resp.status_code == 422
+
+
+def test_put_dataset_metadata_returns_200_on_success():
+    client = _make_metadata_put_client(return_value=_SUCCESS_METADATA_RESPONSE)
+    resp = client.put(
+        "/api/datasets/iris-tickets",
+        json={
+            "description": "Ticket dataset",
+            "training_config": {"format": "parquet"},
+            "lineage": {
+                "source_dataset": "iris-tickets:v2",
+                "source_trainer": "supernova-job-12345",
+            },
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["description"] == "Ticket dataset"
+
+
+def test_put_dataset_metadata_not_found_returns_404():
+    client = _make_metadata_put_client(
+        side_effect=LineageReferenceNotFoundError("missing reference"),
+    )
+    resp = client.put(
+        "/api/datasets/iris-tickets",
+        json={"lineage": {"source_dataset": "missing:v1"}},
+    )
+
+    assert resp.status_code == 404
+
+
+def test_put_dataset_metadata_invalid_lineage_returns_422():
+    client = _make_metadata_put_client(
+        side_effect=InvalidLineageReferenceError("bad lineage"),
+    )
+    resp = client.put(
+        "/api/datasets/iris-tickets",
+        json={"lineage": {"source_dataset": "bad"}},
+    )
 
     assert resp.status_code == 422
 

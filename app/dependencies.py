@@ -10,32 +10,20 @@ get_harbor_client
     Returns the app-level :class:`~harbor_oci_client.HarborClient` singleton
     initialised during application startup.
 
-get_model_registration_service
-    Builds a :class:`~app.services.models.ModelRegistrationService` per request,
-    wiring together the per-request :class:`~sqlalchemy.ext.asyncio.AsyncSession`
-    (from :func:`app.database.get_db_session`) and the Harbor singleton
-    (from :func:`get_harbor_client`).
+get_model_registration_service / get_dataset_registration_service
+    Build registration services per request: :class:`~sqlalchemy.ext.asyncio.AsyncSession`
+    plus Harbor client for pre-flight artifact verification.
 
-get_model_query_service
-    Builds a :class:`~app.services.models.ModelQueryService` per request,
-    wiring the per-request :class:`~sqlalchemy.ext.asyncio.AsyncSession`
-    (from :func:`app.database.get_db_session`).
+get_model_query_service / get_dataset_query_service
+    Build read-only query services (session only): version lookup, catalog lists,
+    artifact-level metadata GET.
 
-get_dataset_registration_service
-    Builds a :class:`~app.services.models.DatasetRegistrationService` per request,
-    wiring the per-request :class:`~sqlalchemy.ext.asyncio.AsyncSession`
-    (from :func:`app.database.get_db_session`) and the Harbor singleton
-    (from :func:`get_harbor_client`).
+get_model_update_service / get_dataset_update_service
+    Build metadata / version JSONB update services (session only): PUT artifact
+    metadata, PATCH version metadata — PostgreSQL only, no Harbor.
 
-get_model_deletion_service
-    Builds a :class:`~app.services.models.ModelDeletionService` per request,
-    wiring the per-request :class:`~sqlalchemy.ext.asyncio.AsyncSession`
-    (from :func:`app.database.get_db_session`).
-
-get_dataset_deletion_service
-    Builds a :class:`~app.services.models.DatasetDeletionService` per request,
-    wiring the per-request :class:`~sqlalchemy.ext.asyncio.AsyncSession`
-    (from :func:`app.database.get_db_session`).
+get_model_deletion_service / get_dataset_deletion_service
+    Build deletion services (session only): remove a single version row.
 
 Usage::
 
@@ -63,10 +51,12 @@ from app.harbor import HarborClient, harbor_client
 from app.services.models import (
     DatasetDeletionService,
     DatasetQueryService,
+    DatasetUpdateService,
     DatasetRegistrationService,
     ModelDeletionService,
     ModelQueryService,
     ModelRegistrationService,
+    ModelUpdateService,
 )
 
 
@@ -104,6 +94,23 @@ def get_model_query_service(
     return ModelQueryService(session=session)
 
 
+def get_model_update_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ModelUpdateService:
+    """Construct a :class:`~app.services.models.ModelUpdateService` per request.
+
+    Wires the per-request :class:`~sqlalchemy.ext.asyncio.AsyncSession`.
+    """
+    return ModelUpdateService(session=session)
+
+
+def get_model_deletion_service(
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ModelDeletionService:
+    """Construct a :class:`~app.services.models.ModelDeletionService` per request."""
+    return ModelDeletionService(session=session)
+
+
 def get_dataset_registration_service(
     session: Annotated[AsyncSession, Depends(get_db_session)],
     harbor: Annotated[HarborClient, Depends(get_harbor_client)],
@@ -123,11 +130,11 @@ def get_dataset_query_service(
     return DatasetQueryService(session=session)
 
 
-def get_model_deletion_service(
+def get_dataset_update_service(
     session: Annotated[AsyncSession, Depends(get_db_session)],
-) -> ModelDeletionService:
-    """Construct a :class:`~app.services.models.ModelDeletionService` per request."""
-    return ModelDeletionService(session=session)
+) -> DatasetUpdateService:
+    """Construct a :class:`~app.services.models.DatasetUpdateService` per request."""
+    return DatasetUpdateService(session=session)
 
 
 def get_dataset_deletion_service(

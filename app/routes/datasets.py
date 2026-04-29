@@ -8,11 +8,14 @@ from app.dependencies import (
     get_dataset_deletion_service,
     get_dataset_query_service,
     get_dataset_registration_service,
+    get_dataset_update_service,
 )
 from app.exceptions import (
     DatasetNotFoundError,
     DatasetVersionNotFoundError,
     InvalidArtifactNameError,
+    InvalidLineageReferenceError,
+    LineageReferenceNotFoundError,
 )
 from app.pagination import resolve_list_pagination
 from app.routes._artifact_list_params import (
@@ -26,15 +29,20 @@ from app.schemas.artifacts import (
     ArtifactSummary,
 )
 from app.schemas.datasets import (
+    GetDatasetMetadataResponse,
     GetDatasetVersionResponse,
     ListDatasetVersionsResponse,
     RegisterDatasetVersionRequest,
     RegisterDatasetVersionResponse,
+    UpdateDatasetMetadataRequest,
+    UpdateDatasetVersionRequest,
+    UpdateDatasetVersionResponse,
 )
 from app.services.models import (
     DatasetDeletionService,
     DatasetQueryService,
     DatasetRegistrationService,
+    DatasetUpdateService,
 )
 
 router = APIRouter(prefix="/api/datasets")
@@ -102,6 +110,50 @@ async def get_dataset_version(
 ) -> GetDatasetVersionResponse:
     try:
         return await service.get_dataset_version(name=name, version=version)
+    except InvalidArtifactNameError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail)
+    except (DatasetNotFoundError, DatasetVersionNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=exc.detail)
+
+
+@router.get("/{name}", status_code=200)
+async def get_dataset_metadata(
+    name: str,
+    service: Annotated[DatasetQueryService, Depends(get_dataset_query_service)],
+) -> GetDatasetMetadataResponse:
+    try:
+        return await service.get_dataset_metadata(name=name)
+    except InvalidArtifactNameError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail)
+    except DatasetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=exc.detail)
+
+
+@router.put("/{name}", status_code=200)
+async def update_dataset_metadata(
+    name: str,
+    request: UpdateDatasetMetadataRequest,
+    service: Annotated[DatasetUpdateService, Depends(get_dataset_update_service)],
+) -> GetDatasetMetadataResponse:
+    try:
+        return await service.update_dataset_metadata(name=name, request=request)
+    except (InvalidArtifactNameError, InvalidLineageReferenceError) as exc:
+        raise HTTPException(status_code=422, detail=exc.detail)
+    except (DatasetNotFoundError, LineageReferenceNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=exc.detail)
+
+
+@router.patch("/{name}/versions/{version}", status_code=200)
+async def update_dataset_version(
+    name: str,
+    version: str,
+    request: UpdateDatasetVersionRequest,
+    service: Annotated[DatasetUpdateService, Depends(get_dataset_update_service)],
+) -> UpdateDatasetVersionResponse:
+    try:
+        return await service.update_dataset_version(
+            name=name, version=version, request=request
+        )
     except InvalidArtifactNameError as exc:
         raise HTTPException(status_code=422, detail=exc.detail)
     except (DatasetNotFoundError, DatasetVersionNotFoundError) as exc:

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from app.exceptions import (
     ArtifactCategoryConflictError,
@@ -31,14 +32,21 @@ from app.harbor import (
     HarborAuthError,
     HarborConnectionError,
 )
-from app.repositories.artifacts import ArtifactVersionRecord
-from app.schemas.models import RegisterModelVersionRequest
+from app.repositories.artifacts import ArtifactMetadataRecord, ArtifactVersionRecord
+from app.schemas.datasets import UpdateDatasetMetadataRequest
+from app.schemas.models import (
+    LineageMetadata,
+    RegisterModelVersionRequest,
+    UpdateModelMetadataRequest,
+)
 from app.services.models import (
     DatasetDeletionService,
     DatasetQueryService,
+    DatasetUpdateService,
     ModelDeletionService,
     ModelQueryService,
     ModelRegistrationService,
+    ModelUpdateService,
 )
 
 # Context-manager helper used by many tests.
@@ -93,6 +101,7 @@ def _make_repo_mock(
     else:
         repo.insert_artifact_version.return_value = None
     repo.touch_artifact_updated_at.return_value = None
+    repo.delete_artifact_version.return_value = None
     return repo
 
 
@@ -174,6 +183,30 @@ async def _dataset_delete_svc(*, repo_overrides=None):
 
     with patch("app.services.models.ArtifactRepository", return_value=mock_repo):
         svc = DatasetDeletionService(session=AsyncMock())
+        yield svc, mock_repo
+
+
+@asynccontextmanager
+async def _model_update_svc(*, repo_overrides=None):
+    mock_repo = _make_repo_mock()
+    if repo_overrides:
+        for attr, val in repo_overrides.items():
+            setattr(mock_repo, attr, val)
+
+    with patch("app.services.models.ArtifactRepository", return_value=mock_repo):
+        svc = ModelUpdateService(session=AsyncMock())
+        yield svc, mock_repo
+
+
+@asynccontextmanager
+async def _dataset_update_svc(*, repo_overrides=None):
+    mock_repo = _make_repo_mock()
+    if repo_overrides:
+        for attr, val in repo_overrides.items():
+            setattr(mock_repo, attr, val)
+
+    with patch("app.services.models.ArtifactRepository", return_value=mock_repo):
+        svc = DatasetUpdateService(session=AsyncMock())
         yield svc, mock_repo
 
 
@@ -476,6 +509,214 @@ async def test_list_model_versions_not_found_propagates():
     ) as (svc, __):
         with pytest.raises(ModelNotFoundError):
             await svc.list_model_versions("mymodel")
+
+
+async def test_get_model_metadata_success_maps_metadata_sections():
+    record = ArtifactMetadataRecord(
+        name="mymodel",
+        category="model",
+        description="Classifier",
+        metadata={
+            "training_config": {"epochs": 3},
+            "eval_metrics": {"accuracy": 0.98},
+            "lineage": {
+                "parent_model": "mymodel:v2",
+                "source_dataset": "iris-tickets:v3",
+                "source_trainer": "supernova-job-12345",
+            },
+        },
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        versions_count=3,
+    )
+
+    async with _query_svc(
+        repo_overrides={"get_artifact_metadata": AsyncMock(return_value=record)}
+    ) as (svc, __):
+        result = await svc.get_model_metadata("mymodel")
+
+    assert result.description == "Classifier"
+    assert result.training_config == {"epochs": 3}
+    assert result.eval_metrics == {"accuracy": 0.98}
+    assert result.lineage is not None
+    assert result.lineage.source_trainer == "supernova-job-12345"
+
+
+async def test_get_model_metadata_invalid_name_raises():
+    async with _query_svc() as (svc, __):
+        with pytest.raises(InvalidArtifactNameError):
+            await svc.get_model_metadata("BAD")
+
+
+async def test_update_model_metadata_partial_merge_keeps_existing_sections():
+    current = ArtifactMetadataRecord(
+        name="mymodel",
+        category="model",
+        description="old desc",
+        metadata={
+            "training_config": {"epochs": 3},
+            "eval_metrics": {"loss": 0.2},
+            "lineage": {
+                "parent_model": "mymodel:v1",
+                "source_dataset": "iris-tickets:v1",
+                "source_trainer": "old-job",
+            },
+        },
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        versions_count=3,
+    )
+    updated = ArtifactMetadataRecord(
+        name="mymodel",
+        category="model",
+        description="old desc",
+        metadata={
+            "training_config": {"epochs": 3},
+            "eval_metrics": {"accuracy": 0.95},
+            "lineage": {
+                "parent_model": "mymodel:v2",
+                "source_dataset": "iris-tickets:v2",
+                "source_trainer": "supernova-job-12345",
+            },
+        },
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        versions_count=3,
+    )
+
+    update_mock = AsyncMock(return_value=updated)
+    ref_exists = AsyncMock(side_effect=[True, True])
+
+    async with _model_update_svc(
+        repo_overrides={
+            "get_artifact_metadata": AsyncMock(return_value=current),
+            "update_artifact_metadata": update_mock,
+            "artifact_version_reference_exists": ref_exists,
+        }
+    ) as (svc, repo):
+        result = await svc.update_model_metadata(
+            "mymodel",
+            UpdateModelMetadataRequest(
+                eval_metrics={"accuracy": 0.95},
+                lineage=LineageMetadata(
+                    parent_model="mymodel:v2",
+                    source_dataset="iris-tickets:v2",
+                    source_trainer="supernova-job-12345",
+                ),
+            ),
+        )
+
+    repo.get_artifact_metadata.assert_awaited_once_with(
+        category="model",
+        name="mymodel",
+    )
+    update_mock.assert_awaited_once_with(
+        category="model",
+        name="mymodel",
+        description=None,
+        set_description=False,
+        raw_metadata={
+            "training_config": {"epochs": 3},
+            "eval_metrics": {"accuracy": 0.95},
+            "lineage": {
+                "parent_model": "mymodel:v2",
+                "source_dataset": "iris-tickets:v2",
+                "source_trainer": "supernova-job-12345",
+            },
+        },
+        set_metadata=True,
+    )
+    assert ref_exists.await_count == 2
+    assert result.lineage is not None
+    assert result.lineage.source_trainer == "supernova-job-12345"
+
+
+async def test_update_model_metadata_rejects_invalid_lineage_reference_format():
+    current = ArtifactMetadataRecord(
+        name="mymodel",
+        category="model",
+        description="old desc",
+        metadata={},
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        versions_count=1,
+    )
+
+    async with _model_update_svc(
+        repo_overrides={
+            "get_artifact_metadata": AsyncMock(return_value=current),
+            "update_artifact_metadata": AsyncMock(),
+        }
+    ) as (svc, repo):
+        with pytest.raises(ValidationError):
+            await svc.update_model_metadata(
+                "mymodel",
+                UpdateModelMetadataRequest(
+                    lineage=LineageMetadata(parent_model="invalid-format"),
+                ),
+            )
+
+    repo.update_artifact_metadata.assert_not_awaited()
+
+
+async def test_get_dataset_metadata_success_maps_metadata_sections():
+    record = ArtifactMetadataRecord(
+        name="iris-tickets",
+        category="dataset",
+        description="Dataset",
+        metadata={
+            "training_config": {"format": "parquet"},
+            "lineage": {"source_trainer": "supernova-job-12345"},
+        },
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        versions_count=2,
+    )
+
+    async with _dataset_query_svc(
+        repo_overrides={"get_artifact_metadata": AsyncMock(return_value=record)}
+    ) as (svc, __):
+        result = await svc.get_dataset_metadata("iris-tickets")
+
+    assert result.training_config == {"format": "parquet"}
+    assert result.lineage is not None
+    assert result.lineage.source_trainer == "supernova-job-12345"
+
+
+async def test_update_dataset_metadata_description_only_skips_latest_metadata_update():
+    current = ArtifactMetadataRecord(
+        name="iris-tickets",
+        category="dataset",
+        description="old",
+        metadata={"training_config": {"format": "json"}},
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        versions_count=2,
+    )
+    updated = ArtifactMetadataRecord(
+        name="iris-tickets",
+        category="dataset",
+        description="new",
+        metadata={"training_config": {"format": "json"}},
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        versions_count=2,
+    )
+
+    update_mock = AsyncMock(return_value=updated)
+
+    async with _dataset_update_svc(
+        repo_overrides={
+            "get_artifact_metadata": AsyncMock(return_value=current),
+            "update_artifact_metadata": update_mock,
+        }
+    ) as (svc, __):
+        await svc.update_dataset_metadata(
+            "iris-tickets",
+            UpdateDatasetMetadataRequest(description="new"),
+        )
+
+    update_mock.assert_awaited_once_with(
+        category="dataset",
+        name="iris-tickets",
+        description="new",
+        set_description=True,
+        raw_metadata=None,
+        set_metadata=False,
+    )
 
 
 async def test_get_dataset_version_success():

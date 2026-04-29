@@ -16,12 +16,15 @@ from app.dependencies import (
     get_model_deletion_service,
     get_model_query_service,
     get_model_registration_service,
+    get_model_update_service,
 )
 from app.exceptions import (
     ArtifactCategoryConflictError,
     ArtifactNotFoundInHarborError,
     HarborVerificationError,
     InvalidArtifactNameError,
+    InvalidLineageReferenceError,
+    LineageReferenceNotFoundError,
     ModelNotFoundError,
     ModelVersionNotFoundError,
     VersionAlreadyExistsError,
@@ -29,7 +32,9 @@ from app.exceptions import (
 from app.routes.models import router
 from app.schemas.artifacts import ArtifactListResponse, ArtifactSummary
 from app.schemas.models import (
+    GetModelMetadataResponse,
     GetModelVersionResponse,
+    LineageMetadata,
     ListModelVersionsResponse,
     ModelVersionListItem,
     RegisterModelVersionResponse,
@@ -79,6 +84,21 @@ _SUCCESS_LIST_RESPONSE = ListModelVersionsResponse(
     ]
 )
 
+_SUCCESS_METADATA_RESPONSE = GetModelMetadataResponse(
+    name="mymodel",
+    category="model",
+    description="OSL classifier",
+    training_config={"epochs": 3},
+    eval_metrics={"accuracy": 0.98},
+    lineage=LineageMetadata(
+        parent_model="mymodel:v2",
+        source_dataset="iris-tickets:v3",
+        source_trainer="supernova-job-12345",
+    ),
+    created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+    versions_count=3,
+)
+
 
 def _make_post_client(return_value=None, side_effect=None) -> TestClient:
     """Return a TestClient with ``ModelRegistrationService`` mocked for POST tests."""
@@ -90,6 +110,11 @@ def _make_post_client(return_value=None, side_effect=None) -> TestClient:
         return_value=return_value,
         side_effect=side_effect,
     )
+    mock_service.update_model_metadata = AsyncMock(
+        return_value=return_value,
+        side_effect=side_effect,
+    )
+    mock_service.delete_model_version = AsyncMock(side_effect=side_effect)
     app.dependency_overrides[get_model_registration_service] = lambda: mock_service
 
     return TestClient(app, raise_server_exceptions=False)
@@ -100,6 +125,8 @@ def _make_get_client(
     get_side_effect=None,
     list_return_value=None,
     list_side_effect=None,
+    metadata_return_value=None,
+    metadata_side_effect=None,
 ) -> TestClient:
     """Return a TestClient with ``ModelQueryService`` mocked for GET tests."""
     app = FastAPI()
@@ -114,7 +141,25 @@ def _make_get_client(
         return_value=list_return_value,
         side_effect=list_side_effect,
     )
+    mock_service.get_model_metadata = AsyncMock(
+        return_value=metadata_return_value,
+        side_effect=metadata_side_effect,
+    )
     app.dependency_overrides[get_model_query_service] = lambda: mock_service
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def _make_metadata_put_client(return_value=None, side_effect=None) -> TestClient:
+    app = FastAPI()
+    app.include_router(router)
+
+    mock_service = MagicMock()
+    mock_service.update_model_metadata = AsyncMock(
+        return_value=return_value,
+        side_effect=side_effect,
+    )
+    app.dependency_overrides[get_model_update_service] = lambda: mock_service
 
     return TestClient(app, raise_server_exceptions=False)
 
@@ -271,6 +316,71 @@ def test_list_model_versions_invalid_name_returns_422():
         list_side_effect=InvalidArtifactNameError("bad name"),
     )
     resp = client.get("/api/models/BAD/versions")
+
+    assert resp.status_code == 422
+
+
+def test_get_model_metadata_returns_200_on_success():
+    client = _make_get_client(metadata_return_value=_SUCCESS_METADATA_RESPONSE)
+    resp = client.get("/api/models/mymodel")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["name"] == "mymodel"
+    assert data["description"] == "OSL classifier"
+    assert data["lineage"]["source_trainer"] == "supernova-job-12345"
+
+
+def test_get_model_metadata_not_found_returns_404():
+    client = _make_get_client(metadata_side_effect=ModelNotFoundError("missing model"))
+    resp = client.get("/api/models/mymodel")
+
+    assert resp.status_code == 404
+
+
+def test_get_model_metadata_invalid_name_returns_422():
+    client = _make_get_client(
+        metadata_side_effect=InvalidArtifactNameError("bad name"),
+    )
+    resp = client.get("/api/models/BAD")
+
+    assert resp.status_code == 422
+
+
+def test_put_model_metadata_returns_200_on_success():
+    client = _make_metadata_put_client(return_value=_SUCCESS_METADATA_RESPONSE)
+    resp = client.put(
+        "/api/models/mymodel",
+        json={
+            "description": "OSL classifier",
+            "training_config": {"epochs": 3},
+            "eval_metrics": {"accuracy": 0.98},
+            "lineage": {
+                "parent_model": "mymodel:v2",
+                "source_dataset": "iris-tickets:v3",
+                "source_trainer": "supernova-job-12345",
+            },
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["lineage"]["source_trainer"] == "supernova-job-12345"
+
+
+def test_put_model_metadata_not_found_returns_404():
+    client = _make_metadata_put_client(
+        side_effect=LineageReferenceNotFoundError("missing reference"),
+    )
+    resp = client.put("/api/models/mymodel", json={"lineage": {"parent_model": "x:v1"}})
+
+    assert resp.status_code == 404
+
+
+def test_put_model_metadata_invalid_lineage_returns_422():
+    client = _make_metadata_put_client(
+        side_effect=InvalidLineageReferenceError("bad lineage"),
+    )
+    resp = client.put("/api/models/mymodel", json={"lineage": {"parent_model": "bad"}})
 
     assert resp.status_code == 422
 

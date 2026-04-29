@@ -8,9 +8,12 @@ from app.dependencies import (
     get_model_deletion_service,
     get_model_query_service,
     get_model_registration_service,
+    get_model_update_service,
 )
 from app.exceptions import (
     InvalidArtifactNameError,
+    InvalidLineageReferenceError,
+    LineageReferenceNotFoundError,
     ModelNotFoundError,
     ModelVersionNotFoundError,
 )
@@ -26,14 +29,19 @@ from app.schemas.artifacts import (
     ArtifactSummary,
 )
 from app.schemas.models import (
+    GetModelMetadataResponse,
     GetModelVersionResponse,
     ListModelVersionsResponse,
+    UpdateModelMetadataRequest,
     RegisterModelVersionRequest,
     RegisterModelVersionResponse,
+    UpdateModelVersionResponse,
+    UpdateModelVersionRequest,
 )
 from app.services.models import (
     ModelDeletionService,
     ModelQueryService,
+    ModelUpdateService,
     ModelRegistrationService,
 )
 
@@ -102,6 +110,50 @@ async def get_model_version(
 ) -> GetModelVersionResponse:
     try:
         return await service.get_model_version(name=name, version=version)
+    except InvalidArtifactNameError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail)
+    except (ModelNotFoundError, ModelVersionNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=exc.detail)
+
+
+@router.get("/{name}", status_code=200)
+async def get_model_metadata(
+    name: str,
+    service: Annotated[ModelQueryService, Depends(get_model_query_service)],
+) -> GetModelMetadataResponse:
+    try:
+        return await service.get_model_metadata(name=name)
+    except InvalidArtifactNameError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail)
+    except ModelNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=exc.detail)
+
+
+@router.put("/{name}", status_code=200)
+async def update_model_metadata(
+    name: str,
+    request: UpdateModelMetadataRequest,
+    service: Annotated[ModelUpdateService, Depends(get_model_update_service)],
+) -> GetModelMetadataResponse:
+    try:
+        return await service.update_model_metadata(name=name, request=request)
+    except (InvalidArtifactNameError, InvalidLineageReferenceError) as exc:
+        raise HTTPException(status_code=422, detail=exc.detail)
+    except (ModelNotFoundError, LineageReferenceNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=exc.detail)
+
+
+@router.patch("/{name}/versions/{version}", status_code=200)
+async def update_model_version(
+    name: str,
+    version: str,
+    request: UpdateModelVersionRequest,
+    service: Annotated[ModelUpdateService, Depends(get_model_update_service)],
+) -> UpdateModelVersionResponse:
+    try:
+        return await service.update_model_version(
+            name=name, version=version, request=request
+        )
     except InvalidArtifactNameError as exc:
         raise HTTPException(status_code=422, detail=exc.detail)
     except (ModelNotFoundError, ModelVersionNotFoundError) as exc:

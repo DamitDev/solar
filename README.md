@@ -23,6 +23,7 @@ docker compose up -d
 - **Swagger UI**: `http://localhost:8000/docs`
 - **Health Check**: `http://localhost:8000/health`
 - **Catalog lists**: `GET /api/artifacts` (kötelező `category`: `model` vagy `dataset`), `GET /api/models`, `GET /api/datasets` — lapozás (`limit`/`offset` vagy `page`/`page_size`), opcionális `search` (részletes leírás: `docs/schema.md`)
+- **Artifact metadata (catalog / WebUI)**: `GET` és `PUT` `/api/models/{name}` és `/api/datasets/{name}` — PostgreSQL metaadat (leírás, `training_config`, `eval_metrics`, `lineage`, verziók száma); nem módosít Harbor blobokat (részletek: `docs/schema.md` → *HTTP artifact metadata*)
 
 ---
 

@@ -10,7 +10,7 @@ executing SQL.
 
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Sequence
 
@@ -67,6 +67,16 @@ class ArtifactListRecord:
     versions_count: int
     latest_version: str | None
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class ArtifactMetadataRecord:
+    name: str
+    category: str
+    description: str | None
+    created_at: datetime
+    versions_count: int
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class ArtifactRepository:
@@ -272,6 +282,209 @@ class ArtifactRepository:
             not_found_exc=DatasetNotFoundError,
             version_not_found_exc=DatasetVersionNotFoundError,
         )
+
+    async def get_artifact_metadata(
+        self,
+        *,
+        category: ArtifactCategory,
+        name: str,
+    ) -> ArtifactMetadataRecord:
+        artifact_row = await self._get_artifact_row(name=name, category=category)
+
+        versions_count_result = await self._session.execute(
+            select(func.count())
+            .select_from(ArtifactVersion)
+            .where(ArtifactVersion.artifact_id == artifact_row.id)
+        )
+        versions_count = int(versions_count_result.scalar_one())
+
+        latest_result = await self._session.execute(
+            select(ArtifactVersion.metadata_)
+            .where(ArtifactVersion.artifact_id == artifact_row.id)
+            .order_by(
+                ArtifactVersion.created_at.desc(),
+                ArtifactVersion.id.desc(),
+            )
+            .limit(1)
+        )
+        latest_row = latest_result.fetchone()
+
+        return ArtifactMetadataRecord(
+            name=artifact_row.name,
+            category=artifact_row.category,
+            description=artifact_row.description,
+            created_at=artifact_row.created_at,
+            versions_count=versions_count,
+            metadata=(latest_row.metadata_ or {}) if latest_row is not None else {},
+        )
+
+    async def update_artifact_metadata(
+        self,
+        *,
+        category: ArtifactCategory,
+        name: str,
+        description: str | None,
+        set_description: bool,
+        raw_metadata: dict[str, Any] | None,
+        set_metadata: bool,
+    ) -> ArtifactMetadataRecord:
+        artifact_row = await self._get_artifact_row(name=name, category=category)
+
+        if set_description:
+            await self._session.execute(
+                update(Artifact)
+                .where(Artifact.id == artifact_row.id)
+                .values(
+                    description=description,
+                    updated_at=func.now(),
+                )
+            )
+
+        if set_metadata:
+            latest_version_result = await self._session.execute(
+                select(ArtifactVersion.id)
+                .where(ArtifactVersion.artifact_id == artifact_row.id)
+                .order_by(
+                    ArtifactVersion.created_at.desc(),
+                    ArtifactVersion.id.desc(),
+                )
+                .limit(1)
+            )
+            latest_version_row = latest_version_result.fetchone()
+            if latest_version_row is not None:
+                await self._session.execute(
+                    update(ArtifactVersion)
+                    .where(ArtifactVersion.id == latest_version_row.id)
+                    .values(metadata_=(raw_metadata or {}))
+                )
+        return await self.get_artifact_metadata(category=category, name=name)
+
+    async def artifact_version_reference_exists(
+        self,
+        *,
+        name: str,
+        version: str,
+        category: ArtifactCategory | None = None,
+    ) -> bool:
+        stmt = (
+            select(ArtifactVersion.id)
+            .join(Artifact, ArtifactVersion.artifact_id == Artifact.id)
+            .where(
+                Artifact.name == name,
+                ArtifactVersion.version == version,
+            )
+        )
+        if category is not None:
+            stmt = stmt.where(Artifact.category == category)
+
+        result = await self._session.execute(stmt.limit(1))
+        return result.fetchone() is not None
+
+    async def update_artifact_version_metadata(
+        self,
+        *,
+        category: ArtifactCategory,
+        name: str,
+        version: str,
+        metadata: dict[str, Any],
+    ) -> ArtifactVersionRecord:
+        current = await self._get_artifact_version(
+            name=name,
+            version=version,
+            category=category,
+            not_found_exc=self._artifact_not_found_exception(category),
+            version_not_found_exc=self._artifact_version_not_found_exception(category),
+        )
+
+        stmt = (
+            update(ArtifactVersion)
+            .where(
+                ArtifactVersion.version == current.version,
+                ArtifactVersion.artifact_id.in_(
+                    select(Artifact.id).where(
+                        Artifact.name == name,
+                        Artifact.category == category,
+                    )
+                ),
+            )
+            .values(metadata_=metadata)
+            .returning(
+                ArtifactVersion.version,
+                ArtifactVersion.harbor_ref,
+                ArtifactVersion.size_bytes,
+                ArtifactVersion.digest,
+                ArtifactVersion.created_at,
+                ArtifactVersion.metadata_,
+            )
+        )
+        result = await self._session.execute(stmt)
+        row = result.fetchone()
+        if row is None:
+            raise self._artifact_version_not_found_exception(category)(
+                f"Version '{current.version}' was not found for {category} '{name}'."
+            )
+
+        return ArtifactVersionRecord(
+            name=name,
+            version=row.version,
+            category=category,
+            harbor_ref=row.harbor_ref,
+            size_bytes=row.size_bytes,
+            checksum=row.digest,
+            created_at=row.created_at,
+            metadata=row.metadata_ or {},
+        )
+
+    async def _get_artifact_row(
+        self,
+        *,
+        name: str,
+        category: ArtifactCategory,
+    ) -> Row[Any]:
+        result = await self._session.execute(
+            select(
+                Artifact.id,
+                Artifact.name,
+                Artifact.category,
+                Artifact.description,
+                Artifact.created_at,
+            ).where(
+                Artifact.name == name,
+                Artifact.category == category,
+            )
+        )
+        row = result.fetchone()
+        if row is not None:
+            return row
+
+        exists_row = await self._fetch_artifact_identity(name)
+        if exists_row is None or exists_row.category != category:
+            label = category.capitalize()
+            raise self._artifact_not_found_exception(category)(
+                f"{label} '{name}' was not found."
+            )
+
+        # Defensive fallback for a stale read between checks.
+        label = category.capitalize()
+        raise self._artifact_not_found_exception(category)(
+            f"{label} '{name}' was not found."
+        )
+
+    @staticmethod
+    def _artifact_not_found_exception(
+        category: ArtifactCategory,
+    ) -> type[ModelNotFoundError] | type[DatasetNotFoundError]:
+        if category == "model":
+            return ModelNotFoundError
+        return DatasetNotFoundError
+
+    @staticmethod
+    def _artifact_version_not_found_exception(
+        category: ArtifactCategory,
+    ) -> type[ModelVersionNotFoundError] | type[DatasetVersionNotFoundError]:
+        if category == "model":
+            return ModelVersionNotFoundError
+        return DatasetVersionNotFoundError
 
     async def _get_artifact_version(
         self,

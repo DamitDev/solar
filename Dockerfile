@@ -25,7 +25,8 @@ COPY alembic.ini ./
 COPY entrypoint.sh ./
 COPY app/ ./app/
 
-RUN chmod +x entrypoint.sh && \
+RUN sed -i 's/\r$//' entrypoint.sh && \
+    chmod +x entrypoint.sh && \
     useradd --create-home --uid 1000 appuser && \
     chown -R appuser:appuser /app
 

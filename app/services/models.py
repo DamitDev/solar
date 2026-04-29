@@ -24,9 +24,10 @@ call global singleton accessors.
 """
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import logging
 import re
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +36,8 @@ from app.exceptions import (
     ArtifactNotFoundInHarborError,
     HarborVerificationError,
     InvalidArtifactNameError,
+    InvalidLineageReferenceError,
+    LineageReferenceNotFoundError,
 )
 from app.harbor import (
     ArtifactNotFoundError,
@@ -44,27 +47,49 @@ from app.harbor import (
     HarborConnectionError,
 )
 from app.catalog_search import normalize_artifact_list_search
-from app.repositories.artifacts import ArtifactRepository
+from app.repositories.artifacts import ArtifactMetadataRecord, ArtifactRepository
 from app.schemas.artifacts import ArtifactListResponse, ArtifactSummary
 from app.schemas.datasets import (
     DatasetVersionListItem,
+    GetDatasetMetadataResponse,
     GetDatasetVersionResponse,
     ListDatasetVersionsResponse,
     RegisterDatasetVersionRequest,
     RegisterDatasetVersionResponse,
+    UpdateDatasetMetadataRequest,
+    UpdateDatasetVersionRequest,
+    UpdateDatasetVersionResponse,
 )
 from app.schemas.models import (
+    GetModelMetadataResponse,
     GetModelVersionResponse,
+    LineageMetadata,
     ListModelVersionsResponse,
     ModelVersionListItem,
     RegisterModelVersionRequest,
     RegisterModelVersionResponse,
+    UpdateModelMetadataRequest,
+    UpdateModelVersionRequest,
+    UpdateModelVersionResponse,
 )
 from app.types import ArtifactCategory
 
 logger = logging.getLogger(__name__)
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,254}$")
+_ARTIFACT_REF_RE = re.compile(
+    r"^(?P<name>[a-z0-9][a-z0-9._-]{0,254}):"
+    r"(?P<version>[A-Za-z0-9][A-Za-z0-9._-]{0,127})$"
+)
+
+
+def _extract_metadata_sections(
+    metadata: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
+    training_config = _extract_object_metadata(metadata, "training_config")
+    eval_metrics = _extract_object_metadata(metadata, "eval_metrics")
+    lineage = _extract_object_metadata(metadata, "lineage")
+    return training_config, eval_metrics, lineage
 
 
 def _validate_artifact_name(name: str) -> None:
@@ -82,6 +107,47 @@ def _validate_artifact_name(name: str) -> None:
         )
 
 
+def _parse_artifact_reference(ref: str) -> tuple[str, str]:
+    match = _ARTIFACT_REF_RE.fullmatch(ref)
+    if match is None:
+        raise InvalidLineageReferenceError(
+            f"Lineage reference '{ref}' must use 'name:version' format."
+        )
+    name = match.group("name")
+    version = match.group("version")
+    if version.lower() == "latest":
+        raise InvalidLineageReferenceError(
+            "Lineage references must use an exact version, not 'latest'."
+        )
+    return name, version
+
+
+async def _validate_lineage_references(
+    repo: ArtifactRepository,
+    lineage: dict[str, str],
+) -> None:
+    fields_to_validate: tuple[tuple[str, ArtifactCategory], ...] = (
+        ("parent_model", "model"),
+        ("source_dataset", "dataset"),
+    )
+
+    for field_name, category in fields_to_validate:
+        ref = lineage.get(field_name)
+        if ref is None:
+            continue
+
+        name, version = _parse_artifact_reference(ref)
+        exists = await repo.artifact_version_reference_exists(
+            name=name,
+            version=version,
+            category=category,
+        )
+        if not exists:
+            raise LineageReferenceNotFoundError(
+                f"Lineage reference '{ref}' for '{field_name}' was not found."
+            )
+
+
 def _extract_object_metadata(
     metadata: dict[str, Any],
     key: str,
@@ -94,6 +160,106 @@ def _extract_object_metadata(
     """
     value = metadata.get(key)
     return value if isinstance(value, dict) else None
+
+
+def _to_model_metadata_response(
+    record: ArtifactMetadataRecord,
+) -> GetModelMetadataResponse:
+    training_config, eval_metrics, lineage = _extract_metadata_sections(record.metadata)
+
+    return GetModelMetadataResponse(
+        name=record.name,
+        category=record.category,
+        description=record.description,
+        training_config=training_config,
+        eval_metrics=eval_metrics,
+        lineage=(
+            LineageMetadata.model_validate(lineage) if lineage is not None else None
+        ),
+        created_at=record.created_at,
+        versions_count=record.versions_count,
+    )
+
+
+def _to_dataset_metadata_response(
+    record: ArtifactMetadataRecord,
+) -> GetDatasetMetadataResponse:
+    training_config, eval_metrics, lineage = _extract_metadata_sections(record.metadata)
+
+    return GetDatasetMetadataResponse(
+        name=record.name,
+        category=record.category,
+        description=record.description,
+        training_config=training_config,
+        eval_metrics=eval_metrics,
+        lineage=(
+            LineageMetadata.model_validate(lineage) if lineage is not None else None
+        ),
+        created_at=record.created_at,
+        versions_count=record.versions_count,
+    )
+
+
+class MetadataUpdateRequest(Protocol):
+    description: str | None
+    training_config: dict[str, Any] | None
+    eval_metrics: dict[str, Any] | None
+    lineage: LineageMetadata | None
+    model_fields_set: set[str]
+
+
+async def _update_artifact_metadata(
+    repo: ArtifactRepository,
+    *,
+    category: ArtifactCategory,
+    name: str,
+    request: MetadataUpdateRequest,
+) -> ArtifactMetadataRecord:
+    _validate_artifact_name(name)
+
+    current = await repo.get_artifact_metadata(category=category, name=name)
+    merged_metadata = dict(current.metadata)
+
+    lineage_dict: dict[str, str] | None = None
+    should_set_lineage = "lineage" in request.model_fields_set
+    if should_set_lineage and request.lineage is not None:
+        lineage_dict = cast(
+            dict[str, str],
+            request.lineage.model_dump(exclude_none=True),
+        )
+        await _validate_lineage_references(repo, lineage_dict)
+
+    if "training_config" in request.model_fields_set:
+        if request.training_config is None:
+            merged_metadata.pop("training_config", None)
+        else:
+            merged_metadata["training_config"] = request.training_config
+
+    if "eval_metrics" in request.model_fields_set:
+        if request.eval_metrics is None:
+            merged_metadata.pop("eval_metrics", None)
+        else:
+            merged_metadata["eval_metrics"] = request.eval_metrics
+
+    if should_set_lineage:
+        if lineage_dict is None:
+            merged_metadata.pop("lineage", None)
+        else:
+            merged_metadata["lineage"] = lineage_dict
+
+    set_metadata = any(
+        key in request.model_fields_set
+        for key in ("training_config", "eval_metrics", "lineage")
+    )
+
+    return await repo.update_artifact_metadata(
+        category=category,
+        name=name,
+        description=request.description,
+        set_description="description" in request.model_fields_set,
+        raw_metadata=merged_metadata if set_metadata else None,
+        set_metadata=set_metadata,
+    )
 
 
 class ArtifactRegistrationRequest(Protocol):
@@ -360,6 +526,11 @@ class ModelQueryService:
 
         return ArtifactListResponse(total=total, items=items)
 
+    async def get_model_metadata(self, name: str) -> GetModelMetadataResponse:
+        _validate_artifact_name(name)
+        record = await self._repo.get_artifact_metadata(category="model", name=name)
+        return _to_model_metadata_response(record)
+
 
 class DatasetQueryService:
     """Read-only dataset query operations using injected dependencies."""
@@ -453,6 +624,98 @@ class DatasetQueryService:
         ]
 
         return ArtifactListResponse(total=total, items=items)
+
+    async def get_dataset_metadata(self, name: str) -> GetDatasetMetadataResponse:
+        _validate_artifact_name(name)
+        record = await self._repo.get_artifact_metadata(category="dataset", name=name)
+        return _to_dataset_metadata_response(record)
+
+
+class BaseArtifactUpdateService:
+    """Shared metadata-update wiring for model and dataset services."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._repo = ArtifactRepository(session)
+
+
+class ModelUpdateService(BaseArtifactUpdateService):
+    async def update_model_metadata(
+        self,
+        name: str,
+        request: UpdateModelMetadataRequest,
+    ) -> GetModelMetadataResponse:
+        record = await _update_artifact_metadata(
+            self._repo,
+            category="model",
+            name=name,
+            request=request,
+        )
+        return _to_model_metadata_response(record)
+
+    async def update_model_version(
+        self,
+        name: str,
+        version: str,
+        request: UpdateModelVersionRequest,
+    ) -> UpdateModelVersionResponse:
+        _validate_artifact_name(name)
+
+        current = await self._repo.get_model_version(name=name, version=version)
+        merged_metadata = dict(current.metadata)
+        merged_metadata.update(request.metadata)
+
+        updated = await self._repo.update_artifact_version_metadata(
+            category="model",
+            name=name,
+            version=current.version,
+            metadata=merged_metadata,
+        )
+        return UpdateModelVersionResponse(
+            name=updated.name,
+            version=updated.version,
+            updated_at=datetime.now(timezone.utc),
+            metadata=updated.metadata,
+        )
+
+
+class DatasetUpdateService(BaseArtifactUpdateService):
+    async def update_dataset_metadata(
+        self,
+        name: str,
+        request: UpdateDatasetMetadataRequest,
+    ) -> GetDatasetMetadataResponse:
+        record = await _update_artifact_metadata(
+            self._repo,
+            category="dataset",
+            name=name,
+            request=request,
+        )
+        return _to_dataset_metadata_response(record)
+
+    async def update_dataset_version(
+        self,
+        name: str,
+        version: str,
+        request: UpdateDatasetVersionRequest,
+    ) -> UpdateDatasetVersionResponse:
+        _validate_artifact_name(name)
+
+        current = await self._repo.get_dataset_version(name=name, version=version)
+        merged_metadata = dict(current.metadata)
+        merged_metadata.update(request.metadata)
+
+        updated = await self._repo.update_artifact_version_metadata(
+            category="dataset",
+            name=name,
+            version=current.version,
+            metadata=merged_metadata,
+        )
+        return UpdateDatasetVersionResponse(
+            name=updated.name,
+            version=updated.version,
+            updated_at=datetime.now(timezone.utc),
+            metadata=updated.metadata,
+        )
 
 
 class BaseArtifactDeletionService:
