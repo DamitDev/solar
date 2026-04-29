@@ -10,3 +10,8 @@ description = "Stateless coordinator for solar-host instances with multi-tenant 
 [tool.setuptools.packages.find]
 include = ["app*"]
 exclude = ["tests*"]
+
+[tool.black]
+target-version = ["py312"]
+line-length = 88
+
