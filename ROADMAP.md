@@ -162,7 +162,7 @@ Enables Solar to autonomously manage resources, migrate instances, and fulfill d
 | N-004 | Implement job submission endpoint. `POST /api/jobs` - validate input (check trainer image tag, verify repo URIs exist via Data Repository, validate steps), create job record, return job ID. | supernova-control | M | N-003, D-014 |
 | N-005 | Implement job queue with priority. Jobs sorted by priority then submission time. `GET /api/jobs/queue` - view queue. | supernova-control | S | N-003 |
 | N-006 | Implement job scheduler. Background task: pick next queued job, query Solar Control for available training resources (`GET /api/resources`), request resource reservation, assign job to host. Handle reservation failures (requeue with backoff). | supernova-control | L | N-005, S-038 |
-| N-007 | Implement model selection strategies. `best_metric`: parse checkpoint eval output, select best by specified metric and direction. `last_checkpoint`: select final checkpoint. | supernova-control | M | - |
+| N-007 | Implement model selection strategies as TrainingArguments passthrough. Support `best_metric` (evaluate by metric + direction, default HuggingFace Trainer behavior) and `last_checkpoint`. Strategy is specified in the training template/config, passed through to the Etalon image's TrainingArguments, and the Etalon image reports the winner in `job.json` → `steps.train.best_checkpoint_path`. (S-021 workspace spec defines the inter-step contract.) | supernova-control | M | - |
 | N-008 | Implement job status endpoints. `GET /api/jobs/{id}` - full status with per-step progress. `GET /api/jobs` - list with filters (status, trainer, date range). | supernova-control | S | N-003 |
 | N-009 | Implement job cancellation. `POST /api/jobs/{id}/cancel` - request cancellation via Solar Control, update state. | supernova-control | S | N-003, S-032 |
 | N-010 | Deploy SuperNova Control to aiops-k8s. Create Helm chart, ArgoCD app, environment values, Postgres schema migration, Solar Control API key config. | supernova-control, aiops-k8s | M | N-001 |
@@ -173,13 +173,13 @@ Enables Solar to autonomously manage resources, migrate instances, and fulfill d
 
 | ID | Issue | Repo | Size | Depends on |
 |----|-------|------|------|------------|
-| N-011 | Implement step pipeline orchestration. Translate job config into step execution commands for Solar Control. Map `steps` array + `base_model`/`training_data` URIs into concrete container configs with args and env vars. | supernova-control | L | N-006, S-032 |
+| N-011 | Implement step pipeline orchestration. Translate job config into step execution commands for Solar Control. Map `steps` array + `base_model`/`training_data` URIs into concrete container configs with args and env vars. **S-021 ref:** Use workspace spec Sections 4.3 (per-step env vars), 5.2 (job.json schema), and 7.3 (training.json derivation) to construct step payloads. | supernova-control | L | N-006, S-032 |
 | N-012 | Implement per-step status tracking. Listen to Solar Control step events (via REST polling or callback), update job_steps table, transition job state machine per step. | supernova-control | M | N-011 |
 | N-013 | Implement training log collection. Store step logs in `job_logs` table. Expose via `GET /api/jobs/{id}/logs?step=train`. | supernova-control | M | N-012 |
-| N-014 | Implement training metric parsing. Parse Etalon console output for eval metrics (loss, F1, accuracy, etc.). Store in `job_metrics` table. Feed into model selection strategy. | supernova-control | M | N-007, N-013 |
-| N-015 | Implement post-training model upload orchestration. After training step completes, apply model selection strategy, trigger `upload_model` step with selected checkpoint. Record artifact version in job metadata. | supernova-control | M | N-014 |
-| N-016 | Build Etalon Docker image for `aiops-categorizer` branch. Dockerfile + GitHub Actions workflow. Push to Harbor as `etalon-categorizer:{tag}`. | etalon, infra | M | - |
-| N-017 | Build Etalon Docker image for `icinga-classifier` branch. Dockerfile + GitHub Actions workflow. Push to Harbor as `etalon-icinga-classifier:{tag}`. | etalon, infra | M | - |
+| N-014 | _(Deprecated — eval_metrics are now written by the train step directly to `job.json` per S-021 workspace spec. Kept for numbering continuity.)_ | — | — | — |
+| N-015 | Implement post-training model upload orchestration. After training step completes, read `job.json` → `steps.train.best_checkpoint_path` (written by Etalon image per S-021), trigger `upload_model` step with the selected checkpoint. Record artifact version in job metadata. | supernova-control | M | N-006, S-030 |
+| N-016 | Build Etalon Docker image for `aiops-categorizer` branch. Dockerfile + GitHub Actions workflow. Push to Harbor as `etalon-categorizer:{tag}`. **S-021 ref:** Image must comply with workspace contract ([spec](docs/specs/job-step-workspace.md)) — read `TRAINING_CONFIG` env var, use `/workspace/` paths in training JSON, write `steps.train` (including `best_checkpoint_path`) to `job.json`, respect `WANDB` env gate. See Section 9 for Dockerfile pattern and Section 10 for migration notes. | etalon, infra | M | - |
+| N-017 | Build Etalon Docker image for `icinga-classifier` branch. Dockerfile + GitHub Actions workflow. Push to Harbor as `etalon-icinga-classifier:{tag}`. **S-021 ref:** Same workspace contract requirements as N-016. | etalon, infra | M | - |
 | N-018 | Set up GitHub Actions CI template for Etalon image builds. Reusable workflow triggered on release/tag. Build on local self-hosted runners. | etalon, infra | M | - |
 
 ---
@@ -204,7 +204,7 @@ Enables Solar to autonomously manage resources, migrate instances, and fulfill d
 | N-025 | Create `aiops-categorizer` template. Pre-filled config for IRIS ticket categorizer training (5 targets: osl, oslt, type, priority, user_grade). | supernova-control | S | N-024, N-016 |
 | N-026 | Create `icinga-classifier` template. Pre-filled config for Icinga alert classifier training. | supernova-control | S | N-024, N-017 |
 | N-027 | Implement scheduled training runs. `POST /api/schedules` - cron expression + template + overrides. Background scheduler triggers job submission. Store in PostgreSQL. | supernova-control | M | N-024, N-004 |
-| N-028 | Implement dataset creation as a pre-step. For scheduled runs, support a `create_dataset` step that runs a configured script (e.g. `create_dataset.py` container for IRIS categorizer). | supernova-control | M | N-027 |
+| N-028 | Implement dataset creation as a pre-step. For scheduled runs, support a `create_dataset` step that runs a configured script (e.g. `create_dataset.py` container for IRIS categorizer). **S-021 ref:** This is an additional step type that writes to `/workspace/data/` (like `download_dataset` but sources from DB, not Harbor). Must write `steps.create_dataset` to `job.json`. | supernova-control | M | N-027 |
 | N-029 | Implement retention policy management. `POST /api/retention` - define rules (keep last N versions, keep versions newer than X days). Background task runs cleanup via Data Repository delete API. | supernova-control | M | D-007 |
 
 ---
