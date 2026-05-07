@@ -3,10 +3,10 @@
 | Field       | Value                          |
 |-------------|--------------------------------|
 | Issue       | S-008                          |
-| Status      | Draft                          |
+| Status      | Done                           |
 | Created     | 2026-03-31                     |
 | Depends on  | —                              |
-| Depended by | S-009 – S-013, D-014, D-016   |
+| Depended by | S-009 – S-013, D-014, D-016    |
 
 ## 1. Overview
 
@@ -120,9 +120,9 @@ This avoids the overhead of proxying multi-GB model files through Solar Control 
 ### 3.3 Resolution flow
 
 ```
-┌────────┐         ┌──────────────┐        ┌──────────────┐       ┌─────────────────┐
-│ Client │         │ Solar Control│        │  Solar Host   │       │ Harbor / HF Hub │
-└───┬────┘         └──────┬───────┘        └──────┬────────┘       └────────┬────────┘
+┌────────┐          ┌──────────────┐       ┌───────────────┐       ┌─────────────────┐
+│ Client │          │ Solar Control│       │  Solar Host   │       │ Harbor / HF Hub │
+└───┬────┘          └──────┬───────┘       └──────┬────────┘       └────────┬────────┘
     │  create instance     │                      │                         │
     │  (model_source URI)  │                      │                         │
     │─────────────────────>│                      │                         │
@@ -132,8 +132,8 @@ This avoids the overhead of proxying multi-GB model files through Solar Control 
     │          │ metadata if repo://   │          │                         │
     │          └───────────┬───────────┘          │                         │
     │                      │                      │                         │
-    │                      │  POST /models/pull   │                         │
-    │                      │  {source, source_uri} │                        │
+    │                      │ POST /models/pull    │                         │
+    │                      │ {source, source_uri} │                         │
     │                      │─────────────────────>│                         │
     │                      │                      │                         │
     │                      │              ┌───────┴────────┐                │
