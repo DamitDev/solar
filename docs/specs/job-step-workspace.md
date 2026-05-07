@@ -3,7 +3,7 @@
 | Field       | Value                                    |
 |-------------|------------------------------------------|
 | Issue       | S-021                                    |
-| Status      | Draft                                    |
+| Status      | Done                                     |
 | Created     | 2026-05-07                               |
 | Depends on  | —                                        |
 | Depended by | S-023, S-028, S-029, S-030, S-031, N-004 |
