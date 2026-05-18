@@ -128,16 +128,82 @@ async def test_pull_on_host_local_uri(mock_host):
 
 
 @pytest.mark.anyio
-async def test_pull_on_host_repo_uri(mock_host):
+async def test_pull_on_host_repo_uri(mock_host, repo_settings):
     uri = "repo://model:v1"
     parsed = parse(uri)
+    with (
+        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.post") as mock_post,
+    ):
+        resolve_resp = AsyncMock()
+        resolve_resp.status = 200
+        resolve_resp.json.return_value = {
+            "category": "model",
+            "name": "model",
+            "version": "v1",
+            "harbor_ref": "imgrepo.damit.hu/supernova/model:v1",
+            "size_bytes": 123,
+            "checksum": "sha256:abc",
+            "metadata": {},
+            "created_at": "2026-04-29T10:00:00Z",
+        }
+        mock_get.return_value.__aenter__.return_value = resolve_resp
 
-    result = await _pull_on_host(parsed, uri, mock_host)
-    assert isinstance(result, _StructuredPullError)
-    assert result.status_code == 501
-    assert "repo:// distribution requires Data Repository" in result.detail
-    assert result.source_uri == "repo://model:v1"
-    assert result.error == "not_implemented"
+        pull_resp = AsyncMock()
+        pull_resp.status = 200
+        pull_resp.json.return_value = {"path": "/models/repo--model--v1"}
+        mock_post.return_value.__aenter__.return_value = pull_resp
+
+        result = await _pull_on_host(parsed, uri, mock_host)
+        assert result == ("/models/repo--model--v1", False)
+
+
+@pytest.mark.anyio
+async def test_pull_on_host_repo_uri_resolve_5xx_raises(mock_host, repo_settings):
+    uri = "repo://model:v1"
+    parsed = parse(uri)
+    with patch("aiohttp.ClientSession.get") as mock_get:
+        resolve_resp = AsyncMock()
+        resolve_resp.status = 500
+        resolve_resp.json.return_value = {"detail": "internal error"}
+        mock_get.return_value.__aenter__.return_value = resolve_resp
+
+        with pytest.raises(HTTPException) as exc:
+            await _pull_on_host(parsed, uri, mock_host)
+
+        assert exc.value.status_code == 502
+        assert "Data Repository resolution failed [500]" in exc.value.detail
+        assert "internal error" in exc.value.detail
+
+
+@pytest.mark.anyio
+async def test_pull_on_host_repo_uri_missing_harbor_ref_is_partial(
+    mock_host, repo_settings
+):
+    """A Data Repository response missing harbor_ref must not abort the batch."""
+    uri = "repo://model:v1"
+    parsed = parse(uri)
+    with patch("aiohttp.ClientSession.get") as mock_get:
+        resolve_resp = AsyncMock()
+        resolve_resp.status = 200
+        resolve_resp.json.return_value = {
+            "category": "model",
+            "name": "model",
+            "version": "v1",
+            # harbor_ref intentionally omitted
+            "size_bytes": 123,
+            "checksum": "sha256:abc",
+            "metadata": {},
+        }
+        mock_get.return_value.__aenter__.return_value = resolve_resp
+
+        result = await _pull_on_host(parsed, uri, mock_host)
+
+        assert isinstance(result, _StructuredPullError)
+        assert result.status_code == 422
+        assert result.error == "resolve_failed"
+        assert "missing harbor_ref" in result.detail
+        assert result.source_uri == uri
 
 
 @pytest.mark.anyio
@@ -203,10 +269,10 @@ async def test_distribute_model_partial_results(mock_host):
         mock_pull.side_effect = [
             ("/path1", False),
             _StructuredPullError(
-                error="not_implemented",
-                detail="repo:// distribution requires Data Repository integration (Phase 1)",
+                error="resolve_failed",
+                detail="Data Repository is unreachable",
                 source_uri="repo://test-model:v1",
-                status_code=501,
+                status_code=502,
             ),
             ("/path3", True),
         ]

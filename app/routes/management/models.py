@@ -11,6 +11,11 @@ from pydantic import BaseModel
 from app.database.hosts import host_db
 from app.models import Host
 from app.model_resolvers.parser import parse, HuggingFaceURI, RepoURI, LocalURI
+from app.model_resolvers.repo import (
+    build_harbor_pull_payload,
+    resolve_from_data_repository,
+    validate_resolved_model,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,55 +130,31 @@ class _StructuredPullError:
         self.status_code = status_code
 
 
-async def _pull_on_host(
-    parsed: Any, source_uri: str, host: Host
+# Long timeout: a full model pull on the host may take minutes.
+_HOST_PULL_TIMEOUT_S = 300
+
+
+async def _post_pull_to_host(
+    host: Host, source_uri: str, payload: dict
 ) -> tuple[str, bool] | _StructuredPullError:
+    """POST a pre-built pull payload to ``host`` and translate the response.
+
+    Unlike ``app.model_resolvers.repo.post_harbor_pull`` (used by the
+    dispatcher path, which raises HTTPException for every failure), this
+    variant preserves structured per-item failures so the /distribute route
+    can keep producing partial-batch results. Transport-level failures still
+    raise HTTPException because they affect the whole batch, not one item.
     """
-    Tells the target host to pull the model.
-    Returns (local_path, cached_bool) on success, or a _StructuredPullError on failure.
-
-    Raises HTTPException only for connection-level errors (502).
-    Returns _StructuredPullError for expected failures (400, 404, 501, 507).
-    """
-    if isinstance(parsed, LocalURI):
-        return _StructuredPullError(
-            error="validation_error",
-            detail="Cannot distribute local:// URIs",
-            source_uri=source_uri,
-            status_code=400,
-        )
-    if isinstance(parsed, RepoURI):
-        return _StructuredPullError(
-            error=ERR_NOT_IMPLEMENTED,
-            detail="repo:// distribution requires Data Repository integration (Phase 1)",
-            source_uri=source_uri,
-            status_code=501,
-        )
-
-    if not isinstance(parsed, HuggingFaceURI):
-        return _StructuredPullError(
-            error="validation_error",
-            detail=f"Unsupported URI type for distribution: {type(parsed).__name__}",
-            source_uri=source_uri,
-            status_code=400,
-        )
-
     url = f"{host.url.rstrip('/')}/models/pull"
     headers = {"X-API-Key": host.api_key, "Content-Type": "application/json"}
-    payload = {
-        "source": "huggingface",
-        "model_id": parsed.model_id,
-        "source_uri": source_uri,
-    }
 
     try:
-        # Long timeout for model pull as it might involve downloading GBs
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 url,
                 json=payload,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=300),
+                timeout=aiohttp.ClientTimeout(total=_HOST_PULL_TIMEOUT_S),
             ) as response:
                 if response.status == 200:
                     data = await response.json()
@@ -182,13 +163,15 @@ async def _pull_on_host(
                     if not path:
                         return _StructuredPullError(
                             error="bad_response",
-                            detail=f"Host '{host.name}' ({host.url}) returned success but no path",
+                            detail=(
+                                f"Host '{host.name}' ({host.url}) returned success "
+                                "but no path"
+                            ),
                             source_uri=source_uri,
                             status_code=502,
                         )
                     return path, cached
 
-                # Parse structured error from host
                 try:
                     err = await response.json()
                     if err.get("error") and err.get("status_code"):
@@ -209,7 +192,10 @@ async def _pull_on_host(
                 )
                 return _StructuredPullError(
                     error="pull_failed",
-                    detail=f"Model pull failed on host '{host.name}' [{response.status}]: {detail}",
+                    detail=(
+                        f"Model pull failed on host '{host.name}' "
+                        f"[{response.status}]: {detail}"
+                    ),
                     source_uri=source_uri,
                     status_code=out_code,
                 )
@@ -220,16 +206,71 @@ async def _pull_on_host(
     ) as e:
         raise HTTPException(
             status_code=502,
-            detail=f"Host '{host.name}' ({host.url}) is unreachable during model pull: {e}",
+            detail=(
+                f"Host '{host.name}' ({host.url}) is unreachable during model pull: {e}"
+            ),
         )
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "Unexpected error during model distribution to host %s", host.id
         )
         raise HTTPException(
             status_code=502,
-            detail=f"Unexpected error during model distribution to host '{host.name}':",
+            detail=(
+                f"Unexpected error during model distribution to host "
+                f"'{host.name}': {exc}"
+            ),
         )
+
+
+async def _pull_on_host(
+    parsed: Any, source_uri: str, host: Host
+) -> tuple[str, bool] | _StructuredPullError:
+    """
+    Tells the target host to pull the model.
+    Returns (local_path, cached_bool) on success, or a _StructuredPullError on failure.
+
+    Raises HTTPException for connection-level/dependency failures (5xx).
+    Returns _StructuredPullError for expected request/content failures (4xx, 507).
+    """
+    if isinstance(parsed, LocalURI):
+        return _StructuredPullError(
+            error="validation_error",
+            detail="Cannot distribute local:// URIs",
+            source_uri=source_uri,
+            status_code=400,
+        )
+    if isinstance(parsed, RepoURI):
+        try:
+            resolved = await resolve_from_data_repository(source_uri)
+            validate_resolved_model(resolved, source_uri)
+        except HTTPException as exc:
+            if exc.status_code >= 500:
+                raise
+            return _StructuredPullError(
+                error="resolve_failed",
+                detail=exc.detail,
+                source_uri=source_uri,
+                status_code=exc.status_code,
+            )
+
+        payload = build_harbor_pull_payload(resolved, source_uri)
+        return await _post_pull_to_host(host, source_uri, payload)
+
+    if not isinstance(parsed, HuggingFaceURI):
+        return _StructuredPullError(
+            error="validation_error",
+            detail=f"Unsupported URI type for distribution: {type(parsed).__name__}",
+            source_uri=source_uri,
+            status_code=400,
+        )
+
+    payload = {
+        "source": "huggingface",
+        "model_id": parsed.model_id,
+        "source_uri": source_uri,
+    }
+    return await _post_pull_to_host(host, source_uri, payload)
 
 
 async def _fetch_host_models(host: Host) -> list[dict]:
