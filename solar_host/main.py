@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,10 +12,11 @@ from solar_host.config import settings
 from solar_host.models.base import BackendType
 from solar_host.models_manager import ensure_models_dir, get_models_dir
 from solar_host.process_manager import process_manager
-from solar_host.routes import instances, models, websockets
+from solar_host.routes import instances, jobs, models, websockets
 from solar_host.ws_client import init_clients, get_clients, get_client, broadcast_health
 from solar_host.jobs import JobExecutor, cleanup_loop, job_store
 from solar_host.jobs.step_log_buffer import step_log_flush_loop
+from solar_host.jobs.workspace import ensure_jobs_dir
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,19 @@ async def lifespan(app: FastAPI):
 
     ensure_models_dir()
     logger.info("Models directory: %s", get_models_dir())
+
+    ensure_jobs_dir()
+    logger.info("Jobs directory: %s", settings.jobs_dir)
+
+    # Load persisted job store from disk so retention cleanup works across
+    # host restarts.  Stale non-terminal jobs are marked as failed.
+    job_store.store_dir = settings.jobs_dir
+    job_store.load()
+
+    # Resolve HF cache directory to absolute so all mount paths are stable.
+    settings.hf_cache_dir = str(Path(settings.hf_cache_dir).resolve())
+    Path(settings.hf_cache_dir).mkdir(parents=True, exist_ok=True)
+    logger.info("HF cache directory: %s", settings.hf_cache_dir)
 
     # --- Job execution layer ---
     from solar_host.docker.service import DockerService
@@ -115,6 +130,7 @@ async def lifespan(app: FastAPI):
                     logger.warning(
                         "Error cancelling job %r during shutdown", job.job_id
                     )
+        await job_executor.await_all(timeout=30)
 
     if step_log_task:
         step_log_task.cancel()
@@ -190,6 +206,7 @@ async def verify_api_key(request: Request, call_next):
 app.include_router(instances.router)
 app.include_router(models.router)
 app.include_router(websockets.router)
+app.include_router(jobs.router)
 
 
 # Customize OpenAPI schema to add security
