@@ -31,6 +31,7 @@ dependencies = [
     "psutil>=6.1.0",
     "harbor-oci-client>=0.1.0",
     "huggingface-hub>=1.10.1",
+    "docker>=7.0.0",
 ]
 
 [project.optional-dependencies]
@@ -57,3 +58,4 @@ packages = ["solar_host"]
 [tool.black]
 target-version = ["py312"]
 line-length = 88
+
