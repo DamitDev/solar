@@ -98,6 +98,7 @@ Fixes/Resolves/Closes #<issue-id>
 - **Etalon is a black box.** Training containers get input volumes mounted and produce output volumes. The platform never modifies Etalon internals.
 - **Step-based pipelines.** Training jobs are sequences of Docker containers (`download_model`, `download_dataset`, `train`, `convert_model`, `upload_model`). Each step is a separate image.
 - **One replica per host.** Never run the same model twice on the same hardware.
+- **Declarative deployment.** Inference deployments are declared as intents (deployed alias, model source URI, replica count, priority, strategy, placement) submitted to Solar Control, which reconciles instances across hosts. Clients declare desired state and never target a host directly. See [docs/specs/deployment-intent.md](docs/specs/deployment-intent.md).
 - **No external experiment tracking.** SuperNova parses console logs and checkpoint eval metrics directly. No W&B or MLflow dependency.
 - **Model source URIs.** Models are referenced via `repo://`, `huggingface://`, or `local://` — not raw filesystem paths.
 - **Harbor for blobs, Postgres for metadata.** Data Repository uses ORAS to push/pull OCI artifacts to Harbor, with PostgreSQL for metadata and search.
@@ -110,3 +111,7 @@ For deeper context when needed:
 - **Full architecture & design**: [README.md](README.md)
 - **Roadmap, phases & issue dependencies**: [ROADMAP.md](ROADMAP.md)
 - **Implementation workflow details**: [workflows/issue-implementation.md](workflows/issue-implementation.md)
+- **Specifications** ([docs/specs/](docs/specs/)):
+  - [Model Source URI](docs/specs/model-source-uri.md) — `repo://`/`huggingface://`/`local://` resolution, caching, and distribution
+  - [Job Step Workspace](docs/specs/job-step-workspace.md) — training step workspace contract and inter-step communication
+  - [Declarative Deployment Intent](docs/specs/deployment-intent.md) — desired-state inference deployment API, reconciliation, and strategies (S-039)

@@ -547,6 +547,8 @@ local:///path/to/model.gguf     → Use local filesystem path (legacy/fallback)
 - "I want to train on a host with 20 GB free VRAM" → Solar Control frees resources and allocates
 - Solar WebUI shifts from configuring instances to monitoring how Solar Control arranges them
 
+Specified in detail in the [Declarative Deployment Intent API Specification](docs/specs/deployment-intent.md) (S-039): intent schema, lifecycle, reconciliation semantics, placement, and the `rolling`/`immediate` strategies.
+
 ### 6.7 Data Repository Integration
 
 - Solar Control resolves `repo://` URIs via Data Repository API, obtaining harbor_ref + metadata for direct Harbor (ORAS) pull
