@@ -221,7 +221,7 @@ Implicit constraint (not configurable): **anti-affinity by alias** — at most o
 Semantics by phase:
 
 - **v1 (today):** best-effort hint. Placement reads per-host `memory_available_gb` / `disk_available_gb` (already reported via `host_health`) and skips hosts that cannot fit the request. No hard reservation is taken.
-- **After S-035/S-038:** the reconciler should consult `GET /api/resources` for the aggregated `available = total - running - reserved` view and may take a reservation through the S-038 coordinator before creating an instance. This spec keeps the field stable so the upgrade is non-breaking.
+- **After S-035/S-038:** the reconciler should consult `GET /api/resources` for the aggregated `available = total - Σeffective` view (per S-034: `effective = max(actual, requested)` per running job) and may take a reservation through the S-038 coordinator before creating an instance. This spec keeps the field stable so the upgrade is non-breaking.
 
 If `resources` is omitted, placement uses only role/gpu/allow-deny filters and ranks by free memory.
 
@@ -421,7 +421,7 @@ candidates = hosts where:
     host.id not in host_deny
     host is NOT already serving I.alias              # one-replica-per-host
     fits(host, resources)                            # memory_available_gb / disk_available_gb (v1)
-                                                     # or available = total-running-reserved (S-035)
+                                                     # or available = total-Σeffective (S-035, effective = max(actual, requested) per S-034)
 
 rank candidates by:
     1. host not currently serving any managed replica of I (always true after the filter)
