@@ -216,6 +216,22 @@ class DockerService:
         except _docker_errors.APIError as exc:
             logger.warning("Error removing container %s: %s", container_id, exc)
 
+    def container_stats(self, container_id: str) -> dict:
+        """Return a single raw stats snapshot for *container_id* (non-streaming).
+
+        Wraps ``container.stats(stream=False)`` and returns the unparsed dict
+        (``memory_stats``, ``cpu_stats``, ...) as provided by the Docker API.
+        Returns an empty dict when the container is not found or an error occurs.
+        """
+        try:
+            container = self._client.containers.get(container_id)
+            return container.stats(stream=False)
+        except _docker_errors.NotFound:
+            return {}
+        except _docker_errors.APIError as exc:
+            logger.warning("container_stats error for %s: %s", container_id, exc)
+            return {}
+
     def inspect_container(self, container_id: str) -> ContainerStatus:
         """Return a ``ContainerStatus`` snapshot for *container_id*."""
         try:

@@ -199,6 +199,55 @@ def get_gpu_devices() -> list[dict[str, object]]:
         return []
 
 
+def get_gpu_process_memory() -> dict[int, int]:
+    """Return per-PID GPU memory usage in bytes across all NVIDIA devices.
+
+    Aggregates both compute and graphics processes via pynvml.
+    Returns an empty dict when pynvml is unavailable or no GPUs are detected.
+    """
+
+    # NVML reports NVML_VALUE_NOT_AVAILABLE ((unsigned long long)-1) when a
+    # process's per-PID GPU memory can't be read (e.g. insufficient permissions
+    # or MIG). The Python binding surfaces this as a huge sentinel or None;
+    # accumulating it would wildly inflate usage, so we discard such values.
+    def _valid(used: object) -> Optional[int]:
+        if used is None:
+            return None
+        try:
+            value = int(used)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        if value < 0 or value >= 2**63:
+            return None
+        return value
+
+    try:
+        import pynvml  # type: ignore
+
+        pynvml.nvmlInit()
+        try:
+            device_count = pynvml.nvmlDeviceGetCount()
+            pid_bytes: dict[int, int] = {}
+            for i in range(device_count):
+                handle = pynvml.nvmlDeviceGetHandleByIndex(i)
+                for proc in pynvml.nvmlDeviceGetComputeRunningProcesses(handle):
+                    used = _valid(proc.usedGpuMemory)
+                    if used is not None:
+                        pid_bytes[proc.pid] = pid_bytes.get(proc.pid, 0) + used
+                try:
+                    for proc in pynvml.nvmlDeviceGetGraphicsRunningProcesses(handle):
+                        used = _valid(proc.usedGpuMemory)
+                        if used is not None:
+                            pid_bytes[proc.pid] = pid_bytes.get(proc.pid, 0) + used
+                except Exception:
+                    pass
+        finally:
+            pynvml.nvmlShutdown()
+        return pid_bytes
+    except Exception:
+        return {}
+
+
 def get_disk_info(path: str) -> Optional[Dict[str, float]]:
     """Return disk usage stats (in GB) for the filesystem containing *path*.
 
