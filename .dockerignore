@@ -1,0 +1,40 @@
+# Git
+.git
+.gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDEs
+.vscode/
+.idea/
+
+# Docker
+Dockerfile
+.dockerignore
+
+# Tests
+tests/
+.pytest_cache/
+
+# Documentation
+README.md
+*.md
+
+# Hermes
+.hermes/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
