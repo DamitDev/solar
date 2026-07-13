@@ -13,8 +13,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import signal
 import sys
 import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -29,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 WORKSPACE_CONFIG = Path(os.environ.get("JOB_CONFIG", "/workspace/config/job.json"))
 WORKSPACE_MODELS = Path(os.environ.get("WORKSPACE_MODELS", "/workspace/models"))
+DEFAULT_HARBOR_OPERATION_TIMEOUT_SECONDS = 300
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +63,10 @@ class ResolveError(StepError):
 
 class PullError(StepError):
     """Harbor ORAS pull failed."""
+
+
+class DestinationError(StepError):
+    """MODEL_OUTPUT_DIR cannot safely receive a downloaded artifact."""
 
 
 class ConfigUpdateError(StepError):
@@ -127,18 +136,39 @@ def resolve_model_uri(model_uri: str, data_repo_url: str) -> dict:
             detail=resp.text[:500],
         ) from exc
 
-    # Validate required fields
+    # Validate the complete step-result contract before starting a transfer.
     harbor_ref = data.get("harbor_ref")
-    if not harbor_ref:
+    digest = data.get("checksum") or data.get("digest")
+    size_bytes = data.get("size_bytes")
+    missing_fields = [
+        name
+        for name, value in {
+            "harbor_ref": harbor_ref,
+            "checksum/digest": digest,
+            "size_bytes": size_bytes,
+        }.items()
+        if value is None or value == ""
+    ]
+    if missing_fields:
         raise ResolveError(
-            f"Data Repository response missing harbor_ref for {model_uri}",
+            "Data Repository response missing required field(s) for "
+            f"{model_uri}: {', '.join(missing_fields)}",
+            detail=json.dumps(data),
+        )
+    if (
+        not isinstance(size_bytes, int)
+        or isinstance(size_bytes, bool)
+        or size_bytes < 0
+    ):
+        raise ResolveError(
+            f"Data Repository returned invalid size_bytes for {model_uri}",
             detail=json.dumps(data),
         )
 
     return {
         "harbor_ref": harbor_ref,
-        "digest": data.get("checksum") or data.get("digest"),
-        "size_bytes": data.get("size_bytes"),
+        "digest": digest,
+        "size_bytes": size_bytes,
         "name": data.get("name"),
         "version": data.get("version"),
         "category": data.get("category"),
@@ -150,37 +180,123 @@ def resolve_model_uri(model_uri: str, data_repo_url: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+class HarborOperationTimeoutError(Exception):
+    """Internal timeout raised while authenticating or pulling from Harbor."""
+
+
+def harbor_hostname(harbor_url: str) -> str:
+    """Return the registry host, preserving a non-default port."""
+    parsed = urlparse(harbor_url)
+    hostname = parsed.netloc if parsed.scheme else harbor_url.split("/", maxsplit=1)[0]
+    hostname = hostname.rsplit("@", maxsplit=1)[-1]
+    if not hostname:
+        raise PullError(f"HARBOR_URL is invalid: {harbor_url!r}")
+    return hostname
+
+
+def harbor_operation_timeout_seconds() -> int:
+    """Read and validate the bounded ORAS login/pull timeout."""
+    raw_value = os.environ.get("HARBOR_OPERATION_TIMEOUT_SECONDS")
+    if raw_value is None:
+        return DEFAULT_HARBOR_OPERATION_TIMEOUT_SECONDS
+
+    try:
+        timeout_seconds = int(raw_value)
+    except ValueError as exc:
+        raise PullError(
+            "HARBOR_OPERATION_TIMEOUT_SECONDS must be a positive integer"
+        ) from exc
+
+    if timeout_seconds < 1:
+        raise PullError("HARBOR_OPERATION_TIMEOUT_SECONDS must be a positive integer")
+    return timeout_seconds
+
+
+@contextmanager
+def bounded_harbor_operation(timeout_seconds: int):
+    """Interrupt a blocking ORAS login or pull after timeout_seconds."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def raise_timeout(_signum: int, _frame: object) -> None:
+        raise HarborOperationTimeoutError
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, raise_timeout)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer != (0.0, 0.0):
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
+
 def pull_from_harbor(
     harbor_ref: str,
     output_path: Path,
     harbor_url: str,
     username: str,
     password: str,
+    timeout_seconds: int = DEFAULT_HARBOR_OPERATION_TIMEOUT_SECONDS,
 ) -> None:
-    """Pull an OCI artifact from Harbor via ORAS into output_path.
+    """Pull an OCI artifact from Harbor via ORAS into output_path atomically.
 
-    Creates output_path if it doesn't exist. Raises PullError on failure.
+    Pulls into a sibling temporary directory, then renames it into place only
+    after a non-empty transfer succeeds. Raises PullError on any failure.
     """
-    parsed = urlparse(harbor_url)
-    hostname = parsed.hostname or harbor_url
+    hostname = harbor_hostname(harbor_url)
 
     logger.info("Pulling %s → %s (host=%s)", harbor_ref, output_path, hostname)
 
-    output_path.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        raise DestinationError(
+            "MODEL_OUTPUT_DIR already exists and will not be overwritten: "
+            f"{output_path}"
+        )
 
-    oras = OrasHelper(
-        hostname=hostname,
-        username=username,
-        password=password,
-    )
-
+    staging_path: Path | None = None
     try:
-        oras.pull(harbor_ref, outdir=str(output_path))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        staging_path = Path(
+            tempfile.mkdtemp(
+                dir=output_path.parent,
+                prefix=f".{output_path.name}.download-",
+            )
+        )
+        with bounded_harbor_operation(timeout_seconds):
+            oras = OrasHelper(
+                hostname=hostname,
+                username=username,
+                password=password,
+            )
+            oras.pull(harbor_ref, outdir=str(staging_path))
+
+        if count_files(staging_path) == 0:
+            raise PullError(f"ORAS pull returned no files for {harbor_ref}")
+
+        staging_path.replace(output_path)
+    except HarborOperationTimeoutError as exc:
+        raise PullError(
+            f"ORAS operation timed out after {timeout_seconds} seconds for {harbor_ref}"
+        ) from exc
     except HarborError as exc:
         raise PullError(
             f"ORAS pull failed for {harbor_ref}: {exc}",
             detail=getattr(exc, "detail", str(exc)),
         ) from exc
+    except StepError:
+        raise
+    except Exception as exc:
+        raise PullError(
+            f"ORAS pull failed for {harbor_ref}: {exc}",
+            detail=str(exc),
+        ) from exc
+    finally:
+        if staging_path is not None and staging_path.exists():
+            shutil.rmtree(staging_path, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +336,7 @@ def update_job_config(
     model_dir: str,
     source_uri: str,
     harbor_ref: str,
-    digest: str | None,
+    digest: str,
     size_bytes: int,
 ) -> None:
     """Atomically update job.json with the download_model step result.
@@ -243,21 +359,30 @@ def update_job_config(
             f"job.json at {config_path} is not valid JSON: {exc}"
         ) from exc
 
+    if not digest:
+        raise ConfigUpdateError("download_model result requires a digest")
+    if size_bytes < 0:
+        raise ConfigUpdateError(
+            "download_model result requires a non-negative size_bytes"
+        )
+
     # Build step result
     step_result: dict[str, str | int] = {
         "status": "completed",
         "model_dir": model_dir,
         "source_uri": source_uri,
         "harbor_ref": harbor_ref,
+        "digest": digest,
+        "size_bytes": size_bytes,
     }
-    if digest:
-        step_result["digest"] = digest
-    if size_bytes is not None:
-        step_result["size_bytes"] = size_bytes
 
     # Update config
     if "steps" not in config:
         config["steps"] = {}
+    if not isinstance(config["steps"], dict):
+        raise ConfigUpdateError(
+            f"job.json at {config_path} has a non-object steps field"
+        )
     config["steps"]["download_model"] = step_result
 
     # Atomic write: write to a temp file in the same directory, then rename
@@ -333,11 +458,12 @@ def main() -> None:
     resolved = resolve_model_uri(model_uri, data_repo_url)
     harbor_ref = resolved["harbor_ref"]
     digest = resolved["digest"]
+    size_bytes = resolved["size_bytes"]
     logger.info(
         "Resolved: harbor_ref=%s digest=%s size_bytes=%s",
         harbor_ref,
         digest,
-        resolved["size_bytes"],
+        size_bytes,
     )
 
     # --- Pull the artifact from Harbor into the workspace ---
@@ -347,28 +473,33 @@ def main() -> None:
         harbor_url=harbor_url,
         username=harbor_username,
         password=harbor_password,
+        timeout_seconds=harbor_operation_timeout_seconds(),
     )
     logger.info("Pull complete: %d files in %s", count_files(output_path), output_path)
 
-    # --- Compute actual size on disk ---
-    # Prefer disk-measured size over Data Repository-reported size_bytes
-    # since the pulled artifact is the ground truth.
-    size_bytes = compute_dir_size(output_path)
+    # Keep the Data Repository's authoritative artifact metadata in job.json.
+    downloaded_size_bytes = compute_dir_size(output_path)
     logger.info(
-        "Downloaded model size: %d bytes (%.2f GiB)",
+        "Downloaded model size: %d bytes (Data Repository reports %d bytes)",
+        downloaded_size_bytes,
         size_bytes,
-        size_bytes / (1024**3),
     )
 
     # --- Atomically update job.json with step result ---
-    update_job_config(
-        config_path=WORKSPACE_CONFIG,
-        model_dir=str(output_path),
-        source_uri=model_uri,
-        harbor_ref=harbor_ref,
-        digest=digest,
-        size_bytes=size_bytes,
-    )
+    try:
+        update_job_config(
+            config_path=WORKSPACE_CONFIG,
+            model_dir=str(output_path),
+            source_uri=model_uri,
+            harbor_ref=harbor_ref,
+            digest=digest,
+            size_bytes=size_bytes,
+        )
+    except Exception:
+        # The model is unusable without a matching completed step record.
+        # Remove only the directory created by this invocation.
+        shutil.rmtree(output_path, ignore_errors=True)
+        raise
 
 
 def setup_logging() -> None:

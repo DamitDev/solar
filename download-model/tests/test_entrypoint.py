@@ -7,7 +7,10 @@ Filesystem operations use tmp_path — nothing touches the real disk.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -83,6 +86,41 @@ class TestMissingEnvVars:
         with pytest.raises(entrypoint.MissingEnvError, match="HARBOR_USERNAME"):
             entrypoint.main()
 
+    def test_missing_harbor_password(self, monkeypatch):
+        monkeypatch.setenv("MODEL_URI", "repo://test:v1")
+        monkeypatch.setenv("MODEL_OUTPUT_DIR", "/workspace/models/test")
+        monkeypatch.setenv("DATA_REPOSITORY_URL", "http://repo:8000")
+        monkeypatch.setenv("HARBOR_URL", "https://harbor.example.com")
+        monkeypatch.setenv("HARBOR_USERNAME", "user")
+        monkeypatch.delenv("HARBOR_PASSWORD", raising=False)
+
+        with pytest.raises(entrypoint.MissingEnvError, match="HARBOR_PASSWORD"):
+            entrypoint.main()
+
+    def test_cli_returns_nonzero_for_missing_model_uri(self):
+        env = os.environ.copy()
+        for variable in (
+            "MODEL_URI",
+            "MODEL_OUTPUT_DIR",
+            "DATA_REPOSITORY_URL",
+            "HARBOR_URL",
+            "HARBOR_USERNAME",
+            "HARBOR_PASSWORD",
+        ):
+            env.pop(variable, None)
+        env["PYTHONUNBUFFERED"] = "1"
+
+        result = subprocess.run(
+            [sys.executable, str(_MODEL_DIR / "entrypoint.py")],
+            check=False,
+            capture_output=True,
+            env=env,
+            text=True,
+        )
+
+        assert result.returncode == 1
+        assert "MODEL_URI is required" in result.stdout
+
 
 # ---------------------------------------------------------------------------
 # Test: path validation
@@ -120,6 +158,17 @@ class TestPathValidation:
         with pytest.raises(entrypoint.PathValidationError, match="must be under"):
             entrypoint.validate_output_path(nested)
 
+    def test_main_rejects_path_outside_workspace(self, monkeypatch):
+        monkeypatch.setenv("MODEL_URI", "repo://test:v1")
+        monkeypatch.setenv("MODEL_OUTPUT_DIR", "/tmp/not-a-workspace-model")
+        monkeypatch.setenv("DATA_REPOSITORY_URL", "http://repo:8000")
+        monkeypatch.setenv("HARBOR_URL", "https://harbor.example.com")
+        monkeypatch.setenv("HARBOR_USERNAME", "user")
+        monkeypatch.setenv("HARBOR_PASSWORD", "password")
+
+        with pytest.raises(entrypoint.PathValidationError, match="must be under"):
+            entrypoint.main()
+
 
 # ---------------------------------------------------------------------------
 # Test: Data Repository resolution
@@ -146,6 +195,11 @@ class TestResolveModelUri:
         assert result["harbor_ref"] == "harbor.example.com/project/model:v1"
         assert result["digest"] == "sha256:abc123"
         assert result["size_bytes"] == 1024
+        mock_get.assert_called_once_with(
+            "http://repo:8000/api/resolve",
+            params={"uri": "repo://model:v1"},
+            timeout=30,
+        )
 
     def test_404_raises_resolve_error(self):
         with patch("requests.get") as mock_get:
@@ -176,7 +230,7 @@ class TestResolveModelUri:
             mock_resp.json.return_value = {"name": "model", "version": "v1"}
             mock_get.return_value = mock_resp
 
-            with pytest.raises(entrypoint.ResolveError, match="missing harbor_ref"):
+            with pytest.raises(entrypoint.ResolveError, match="harbor_ref"):
                 entrypoint.resolve_model_uri("repo://model:v1", "http://repo:8000")
 
     def test_connection_error_raises(self):
@@ -184,6 +238,38 @@ class TestResolveModelUri:
 
         with patch("requests.get", side_effect=req_mod.ConnectionError("timeout")):
             with pytest.raises(entrypoint.ResolveError, match="Failed to reach"):
+                entrypoint.resolve_model_uri("repo://model:v1", "http://repo:8000")
+
+    def test_server_error_raises_resolve_error(self):
+        with patch("requests.get") as mock_get:
+            mock_resp = MagicMock(ok=False, status_code=500, text="server error")
+            mock_get.return_value = mock_resp
+
+            with pytest.raises(entrypoint.ResolveError, match="returned 500"):
+                entrypoint.resolve_model_uri("repo://model:v1", "http://repo:8000")
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            {"harbor_ref": "harbor.example.com/project/model:v1", "size_bytes": 1},
+            {
+                "harbor_ref": "harbor.example.com/project/model:v1",
+                "checksum": "sha256:abc",
+            },
+            {
+                "harbor_ref": "harbor.example.com/project/model:v1",
+                "checksum": "sha256:abc",
+                "size_bytes": -1,
+            },
+        ],
+    )
+    def test_missing_or_invalid_required_metadata_raises(self, response):
+        with patch("requests.get") as mock_get:
+            mock_resp = MagicMock(ok=True)
+            mock_resp.json.return_value = response
+            mock_get.return_value = mock_resp
+
+            with pytest.raises(entrypoint.ResolveError, match="required|invalid"):
                 entrypoint.resolve_model_uri("repo://model:v1", "http://repo:8000")
 
 
@@ -197,6 +283,9 @@ class TestPullFromHarbor:
         output = tmp_path / "model-dir"
         with patch("entrypoint.OrasHelper") as mock_oras_class:
             mock_oras = mock_oras_class.return_value
+            mock_oras.pull.side_effect = lambda _ref, outdir: Path(
+                outdir, "model.safetensors"
+            ).write_bytes(b"model")
 
             entrypoint.pull_from_harbor(
                 harbor_ref="harbor.example.com/project/model:v1",
@@ -211,10 +300,32 @@ class TestPullFromHarbor:
             username="user",
             password="pass",
         )
-        mock_oras.pull.assert_called_once_with(
-            "harbor.example.com/project/model:v1", outdir=str(output)
-        )
+        pull_args, pull_kwargs = mock_oras.pull.call_args
+        assert pull_args == ("harbor.example.com/project/model:v1",)
+        assert Path(pull_kwargs["outdir"]).parent == output.parent
+        assert Path(pull_kwargs["outdir"]).name.startswith(".model-dir.download-")
         assert output.exists()
+
+    def test_preserves_non_default_harbor_port(self, tmp_path):
+        output = tmp_path / "model-dir"
+        with patch("entrypoint.OrasHelper") as mock_oras_class:
+            mock_oras_class.return_value.pull.side_effect = lambda _ref, outdir: Path(
+                outdir, "model.safetensors"
+            ).write_bytes(b"model")
+
+            entrypoint.pull_from_harbor(
+                harbor_ref="harbor.example.com:5443/project/model:v1",
+                output_path=output,
+                harbor_url="https://harbor.example.com:5443",
+                username="user",
+                password="pass",
+            )
+
+        mock_oras_class.assert_called_once_with(
+            hostname="harbor.example.com:5443",
+            username="user",
+            password="pass",
+        )
 
     def test_harbor_error_raises_pull_error(self, tmp_path):
         output = tmp_path / "model-dir"
@@ -232,6 +343,90 @@ class TestPullFromHarbor:
                     username="bad",
                     password="wrong",
                 )
+
+        assert not output.exists()
+
+    def test_auth_error_during_client_initialization_raises_pull_error(self, tmp_path):
+        output = tmp_path / "model-dir"
+        from harbor_oci_client import HarborError
+
+        with patch("entrypoint.OrasHelper", side_effect=HarborError("auth failed")):
+            with pytest.raises(entrypoint.PullError, match="ORAS pull failed"):
+                entrypoint.pull_from_harbor(
+                    harbor_ref="harbor.example.com/project/bad:v1",
+                    output_path=output,
+                    harbor_url="https://harbor.example.com",
+                    username="bad",
+                    password="wrong",
+                )
+
+        assert not output.exists()
+
+    def test_generic_oras_error_raises_pull_error(self, tmp_path):
+        output = tmp_path / "model-dir"
+
+        with patch("entrypoint.OrasHelper", side_effect=RuntimeError("network failed")):
+            with pytest.raises(entrypoint.PullError, match="ORAS pull failed"):
+                entrypoint.pull_from_harbor(
+                    harbor_ref="harbor.example.com/project/bad:v1",
+                    output_path=output,
+                    harbor_url="https://harbor.example.com",
+                    username="user",
+                    password="pass",
+                )
+
+        assert not output.exists()
+
+    def test_empty_pull_is_rejected_without_destination(self, tmp_path):
+        output = tmp_path / "model-dir"
+
+        with patch("entrypoint.OrasHelper"):
+            with pytest.raises(entrypoint.PullError, match="returned no files"):
+                entrypoint.pull_from_harbor(
+                    harbor_ref="harbor.example.com/project/empty:v1",
+                    output_path=output,
+                    harbor_url="https://harbor.example.com",
+                    username="user",
+                    password="pass",
+                )
+
+        assert not output.exists()
+
+    def test_pull_timeout_is_reported_and_cleans_staging_directory(self, tmp_path):
+        output = tmp_path / "model-dir"
+        with patch("entrypoint.OrasHelper") as mock_oras_class:
+            mock_oras_class.return_value.pull.side_effect = lambda *_args, **_kwargs: (
+                time.sleep(2)
+            )
+
+            with pytest.raises(entrypoint.PullError, match="timed out after 1 seconds"):
+                entrypoint.pull_from_harbor(
+                    harbor_ref="harbor.example.com/project/slow:v1",
+                    output_path=output,
+                    harbor_url="https://harbor.example.com",
+                    username="user",
+                    password="pass",
+                    timeout_seconds=1,
+                )
+
+        assert not output.exists()
+        assert not list(tmp_path.glob(".model-dir.download-*"))
+
+    def test_existing_destination_is_not_overwritten(self, tmp_path):
+        output = tmp_path / "model-dir"
+        output.mkdir()
+        (output / "existing.bin").write_bytes(b"existing")
+
+        with pytest.raises(entrypoint.DestinationError, match="already exists"):
+            entrypoint.pull_from_harbor(
+                harbor_ref="harbor.example.com/project/model:v1",
+                output_path=output,
+                harbor_url="https://harbor.example.com",
+                username="user",
+                password="pass",
+            )
+
+        assert (output / "existing.bin").read_bytes() == b"existing"
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +501,7 @@ class TestUpdateJobConfig:
             model_dir="/workspace/models/x",
             source_uri="repo://x:v1",
             harbor_ref="harbor.example.com/x:v1",
-            digest=None,
+            digest="sha256:abc",
             size_bytes=0,
         )
 
@@ -414,3 +609,52 @@ class TestEndToEnd:
         assert step["harbor_ref"] == "harbor.example.com/project/my-model:v1"
         assert step["size_bytes"] == 100
         assert step["digest"] == "sha256:abc"
+
+    def test_config_update_failure_removes_downloaded_model(
+        self, tmp_path, monkeypatch
+    ):
+        ws = tmp_path / "workspace"
+        models = ws / "models"
+        config = ws / "config"
+        models.mkdir(parents=True)
+        config.mkdir(parents=True)
+        job_json = config / "job.json"
+        job_json.write_text(json.dumps({"job_id": "e2e-test", "steps": {}}))
+        output_dir = models / "my-model"
+
+        monkeypatch.setattr(entrypoint, "WORKSPACE_MODELS", models)
+        monkeypatch.setattr(entrypoint, "WORKSPACE_CONFIG", job_json)
+        monkeypatch.setenv("MODEL_URI", "repo://my-model:v1")
+        monkeypatch.setenv("MODEL_OUTPUT_DIR", str(output_dir))
+        monkeypatch.setenv("DATA_REPOSITORY_URL", "http://repo:8000")
+        monkeypatch.setenv("HARBOR_URL", "https://harbor.example.com")
+        monkeypatch.setenv("HARBOR_USERNAME", "user")
+        monkeypatch.setenv("HARBOR_PASSWORD", "pass")
+
+        with (
+            patch.object(
+                entrypoint,
+                "resolve_model_uri",
+                return_value={
+                    "harbor_ref": "harbor.example.com/project/my-model:v1",
+                    "digest": "sha256:abc",
+                    "size_bytes": 100,
+                },
+            ),
+            patch.object(entrypoint, "OrasHelper") as mock_oras_class,
+            patch.object(
+                entrypoint,
+                "update_job_config",
+                side_effect=entrypoint.ConfigUpdateError("cannot write config"),
+            ),
+        ):
+            mock_oras_class.return_value.pull.side_effect = lambda _ref, outdir: Path(
+                outdir, "model.safetensors"
+            ).write_bytes(b"x" * 100)
+
+            with pytest.raises(
+                entrypoint.ConfigUpdateError, match="cannot write config"
+            ):
+                entrypoint.main()
+
+        assert not output_dir.exists()

@@ -25,6 +25,7 @@ specification](https://github.com/DamitDev/training-platform-project/blob/master
 | `HARBOR_URL`           | `https://imgrepo.damit.hu`                     | Harbor registry URL                                     |
 | `HARBOR_USERNAME`      | `robot_supernova+aiops`                        | Harbor robot account                                    |
 | `HARBOR_PASSWORD`      | `...`                                          | Harbor robot password                                   |
+| `HARBOR_OPERATION_TIMEOUT_SECONDS` | `300`                               | Optional maximum duration for Harbor login and pull     |
 
 ## Building
 
@@ -52,10 +53,10 @@ docker run --rm \
   -v "$TEST_WS/config:/workspace/config" \
   -e MODEL_URI="repo://iris-osl:v3" \
   -e MODEL_OUTPUT_DIR="/workspace/models/iris-osl" \
-  -e DATA_REPOSITORY_URL="http://data-repository:8000" \
-  -e HARBOR_URL="https://imgrepo.damit.hu" \
-  -e HARBOR_USERNAME="..." \
-  -e HARBOR_PASSWORD="..." \
+  -e DATA_REPOSITORY_URL \
+  -e HARBOR_URL \
+  -e HARBOR_USERNAME \
+  -e HARBOR_PASSWORD \
   supernova-step-download-model
 
 # 4. Verify
@@ -76,10 +77,17 @@ rm -rf "$TEST_WS"
 | Path outside `/workspace/models/`  | 1         | `MODEL_OUTPUT_DIR (...) must be under ...`       |
 | Data Repository unreachable        | 1         | `Failed to reach Data Repository at ...`         |
 | Artifact not found (404)           | 1         | `Artifact not found in Data Repository: ...`     |
-| Harbor auth failure (401)          | 1         | `ORAS pull failed for ...` (HarborError detail)  |
+| Missing resolve metadata           | 1         | `Data Repository response missing required field(s)` |
+| Harbor auth failure (401)          | 1         | `ORAS pull failed for ...`                       |
+| Harbor login/pull timeout          | 1         | `ORAS operation timed out after ...`             |
 | ORAS pull failure                  | 1         | `ORAS pull failed for ...`                       |
+| Existing output directory          | 1         | `MODEL_OUTPUT_DIR already exists and will not be overwritten` |
 | `job.json` not found               | 1         | `job.json not found at ...`                      |
 | Success                            | 0         | `job.json updated successfully`                  |
+
+The artifact is pulled into a temporary sibling directory and moved into
+`MODEL_OUTPUT_DIR` only after a non-empty transfer succeeds. This prevents
+failed pulls from leaving a partial model in the requested destination.
 
 ## Future Enhancements
 
