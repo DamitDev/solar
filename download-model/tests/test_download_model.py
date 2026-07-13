@@ -19,9 +19,12 @@ import pytest
 # The entrypoint module lives in a directory named with a hyphen
 # (download-model/), which is not a valid Python package name.
 # Import it by adding the parent directory to sys.path.
+# Pop any cached "entrypoint" from sys.modules first so that
+# multiple step test suites can coexist in the same pytest run.
 _HERE = Path(__file__).resolve().parent
-_MODEL_DIR = _HERE.parent  # download-model/
-sys.path.insert(0, str(_MODEL_DIR))
+_STEP_DIR = _HERE.parent  # download-model/
+sys.modules.pop("entrypoint", None)
+sys.path.insert(0, str(_STEP_DIR))
 
 import entrypoint  # noqa: E402
 
@@ -111,7 +114,7 @@ class TestMissingEnvVars:
         env["PYTHONUNBUFFERED"] = "1"
 
         result = subprocess.run(
-            [sys.executable, str(_MODEL_DIR / "entrypoint.py")],
+            [sys.executable, str(_STEP_DIR / "entrypoint.py")],
             check=False,
             capture_output=True,
             env=env,
@@ -281,7 +284,7 @@ class TestResolveModelUri:
 class TestPullFromHarbor:
     def test_successful_pull(self, tmp_path):
         output = tmp_path / "model-dir"
-        with patch("entrypoint.OrasHelper") as mock_oras_class:
+        with patch.object(entrypoint, "OrasHelper") as mock_oras_class:
             mock_oras = mock_oras_class.return_value
             mock_oras.pull.side_effect = lambda _ref, outdir: Path(
                 outdir, "model.safetensors"
@@ -308,7 +311,7 @@ class TestPullFromHarbor:
 
     def test_preserves_non_default_harbor_port(self, tmp_path):
         output = tmp_path / "model-dir"
-        with patch("entrypoint.OrasHelper") as mock_oras_class:
+        with patch.object(entrypoint, "OrasHelper") as mock_oras_class:
             mock_oras_class.return_value.pull.side_effect = lambda _ref, outdir: Path(
                 outdir, "model.safetensors"
             ).write_bytes(b"model")
@@ -331,7 +334,7 @@ class TestPullFromHarbor:
         output = tmp_path / "model-dir"
         from harbor_oci_client import HarborError
 
-        with patch("entrypoint.OrasHelper") as mock_oras_class:
+        with patch.object(entrypoint, "OrasHelper") as mock_oras_class:
             mock_oras = mock_oras_class.return_value
             mock_oras.pull.side_effect = HarborError("auth failed")
 
@@ -350,7 +353,9 @@ class TestPullFromHarbor:
         output = tmp_path / "model-dir"
         from harbor_oci_client import HarborError
 
-        with patch("entrypoint.OrasHelper", side_effect=HarborError("auth failed")):
+        with patch.object(
+            entrypoint, "OrasHelper", side_effect=HarborError("auth failed")
+        ):
             with pytest.raises(entrypoint.PullError, match="ORAS pull failed"):
                 entrypoint.pull_from_harbor(
                     harbor_ref="harbor.example.com/project/bad:v1",
@@ -365,7 +370,9 @@ class TestPullFromHarbor:
     def test_generic_oras_error_raises_pull_error(self, tmp_path):
         output = tmp_path / "model-dir"
 
-        with patch("entrypoint.OrasHelper", side_effect=RuntimeError("network failed")):
+        with patch.object(
+            entrypoint, "OrasHelper", side_effect=RuntimeError("network failed")
+        ):
             with pytest.raises(entrypoint.PullError, match="ORAS pull failed"):
                 entrypoint.pull_from_harbor(
                     harbor_ref="harbor.example.com/project/bad:v1",
@@ -380,7 +387,7 @@ class TestPullFromHarbor:
     def test_empty_pull_is_rejected_without_destination(self, tmp_path):
         output = tmp_path / "model-dir"
 
-        with patch("entrypoint.OrasHelper"):
+        with patch.object(entrypoint, "OrasHelper"):
             with pytest.raises(entrypoint.PullError, match="returned no files"):
                 entrypoint.pull_from_harbor(
                     harbor_ref="harbor.example.com/project/empty:v1",
@@ -394,7 +401,7 @@ class TestPullFromHarbor:
 
     def test_pull_timeout_is_reported_and_cleans_staging_directory(self, tmp_path):
         output = tmp_path / "model-dir"
-        with patch("entrypoint.OrasHelper") as mock_oras_class:
+        with patch.object(entrypoint, "OrasHelper") as mock_oras_class:
             mock_oras_class.return_value.pull.side_effect = lambda *_args, **_kwargs: (
                 time.sleep(2)
             )
@@ -588,7 +595,7 @@ class TestEndToEnd:
             mock_get.return_value = mock_resp
 
             # Mock ORAS pull
-            with patch("entrypoint.OrasHelper") as mock_oras_class:
+            with patch.object(entrypoint, "OrasHelper") as mock_oras_class:
                 mock_oras = mock_oras_class.return_value
 
                 # Simulate pull: create files in output_dir

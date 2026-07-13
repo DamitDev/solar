@@ -15,12 +15,16 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: download-model/requirements.txt
+          cache-dependency-path: |
+            download-model/requirements.txt
+            download-dataset/requirements.txt
       - name: Install test tools
-        run: python -m pip install --upgrade pip pytest ruff -r download-model/requirements.txt
+        run: python -m pip install --upgrade pip pytest ruff -r download-model/requirements.txt -r download-dataset/requirements.txt
       - name: Run unit tests
         run: python -m pytest -q
       - name: Lint and format check
-        run: python -m ruff check download-model && python -m ruff format --check download-model
-      - name: Build step image
-        run: docker build -t supernova-step-download-model:ci download-model/
+        run: python -m ruff check download-model download-dataset && python -m ruff format --check download-model download-dataset
+      - name: Build model step image
+        run: docker build -f download-model/Dockerfile -t supernova-step-download-model:ci .
+      - name: Build dataset step image
+        run: docker build -f download-dataset/Dockerfile -t supernova-step-download-dataset:ci .

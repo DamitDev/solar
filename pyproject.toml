@@ -31,4 +31,4 @@ quote-style = "double"
 indent-style = "space"
 
 [tool.pytest.ini_options]
-testpaths = ["download-model/tests"]
+testpaths = ["download-model/tests", "download-dataset/tests"]

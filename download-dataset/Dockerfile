@@ -8,13 +8,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY download-model/requirements.txt ./requirements.txt
+COPY download-dataset/requirements.txt ./requirements.txt
 COPY certs/damit-cloud-root-ca.crt /usr/local/share/ca-certificates/damit-cloud-root-ca.crt
 RUN update-ca-certificates && \
     pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-COPY download-model/entrypoint.py ./entrypoint.py
+COPY download-dataset/entrypoint.py ./entrypoint.py
 
 RUN useradd --create-home --uid 1000 stepuser && \
     chown -R stepuser:stepuser /app
