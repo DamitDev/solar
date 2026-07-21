@@ -210,6 +210,7 @@ export function AddInstanceModal({ hostId, hostName, onClose, onCreate }: AddIns
       if (!c.ot) delete c.ot;
       if (!c.mmproj) delete c.mmproj;
       if (!c.pooling) delete c.pooling;
+      if (!c.spec_type) delete c.spec_draft_n_max;
     }
 
     setLoading(true);
@@ -403,9 +404,7 @@ export function AddInstanceModal({ hostId, hostName, onClose, onCreate }: AddIns
                   {/* Multimodal projector GPU offload — only when mmproj is set */}
                   {llamaCppMode === 'llm' && (formData as Partial<LlamaCppConfig>).mmproj && (
                     <div className="md:col-span-2">
-                      <label className="block text-sm font-medium text-nord-4 mb-1">
-                        Projector GPU Offload
-                      </label>
+                      <label className="block text-sm font-medium text-nord-4 mb-1">Projector GPU Offload</label>
                       <select
                         name="mmproj_offload"
                         value={(formData as Partial<LlamaCppConfig>).mmproj_offload === false ? 'false' : 'true'}
@@ -515,6 +514,60 @@ export function AddInstanceModal({ hostId, hostName, onClose, onCreate }: AddIns
                         Passed as <code>--reasoning-budget</code>. Use <code>-1</code> for unrestricted, <code>0</code>{' '}
                         to disable thinking. Leave blank to omit.
                       </p>
+                    </div>
+                  )}
+
+                  {/* Draft MTP speculative decoding - only for LLM mode */}
+                  {llamaCppMode === 'llm' && (
+                    <div className="md:col-span-2 rounded-md border border-nord-3 bg-nord-2 p-3">
+                      <div className="flex items-start gap-3">
+                        <input
+                          type="checkbox"
+                          id="add-spec-draft-mtp"
+                          checked={(formData as Partial<LlamaCppConfig>).spec_type === 'draft-mtp'}
+                          onChange={(e) =>
+                            setFormData((prev) => {
+                              if (e.target.checked) {
+                                return { ...prev, spec_type: 'draft-mtp', spec_draft_n_max: 2 };
+                              }
+                              const next = { ...prev } as Partial<LlamaCppConfig>;
+                              delete next.spec_type;
+                              delete next.spec_draft_n_max;
+                              return next;
+                            })
+                          }
+                          className="h-4 w-4 mt-0.5 rounded border-nord-3 bg-nord-1 text-nord-10 focus:ring-nord-10"
+                        />
+                        <div className="flex-1">
+                          <label htmlFor="add-spec-draft-mtp" className="block text-sm font-medium text-nord-4">
+                            Draft MTP speculative decoding
+                          </label>
+                          <p className="text-xs text-nord-4 mt-1">
+                            Enable faster generation for compatible MTP models. Disabled by default.
+                          </p>
+                        </div>
+                      </div>
+                      {(formData as Partial<LlamaCppConfig>).spec_type === 'draft-mtp' && (
+                        <div className="mt-3 pl-7">
+                          <label className="block text-sm font-medium text-nord-4 mb-1" htmlFor="add-spec-draft-n-max">
+                            Maximum draft tokens
+                          </label>
+                          <input
+                            type="number"
+                            id="add-spec-draft-n-max"
+                            name="spec_draft_n_max"
+                            value={(formData as Partial<LlamaCppConfig>).spec_draft_n_max ?? 2}
+                            onChange={handleChange}
+                            min="1"
+                            step="1"
+                            required
+                            className="w-full px-3 py-2 bg-nord-1 border border-nord-3 text-nord-6 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                          />
+                          <p className="text-xs text-nord-4 mt-1">
+                            Launches with <code>--spec-type draft-mtp --spec-draft-n-max 2</code> by default.
+                          </p>
+                        </div>
+                      )}
                     </div>
                   )}
 
