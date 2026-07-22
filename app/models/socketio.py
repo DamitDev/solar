@@ -172,3 +172,51 @@ class InstanceStatePayload(BaseModel):
     instance_id: str | None
     timestamp: str
     data: dict[str, Any]
+
+
+class JobLogPayload(BaseModel):
+    """Outgoing payload for job step log events to WebUI (S-025).
+
+    Mirrors the per-entry shape emitted by Solar Host's step log buffer
+    (``job_id``, ``step_name``, ``step_index``, ``stream``, ``seq``,
+    ``line``, and optional completion markers), enriched by Solar Control
+    with ``host_id``/``host_name`` and the job ``correlation_id`` before
+    rebroadcast to WebUI clients.
+    """
+
+    job_id: str
+    host_id: str
+    host_name: str | None = None
+    step_name: str | None = None
+    step_index: int | None = None
+    stream: str | None = None
+    seq: int = 0
+    line: str = ""
+    completed: bool = False
+    exit_code: int | None = None
+    correlation_id: str | None = None
+    timestamp: str
+
+
+class JobLifecyclePayload(BaseModel):
+    """Outgoing payload for job lifecycle events to WebUI (S-026).
+
+    Normalizes the distinct lifecycle events emitted by Solar Host
+    (``job_started``, ``job_completed``, ``job_failed``, ``job_cancelled``,
+    ``step_started``, ``step_completed``, ``step_failed``) into a single
+    WebUI event. ``event`` is the host event name, ``status`` is the
+    host-reported state, and ``data`` carries any event-specific extras
+    (``duration_s``, ``exit_code``, ``error_summary``, ``error_message``,
+    ``workspace_path``, ``retention_deadline``, ``name``, ...).
+    """
+
+    job_id: str
+    host_id: str
+    host_name: str | None = None
+    event: str
+    status: str | None = None
+    step_name: str | None = None
+    step_index: int | None = None
+    correlation_id: str | None = None
+    data: dict[str, Any] = Field(default_factory=dict)
+    timestamp: str

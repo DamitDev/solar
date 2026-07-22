@@ -80,7 +80,13 @@ async def webui_disconnect(sid: str):
 
 @sio.on("set_filter", namespace="/webui")
 async def webui_set_filter(sid: str, filter_config: dict[str, Any]):
-    """Update the client's event filter."""
+    """Update the client's event filter.
+
+    Supported filter keys:
+    - ``event_types``: list[str] — only emit events of these types
+    - ``host_ids``: list[str] — only emit events for these hosts
+    - ``job_ids``: list[str] — only emit job_log/job_lifecycle for these jobs
+    """
     async with sio.session(sid, namespace="/webui") as session:
         session["filter"] = filter_config
 
@@ -92,6 +98,36 @@ async def webui_set_filter(sid: str, filter_config: dict[str, Any]):
     )
 
 
+async def _should_emit_to_client(
+    session_filter: dict[str, Any] | None,
+    event: str,
+    data: dict[str, Any],
+) -> bool:
+    """Check whether an event should be emitted to a client based on its filter.
+
+    If no filter is set, all events pass through.
+    """
+    if not session_filter:
+        return True
+
+    # Filter by event type
+    event_types = session_filter.get("event_types")
+    if event_types is not None and event not in event_types:
+        return False
+
+    # Filter by host_id
+    host_ids = session_filter.get("host_ids")
+    if host_ids is not None and data.get("host_id") not in host_ids:
+        return False
+
+    # Filter by job_id (for job_log / job_lifecycle events)
+    job_ids = session_filter.get("job_ids")
+    if job_ids is not None and data.get("job_id") not in job_ids:
+        return False
+
+    return True
+
+
 async def broadcast_to_webui(event: str, data: dict[str, Any]) -> None:
     """Helper to emit events to all WebUI clients."""
     await sio.emit(event, data, namespace="/webui")
@@ -100,3 +136,33 @@ async def broadcast_to_webui(event: str, data: dict[str, Any]) -> None:
 async def broadcast_gateway_request(summary_data: dict[str, Any]) -> None:
     """Broadcast a completed gateway request summary to WebUI clients."""
     await sio.emit("gateway_request", summary_data, namespace="/webui")
+
+
+async def _emit_to_matching_clients(
+    event: str, data: dict[str, Any], namespace: str = "/webui"
+) -> None:
+    """Emit *event* with *data* only to clients whose filter allows it."""
+    participants = sio.manager.get_participants(namespace, namespace)
+    for sid, _ in participants:
+        async with sio.session(sid, namespace=namespace) as session:
+            session_filter = session.get("filter")
+        if await _should_emit_to_client(session_filter, event, data):
+            await sio.emit(event, data, to=sid, namespace=namespace)
+
+
+async def broadcast_job_log(payload: dict[str, Any]) -> None:
+    """Broadcast a job step log event to WebUI clients (S-025).
+
+    Applies per-client filters so only clients whose filter matches
+    the event's host_id / job_id receive it.
+    """
+    await _emit_to_matching_clients("job_log", payload)
+
+
+async def broadcast_job_lifecycle(payload: dict[str, Any]) -> None:
+    """Broadcast a job lifecycle event to WebUI clients (S-026).
+
+    Applies per-client filters so only clients whose filter matches
+    the event's host_id / job_id receive it.
+    """
+    await _emit_to_matching_clients("job_lifecycle", payload)
