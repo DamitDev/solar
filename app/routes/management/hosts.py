@@ -277,11 +277,28 @@ async def create_instance(host_id: str, instance_data: dict[str, Any]):
     # Validate priority if present (S-036)
     validate_priority(instance_data)
 
-    # Resolve model_source if present
-    model_source = instance_data.get("model_source")
+    # Resolve model_source if present.
+    # The resolved local:// URI is used to set model/model_id so the host can
+    # create the instance.  The original model_source URI (repo://, huggingface://)
+    # is preserved for cross-host operations such as migration (S-037).
+    # Support both flat and {config: {...}} payload shapes.
+    config = instance_data.get("config", instance_data)
+    model_source = config.get("model_source")
     if model_source:
         resolved = await resolve(model_source, host.url, host.api_key)
-        instance_data = {**instance_data, "model_source": resolved}
+        # Extract filesystem path from local:// URI
+        # local:// is always 8 chars; the path starts at index 8.
+        if resolved.startswith("local://"):
+            model_path = resolved[8:]
+        else:
+            model_path = resolved
+        backend_type = config.get("backend_type", "llamacpp")
+        if backend_type.startswith("huggingface"):
+            config["model_id"] = model_path
+        else:
+            config["model"] = model_path
+        if "config" in instance_data:
+            instance_data["config"] = config
 
     try:
         async with aiohttp.ClientSession() as session:
