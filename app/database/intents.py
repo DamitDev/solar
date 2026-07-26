@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 
 from app.models.intent import (
     IntentPhase,
@@ -157,19 +157,58 @@ class IntentDB:
             result = await session.execute(stmt)
             return [self._row_to_response(row) for row in result.scalars()]
 
-    async def soft_delete_intent(self, intent_id: str) -> IntentResponse | None:
-        """Mark an intent as deleted (soft-delete with deleted_at timestamp)."""
+    async def soft_delete_intent(
+        self, intent_id: str, *, orphan: bool = False
+    ) -> IntentResponse | None:
+        """Transition an intent to 'deleting' so the reconciler cleans it up.
+
+        The reconciler (S-041) will stop or disown managed instances, then
+        transition the phase to 'deleted'.  ``deleted_at`` is set by
+        ``update_status()`` once reconciliation confirms zero observed
+        replicas — setting it here would exclude the intent from
+        ``list_active_for_reconciliation()`` and block cleanup.
+
+        If *orphan* is True, the reconciler will clear ownership markers
+        instead of stopping managed instances.
+        """
         now = datetime.now(timezone.utc)
         async with self._session() as session:
             row = await session.get(IntentRow, intent_id)
             if row is None or row.deleted_at is not None:
                 return None
             row.phase = "deleting"
-            row.deleted_at = now
             row.updated_at = now
+            # Store orphan flag in metadata so the reconciler can read it
+            if orphan:
+                meta = dict(row.metadata_ or {})
+                meta["orphan"] = "true"
+                row.metadata_ = meta
             await session.commit()
             await session.refresh(row)
             return self._row_to_response(row)
+
+    async def list_active_for_reconciliation(self) -> list[IntentResponse]:
+        """List all non-deleted intents, ordered by priority for reconciliation.
+
+        Higher-priority intents (production) are reconciled first so they
+        can claim capacity before lower-priority intents.
+        """
+        async with self._session() as session:
+            stmt = (
+                select(IntentRow)
+                .where(IntentRow.deleted_at.is_(None))
+                .order_by(
+                    case(
+                        (IntentRow.priority == "production", 0),
+                        (IntentRow.priority == "staging", 1),
+                        (IntentRow.priority == "ephemeral", 2),
+                        else_=3,
+                    ),
+                    IntentRow.created_at.asc(),
+                )
+            )
+            result = await session.execute(stmt)
+            return [self._row_to_response(row) for row in result.scalars()]
 
     async def check_alias_conflict(
         self, alias: str, *, exclude_id: str | None = None
@@ -187,6 +226,54 @@ class IntentDB:
             if exclude_id and str(row.id) == exclude_id:
                 return False
             return True
+
+    async def update_status(
+        self,
+        intent_id: str,
+        *,
+        phase: str | None = None,
+        reconcile: str | None = None,
+        status_json: dict[str, Any] | None = None,
+        last_reconciled_at: datetime | None = None,
+        ready_at: datetime | str | None = None,
+    ) -> IntentResponse | None:
+        """Update an intent's status fields atomically.
+
+        Only the provided non-None kwargs are written; all others are
+        left unchanged.  Returns the updated intent or None if the
+        intent is unknown or has already been soft-deleted.
+
+        When *phase* transitions to ``"deleted"``, ``deleted_at`` is set
+        automatically so ``list_active_for_reconciliation()`` excludes
+        the intent from future reconciliation passes.
+        """
+        now = datetime.now(timezone.utc)
+        async with self._session() as session:
+            row = await session.get(IntentRow, intent_id)
+            if row is None:
+                return None
+            # Once soft-deleted, status updates are rejected
+            if row.deleted_at is not None:
+                return None
+            if phase is not None:
+                row.phase = phase
+                # Auto-soft-delete when the reconciler confirms cleanup
+                if phase == "deleted":
+                    row.deleted_at = now
+            if reconcile is not None:
+                row.reconcile = reconcile
+            if status_json is not None:
+                row.status_json = status_json
+            if last_reconciled_at is not None:
+                row.last_reconciled_at = last_reconciled_at
+            if ready_at is not None:
+                if isinstance(ready_at, str):
+                    ready_at = datetime.fromisoformat(ready_at)
+                row.ready_at = ready_at
+            row.updated_at = now
+            await session.commit()
+            await session.refresh(row)
+            return self._row_to_response(row)
 
 
 intent_db = IntentDB()
