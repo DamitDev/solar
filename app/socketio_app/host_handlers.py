@@ -24,7 +24,6 @@ from app.models.job import JobStatus
 from app.models.socketio import (
     HostHealthPayload,
     HostPendingPayload,
-    HostStatusPayload,
     InstancesUpdatePayload,
     InstanceStatePayload,
     JobLifecyclePayload,
@@ -33,6 +32,7 @@ from app.models.socketio import (
     WSRegistration,
 )
 from app.redis_state import host_store
+from app.services.host_status import build_host_status_payload
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ def _api_key_preview(api_key: str) -> str:
 
 async def _emit_host_status(host: Host, *, connected: bool) -> None:
     """Emit a host_status event to WebUI using the typed payload model."""
-    payload = HostStatusPayload.from_host(host, connected=connected)
+    payload = await build_host_status_payload(host, connected=connected)
     await sio.emit("host_status", payload.model_dump(), namespace="/webui")
 
 
@@ -630,6 +630,9 @@ async def _handle_job_lifecycle(
         timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
     )
 
+    # Tracks whether this event changed anything the active_jobs view exposes.
+    job_state_changed = False
+
     # Persist job-level status transitions (step_* events don't change it).
     new_status = _LIFECYCLE_STATUS.get(event_name)
     if new_status and job_id:
@@ -639,6 +642,7 @@ async def _handle_job_lifecycle(
             new_status,
             error_message=error_message if new_status == JobStatus.FAILED else None,
         )
+        job_state_changed = True
         if new_status in (
             JobStatus.COMPLETED,
             JobStatus.FAILED,
@@ -646,9 +650,28 @@ async def _handle_job_lifecycle(
         ):
             _correlation_cache.pop(job_id, None)
 
+    # Persist current pipeline step on step_started events.
+    if event_name == "step_started" and job_id:
+        step_name = data.get("step_name")
+        step_index = data.get("step_index")
+        if step_name is not None or step_index is not None:
+            await job_db.update_job_step(
+                job_id,
+                step_name=str(step_name) if step_name is not None else None,
+                step_index=int(step_index) if step_index is not None else None,
+            )
+            job_state_changed = True
+
     from .webui_handlers import broadcast_job_lifecycle as _b
 
     await _b(payload.model_dump())
+
+    # Broadcast updated host status so WebUI consumers see the new active_jobs
+    # summary immediately. Skipped when nothing was persisted: step_completed
+    # and step_failed would rebroadcast an identical payload, and step_failed
+    # is always followed by job_failed, which does broadcast.
+    if host and job_state_changed:
+        await _emit_host_status(host, connected=True)
 
 
 def _make_lifecycle_handler(event_name: str):

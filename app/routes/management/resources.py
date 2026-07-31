@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query
 from app.database.hosts import host_db
 from app.models import Host, HostResourceSnapshot, AggregatedResourceResponse
 from app.redis_state import host_store
+from app.services.host_status import get_host_active_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,9 @@ async def _fetch_host_resource_snapshot(
             host.id,
             exc_info=True,
         )
+
+    # Aggregate active job workloads from the jobs table
+    base.active_jobs = await get_host_active_jobs(host.id)
 
     # Proxy live resource data from the host
     try:
