@@ -16,9 +16,13 @@ Design:
 
 import asyncio
 import logging
+import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+
+from fastapi import HTTPException
 
 from app.config import settings
 from app.redis_state.connection import redis_client
@@ -64,6 +68,26 @@ class Action:
 _BACKOFF_MIN_S = 10
 _BACKOFF_MAX_S = 300
 
+# Hard bound on a single reconciliation action. Host calls are individually
+# time-bounded, but a MIGRATE can chain several (pull with ORAS retries,
+# create, start, delete) and stall the whole loop for minutes; the bound
+# turns such stalls into a recorded failure + paced backoff instead (§8.3).
+_ACTION_TIMEOUT_S = 60
+
+# How long the *displaced* intent is left alone after a displacement
+# MIGRATE/stop so it does not race-recreate the instance the migration is
+# moving (§8.5: coordinated displacement, not a fight).
+_SETTLE_S = float(os.getenv("RECONCILE_SETTLE_S", "3.0"))
+_MIGRATE_SETTLE_S = float(os.getenv("RECONCILE_MIGRATE_SETTLE_S", "10.0"))
+_DISPLACE_COOLDOWN_S = float(os.getenv("RECONCILE_DISPLACE_COOLDOWN_S", "60.0"))
+
+# Redis set of instance ids whose ownership markers were cleared while the
+# instance kept running (orphan delete, §12.4). The host config retains the
+# markers (no host-side PATCH for running instances), so without this set a
+# cache re-seed after a control restart would make the reconciler treat the
+# orphan as managed again.
+_DISOWNED_SET = "solar:disowned"
+
 
 # ── Reconciler ─────────────────────────────────────────────────
 
@@ -77,6 +101,17 @@ class Reconciler:
         self._running = False
         # Per-intent exponential backoff: {intent_id: {"failures": N, "next_retry_at": iso}}
         self._backoff: dict[str, dict[str, Any]] = {}
+        # Per-intent settle window (monotonic deadline) after CREATE/MIGRATE
+        # so the host's WS instances_update lands before the next diff —
+        # otherwise the stale observed state diffs a duplicate CREATE whose
+        # start is then SIGTERM'd by the surplus cleanup (-15/404 races).
+        self._settle_until: dict[str, float] = {}
+        # Per-instance displacement cooldown (monotonic deadline): a MIGRATE
+        # that found no target (staging left in place, or ephemeral already
+        # stopped) must not be re-attempted every tick — it starves the
+        # intent's CREATE actions and cannot free capacity it already failed
+        # to free (§8.5 partial fulfillment instead of thrash).
+        self._displace_cooldown: dict[str, float] = {}
 
     # ── Lifecycle ──────────────────────────────────────────────
 
@@ -207,6 +242,29 @@ class Reconciler:
             logger.debug("Intent %s in backoff, skipping", intent.id)
             return
 
+        # Settle window: skip diffing right after a CREATE/MIGRATE so the
+        # host's WS push lands before we re-observe (closes the
+        # duplicate-create window; still refresh status).
+        if time.monotonic() < self._settle_until.get(intent.id, 0.0):
+            logger.debug("Intent %s in settle window, skipping diff", intent.id)
+            # Reload the intent: the status refresh below must never
+            # overwrite a phase transition that happened since this pass's
+            # intent was loaded (e.g. a DELETE that set phase=deleting —
+            # writing a stale "pending"-derived phase would kill the delete
+            # flow and the reconciler would recreate forever).
+            from app.database.intents import intent_db
+
+            fresh = await intent_db.get_intent(intent.id)
+            if fresh is None:
+                return
+            if _intent_phase(fresh) == "deleting":
+                # A delete raced the settle window — fall through to the
+                # normal (delete) flow instead of the status-only refresh.
+                intent = fresh
+            else:
+                await self._update_status(intent, await self._observe(intent))
+                return
+
         # 1. Observe
         observed = await self._observe(intent)
 
@@ -231,12 +289,22 @@ class Reconciler:
             last_error = None
             action_succeeded = False
             try:
-                result = await self._act(intent, action)
+                t_act = time.monotonic()
+                result = await asyncio.wait_for(
+                    self._act(intent, action), timeout=_ACTION_TIMEOUT_S
+                )
+                logger.debug(
+                    "act %s for %s took %.1fs",
+                    action.type,
+                    intent.id[:8],
+                    time.monotonic() - t_act,
+                )
                 action_succeeded = True
                 if action.type in (ActionType.CREATE, ActionType.MIGRATE) and result:
                     await asyncio.sleep(0.5)
                     observed = await self._observe(intent)
-            except Exception as e:
+                    self._settle_until[intent.id] = time.monotonic() + _SETTLE_S
+            except Exception as e:  # noqa: BLE001
                 logger.error(
                     "Action %s failed for intent %s: %s",
                     action.type,
@@ -254,7 +322,13 @@ class Reconciler:
                 self._backoff_clear(intent.id)
             elif last_error is not None:
                 self._backoff_record_failure(intent.id)
+            t_upd = time.monotonic()
             await self._update_status(intent, observed, last_error=last_error)
+            logger.debug(
+                "update_status for %s took %.1fs",
+                intent.id[:8],
+                time.monotonic() - t_upd,
+            )
             return
 
         # 2. Diff
@@ -291,14 +365,19 @@ class Reconciler:
         last_error = None
         action_succeeded = False
         try:
-            result = await self._act(intent, action)
+            result = await asyncio.wait_for(
+                self._act(intent, action), timeout=_ACTION_TIMEOUT_S
+            )
             action_succeeded = True
 
             # If we created/migrated, re-observe for fresh state
             if action.type in (ActionType.CREATE, ActionType.MIGRATE) and result:
                 await asyncio.sleep(0.5)
                 observed = await self._observe(intent)
-        except Exception as e:
+                # Let the host's WS instances_update land before the next
+                # diff (see _settle_until above).
+                self._settle_until[intent.id] = time.monotonic() + _SETTLE_S
+        except Exception as e:  # noqa: BLE001
             logger.error(
                 "Action %s failed for intent %s: %s",
                 action.type,
@@ -386,14 +465,18 @@ class Reconciler:
         candidates = observed["candidates"]
         gateway_aliases = observed["gateway_aliases"]
 
-        # Compute health gate elapsed time from strategy start
-        started_at_str = strategy_progress.get("started_at")
+        # Compute health gate elapsed time from the current step start
+        # (per §11.1 each replacement step has its own timeout window).
+        # Fall back to overall strategy started_at for backward compat.
+        step_started_at_str = strategy_progress.get(
+            "step_started_at"
+        ) or strategy_progress.get("started_at")
         health_gate_started_at = 0.0
-        if started_at_str:
+        if step_started_at_str:
             try:
-                started_dt = datetime.fromisoformat(started_at_str)
+                step_started_dt = datetime.fromisoformat(step_started_at_str)
                 health_gate_started_at = (
-                    datetime.now(timezone.utc) - started_dt
+                    datetime.now(timezone.utc) - step_started_dt
                 ).total_seconds()
             except (ValueError, TypeError):
                 pass
@@ -450,7 +533,7 @@ class Reconciler:
                     new_progress["current_instance_id"] = created.get(
                         "id"
                     ) or created.get("instance_id")
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.error(
                     "Strategy action %s failed for intent %s: %s",
                     action_type,
@@ -517,11 +600,25 @@ class Reconciler:
         managed_instances: list[dict[str, Any]] = []
         alias_instances: list[dict[str, Any]] = []
         manual_conflicts: list[dict[str, Any]] = []
+        # Orphaned instances (markers cleared while running, §12.4): the host
+        # config still carries managed_by/intent_id, so exclude them here —
+        # they are neither managed nor conflicts.
+        try:
+            r = redis_client()
+            disowned: set[str] = set(str(x) for x in await r.smembers(_DISOWNED_SET))
+        except Exception:  # noqa: BLE001
+            disowned = set()
+        seen_instance_ids: set[str] = set()
         for host in hosts:
             instances = await host_store.get_host_instances(host.id)
             for inst in instances:
                 cfg = inst.get("config", inst)
                 inst_alias = cfg.get("alias") or inst.get("alias")
+                iid = inst.get("instance_id") or inst.get("id")
+                if iid:
+                    seen_instance_ids.add(iid)
+                if iid and iid in disowned:
+                    continue
                 if inst_alias != alias:
                     continue
                 # Annotate with host context
@@ -537,6 +634,16 @@ class Reconciler:
                 elif managed_by != "intent" or intent_id != intent.id:
                     # Manual instance or owned by a different intent
                     manual_conflicts.append(inst)
+
+        # Prune disowned tombstones whose instance no longer exists anywhere.
+        if disowned:
+            stale = disowned - seen_instance_ids
+            if stale:
+                try:
+                    r = redis_client()
+                    await r.srem(_DISOWNED_SET, *stale)
+                except Exception:  # noqa: BLE001
+                    logger.warning("Could not prune disowned set", exc_info=True)
 
         # 3. Gateway registry — which aliases are registered?
         gateway_aliases: set[str] = set()
@@ -623,6 +730,14 @@ class Reconciler:
             displaced = await find_displaceable_instances(
                 host.id, intent_priority, preserve_alias=alias
             )
+            if displaced:
+                now = time.monotonic()
+                filtered: list[dict[str, Any]] = []
+                for d in displaced:
+                    iid = d.get("instance_id") or d.get("id")
+                    if iid is None or now >= self._displace_cooldown.get(iid, 0.0):
+                        filtered.append(d)
+                displaced = filtered
             if displaced:
                 displaceable_map[host.id] = displaced
 
@@ -743,24 +858,26 @@ class Reconciler:
                     )
                 )
 
-            # Check if instance failed/stopped unexpectedly
+            # Managed instances in failed/stopped/error are drift (§8.2):
+            # RECREATE restarts them; if the restart fails, the replica is
+            # deleted and re-created with backoff (so no /stop spam — the
+            # action restarts instead of stopping).
             status = inst.get("status") or inst.get("state", "")
-            if status in ("failed", "stopped", "error"):
-                if not any(
-                    a.instance_id == inst_id and a.type == ActionType.REPLACE
-                    for a in actions
-                ):
-                    actions.append(
-                        Action(
-                            type=ActionType.RECREATE,
-                            intent_id=intent.id,
-                            alias=intent.alias,
-                            host_id=inst.get("_host_id"),
-                            instance_id=inst_id,
-                            reason=f"Instance {status}, recreating",
-                            priority=15,
-                        )
+            if status in ("failed", "stopped", "error") and not any(
+                a.instance_id == inst_id and a.type == ActionType.REPLACE
+                for a in actions
+            ):
+                actions.append(
+                    Action(
+                        type=ActionType.RECREATE,
+                        intent_id=intent.id,
+                        alias=intent.alias,
+                        host_id=inst.get("_host_id"),
+                        instance_id=inst_id,
+                        reason=f"Instance {status}, recreating",
+                        priority=15,
                     )
+                )
 
         # ── Observed < Desired → CREATE (placement policy) ───────
         shortfall = desired - observed_count
@@ -819,7 +936,14 @@ class Reconciler:
         if surplus > 0:
             # Sort per §8.2: unhealthy/failed first (oldest→newest within
             # that group), then healthy instances most-recently-created
-            # first so long-lived replicas survive.
+            # first so long-lived replicas survive. Tiebreak by host load
+            # (fewest running instances stopped first).
+            snapshots = observed.get("snapshots", {})
+
+            def _host_load(inst: dict[str, Any]) -> int:
+                snap = snapshots.get(inst.get("_host_id"))
+                return getattr(snap, "running_instance_count", 0) or 0
+
             unhealthy_insts: list[dict[str, Any]] = []
             healthy_insts: list[dict[str, Any]] = []
             for inst in managed:
@@ -828,7 +952,12 @@ class Reconciler:
                     unhealthy_insts.append(inst)
                 else:
                     healthy_insts.append(inst)
-            unhealthy_insts.sort(key=lambda i: i.get("created_at") or "0")
+            unhealthy_insts.sort(
+                key=lambda i: ((i.get("created_at") or "0"), _host_load(i))
+            )
+            # Newest-first primary, least-loaded secondary. Two-pass stable
+            # sort: a single reverse=True would also flip the load tiebreak.
+            healthy_insts.sort(key=_host_load)
             healthy_insts.sort(key=lambda i: i.get("created_at") or "0", reverse=True)
             to_stop = (unhealthy_insts + healthy_insts)[:surplus]
             for inst in to_stop:
@@ -918,13 +1047,33 @@ class Reconciler:
                     if isinstance(cfg, dict):
                         cfg.pop("managed_by", None)
                         cfg.pop("intent_id", None)
-                        inst["config"] = cfg
+                        # Flat WS cache entries have no nested "config"; the
+                        # fallback makes cfg == inst, so assigning it back
+                        # would create a self-referential dict that json
+                        # serialization rejects ("Circular reference
+                        # detected"). Only re-attach real nested configs.
+                        if cfg is not inst:
+                            inst["config"] = cfg
                     inst.pop("managed_by", None)
                     inst.pop("intent_id", None)
                     found = True
                     break
             if found:
                 await _hs.set_host_instances(action.host_id, instances)
+                # Tombstone the instance so a cache re-seed (host
+                # registration/instances_update after a control restart)
+                # cannot make the reconciler treat the orphan as managed
+                # again — the host config retains the markers by design
+                # (§12.4 + §5.2 restart-safe recompute).
+                try:
+                    r = redis_client()
+                    await r.sadd(_DISOWNED_SET, action.instance_id)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "Could not record disowned instance %s",
+                        action.instance_id,
+                        exc_info=True,
+                    )
             logger.info(
                 "Disowned instance %s on host %s (reason: %s)",
                 action.instance_id,
@@ -973,25 +1122,49 @@ class Reconciler:
             return None
 
         if action.type == ActionType.RECREATE:
-            # Recreate = stop failed instance, next tick creates replacement
+            # §8.2: "restart or recreate on the same or a new host (with
+            # backoff)". Try restart in place first; if the instance
+            # cannot be restarted, delete the broken replica so
+            # observed_count drops and the next tick's CREATE places a
+            # fresh replica (same or new host per placement). Raising
+            # records exponential backoff via _reconcile_one.
             if action.instance_id and action.host_id:
                 host = await host_db.get_host(action.host_id)
                 if host:
                     logger.info(
-                        "Stopping failed instance %s on %s for recreation",
+                        "Restarting instance %s on %s for recreation",
                         action.instance_id,
                         host.name,
                     )
-                    await stop_source_instance(host, action.instance_id)
+                    try:
+                        await self._start_instance(host, action.instance_id)
+                        return None
+                    except HTTPException:
+                        logger.warning(
+                            "Restart failed for instance %s on %s, recreating",
+                            action.instance_id,
+                            host.name,
+                            exc_info=True,
+                        )
+                        try:
+                            await self._delete_instance(host, action.instance_id)
+                        except Exception:  # noqa: BLE001
+                            logger.warning(
+                                "Failed to delete instance %s on %s after failed restart",
+                                action.instance_id,
+                                host.name,
+                                exc_info=True,
+                            )
+                        raise  # record backoff so retries are paced
             return None
 
         if action.type == ActionType.MIGRATE:
             # Migrate = use S-037 to move instance off this host, freeing capacity
             if not action.instance_id or not action.host_id:
                 return None
-            from app.services.placement import find_candidates
-            from app.services.migration import execute_migration
             from app.routes.management.resources import _fetch_host_resource_snapshot
+            from app.services.migration import execute_migration
+            from app.services.placement import find_candidates
 
             # Look up the source host to inherit its GPU type and roles as
             # placement constraints for the migration target (§8.5: move to
@@ -1025,10 +1198,56 @@ class Reconciler:
             ]
 
             if not target_candidates:
+                # §8.5: "Only stop it if no migration target exists and
+                # policy allows (e.g. ephemeral)." staging is migrated,
+                # not stopped, when possible — leave it untouched.
+                from app.redis_state import host_store as _hs
+
+                inst_priority, displaced_intent_id = (
+                    await self._displaced_instance_info(
+                        action.host_id, action.instance_id
+                    )
+                )
+                if displaced_intent_id:
+                    self._settle_until[displaced_intent_id] = (
+                        time.monotonic() + _MIGRATE_SETTLE_S
+                    )
+                # No target: don't re-attempt this displacement every tick
+                # (it cannot succeed while the cluster lacks an eligible
+                # host — re-trying only starves the CREATE actions).
+                self._displace_cooldown[action.instance_id] = (
+                    time.monotonic() + _DISPLACE_COOLDOWN_S
+                )
+                if inst_priority == "ephemeral":
+                    if source_host is None:
+                        logger.warning(
+                            "Host %s not found for stop fallback of instance %s",
+                            action.host_id,
+                            action.instance_id,
+                        )
+                        return None
+                    logger.info(
+                        "No migration target for %s (%s); ephemeral → stop",
+                        action.instance_id,
+                        action.alias,
+                    )
+                    await stop_source_instance(source_host, action.instance_id)
+                    try:
+                        await self._delete_instance(source_host, action.instance_id)
+                    except Exception:  # noqa: BLE001
+                        logger.warning(
+                            "Failed to delete instance %s on %s after stop",
+                            action.instance_id,
+                            source_host.name,
+                            exc_info=True,
+                        )
+                    return None
                 logger.warning(
-                    "No migration target found for instance %s (alias=%s)",
+                    "No migration target found for instance %s (alias=%s, "
+                    "priority=%s); leaving in place",
                     action.instance_id,
                     action.alias,
+                    inst_priority,
                 )
                 return None
 
@@ -1041,12 +1260,29 @@ class Reconciler:
                 target_host.name,
                 action.reason,
             )
+            # Leave the displaced intent alone while the migration moves its
+            # instance — otherwise its own diff sees the disowned source and
+            # races a duplicate CREATE against the target being placed.
+            _, displaced_intent_id = await self._displaced_instance_info(
+                action.host_id, action.instance_id
+            )
+            if displaced_intent_id:
+                self._settle_until[displaced_intent_id] = (
+                    time.monotonic() + _MIGRATE_SETTLE_S
+                )
             try:
                 result = await execute_migration(
                     instance_id=action.instance_id,
                     source_host_id=action.host_id,
                     target_host_id=target_host.id,
                     allow_production=False,
+                )
+                # The source stays visible in the cache until the host's WS
+                # push lands; without a cooldown the next tick re-migrates
+                # the same instance (disown already cleared its markers, so
+                # the settle lookup finds no intent to protect).
+                self._displace_cooldown[action.instance_id] = (
+                    time.monotonic() + _DISPLACE_COOLDOWN_S
                 )
                 return {"migration_id": result.migration_id, "status": result.status}
             except Exception:
@@ -1062,8 +1298,44 @@ class Reconciler:
 
     # ── Start / Delete instance helpers ────────────────────────
 
+    async def _displaced_instance_info(
+        self, host_id: str, instance_id: str
+    ) -> tuple[str, str | None]:
+        """Return ``(priority, intent_id)`` of the displaced instance.
+
+        Reads the reconciler's own Redis cache view (flat or nested). The
+        displaced workload's ``intent_id`` lets the reconciler leave that
+        intent alone while the migration moves/removes its instance (§8.5).
+        """
+        from app.redis_state import host_store as _hs
+
+        priority = "production"
+        intent_id: str | None = None
+        try:
+            insts = await _hs.get_host_instances(host_id)
+            for inst in insts:
+                iid = inst.get("instance_id") or inst.get("id")
+                if iid == instance_id:
+                    priority = (
+                        inst.get("priority")
+                        or inst.get("config", {}).get("priority")
+                        or "production"
+                    )
+                    intent_id = inst.get("intent_id") or inst.get("config", {}).get(
+                        "intent_id"
+                    )
+                    break
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Could not read priority for instance %s", instance_id, exc_info=True
+            )
+        return priority, intent_id
+
     async def _start_instance(self, host: Any, instance_id: str) -> None:
-        """Start a stopped instance on *host* via POST /instances/{id}/start."""
+        """Start a stopped instance on *host* via POST /instances/{id}/start.
+
+        Raises HTTPException on failure so the reconciler records last_error.
+        """
         import aiohttp
 
         try:
@@ -1075,21 +1347,25 @@ class Reconciler:
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp:
-                    if resp.status != 200:
-                        text = await resp.text()
-                        logger.warning(
-                            "Failed to start instance %s on %s: HTTP %s %s",
-                            instance_id,
-                            host.name,
-                            resp.status,
-                            text,
-                        )
-        except Exception as e:
-            logger.warning(
-                "Failed to start instance %s on %s: %s",
-                instance_id,
-                host.name,
-                e,
+                    if resp.status == 200:
+                        return
+                    text = await resp.text()
+                    raise HTTPException(
+                        status_code=502,
+                        detail=(
+                            f"Host '{host.name}' failed to start instance "
+                            f"{instance_id}: HTTP {resp.status} — {text}"
+                        ),
+                    )
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"Host '{host.name}' unreachable during instance start "
+                    f"for {instance_id}: {e}"
+                ),
             )
 
     async def _delete_instance(self, host: Any, instance_id: str) -> None:
@@ -1114,7 +1390,7 @@ class Reconciler:
                             resp.status,
                             text,
                         )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning(
                 "Failed to delete instance %s on %s: %s",
                 instance_id,
@@ -1221,9 +1497,12 @@ class Reconciler:
                 phase = IntentPhase.DELETED
             else:
                 phase = IntentPhase.DELETING
-        elif desired == 0 and observed_count == 0:
-            phase = IntentPhase.READY
-        elif ready_count == desired and desired > 0:
+        elif (
+            desired == 0
+            and observed_count == 0
+            or ready_count == desired
+            and desired > 0
+        ):
             phase = IntentPhase.READY
         elif ready_count == 0 and desired > 0 and observed_count == 0:
             phase = IntentPhase.RECONCILING
@@ -1247,13 +1526,26 @@ class Reconciler:
                     last_transition=now_iso,
                 ).model_dump()
             )
-        if phase in (IntentPhase.RECONCILING, IntentPhase.DEGRADED):
+        if phase == IntentPhase.RECONCILING:
             conditions.append(
                 Condition(
                     type="Progressing",
                     status=True,
                     reason="Reconciling",
                     message="Reconciliation in progress",
+                    last_transition=now_iso,
+                ).model_dump()
+            )
+        if phase == IntentPhase.DEGRADED:
+            conditions.append(
+                Condition(
+                    type="Degraded",
+                    status=True,
+                    reason="ShortfallOrFailure",
+                    message=(
+                        f"{ready_count}/{desired} ready — "
+                        "desired replicas cannot all be made ready"
+                    ),
                     last_transition=now_iso,
                 ).model_dump()
             )
@@ -1385,6 +1677,14 @@ def _detect_backend_drift(intent: Any, instance_config: dict[str, Any]) -> bool:
 
     Compares the intent's backend fields (excluding identity/server-derived
     fields) against the instance config for the same keys.
+
+    NB: the WS instances cache is intentionally flat (id/alias/status/port/
+    backend_type/model_source/... only — see gateway._ws_cache_from_http_
+    instances and the host's send_instances_update), so most backend fields
+    (device, dtype, max_length, labels) are never visible here. Fields that
+    are absent from the cache entry are skipped; comparing them as None
+    would report drift on every managed instance and trigger a REPLACE-stop
+    loop (the pre-fix behavior).
     """
     intent_backend = intent.backend if isinstance(intent.backend, dict) else {}
     _skip_keys = {
@@ -1402,6 +1702,8 @@ def _detect_backend_drift(intent: Any, instance_config: dict[str, Any]) -> bool:
     for key, value in intent_backend.items():
         if key in _skip_keys:
             continue
+        if key not in instance_config:
+            continue  # flat WS cache does not carry this field
         inst_value = instance_config.get(key)
         if inst_value != value:
             return True

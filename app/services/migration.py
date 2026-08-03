@@ -29,9 +29,9 @@ import aiohttp
 from fastapi import HTTPException
 
 from app.database.hosts import host_db
+from app.model_resolvers import resolve
 from app.models import Host
 from app.models.migration import MigrationResult, MigrationStep
-from app.model_resolvers import resolve
 from app.redis_state import host_store
 from app.validation import validate_priority
 
@@ -54,9 +54,11 @@ async def create_instance_on_host(
 
     # Resolve model_source and set model/model_id while preserving the
     # original URI.  Support both flat and {config: {...}} payload shapes.
+    # Skip re-resolution when the caller already set model/model_id
+    # (migration passes the path returned by ensure_model_on_target).
     config = instance_data.get("config", instance_data)
     model_source = config.get("model_source")
-    if model_source:
+    if model_source and not config.get("model") and not config.get("model_id"):
         resolved = await resolve(model_source, host.url, host.api_key)
         # Extract filesystem path from local:// URI (scheme is 8 chars)
         if resolved.startswith("local://"):
@@ -99,7 +101,7 @@ async def create_instance_on_host(
             status_code=502,
             detail=f"Host '{host.name}' is unreachable at {host.url}",
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
             detail=f"Cannot reach host '{host.name}': {e}",
@@ -172,7 +174,7 @@ async def capture_instance_config(
                 f"at {source_host.url}"
             ),
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
             detail=f"Cannot reach source host '{source_host.name}': {e}",
@@ -251,15 +253,18 @@ async def validate_target_fitness(
     # portable across GPU architectures and the model is pulled fresh
     # on the target host via S-019 distribution.  Placement constraints
     # (deployment-intent §4.5) default gpu_type to null (any).
-    if source_gpu_type and target_host.gpu_type:
-        if source_gpu_type != target_host.gpu_type:
-            logger.info(
-                "GPU type differs — source '%s' (%s) → target '%s' (%s)",
-                source_gpu_type,
-                source_gpu_type,
-                target_host.name,
-                target_host.gpu_type,
-            )
+    if (
+        source_gpu_type
+        and target_host.gpu_type
+        and source_gpu_type != target_host.gpu_type
+    ):
+        logger.info(
+            "GPU type differs — source '%s' (%s) → target '%s' (%s)",
+            source_gpu_type,
+            source_gpu_type,
+            target_host.name,
+            target_host.gpu_type,
+        )
 
     # Resource check via /health (disk + VRAM)
     MIN_VRAM_GB = 2.0
@@ -303,7 +308,7 @@ async def validate_target_fitness(
                             break
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(
             "Failed to check resources on target host %s: %s",
             target_host.id,
@@ -413,12 +418,94 @@ async def check_no_active_training(host: Host) -> None:
                 f"– migration rejected."
             ),
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
             detail=(
                 f"Cannot reach source host '{host.name}' for training job "
                 f"check: {e}. Migration rejected."
+            ),
+        )
+
+
+async def disown_source_instance(
+    source_host: Host, instance_id: str, config: dict[str, Any]
+) -> None:
+    """Clear intent ownership markers from *instance_id* on *source_host*.
+
+    The instance is left stopped — it is not deleted — but stops being
+    managed by the intent reconciler (S-037/D-017).  Both the host-side
+    instance record and the Redis cache are updated so the reconciler
+    stops tracking it immediately and does not try to recreate it.
+    """
+    # 1. Host-side: clear markers via PUT (instance must be stopped).
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"{source_host.url}/instances/{instance_id}"
+            headers = {
+                "X-API-Key": source_host.api_key,
+                "Content-Type": "application/json",
+            }
+            payload = {"config": config, "managed_by": None, "intent_id": None}
+            async with session.put(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    raise HTTPException(
+                        status_code=response.status,
+                        detail=f"Failed to disown source instance: {text}",
+                    )
+    except HTTPException:
+        raise
+    except (
+        aiohttp.ClientConnectionError,
+        aiohttp.ClientConnectorError,
+        asyncio.TimeoutError,
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Source host '{source_host.name}' is unreachable "
+                f"at {source_host.url}"
+            ),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cannot reach source host '{source_host.name}': {e}",
+        )
+
+    # 2. Redis: clear markers so the reconciler stops observing it now.
+    # Must never escape as a raw 500: a failure here would leave the
+    # intent markers in Redis while the host-side markers are already
+    # cleared, and the reconciler would fight the stopped instance
+    # (RECREATE -> /stop spam) forever.
+    try:
+        instances = await host_store.get_host_instances(source_host.id)
+        for inst in instances:
+            iid = inst.get("instance_id") or inst.get("id")
+            if iid == instance_id:
+                # Redis host_store entries are the flat WS format: markers
+                # live at top level, and there is no nested "config" key.
+                # Never fall back to `inst` itself (would self-reference).
+                cfg = inst.get("config")
+                if isinstance(cfg, dict):
+                    cfg.pop("managed_by", None)
+                    cfg.pop("intent_id", None)
+                inst.pop("managed_by", None)
+                inst.pop("intent_id", None)
+                break
+        await host_store.set_host_instances(source_host.id, instances)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Failed to clear intent markers from Redis for source "
+                f"instance '{instance_id}': {e}"
             ),
         )
 
@@ -459,7 +546,7 @@ async def stop_source_instance(source_host: Host, instance_id: str) -> dict[str,
                 f"at {source_host.url}"
             ),
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
             detail=f"Cannot reach source host '{source_host.name}': {e}",
@@ -671,11 +758,44 @@ async def execute_migration(
             error=f"Stop source failed: {e.detail}",
         )
 
+    # ── 6.5 Disown source instance ──────────────────────────────
+    # S-037/D-017: the source stays stopped but is released from the
+    # intent so the reconciler no longer manages (or recreates) it.
+    try:
+        await disown_source_instance(
+            source_host,
+            instance_id,
+            instance_config.get("config", instance_config),
+        )
+        steps.append(MigrationStep(step="disown_source", status="ok"))
+    except HTTPException as e:
+        steps.append(
+            MigrationStep(
+                step="disown_source",
+                status="failed",
+                detail={"error": str(e.detail), "status_code": e.status_code},
+            )
+        )
+        return _build_result(
+            migration_id,
+            source_host,
+            target_host,
+            instance_id,
+            alias,
+            model_source,
+            priority,
+            None,
+            steps,
+            status="failed",
+            error=f"Disown source failed: {e.detail}",
+        )
+
     # ── 7. Create target instance ───────────────────────────────
     # Build the instance config for the target host.
     config = instance_config.get("config", instance_config)
 
     # Remove host-assigned and instance-level fields from the config dict.
+    # managed_by and intent_id are ownership markers that survive migration.
     _INSTANCE_FIELDS = frozenset(
         {
             "id",
@@ -684,8 +804,6 @@ async def execute_migration(
             "pid",
             "api_key",
             "supported_endpoints",
-            "managed_by",
-            "intent_id",
             "created_at",
             "started_at",
             "error_message",
@@ -701,10 +819,15 @@ async def execute_migration(
     # Set model to the path resolved by ensure_model_on_target so the
     # host does not need to resolve model_source itself (which would
     # reject repo:// URIs without the companion host-side fix).
-    create_payload["model"] = path
-    create_payload.pop("model_source", None)
+    # Preserve model_source alongside the resolved path for intent
+    # linking and cross-host operations (S-037/D-017).
+    backend_type = str(create_payload.get("backend_type", "llamacpp"))
+    if backend_type.startswith("huggingface"):
+        create_payload["model_id"] = path
+    else:
+        create_payload["model"] = path
     # Ensure key fields from captured config are present.
-    for key in ("alias", "priority", "backend_type"):
+    for key in ("alias", "backend_type"):
         if key not in create_payload:
             val = _config_field(instance_config, key)
             if val is not None:
@@ -712,9 +835,15 @@ async def execute_migration(
 
     target_instance: dict[str, Any]
     try:
-        target_instance = await create_instance_on_host(
-            target_host, {"config": create_payload}
-        )
+        create_wrapper: dict[str, Any] = {"config": create_payload}
+        # Preserve ownership markers and priority from the source instance
+        # (S-037/D-017 G3): managed_by, intent_id, and priority are all
+        # top-level instance fields on the host (S-036), not config keys.
+        for field in ("managed_by", "intent_id", "priority"):
+            val = _config_field(instance_config, field)
+            if val is not None:
+                create_wrapper[field] = val
+        target_instance = await create_instance_on_host(target_host, create_wrapper)
     except HTTPException as e:
         steps.append(
             MigrationStep(
@@ -737,9 +866,9 @@ async def execute_migration(
             error=f"Create target failed: {e.detail}",
         )
 
-    target_instance_id = target_instance.get("instance_id") or target_instance.get(
-        "id", ""
-    )
+    # The host wraps created instances in {"instance": {...}, "message": "..."}
+    created = target_instance.get("instance", target_instance)
+    target_instance_id = created.get("id") or created.get("instance_id") or ""
     steps.append(
         MigrationStep(
             step="create_target",
