@@ -155,3 +155,42 @@ export function getCatalogStatusColor(status: string): string {
       return 'text-nord-4 bg-nord-3'; // unavailable / anything else — gray
   }
 }
+
+/** Badge colors for intent lifecycle phases (spec deployment-intent.md §7.2). */
+export function getIntentPhaseColor(phase: string): string {
+  switch (phase) {
+    case 'ready':
+      return 'text-nord-0 bg-nord-14'; // green
+    case 'reconciling':
+      return 'text-nord-6 bg-nord-10'; // blue
+    case 'pending':
+      return 'text-nord-0 bg-nord-13'; // yellow — stored, not reconciled
+    case 'degraded':
+      return 'text-nord-6 bg-nord-12'; // orange — partial fulfillment
+    case 'failed':
+      return 'text-nord-6 bg-nord-11'; // red
+    case 'deleting':
+    case 'deleted':
+      return 'text-nord-4 bg-nord-3';
+    default:
+      return 'text-nord-4 bg-nord-3';
+  }
+}
+
+export interface IntentOwnership {
+  managed: boolean;
+  intentId: string | null;
+}
+
+/**
+ * Read the intent ownership markers from an instance payload. The markers may
+ * surface either inside `config` or at the top level (payload position depends
+ * on the solar-control version) — check both (spec deployment-intent.md §5.1).
+ */
+export function getIntentOwnership(instance: any): IntentOwnership {
+  const managed = instance?.config?.managed_by === 'intent' || instance?.managed_by === 'intent';
+  return {
+    managed,
+    intentId: instance?.config?.intent_id ?? instance?.intent_id ?? null,
+  };
+}

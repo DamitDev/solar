@@ -15,6 +15,9 @@ import {
   PendingHost,
   PendingHostApproveRequest,
   CatalogResponse,
+  Intent,
+  IntentCreateRequest,
+  IntentDeletedResponse,
 } from './types';
 
 const DEFAULT_RELATIVE_CONTROL_BASE = '/api/control';
@@ -271,6 +274,27 @@ class SolarClient {
   async getCatalogModels(params: { search?: string; limit?: number; offset?: number }): Promise<CatalogResponse> {
     const response = await this.client.get('/api/catalog/models', { params });
     return response.data as CatalogResponse;
+  }
+
+  // Declarative deployment intents (U-003)
+  async createIntent(data: IntentCreateRequest): Promise<Intent> {
+    const response = await this.client.post('/api/intents', data);
+    return response.data as Intent;
+  }
+
+  async getIntents(params?: { alias?: string; priority?: string; phase?: string }): Promise<Intent[]> {
+    const response = await this.client.get('/api/intents', { params });
+    return response.data as Intent[];
+  }
+
+  async getIntent(id: string): Promise<Intent> {
+    const response = await this.client.get(`/api/intents/${id}`);
+    return response.data as Intent;
+  }
+
+  async deleteIntent(id: string, orphan = false): Promise<IntentDeletedResponse> {
+    const response = await this.client.delete(`/api/intents/${id}`, { params: { orphan } });
+    return response.data as IntentDeletedResponse;
   }
 
   // OpenAI Gateway

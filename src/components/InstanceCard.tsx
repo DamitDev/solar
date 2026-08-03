@@ -31,6 +31,7 @@ import { cn, getStatusColor, formatUptime } from '@/lib/utils';
 import { LogViewer } from './LogViewer';
 import { EditInstanceModal } from './EditInstanceModal';
 import { useInstanceState } from '@/hooks/useInstanceState';
+import { IntentManagedBadge } from './IntentManagedBadge';
 
 interface InstanceCardProps {
   instance: Instance;
@@ -262,6 +263,7 @@ export function InstanceCard({
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1">
                 <h3 className="font-semibold text-lg truncate text-nord-6">{instance.config.alias}</h3>
+                <IntentManagedBadge instance={instance} />
               </div>
               <p className="text-sm text-nord-4 truncate" title={getModelDisplay()}>
                 {getModelDisplay()}

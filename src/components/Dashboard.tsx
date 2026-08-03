@@ -7,7 +7,8 @@ import { AddHostModal } from './AddHostModal';
 import { PendingHostBanner } from './PendingHostBanner';
 import { Plus, RefreshCw, AlertCircle, Server, LayoutGrid, Table2 } from 'lucide-react';
 import solarClient from '@/api/client';
-import { cn } from '@/lib/utils';
+import { cn, getIntentOwnership } from '@/lib/utils';
+import { Instance } from '@/api/types';
 import {
   DndContext,
   closestCenter,
@@ -95,7 +96,30 @@ export function Dashboard() {
     }
   };
 
+  // Find the full instance record so ownership can be checked before actions
+  const findInstance = useCallback(
+    (hostId: string, instanceId: string): Instance | undefined =>
+      hosts.find((h) => h.id === hostId)?.instances.find((i) => i.id === instanceId),
+    [hosts],
+  );
+
+  // Intent-managed instances are recreated by the reconciler — warn first
+  const warnIfManaged = useCallback((instance?: Instance): boolean => {
+    if (!instance) return true;
+    const { managed, intentId } = getIntentOwnership(instance);
+    if (!managed) return true;
+    return window.confirm(
+      `This instance is managed by an intent (${intentId ?? 'unknown'}). Stopping it is temporary — the reconciler will recreate it. Delete it?`,
+    );
+  }, []);
+
+  const handleStopInstance = async (hostId: string, instanceId: string) => {
+    if (!warnIfManaged(findInstance(hostId, instanceId))) return;
+    await stopInstance(hostId, instanceId);
+  };
+
   const handleDeleteInstance = async (hostId: string, instanceId: string) => {
+    if (!warnIfManaged(findInstance(hostId, instanceId))) return;
     if (!confirm('Are you sure you want to delete this instance?')) return;
 
     try {
@@ -220,7 +244,7 @@ export function Dashboard() {
             hosts={hosts}
             isHostReachable={isHostReachable}
             onStartInstance={startInstance}
-            onStopInstance={stopInstance}
+            onStopInstance={handleStopInstance}
             onRestartInstance={restartInstance}
             onUpdateInstance={handleUpdateInstance}
             onDeleteInstance={handleDeleteInstance}
@@ -237,7 +261,7 @@ export function Dashboard() {
                     hostReachable={isHostReachable(host.id)}
                     onReorderInstance={(hostId, activeId, overId) => reorderInstance(hostId, activeId, overId)}
                     onStartInstance={startInstance}
-                    onStopInstance={stopInstance}
+                    onStopInstance={handleStopInstance}
                     onRestartInstance={restartInstance}
                     onUpdateInstance={handleUpdateInstance}
                     onDeleteInstance={handleDeleteInstance}

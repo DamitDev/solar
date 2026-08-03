@@ -15,7 +15,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
 import solarClient from '@/api/client';
-import { MemoryInfo, LogMessage, PendingHost } from '@/api/types';
+import { MemoryInfo, LogMessage, PendingHost, Intent } from '@/api/types';
 
 // Event type definitions
 export type WSMessageType =
@@ -34,6 +34,8 @@ export type WSMessageType =
   | 'request_reroute'
   | 'gateway_request'
   | 'filter_status'
+  | 'intent_update'
+  | 'intent_removed'
   | 'keepalive';
 
 export interface InstanceSummary {
@@ -180,6 +182,8 @@ export interface EventHandlers {
   onRoutingEvent?: (type: WSMessageType, data: RoutingEventData) => void;
   onGatewayRequest?: (data: GatewayRequestSummary) => void;
   onFilterStatus?: (filter: GatewayFilter) => void;
+  onIntentUpdate?: (intent: Intent) => void;
+  onIntentRemoved?: (id: string, alias: string) => void;
 }
 
 const DEFAULT_FILTER: GatewayFilter = {
@@ -200,6 +204,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
   const [logs, setLogs] = useState<Map<string, LogMessage[]>>(new Map());
   const [gatewayRequests, setGatewayRequests] = useState<GatewayRequestSummary[]>([]);
   const [gatewayFilter, setGatewayFilter] = useState<GatewayFilter>(DEFAULT_FILTER);
+  const [intents, setIntents] = useState<Map<string, Intent>>(new Map());
 
   const socketRef = useRef<Socket | null>(null);
   const handlersRef = useRef(handlers);
@@ -450,6 +455,29 @@ export function useEventStream(handlers: EventHandlers = {}) {
           }
           break;
 
+        case 'intent_update':
+          // Full intent record (reconciler emits the bare record — bindEvent wraps it in data)
+          if (event.data?.id) {
+            setIntents((prev) => {
+              const m = new Map(prev);
+              m.set(event.data.id, event.data as Intent);
+              return m;
+            });
+            h.onIntentUpdate?.(event.data as Intent);
+          }
+          break;
+
+        case 'intent_removed':
+          if (event.data?.id) {
+            setIntents((prev) => {
+              const m = new Map(prev);
+              m.delete(event.data.id);
+              return m;
+            });
+            h.onIntentRemoved?.(event.data.id, event.data.alias);
+          }
+          break;
+
         case 'keepalive':
           // Ignore keepalives
           break;
@@ -571,6 +599,8 @@ export function useEventStream(handlers: EventHandlers = {}) {
         type: 'filter_status',
         filter: payload?.filter ?? payload,
       }));
+      bindEvent('intent_update', (payload) => ({ type: 'intent_update', data: payload }));
+      bindEvent('intent_removed', (payload) => ({ type: 'intent_removed', data: payload }));
     };
 
     connect();
@@ -619,6 +649,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
     logs,
     gatewayRequests,
     gatewayFilter,
+    intents,
     getInstanceLogs,
     getInstanceState,
     clearInstanceLogs,

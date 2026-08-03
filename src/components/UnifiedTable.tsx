@@ -16,6 +16,7 @@ import {
 import { cn, getStatusColor, formatUptime } from '@/lib/utils';
 import { LogViewer } from './LogViewer';
 import { EditInstanceModal } from './EditInstanceModal';
+import { IntentManagedBadge } from './IntentManagedBadge';
 
 interface HostInfo {
   id: string;
@@ -153,7 +154,12 @@ export function UnifiedTable({
                   className={cn('bg-nord-1 hover:bg-nord-2 transition-colors', !reachable && 'opacity-70')}
                 >
                   {/* Alias */}
-                  <td className="px-3 py-1.5 font-medium text-nord-6 whitespace-nowrap">{instance.config.alias}</td>
+                  <td className="px-3 py-1.5 font-medium text-nord-6 whitespace-nowrap">
+                    <span className="flex items-center gap-2">
+                      {instance.config.alias}
+                      <IntentManagedBadge instance={instance} />
+                    </span>
+                  </td>
 
                   {/* Model */}
                   <td className="px-3 py-1.5 text-nord-4 font-mono text-xs" title={model}>

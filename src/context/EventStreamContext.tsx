@@ -19,7 +19,7 @@ import {
   GatewayRequestSummary,
   GatewayFilter,
 } from '@/hooks/useEventStream';
-import { LogMessage, PendingHost } from '@/api/types';
+import { LogMessage, PendingHost, Intent } from '@/api/types';
 
 interface EventStreamContextValue {
   isConnected: boolean;
@@ -31,6 +31,7 @@ interface EventStreamContextValue {
   logs: Map<string, LogMessage[]>;
   gatewayRequests: GatewayRequestSummary[];
   gatewayFilter: GatewayFilter;
+  intents: Map<string, Intent>;
   getInstanceLogs: (hostId: string, instanceId: string) => LogMessage[];
   getInstanceState: (hostId: string, instanceId: string) => InstanceStateData | undefined;
   clearInstanceLogs: (hostId: string, instanceId: string) => void;
@@ -72,4 +73,5 @@ export type {
   EventHandlers,
   GatewayRequestSummary,
   GatewayFilter,
+  Intent,
 };

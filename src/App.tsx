@@ -4,7 +4,9 @@ import { RoutingGraph } from './components/RoutingGraph';
 import { GatewayDashboard } from './components/GatewayDashboard';
 import { EndpointsDashboard } from './components/EndpointsDashboard';
 import { ModelCatalog } from './components/ModelCatalog';
-import { Activity, Server, Key, LogOut, Database } from 'lucide-react';
+import { IntentsPage } from './components/IntentsPage';
+import { IntentDetail } from './components/IntentDetail';
+import { Activity, Server, Key, LogOut, Database, Target } from 'lucide-react';
 import { RoutingEventsProvider } from './context/RoutingEventsContext';
 import { useRoutingEventsContext } from './context/RoutingEventsContext';
 
@@ -49,6 +51,17 @@ function Navigation() {
         >
           <Server size={18} />
           Hosts & Instances
+        </Link>
+        <Link
+          to="/intents"
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${
+            location.pathname.startsWith('/intents')
+              ? 'bg-nord-10 text-nord-6 font-medium'
+              : 'text-nord-4 hover:bg-nord-2'
+          }`}
+        >
+          <Target size={18} />
+          Intents
         </Link>
         <Link
           to="/endpoints"
@@ -107,6 +120,8 @@ const router = createBrowserRouter([
       { path: '/routing', element: <RoutingGraph /> },
       { path: '/gateway', element: <GatewayDashboard /> },
       { path: '/hosts', element: <Dashboard /> },
+      { path: '/intents', element: <IntentsPage /> },
+      { path: '/intents/:id', element: <IntentDetail /> },
       { path: '/endpoints', element: <EndpointsDashboard /> },
       { path: '/catalog', element: <ModelCatalog /> },
     ],

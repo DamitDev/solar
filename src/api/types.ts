@@ -4,7 +4,12 @@ export type InstanceStatus = 'stopped' | 'starting' | 'running' | 'failed' | 'st
 
 export type HostStatus = 'online' | 'offline' | 'error';
 
-export type BackendType = 'llamacpp' | 'huggingface_causal' | 'huggingface_classification' | 'huggingface_embedding';
+export type BackendType =
+  | 'llamacpp'
+  | 'huggingface_causal'
+  | 'huggingface_classification'
+  | 'huggingface_embedding'
+  | 'huggingface_vision';
 
 export interface MemoryInfo {
   used_gb: number;
@@ -21,6 +26,10 @@ export interface BaseInstanceConfig {
   alias: string;
   host: string;
   port?: number;
+  // Ownership marker (spec deployment-intent.md §5.1): set to "intent" + intent_id
+  // for reconciler-managed instances; absent for manual instances.
+  managed_by?: string | null;
+  intent_id?: string | null;
 }
 
 // llama.cpp specific config
@@ -247,6 +256,10 @@ export interface Instance {
   busy?: boolean;
   prefill_progress?: number;
   active_slots?: number;
+  // Ownership marker may also surface at the top level (payload position
+  // depends on solar-control version — check both locations defensively).
+  managed_by?: string | null;
+  intent_id?: string | null;
 }
 
 export interface Host {
@@ -474,4 +487,118 @@ export interface CatalogResponse {
   total: number;
   items: CatalogModelItem[];
   meta: { enrichment: CatalogEnrichmentStatus };
+}
+
+// ─── Declarative deployment intents (U-003, spec deployment-intent.md §4/§10) ───
+
+export type IntentPhase = 'pending' | 'reconciling' | 'ready' | 'degraded' | 'failed' | 'deleting' | 'deleted';
+export type ReconcileState = 'idle' | 'in_progress' | 'succeeded' | 'failed';
+export type IntentPriority = 'production' | 'staging' | 'ephemeral';
+export type IntentStrategy = 'rolling' | 'immediate';
+
+export interface IntentPlacement {
+  roles: string[];
+  gpu_type?: string | null;
+  host_allow: string[];
+  host_deny: string[];
+}
+
+export interface IntentResources {
+  vram_gb?: number | null;
+  ram_gb?: number | null;
+}
+
+export interface IntentCreateRequest {
+  alias: string;
+  model_source: string;
+  replicas?: number;
+  priority?: IntentPriority;
+  strategy?: IntentStrategy;
+  backend: Record<string, any>;
+  placement?: Partial<IntentPlacement>;
+  resources?: Partial<IntentResources>;
+  metadata?: Record<string, string>;
+}
+
+export interface ReplicaEntry {
+  host_id?: string | null;
+  host_name?: string | null;
+  instance_id?: string | null;
+  state?: string | null;
+  model_source?: string | null;
+  healthy: boolean;
+  message?: string | null;
+  updated_at?: string | null;
+}
+
+export interface IntentCondition {
+  type: string;
+  status: boolean;
+  reason: string;
+  message: string;
+  last_transition: string;
+}
+
+export interface StrategyProgress {
+  strategy: string;
+  target_model_source?: string | null;
+  phase?: string | null;
+  step?: string | null;
+  updated: number;
+  in_progress: number;
+  failed: number;
+  current_host_id?: string | null;
+  current_instance_id?: string | null;
+  pending_hosts?: string[];
+  failed_hosts?: string[];
+  started_at?: string | null;
+  message?: string | null;
+}
+
+export interface IntentLastError {
+  code: string;
+  message: string;
+  host_id?: string | null;
+  source_uri?: string | null;
+  at: string;
+}
+
+export interface IntentStatus {
+  phase: IntentPhase;
+  reconcile: ReconcileState;
+  desired_replicas: number;
+  observed_replicas: number;
+  ready_replicas: number;
+  updated_replicas: number;
+  available: boolean;
+  shortfall: number;
+  replica_set: ReplicaEntry[];
+  conditions: IntentCondition[];
+  strategy_progress: StrategyProgress | null;
+  last_error: IntentLastError | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  last_reconciled_at?: string | null;
+  ready_at?: string | null;
+}
+
+export interface Intent {
+  id: string;
+  alias: string;
+  model_source: string;
+  replicas: number;
+  priority: string;
+  strategy: string;
+  backend: Record<string, any>;
+  placement: IntentPlacement;
+  resources: IntentResources;
+  metadata: Record<string, string>;
+  status: IntentStatus;
+}
+
+export interface IntentDeletedResponse {
+  id: string;
+  alias: string;
+  phase: IntentPhase;
+  message: string;
 }

@@ -1,4 +1,5 @@
 import { Fragment, useEffect, type ReactNode } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Rocket, X } from 'lucide-react';
 import { CatalogDeployedHost, CatalogModelItem, CatalogSolarStatus } from '@/api/types';
 import { cn, formatBytes, formatDateTime, getCatalogStatusColor } from '@/lib/utils';
@@ -31,6 +32,17 @@ function StatBlock({ label, children }: { label: string; children: ReactNode }) 
 }
 
 export function ModelDetail({ model }: { model: CatalogModelItem }) {
+  // U-003 handoff: catalog → intent form pre-fill
+  const navigate = useNavigate();
+
+  const handleDeploy = () => {
+    navigate(
+      `/intents?alias=${encodeURIComponent(model.name)}&model_source=${encodeURIComponent(
+        `repo://${model.name}:${model.latest_version ?? ''}`,
+      )}`,
+    );
+  };
+
   // D-018 can list the same host once per model version path present on it
   // (verified in live dev data: damcpaiops02 appears for both v1 and v2).
   // Group by host name but keep every path — do not dedupe silently.
@@ -123,23 +135,15 @@ export function ModelDetail({ model }: { model: CatalogModelItem }) {
         </div>
       </section>
 
-      {/* Deploy affordance — disabled until U-003 (intent submission UI) lands */}
+      {/* Deploy affordance — opens the intent submission form pre-filled (U-003) */}
       <div className="flex justify-end border-t border-nord-3 pt-3">
         <button
-          disabled
-          title="Model deployment UI ships with U-003 (intent submission)"
-          className="px-3 py-1.5 rounded bg-nord-3 text-nord-4 text-sm cursor-not-allowed opacity-60"
+          onClick={handleDeploy}
+          className="px-3 py-1.5 rounded bg-nord-10 text-nord-6 text-sm hover:bg-nord-9 transition-colors"
         >
           <Rocket size={14} className="inline mr-1" /> Deploy
         </button>
       </div>
-      {/* U-003 handoff: when /intents lands, replace the disabled button with a real
-          useNavigate call:
-          navigate(
-            `/intents?alias=${encodeURIComponent(model.name)}&model_source=${encodeURIComponent(
-              `repo://${model.name}:${model.latest_version ?? ''}`,
-            )}`,
-          ) */}
     </div>
   );
 }
