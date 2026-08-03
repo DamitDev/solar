@@ -1,18 +1,19 @@
-from fastapi import APIRouter, HTTPException
-from typing import List, Optional
+from datetime import UTC
 
+from fastapi import APIRouter, HTTPException
+
+from solar_host.config import config_manager, parse_instance_config
 from solar_host.models import (
+    GenerationMetrics,
     Instance,
     InstanceCreate,
-    InstanceUpdate,
-    InstanceResponse,
-    InstanceStatus,
     InstancePriority,
+    InstanceResponse,
     InstanceRuntimeState,
-    GenerationMetrics,
+    InstanceStatus,
+    InstanceUpdate,
     LogMessage,
 )
-from solar_host.config import config_manager, parse_instance_config
 from solar_host.process_manager import process_manager
 
 router = APIRouter(prefix="/instances", tags=["instances"])
@@ -36,14 +37,19 @@ async def create_instance(data: InstanceCreate):
             managed_by=data.managed_by,
             intent_id=data.intent_id,
         )
+        # Push the new instance so solar-control's Redis cache learns about
+        # it immediately (flat WS shape); otherwise the gateway's HTTP poll
+        # fallback re-seeds the cache with the nested /instances shape and
+        # the reconciler's view of the instance lags (D-017).
+        process_manager._push_instances_update()
         return InstanceResponse(
             instance=instance, message=f"Instance {instance.id} created successfully"
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("", response_model=List[Instance])
+@router.get("", response_model=list[Instance])
 async def list_instances():
     """List all instances"""
     return config_manager.get_all_instances()
@@ -95,7 +101,7 @@ async def update_instance(instance_id: str, data: InstanceUpdate):
         return InstanceResponse(
             instance=instance, message=f"Instance {instance_id} updated successfully"
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -117,7 +123,7 @@ async def delete_instance(instance_id: str):
         return InstanceResponse(
             instance=instance, message=f"Instance {instance_id} deleted successfully"
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -211,7 +217,7 @@ async def get_instance_state(instance_id: str):
     )
 
 
-@router.get("/{instance_id}/logs", response_model=List[LogMessage])
+@router.get("/{instance_id}/logs", response_model=list[LogMessage])
 async def get_instance_logs(instance_id: str):
     """Get buffered logs for an instance.
 
@@ -227,7 +233,7 @@ async def get_instance_logs(instance_id: str):
 
 @router.get("/{instance_id}/last-generation", response_model=GenerationMetrics)
 async def get_last_generation(
-    instance_id: str, after: Optional[str] = None, within_s: Optional[int] = None
+    instance_id: str, after: str | None = None, within_s: int | None = None
 ):
     """Return most recent finished generation metrics for the instance.
 
@@ -244,14 +250,12 @@ async def get_last_generation(
     if not metrics:
         raise HTTPException(status_code=404, detail="No generation metrics available")
 
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     def parse_iso(ts: str | None):
         if not ts:
             return None
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(
-            timezone.utc
-        )
+        return datetime.fromisoformat(ts).astimezone(UTC)
 
     finished_dt = parse_iso(metrics.finished_at)
 
@@ -269,7 +273,7 @@ async def get_last_generation(
             )
 
     if within_s is not None and within_s >= 0:
-        now_dt = datetime.now(timezone.utc)
+        now_dt = datetime.now(UTC)
         if finished_dt and (now_dt - finished_dt).total_seconds() > float(within_s):
             raise HTTPException(
                 status_code=404,

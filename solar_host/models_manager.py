@@ -9,6 +9,7 @@ cache detection.
 """
 
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -16,9 +17,9 @@ import re
 import shutil
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any
 from urllib.parse import urlparse
 
 import pebble
@@ -49,13 +50,17 @@ class ManifestEntry(BaseModel):
     source_uri: str
     path: str
     size_bytes: int
-    digest: Optional[str] = None
+    digest: str | None = None
     downloaded_at: str
-    category: Optional[str] = None
-    name: Optional[str] = None
-    version: Optional[str] = None
-    checksum: Optional[str] = None
-    metadata: Optional[dict] = None
+    category: str | None = None
+    name: str | None = None
+    version: str | None = None
+    checksum: str | None = None
+    metadata: dict | None = None
+    # Per-file sha256 (hex) of the pulled artifact, recorded at pull time
+    # and verified on every cache hit (D-017). Absent on entries created
+    # before this field existed — readers must treat it as optional.
+    file_digests: dict | None = None
 
 
 class Manifest(BaseModel):
@@ -148,7 +153,7 @@ def read_manifest() -> Manifest:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return Manifest.model_validate(data)
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning("Failed to parse manifest at %s, treating as empty", path)
         return Manifest()
 
@@ -164,7 +169,7 @@ def write_manifest(manifest: Manifest) -> None:
     os.replace(tmp, target)
 
 
-def get_manifest_entry(source_uri: str) -> Optional[ManifestEntry]:
+def get_manifest_entry(source_uri: str) -> ManifestEntry | None:
     """Look up a manifest entry by source_uri. Returns None if not found."""
     manifest = read_manifest()
     for entry in manifest.models:
@@ -192,7 +197,7 @@ def remove_manifest_entry(source_uri: str) -> bool:
     return True
 
 
-def get_manifest_entry_by_slug(slug: str) -> Optional[ManifestEntry]:
+def get_manifest_entry_by_slug(slug: str) -> ManifestEntry | None:
     """Look up a manifest entry by slug. Returns None if not found."""
     manifest = read_manifest()
     for entry in manifest.models:
@@ -229,7 +234,7 @@ def delete_model_files(path: str) -> None:
 _manifest_lock = threading.Lock()
 
 
-def remove_manifest_entry_by_slug(slug: str) -> Optional[ManifestEntry]:
+def remove_manifest_entry_by_slug(slug: str) -> ManifestEntry | None:
     """Remove a manifest entry by slug under the manifest lock.
 
     Returns the removed entry (so the caller can obtain the path to delete
@@ -237,7 +242,7 @@ def remove_manifest_entry_by_slug(slug: str) -> Optional[ManifestEntry]:
     """
     with _manifest_lock:
         manifest = read_manifest()
-        removed: Optional[ManifestEntry] = None
+        removed: ManifestEntry | None = None
         new_models = []
         for entry in manifest.models:
             if entry.slug == slug and removed is None:
@@ -305,8 +310,14 @@ def _pull_harbor(
     harbor_ref: str,
     target_dir: Path,
     source_uri: str,
-) -> None:
+) -> dict | None:
     """Download a Harbor OCI artifact via ORAS into *target_dir*.
+
+    Verifies every pulled file's sha256 against the OCI manifest layer
+    digests (flat layers: layer digest = sha256 of the exact file bytes)
+    and returns ``{filename: sha256-hex}`` for the verified files. Raises
+    ``ModelPullError`` (502 model_pull_failed) on any mismatch so the
+    caller's retry/backoff surfaces it.
 
     Credentials must have been validated by the caller before this is invoked.
     """
@@ -321,6 +332,104 @@ def _pull_harbor(
         password=settings.harbor_password,
     )
     oras.pull(harbor_ref, outdir=str(target_dir))
+    return _verify_pulled_digests(oras, harbor_ref, target_dir, source_uri)
+
+
+def _verify_pulled_digests(
+    oras: Any,
+    harbor_ref: str,
+    target_dir: Path,
+    source_uri: str,
+) -> dict | None:
+    """Verify on-disk pulled files against the OCI manifest layer digests.
+
+    Uses the shared client's authenticated manifest fetch (the public
+    ``OrasHelper`` API does not expose manifests yet — follow-up: add a
+    ``get_manifest_layers`` method to harbor-oci-client). If the manifest
+    cannot be fetched or carries no per-file digests, verification is
+    skipped (log warning) rather than failing the pull.
+
+    Returns ``{filename: sha256-hex}`` of verified files, or None when
+    verification was not possible.
+    """
+    try:
+        manifest = oras._client.get_manifest(harbor_ref)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Post-pull digest verification skipped for %s: manifest fetch failed: %s",
+            harbor_ref,
+            exc,
+        )
+        return None
+
+    expected: dict[str, str] = {}
+    for layer in manifest.get("layers", []):
+        title = (layer.get("annotations") or {}).get("org.opencontainers.image.title")
+        digest = layer.get("digest", "")
+        if title and digest.startswith("sha256:"):
+            expected[title] = digest[len("sha256:") :]
+
+    if not expected:
+        logger.warning(
+            "Post-pull digest verification skipped for %s: manifest has no "
+            "per-file layer digests",
+            harbor_ref,
+        )
+        return None
+
+    problems: list[str] = []
+    actual: dict[str, str] = {}
+    for path in target_dir.iterdir():
+        if not path.is_file():
+            continue
+        h = hashlib.sha256(path.read_bytes()).hexdigest()
+        actual[path.name] = h
+        want = expected.get(path.name)
+        if want is None:
+            logger.warning(
+                "Pulled file %s is not covered by the manifest for %s",
+                path.name,
+                harbor_ref,
+            )
+        elif h != want:
+            problems.append(f"{path.name}: digest mismatch (got {h}, want {want})")
+    for name in expected:
+        if name not in actual:
+            problems.append(f"{name}: missing on disk after pull")
+
+    if problems:
+        raise ModelPullError(
+            502,
+            "model_pull_failed",
+            f"Pulled artifact integrity check failed: {'; '.join(problems)}",
+            source_uri,
+        )
+    return actual
+
+
+def _verify_cached_digests(entry: "ManifestEntry") -> bool:
+    """Verify on-disk artifact files against the manifest entry's digests.
+
+    Entries without recorded digests (pre-D-017) are trusted as-is.
+    """
+    if not entry.file_digests:
+        return True
+    base = Path(entry.path)
+    for name, want in entry.file_digests.items():
+        f = base / name
+        if not f.is_file():
+            logger.warning(
+                "Cached artifact %s corrupt: %s missing", entry.source_uri, name
+            )
+            return False
+        if hashlib.sha256(f.read_bytes()).hexdigest() != want:
+            logger.warning(
+                "Cached artifact %s corrupt: %s digest mismatch",
+                entry.source_uri,
+                name,
+            )
+            return False
+    return True
 
 
 def _pull_huggingface(
@@ -331,7 +440,7 @@ def _pull_huggingface(
     """Download a HuggingFace Hub model snapshot into *target_dir*."""
     import huggingface_hub  # type: ignore[import-untyped]
 
-    hf_token: Optional[str] = settings.hf_token or None
+    hf_token: str | None = settings.hf_token or None
 
     huggingface_hub.snapshot_download(
         repo_id=model_id,
@@ -344,15 +453,15 @@ def pull_model(
     *,
     source: str,
     source_uri: str,
-    harbor_ref: Optional[str] = None,
-    model_id: Optional[str] = None,
-    digest: Optional[str] = None,
-    size_bytes: Optional[int] = None,
-    category: Optional[str] = None,
-    name: Optional[str] = None,
-    version: Optional[str] = None,
-    checksum: Optional[str] = None,
-    metadata: Optional[dict] = None,
+    harbor_ref: str | None = None,
+    model_id: str | None = None,
+    digest: str | None = None,
+    size_bytes: int | None = None,
+    category: str | None = None,
+    name: str | None = None,
+    version: str | None = None,
+    checksum: str | None = None,
+    metadata: dict | None = None,
 ) -> dict:
     """Download a model from Harbor or HuggingFace Hub and record it in the manifest.
 
@@ -389,21 +498,22 @@ def pull_model(
 
         # 2. Cache check — manifest is the single source of truth, keyed by
         #    the base URI (the artifact identity).  Verify the resolved path
-        #    (dir + optional subpath) still exists on disk.
+        #    (dir + optional subpath) still exists on disk AND the recorded
+        #    per-file digests still match (a corrupt cached artifact would
+        #    otherwise keep crashing every restart-in-place RECREATE).
         cached_entry = get_manifest_entry(cache_key)
         if cached_entry is not None:
             cached_path = Path(cached_entry.path)
             resolved_cache = cached_path / subpath if subpath else cached_path
-            if resolved_cache.exists():
+            if resolved_cache.exists() and _verify_cached_digests(cached_entry):
                 return {
                     "path": str(resolved_cache),
                     "cached": True,
                     "source_uri": source_uri,
                 }
             logger.warning(
-                "Manifest entry for %s points to missing path %s, re-pulling",
+                "Manifest entry for %s is missing or corrupt on disk, re-pulling",
                 cache_key,
-                cached_entry.path,
             )
             with _manifest_lock:
                 remove_manifest_entry(cache_key)
@@ -433,20 +543,19 @@ def pull_model(
                 )
 
         # 4. Validate credentials before touching the filesystem.
-        if source == "harbor":
-            if not all(
-                [
-                    settings.harbor_url,
-                    settings.harbor_username,
-                    settings.harbor_password,
-                ]
-            ):
-                raise ModelPullError(
-                    500,
-                    "credentials_missing",
-                    "Harbor credentials not configured. Set HARBOR_URL, HARBOR_USERNAME, and HARBOR_PASSWORD.",
-                    source_uri,
-                )
+        if source == "harbor" and not all(
+            [
+                settings.harbor_url,
+                settings.harbor_username,
+                settings.harbor_password,
+            ]
+        ):
+            raise ModelPullError(
+                500,
+                "credentials_missing",
+                "Harbor credentials not configured. Set HARBOR_URL, HARBOR_USERNAME, and HARBOR_PASSWORD.",
+                source_uri,
+            )
 
         # 5. Remove any stale/partial directory from a previous failed pull.
         if target_dir.exists():
@@ -455,6 +564,7 @@ def pull_model(
 
         # 6. Download — subprocess + polling allows aborting on low disk (S-018).
         # In-process mode skips the worker (used by unit tests that mock pull funcs).
+        file_digests: dict | None = None
         try:
             if settings.pull_use_subprocess:
                 poll_s = max(0.05, settings.pull_disk_poll_interval_s)
@@ -487,10 +597,12 @@ def pull_model(
                                 source_uri,
                             )
 
-                    future.result()
+                    file_digests = future.result()
             else:
                 if source == "harbor":
-                    _pull_harbor(harbor_ref or "", target_dir, source_uri)
+                    file_digests = _pull_harbor(
+                        harbor_ref or "", target_dir, source_uri
+                    )
                 else:
                     _pull_huggingface(model_id or "", target_dir, source_uri)
         except ModelPullError:
@@ -510,7 +622,7 @@ def pull_model(
             # huggingface_hub errors (e.g. RepositoryNotFoundError) subclass OSError
             # via httpx.HTTPError; they must not be collapsed to a generic 500 here.
             _map_download_exception(exc, source_uri)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             shutil.rmtree(target_dir, ignore_errors=True)
             _map_download_exception(exc, source_uri)
 
@@ -544,12 +656,13 @@ def pull_model(
             path=str(target_dir.resolve()),
             size_bytes=size_bytes,
             digest=digest,
-            downloaded_at=datetime.now(timezone.utc).isoformat(),
+            downloaded_at=datetime.now(UTC).isoformat(),
             category=category,
             name=name,
             version=version,
             checksum=checksum,
             metadata=metadata,
+            file_digests=file_digests,
         )
         with _manifest_lock:
             add_manifest_entry(entry)
