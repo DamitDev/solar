@@ -133,3 +133,25 @@ export function formatTokenCount(count: number | undefined | null): string {
   const rounded = count.toFixed(1);
   return rounded.replace(/\.0$/, '');
 }
+
+export function formatBytes(bytes: number | undefined | null): string {
+  if (bytes === undefined || bytes === null || isNaN(bytes)) return '—';
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / Math.pow(1024, i);
+  return `${value.toFixed(value >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+export function getCatalogStatusColor(status: string): string {
+  switch (status) {
+    case 'available':
+      return 'text-nord-6 bg-nord-14'; // green — running
+    case 'deployed':
+      return 'text-nord-6 bg-nord-10'; // blue — on hosts, not running
+    case 'unknown':
+      return 'text-nord-0 bg-nord-13'; // yellow — availability unknown
+    default:
+      return 'text-nord-4 bg-nord-3'; // unavailable / anything else — gray
+  }
+}

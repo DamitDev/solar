@@ -435,3 +435,43 @@ export interface EndpointUsageResponse {
   hours: number;
   usage: EndpointUsageStats;
 }
+
+// Model catalog (D-018: GET /api/catalog/models)
+export type CatalogEnrichmentStatus = 'ok' | 'partial' | 'unavailable';
+export type CatalogSolarStatus = 'available' | 'deployed' | 'unavailable' | 'unknown';
+
+export interface CatalogDeployedHost {
+  host_id: string;
+  host_name: string;
+  size_bytes: number;
+  path: string;
+}
+
+export interface CatalogRunningInstance {
+  host_id: string;
+  host_name: string;
+  instance_id: string;
+}
+
+export interface CatalogSolarRuntime {
+  status: CatalogSolarStatus;
+  running_instances: number;
+  deployed_hosts: CatalogDeployedHost[];
+  instances: CatalogRunningInstance[];
+}
+
+export interface CatalogModelItem {
+  name: string;
+  category: string;
+  description: string | null;
+  versions_count: number;
+  latest_version: string | null;
+  created_at: string;
+  solar: CatalogSolarRuntime;
+}
+
+export interface CatalogResponse {
+  total: number;
+  items: CatalogModelItem[];
+  meta: { enrichment: CatalogEnrichmentStatus };
+}

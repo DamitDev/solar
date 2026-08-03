@@ -14,6 +14,7 @@ import {
   EndpointUsageResponse,
   PendingHost,
   PendingHostApproveRequest,
+  CatalogResponse,
 } from './types';
 
 const DEFAULT_RELATIVE_CONTROL_BASE = '/api/control';
@@ -264,6 +265,12 @@ class SolarClient {
   }): Promise<{ from: string; to: string; types: string[]; items: GatewayEventDTO[] }> {
     const response = await this.client.get('/api/gateway/events/recent', { params });
     return response.data as { from: string; to: string; types: string[]; items: GatewayEventDTO[] };
+  }
+
+  // Model catalog (D-018)
+  async getCatalogModels(params: { search?: string; limit?: number; offset?: number }): Promise<CatalogResponse> {
+    const response = await this.client.get('/api/catalog/models', { params });
+    return response.data as CatalogResponse;
   }
 
   // OpenAI Gateway
