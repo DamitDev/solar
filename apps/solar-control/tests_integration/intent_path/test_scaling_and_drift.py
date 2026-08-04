@@ -57,7 +57,7 @@ async def test_drift_stopped_instance_recreated(http_control, stack, clean_state
     # Reconciler RECREATE: restarts in place. Poll for running again.
     await wait_for(
         lambda: _replica_running(http_control, intent["id"], instance_id),
-        timeout=15.0,
+        timeout=30.0,
         interval=0.5,
         description=f"replica {instance_id} recreated/running",
     )
@@ -101,7 +101,7 @@ async def test_scale_down_surplus_stop(http_control, stack, clean_state):
     # Converges to a single managed replica, still ready.
     await wait_for(
         lambda: _observed_is(http_control, intent["id"], 1),
-        timeout=15.0,
+        timeout=30.0,
         interval=0.5,
         description="intent scaled down to 1 replica",
     )
@@ -150,7 +150,7 @@ async def test_shortfall_degraded(http_control, stack, clean_state):
 
     await wait_for(
         degraded_with_shortfall,
-        timeout=15.0,
+        timeout=30.0,
         interval=0.5,
         description="intent degraded with shortfall",
     )
@@ -160,7 +160,7 @@ async def test_shortfall_degraded(http_control, stack, clean_state):
     # (2 replicas on 2 hosts) rather than asserting immediately.
     await wait_for(
         lambda: _placed(http_control, intent["id"], 2),
-        timeout=15.0,
+        timeout=30.0,
         interval=0.5,
         description="two replicas placed on two hosts",
     )

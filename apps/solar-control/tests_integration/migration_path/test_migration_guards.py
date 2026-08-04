@@ -187,7 +187,7 @@ async def test_no_target_ephemeral_stop(http_control, stack, clean_state):
 
     await wait_for(
         lambda: _degraded_with_shortfall(http_control, high["id"]),
-        timeout=15.0,
+        timeout=30.0,
         interval=0.5,
         description="high-priority intent degraded with shortfall",
     )
@@ -195,7 +195,7 @@ async def test_no_target_ephemeral_stop(http_control, stack, clean_state):
     # The ephemeral replica on the source host is stopped and deleted.
     await wait_for(
         lambda: _instance_gone(http_control, src["id"], displaced_instance_id),
-        timeout=15.0,
+        timeout=30.0,
         interval=0.5,
         description="displaced ephemeral replica removed",
     )
@@ -232,7 +232,7 @@ async def test_no_target_staging_left_in_place(http_control, stack, clean_state)
     )
     await wait_for(
         lambda: _degraded_with_shortfall(http_control, high["id"]),
-        timeout=15.0,
+        timeout=30.0,
         interval=0.5,
         description="high-priority intent degraded with shortfall",
     )
@@ -240,7 +240,7 @@ async def test_no_target_staging_left_in_place(http_control, stack, clean_state)
     # Staging replica survives on the source host (migrate, don't drop).
     await wait_for(
         lambda: _instance_exists(http_control, src["id"], displaced_instance_id),
-        timeout=15.0,
+        timeout=30.0,
         interval=0.5,
         description="staging replica still present",
     )

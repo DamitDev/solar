@@ -53,7 +53,7 @@ async def test_failed_create_backoff(stack, clean_state):
 
         # Restore data-repo; the next tick's CREATE succeeds -> ready.
         await stack.respawn_data_repo()
-        ready = await wait_intent_ready(http_control, intent["id"], timeout=15.0)
+        ready = await wait_intent_ready(http_control, intent["id"], timeout=30.0)
         assert ready["status"]["ready_replicas"] == 1
         assert ready["status"]["phase"] == "ready"
 

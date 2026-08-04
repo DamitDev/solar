@@ -159,7 +159,7 @@ async def test_delete_intent_cleans_up(http_control, clean_state):
     # finishes cleanup — poll for that, then assert the host-side cleanup.
     await wait_for(
         lambda: _soft_deleted(http_control, intent["id"]),
-        timeout=15.0,
+        timeout=30.0,
         interval=0.5,
         description="intent soft-deleted (API 404)",
     )

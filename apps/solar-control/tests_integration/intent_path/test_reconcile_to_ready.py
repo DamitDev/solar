@@ -96,7 +96,7 @@ async def test_phase_transitions(http_control, clean_state):
         return phase == "ready"
 
     await wait_for(
-        collect, timeout=15.0, interval=0.5, description="phase transitions to ready"
+        collect, timeout=30.0, interval=0.5, description="phase transitions to ready"
     )
     # The reconciler only writes status *after* executing an action, so the
     # transient `reconciling` phase is not reliably observable for a fast

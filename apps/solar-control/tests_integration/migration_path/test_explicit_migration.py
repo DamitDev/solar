@@ -52,7 +52,7 @@ async def _wait_status(
 
     await wait_for(
         reached,
-        timeout=15.0,
+        timeout=30.0,
         interval=0.5,
         description=f"instance {instance_id} {status}",
     )

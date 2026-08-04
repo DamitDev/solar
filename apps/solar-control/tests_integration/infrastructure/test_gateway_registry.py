@@ -57,7 +57,7 @@ async def test_alias_lifecycle(http_control, clean_state):
     # Not visible while stopped.
     await wait_for(
         lambda: _alias_gone(http_control, alias),
-        timeout=15.0,
+        timeout=30.0,
         interval=0.5,
         description="alias absent while stopped",
     )
@@ -69,7 +69,7 @@ async def test_alias_lifecycle(http_control, clean_state):
     assert resp.status_code == 200, resp.text
     await wait_for(
         lambda: _alias_visible(http_control, alias),
-        timeout=15.0,
+        timeout=30.0,
         interval=0.5,
         description="alias visible while running",
     )

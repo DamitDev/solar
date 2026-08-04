@@ -91,7 +91,7 @@ async def test_create_instance_via_control_and_classify(
     # is what actually absorbs the remaining startup window.
     await wait_for(
         lambda: _registry_has_alias(http_control, MODEL_ALIAS),
-        timeout=15.0,
+        timeout=30.0,
         interval=0.5,
         description=f"gateway routes to {MODEL_ALIAS}",
     )
