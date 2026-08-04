@@ -1,0 +1,21 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.0
+    hooks:
+      - id: ruff
+        files: ^apps/(solar-control|solar-host|data-repository|supernova-steps)/
+      - id: ruff-format
+        files: ^apps/(solar-control|solar-host|data-repository|supernova-steps)/
+  - repo: https://github.com/psf/black
+    rev: 24.10.0
+    hooks:
+      - id: black
+        files: ^apps/(solar-control|solar-host|data-repository|supernova-steps)/
+  - repo: local
+    hooks:
+      - id: eslint-webui
+        name: eslint (solar-webui)
+        entry: bash -c 'cd apps/solar-webui && pnpm lint'
+        language: system
+        files: ^apps/solar-webui/
+        pass_filenames: false

@@ -5,11 +5,7 @@ export type InstanceStatus = 'stopped' | 'starting' | 'running' | 'failed' | 'st
 export type HostStatus = 'online' | 'offline' | 'error';
 
 export type BackendType =
-  | 'llamacpp'
-  | 'huggingface_causal'
-  | 'huggingface_classification'
-  | 'huggingface_embedding'
-  | 'huggingface_vision';
+  'llamacpp' | 'huggingface_causal' | 'huggingface_classification' | 'huggingface_embedding' | 'huggingface_vision';
 
 export interface MemoryInfo {
   used_gb: number;
@@ -99,10 +95,7 @@ export interface HuggingFaceEmbeddingConfig extends BaseInstanceConfig {
 
 // Union type for all config types
 export type InstanceConfig =
-  | LlamaCppConfig
-  | HuggingFaceCausalConfig
-  | HuggingFaceClassificationConfig
-  | HuggingFaceEmbeddingConfig;
+  LlamaCppConfig | HuggingFaceCausalConfig | HuggingFaceClassificationConfig | HuggingFaceEmbeddingConfig;
 
 // Helper to check backend type
 export function isLlamaCppConfig(config: InstanceConfig): config is LlamaCppConfig {

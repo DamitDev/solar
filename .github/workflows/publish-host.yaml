@@ -1,0 +1,31 @@
+name: Publish Host
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish to PyPI (e.g. v1.2.3)'
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  pypi-publish:
+    runs-on: self-hosted
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - name: Set version
+        run: sed -i "s/^version = .*/version = \"${INPUT_VERSION#v}\"/" apps/solar-host/pyproject.toml
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+      - name: Build package
+        working-directory: apps/solar-host
+        run: uv build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: apps/solar-host/dist/

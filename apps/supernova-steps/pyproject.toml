@@ -1,12 +1,19 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
 [project]
 name = "supernova-steps"
 version = "0.1.0"
 description = "SuperNova training pipeline step Docker images"
 requires-python = ">=3.12"
+
+[dependency-groups]
+# Runtime deps mirror the per-step requirements.txt (Docker build source of
+# truth); this group only exists so lint/test can run from a uv venv.
+dev = [
+    "harbor-oci-client>=0.1.0",
+    "requests>=2.32.0",
+    "pytest>=8.0",
+    "black>=24.0",
+    "ruff>=0.15",
+]
 
 [tool.black]
 target-version = ["py312"]

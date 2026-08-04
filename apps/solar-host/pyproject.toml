@@ -48,9 +48,12 @@ dev = ["pytest>=9.0"]
 solar-host = "solar_host.main:run"
 
 [project.urls]
-Homepage = "https://github.com/DamitDev/solar-host"
-Repository = "https://github.com/DamitDev/solar-host"
-Issues = "https://github.com/DamitDev/solar-host/issues"
+Homepage = "https://github.com/DamitDev/solar"
+Repository = "https://github.com/DamitDev/solar"
+Issues = "https://github.com/DamitDev/solar/issues"
+
+[dependency-groups]
+dev = ["pytest>=9.0", "black>=24.0", "ruff>=0.15"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["solar_host"]

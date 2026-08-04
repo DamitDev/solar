@@ -1,0 +1,13 @@
+[tool.uv.workspace]
+members = [
+    "apps/solar-control",
+    "apps/data-repository",
+]
+
+# solar-host and supernova-steps are intentionally NOT workspace members:
+# - solar-host is a separately published PyPI package (harbor-oci-client is
+#   a runtime dep) with heavy optional extras (torch/transformers); it keeps
+#   its own venv and lockfile so `make install` stays light.
+# - supernova-steps ships standalone step Docker images built from per-step
+#   requirements.txt; its root pyproject is a virtual project used for
+#   lint/test only.

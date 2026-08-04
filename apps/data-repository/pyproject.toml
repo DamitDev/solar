@@ -6,6 +6,28 @@ build-backend = "setuptools.build_meta"
 name = "data-repository"
 version = "0.0.0.dev0"
 description = "API for managing model and dataset registry metadata"
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn[standard]==0.52.1",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.14.2",
+    "asyncpg==0.31.0",
+    "sqlalchemy==2.0.51",
+    "alembic==1.18.5",
+    "psycopg2-binary==2.9.12",
+    "python-dotenv==1.2.2",
+    "harbor-oci-client==0.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "black>=24.0",
+    # Pinned: ruff 0.16 changed the default rule set and flags the codebase's
+    # existing style (86 errors). Bumping this is a deliberate lint cleanup PR.
+    "ruff==0.15.14",
+    "pytest>=8.0",
+    "pytest-asyncio>=1.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

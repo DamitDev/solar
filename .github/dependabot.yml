@@ -1,0 +1,126 @@
+version: 2
+updates:
+  # solar-control (uv workspace member, Docker: requirements.txt)
+  - package-ecosystem: "pip"
+    directory: "/apps/solar-control"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    versioning-strategy: increase
+    open-pull-requests-limit: 10
+    allow:
+      - dependency-type: "direct"
+    commit-message:
+      prefix: "chore(deps-control):"
+    labels:
+      - "dependencies"
+      - "solar-control"
+    groups:
+      deps:
+        patterns:
+          - "*"
+
+  # data-repository (uv workspace member, Docker: requirements.txt)
+  - package-ecosystem: "pip"
+    directory: "/apps/data-repository"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    versioning-strategy: increase
+    open-pull-requests-limit: 10
+    allow:
+      - dependency-type: "direct"
+    commit-message:
+      prefix: "chore(deps-data-repository):"
+    labels:
+      - "dependencies"
+      - "data-repository"
+    groups:
+      deps:
+        patterns:
+          - "*"
+
+  # solar-host (standalone uv project, PyPI package)
+  - package-ecosystem: "pip"
+    directory: "/apps/solar-host"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    versioning-strategy: increase
+    open-pull-requests-limit: 10
+    allow:
+      - dependency-type: "direct"
+    commit-message:
+      prefix: "chore(deps-solar-host):"
+    labels:
+      - "dependencies"
+      - "solar-host"
+    groups:
+      deps:
+        patterns:
+          - "*"
+
+  # supernova-steps (Docker images built from per-step requirements.txt)
+  - package-ecosystem: "pip"
+    directory: "/apps/supernova-steps/download-model"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    versioning-strategy: increase
+    open-pull-requests-limit: 5
+    allow:
+      - dependency-type: "direct"
+    commit-message:
+      prefix: "chore(deps-steps):"
+    labels:
+      - "dependencies"
+      - "supernova-steps"
+    groups:
+      deps:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/apps/supernova-steps/download-dataset"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    versioning-strategy: increase
+    open-pull-requests-limit: 5
+    allow:
+      - dependency-type: "direct"
+    commit-message:
+      prefix: "chore(deps-steps):"
+    labels:
+      - "dependencies"
+      - "supernova-steps"
+    groups:
+      deps:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/apps/supernova-steps/upload-model"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    versioning-strategy: increase
+    open-pull-requests-limit: 5
+    allow:
+      - dependency-type: "direct"
+    commit-message:
+      prefix: "chore(deps-steps):"
+    labels:
+      - "dependencies"
+      - "supernova-steps"
+    groups:
+      deps:
+        patterns:
+          - "*"
+
+  # JS workspace (apps/solar-webui) is intentionally NOT managed by Dependabot.
+  # The pnpm/Vite ecosystem has too many peer-coupled major releases for
+  # per-dependency bumps to produce mergeable PRs without coordinated
+  # framework upgrades. JS deps are bumped manually as part of intentional
+  # upgrade work. GitHub's security alerts for npm packages still flow
+  # through the security tab independently of this file.

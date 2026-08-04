@@ -21,14 +21,14 @@ Communication topology: SuperNova → Solar Control API → Solar Hosts. SuperNo
 
 | Repo | Path | Description |
 |------|------|-------------|
-| `training-platform-project` | `/mnt/nvme/AI/damit-aiops/training-platform-project` | This repo — project management, issues, roadmap |
-| `solar-host` | `/mnt/nvme/AI/solar/solar-host` | Solar Host agent (Python/FastAPI) |
-| `solar-control` | `/mnt/nvme/AI/solar/solar-control` | Solar Control API (Python/FastAPI) |
-| `solar-webui` | `/mnt/nvme/AI/solar/solar-webui` | Solar WebUI (React) |
-| `data-repository` | `/mnt/nvme/AI/damit-aiops/data-repository` | Data Repository API (FastAPI) |
+| `training-platform-project` | `/mnt/nvme/AI/damit-aiops/solar/training-platform-project` | This repo — project management, issues, roadmap |
+| `solar-host` | `/mnt/nvme/AI/damit-aiops/solar/apps/solar-host` | Solar Host agent (Python/FastAPI) |
+| `solar-control` | `/mnt/nvme/AI/damit-aiops/solar/apps/solar-control` | Solar Control API (Python/FastAPI) |
+| `solar-webui` | `/mnt/nvme/AI/damit-aiops/solar/apps/solar-webui` | Solar WebUI (React) |
+| `data-repository` | `/mnt/nvme/AI/damit-aiops/solar/apps/data-repository` | Data Repository API (FastAPI) |
 | `supernova-control` | `/mnt/nvme/AI/damit-aiops/supernova-control` | SuperNova Control API (FastAPI) |
 | `supernova-webui` | `/mnt/nvme/AI/damit-aiops/supernova-webui` | SuperNova WebUI (React) |
-| `supernova-steps` | `/mnt/nvme/AI/damit-aiops/supernova-steps` | Step Docker images (download, upload, convert) |
+| `supernova-steps` | `/mnt/nvme/AI/damit-aiops/solar/apps/supernova-steps` | Step Docker images (download, upload, convert) |
 | `harbor-oci-client` | `/mnt/nvme/AI/damit-aiops/harbor-oci-client` | Shared Python library for Harbor OCI/ORAS operations ([PyPI](https://pypi.org/project/harbor-oci-client/), [GitHub](https://github.com/DamitDev/harbor-oci-client)) |
 | `etalon` | `/mnt/nvme/AI/etalon` | Training framework (black box — do not modify) |
 | `aiops-k8s` | `/mnt/nvme/AI/damit-aiops/aiops-k8s` | GitOps repo (ArgoCD App-of-Apps) |

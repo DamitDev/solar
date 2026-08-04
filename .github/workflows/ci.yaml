@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: [self-hosted, fast]
+    outputs:
+      apps: ${{ steps.changed.outputs.apps }}
+      count: ${{ steps.changed.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute changed apps
+        id: changed
+        run: |
+          set -euo pipefail
+
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            git fetch origin "$GITHUB_BASE_REF" --depth=1 -q
+            CHANGED=$(git diff --name-only "origin/$GITHUB_BASE_REF...HEAD" || true)
+          else
+            BASE="${GITHUB_EVENT_BEFORE:-HEAD~1}"
+            [ "$BASE" = "0000000000000000000000000000000000000000" ] && BASE="HEAD~1"
+            CHANGED=$(git diff --name-only "$BASE...HEAD" || true)
+          fi
+
+          APPS=""
+          ALL=0
+          for f in $CHANGED; do
+            case "$f" in
+              apps/solar-control/*)   APPS="$APPS solar-control";;
+              apps/solar-host/*)      APPS="$APPS solar-host";;
+              apps/solar-webui/*)     APPS="$APPS solar-webui";;
+              apps/data-repository/*) APPS="$APPS data-repository";;
+              apps/supernova-steps/*) APPS="$APPS supernova-steps";;
+              # training-platform-project is docs-only: no checks.
+              .github/*|pyproject.toml|uv.lock|pnpm-lock.yaml|pnpm-workspace.yaml|package.json|Makefile|.mise.toml|.pre-commit-config.yaml)
+                ALL=1;;
+            esac
+          done
+          [ "$ALL" = "1" ] && APPS=" solar-control solar-host solar-webui data-repository supernova-steps"
+
+          APPS=$(printf '%s' "$APPS" | tr ' ' '\n' | awk '!seen[$0]++' | grep -v '^$' | paste -sd ' ' -)
+          echo "changed apps: ${APPS:-none}"
+          JSON=$(printf '%s' "$APPS" | jq -R -c 'split(" ") | map(select(length > 0))')
+          echo "apps=$JSON" >> "$GITHUB_OUTPUT"
+          echo "count=$(printf '%s' "$APPS" | wc -w)" >> "$GITHUB_OUTPUT"
+
+  quality:
+    needs: detect
+    if: needs.detect.outputs.count != '0'
+    strategy:
+      fail-fast: false
+      matrix:
+        app: ${{ fromJson(needs.detect.outputs.apps) }}
+    uses: ./.github/workflows/quality-gates.yaml
+    with:
+      app: ${{ matrix.app }}

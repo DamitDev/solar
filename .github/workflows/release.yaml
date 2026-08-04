@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag for every selected component (e.g. v1.2.3)'
+        required: true
+      components:
+        description: >-
+          Space/comma separated components and/or presets to release.
+          Presets: all, core, steps. Components: solar-control, solar-webui,
+          data-repository, download-model, download-dataset, upload-model.
+        required: true
+        default: 'all'
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: imgrepo.damit.hu
+  MANIFEST: .github/release-manifest.json
+
+jobs:
+  prepare:
+    runs-on: [self-hosted, fast]
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve selected components into a build matrix
+        id: select
+        env:
+          COMPONENTS: ${{ inputs.components }}
+        run: |
+          set -euo pipefail
+
+          # Normalise separators (comma / newline) to spaces and expand presets.
+          tokens=$(printf '%s' "$COMPONENTS" | tr ',\n' '  ')
+          selected=()
+          for tok in $tokens; do
+            [ -z "$tok" ] && continue
+            if jq -e --arg k "$tok" '.presets[$k]' "$MANIFEST" >/dev/null; then
+              while IFS= read -r c; do selected+=("$c"); done \
+                < <(jq -r --arg k "$tok" '.presets[$k][]' "$MANIFEST")
+            elif jq -e --arg k "$tok" '.components[$k]' "$MANIFEST" >/dev/null; then
+              selected+=("$tok")
+            else
+              echo "::error::Unknown component or preset: '$tok'"
+              exit 1
+            fi
+          done
+
+          if [ ${#selected[@]} -eq 0 ]; then
+            echo "::error::No components selected"
+            exit 1
+          fi
+
+          # De-duplicate while preserving order.
+          names_json=$(printf '%s\n' "${selected[@]}" | awk '!seen[$0]++' | jq -R . | jq -s -c .)
+
+          matrix=$(jq -c --argjson names "$names_json" '
+            {include: [
+              $names[] as $n | {
+                name: $n,
+                image: .components[$n].image,
+                registry_ns: (.components[$n].registry_ns // "imgrepo.damit.hu/aiops"),
+                secret_scope: (.components[$n].secret_scope // "AIOPS"),
+                context: .components[$n].context,
+                dockerfile: .components[$n].dockerfile,
+                app_version: (.components[$n].app_version // false)
+              }
+            ]}
+          ' "$MANIFEST")
+
+          echo "Releasing: $(echo "$names_json" | jq -r 'join(", ")')"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    runs-on: [self-hosted, fast]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    name: build (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute APP_VERSION
+        if: matrix.app_version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: echo "APP_VERSION=${VERSION#v}" >> "$GITHUB_ENV"
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ matrix.registry_ns }}/${{ matrix.image }}
+          tags: |
+            type=raw,value=${{ inputs.version }}
+      - uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+          driver: docker
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets[format('{0}_HARBOR_USERNAME', matrix.secret_scope)] }}
+          password: ${{ secrets[format('{0}_HARBOR_PASSWORD', matrix.secret_scope)] }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          platforms: linux/amd64
+          build-args: ${{ matrix.app_version && format('APP_VERSION={0}', env.APP_VERSION) || '' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

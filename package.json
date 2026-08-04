@@ -1,0 +1,10 @@
+{
+  "name": "solar",
+  "private": true,
+  "version": "0.0.0-dev",
+  "scripts": {
+    "dev:webui": "pnpm --filter solar-webui dev",
+    "build:webui": "pnpm --filter solar-webui build",
+    "lint:webui": "pnpm --filter solar-webui lint"
+  }
+}

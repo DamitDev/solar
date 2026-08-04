@@ -1,0 +1,58 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/solar-control/**'
+      - 'apps/solar-host/**'
+      - 'apps/data-repository/**'
+      - '.github/workflows/integration-tests.yaml'
+  pull_request:
+    paths:
+      - 'apps/solar-control/**'
+      - 'apps/solar-host/**'
+      - 'apps/data-repository/**'
+      - '.github/workflows/integration-tests.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: [self-hosted, fast]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Sync workspace (control + data-repository)
+        run: uv sync --all-extras
+
+      - name: Sync solar-host (huggingface extra for the suite)
+        working-directory: apps/solar-host
+        run: uv sync --extra huggingface
+
+      - name: Verify Docker access
+        run: docker version
+
+      - name: Pre-pull test container images
+        run: |
+          docker pull postgres:15-alpine
+          docker pull redis:7-alpine
+          docker pull testcontainers/ryuk:0.8.1
+
+      - name: Run integration tests
+        working-directory: apps/solar-control
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: uv run --extra integration pytest tests_integration/ -v --tb=short --durations=20 --junitxml=integration-report.xml
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: integration-report
+          path: apps/solar-control/integration-report.xml
+          if-no-files-found: ignore

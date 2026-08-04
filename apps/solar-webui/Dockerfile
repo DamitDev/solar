@@ -1,15 +1,15 @@
 # Stage 1: Build the React application
-FROM node:20-alpine AS builder
+FROM node:24-alpine AS builder
 
 ARG APP_VERSION=0.0.0-dev
 
 WORKDIR /app
 
 # Copy package files
-COPY package*.json ./
+COPY package.json pnpm-lock.yaml ./
 
 # Install dependencies
-RUN npm ci
+RUN corepack enable && pnpm install --frozen-lockfile
 
 # Copy source code
 COPY . .
@@ -18,10 +18,10 @@ COPY . .
 RUN sed -i "s/\"version\": \".*\"/\"version\": \"${APP_VERSION}\"/" package.json
 
 # Build the application
-RUN npm run build
+RUN pnpm run build
 
 # Stage 2: Run the middleware server
-FROM node:20-alpine
+FROM node:24-alpine
 
 ARG APP_VERSION=0.0.0-dev
 
@@ -31,8 +31,8 @@ ENV NODE_ENV=production \
 
 # Copy patched package files from builder and install production dependencies
 COPY --from=builder /app/package.json ./
-COPY package-lock.json ./
-RUN npm ci --omit=dev
+COPY --from=builder /app/pnpm-lock.yaml ./
+RUN corepack enable && pnpm install --prod --frozen-lockfile
 
 # Use the existing node user (UID 1000 in alpine)
 # Copy built assets and server

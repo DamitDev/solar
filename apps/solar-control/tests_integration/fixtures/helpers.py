@@ -20,16 +20,18 @@ from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent  # solar-control/
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent  # apps/solar-control/
 TESTS_INTEGRATION = REPO_ROOT / "tests_integration"
+
+MONOREPO_ROOT = REPO_ROOT.parent.parent
 
 DATA_REPO_ROOT = REPO_ROOT.parent / "data-repository"
 SOLAR_HOST_ROOT = REPO_ROOT.parent / "solar-host"
 
-# Per-repo interpreter for subprocesses (each service runs in its own venv
-# with its own pinned deps — mirrors the plan's per-service dependencies).
-DATA_REPO_PYTHON = DATA_REPO_ROOT / ".venv" / "bin" / "python"
-SOLAR_CONTROL_PYTHON = REPO_ROOT / ".venv" / "bin" / "python"
+# Control and data-repository run from the shared workspace venv (uv sync at
+# the monorepo root); solar-host keeps its own venv (torch/transformers).
+DATA_REPO_PYTHON = MONOREPO_ROOT / ".venv" / "bin" / "python"
+SOLAR_CONTROL_PYTHON = MONOREPO_ROOT / ".venv" / "bin" / "python"
 SOLAR_HOST_PYTHON = SOLAR_HOST_ROOT / ".venv" / "bin" / "python"
 
 

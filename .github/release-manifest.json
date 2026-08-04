@@ -1,0 +1,72 @@
+{
+  "presets": {
+    "all": [
+      "solar-control",
+      "solar-webui",
+      "data-repository",
+      "download-model",
+      "download-dataset",
+      "upload-model"
+    ],
+    "core": [
+      "solar-control",
+      "solar-webui",
+      "data-repository"
+    ],
+    "steps": [
+      "download-model",
+      "download-dataset",
+      "upload-model"
+    ]
+  },
+  "components": {
+    "solar-control": {
+      "image": "solar-control",
+      "registry_ns": "imgrepo.damit.hu/aiops",
+      "secret_scope": "AIOPS",
+      "context": "apps/solar-control",
+      "dockerfile": "apps/solar-control/Dockerfile",
+      "app_version": true
+    },
+    "solar-webui": {
+      "image": "solar-webui",
+      "registry_ns": "imgrepo.damit.hu/aiops",
+      "secret_scope": "AIOPS",
+      "context": "apps/solar-webui",
+      "dockerfile": "apps/solar-webui/Dockerfile",
+      "app_version": true
+    },
+    "data-repository": {
+      "image": "data-repository",
+      "registry_ns": "imgrepo.damit.hu/aiops",
+      "secret_scope": "AIOPS",
+      "context": "apps/data-repository",
+      "dockerfile": "apps/data-repository/Dockerfile",
+      "app_version": true
+    },
+    "download-model": {
+      "image": "steps/download-model",
+      "registry_ns": "imgrepo.damit.hu/supernova",
+      "secret_scope": "SUPERNOVA",
+      "context": "apps/supernova-steps",
+      "dockerfile": "apps/supernova-steps/download-model/Dockerfile",
+      "app_version": false
+    },
+    "download-dataset": {
+      "image": "steps/download-dataset",
+      "registry_ns": "imgrepo.damit.hu/supernova",
+      "secret_scope": "SUPERNOVA",
+      "context": "apps/supernova-steps",
+      "dockerfile": "apps/supernova-steps/download-dataset/Dockerfile",
+      "app_version": false
+    },
+    "upload-model": {
+      "image": "steps/upload-model",
+      "registry_ns": "imgrepo.damit.hu/supernova",
+      "secret_scope": "SUPERNOVA",
+      "context": "apps/supernova-steps",
+      "dockerfile": "apps/supernova-steps/upload-model/Dockerfile",
+      "app_version": false
+    }
+  }
+}

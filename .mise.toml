@@ -1,0 +1,5 @@
+[tools]
+python = "3.12"
+node = "24"
+pnpm = "latest"
+uv = "latest"

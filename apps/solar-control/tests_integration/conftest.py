@@ -56,6 +56,7 @@ from fixtures.constants import (  # noqa: E402
 )
 from fixtures.helpers import (  # noqa: E402
     DATA_REPO_PYTHON,
+    DATA_REPO_ROOT,
     REPO_ROOT,
     SOLAR_CONTROL_PYTHON,
     SOLAR_HOST_PYTHON,
@@ -233,7 +234,7 @@ def alembic_data_repo(db_env: dict[str, str], stub_harbor):
         POSTGRES_USER=db_env["pg_user"],
         POSTGRES_PASSWORD=db_env["pg_password"],
     )
-    _run_alembic(DATA_REPO_PYTHON, Path(DATA_REPO_PYTHON).parent.parent.parent, env)
+    _run_alembic(DATA_REPO_PYTHON, DATA_REPO_ROOT, env)
 
 
 @pytest.fixture(scope="session")
@@ -410,7 +411,7 @@ class Stack:
             python=DATA_REPO_PYTHON,
             module="app.main:app",
             port=self.data_repo.port if self.data_repo else free_port(),
-            cwd=Path(DATA_REPO_PYTHON).parent.parent.parent,
+            cwd=DATA_REPO_ROOT,
             env=self.data_repo_env,
             log_dir=self.logs_dir,
             ready_path="/health",
@@ -477,7 +478,7 @@ async def _build_stack(
         python=DATA_REPO_PYTHON,
         module="app.main:app",
         port=free_port(),
-        cwd=Path(DATA_REPO_PYTHON).parent.parent.parent,
+        cwd=DATA_REPO_ROOT,
         env=data_repo_env,
         log_dir=logs_dir,
         ready_path="/health",

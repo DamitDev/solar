@@ -1,0 +1,25 @@
+# ── Python ──────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+
+# ── Node / pnpm ─────────────────────────────────────────────────────
+node_modules/
+*.tsbuildinfo
+
+# ── Environment & local state ───────────────────────────────────────
+.env
+.env.*
+!.env.example
+logs/
+
+# ── OS / editors ────────────────────────────────────────────────────
+.DS_Store
+*.swp

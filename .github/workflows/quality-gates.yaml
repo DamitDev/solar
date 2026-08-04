@@ -1,0 +1,43 @@
+name: Quality Gates
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: [self-hosted, fast]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: |
+          case "${{ inputs.app }}" in
+            solar-webui)
+              pnpm install --frozen-lockfile
+              ;;
+            solar-host)
+              cd apps/solar-host && uv sync
+              ;;
+            supernova-steps)
+              cd apps/supernova-steps && uv sync
+              ;;
+            *)
+              uv sync --all-extras
+              ;;
+          esac
+
+      - name: Unit tests
+        run: make test-${{ inputs.app }}
+
+      - name: Lint & format check
+        run: make lint-${{ inputs.app }}

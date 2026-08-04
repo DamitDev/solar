@@ -378,9 +378,7 @@ export function ResourcesPage() {
                 Free (available)
               </span>
             </div>
-            <p className="text-xs text-nord-4">
-              available = total − Σeffective · effective = max(actual, requested)
-            </p>
+            <p className="text-xs text-nord-4">available = total − Σeffective · effective = max(actual, requested)</p>
           </div>
         </>
       )}
