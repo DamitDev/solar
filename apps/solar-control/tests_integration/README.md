@@ -99,7 +99,7 @@ tests_integration/
 │   ├── smoke_stub_harbor.py     # Phase-1 smoke: real OrasHelper + HarborClient
 │   └── test_model/        # COMMITTED tiny HF classification model (~230 KB)
 ├── repo_path/             # minimal repo path (9 tests)
-├── intent_path/           # declarative path (20 tests)
+├── intent_path/           # declarative path (21 tests)
 ├── migration_path/        # S-037 + S-043 drain (13 tests)
 └── infrastructure/        # WS seam, registry, cache, wake (6 tests)
 ```

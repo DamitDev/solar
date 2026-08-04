@@ -8,6 +8,7 @@ running with markers cleared.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
@@ -198,6 +199,84 @@ async def test_rolling_backend_config_change(http_control, stack, clean_state):
         http_control, final["alias"], stack=stack, timeout=30.0
     )
     assert body["choices"][0]["score"] > 0.0
+
+
+async def test_edit_is_not_lost_while_the_host_is_unreachable(
+    http_control, stack, clean_state
+):
+    """An edit the reconciler cannot verify stays pending until it can.
+
+    Drift in backend config is only visible in the replica's real
+    configuration, which lives on the host — the cached instance view carries
+    almost none of those fields. When that read fails, "no drift" is not a
+    finding: concluding it would declare the edit rolled out and drop it, and
+    the replica would serve the old config while the intent reported itself up
+    to date.
+
+    Failure injection: the host's API key is rotated in the DB, so control's
+    HTTP calls fail while its WS channel (the reconciler's view of instances)
+    stays intact — the lever the RECREATE failure test uses.
+    """
+    from fixtures.seed import update_host_api_key
+
+    intent = await create_intent(http_control, alias=_alias("unreachable"))
+    ready = await wait_intent_ready(http_control, intent["id"])
+    old_instance_id = next(iter(replica_states(ready)))
+    host_id = ready["status"]["replica_set"][0]["host_id"]
+
+    hosts = (await http_control.get("/api/hosts")).json()
+    host_name = next(h["name"] for h in hosts if h["id"] == host_id)
+    real_key = (
+        stack.secrets["host_a"] if host_name == "host-a" else stack.secrets["host_b"]
+    )
+
+    update_host_api_key(stack.db_env["control_db"], host_id, "wrong-key")
+
+    backend = dict(ready["backend"])
+    backend["max_length"] = 256
+    updated = await update_intent(http_control, ready, backend=backend)
+    assert updated["status"]["spec_changed_at"] is not None
+
+    # Several ticks pass with the host unreachable: the edit must still be
+    # pending, and the replica it applies to must still be the old one.
+    await asyncio.sleep(8)
+    stalled = await get_intent(http_control, intent["id"])
+    assert stalled is not None
+    assert stalled["status"]["spec_changed_at"] is not None, (
+        "the edit was declared rolled out while the host could not be read: "
+        f"{stalled['status']}\n{stack.tail()}"
+    )
+    assert old_instance_id in replica_states(stalled)
+
+    # Reachable again: the rollout runs and the edit finally applies.
+    update_host_api_key(stack.db_env["control_db"], host_id, real_key)
+
+    async def replaced() -> bool:
+        state = await get_intent(http_control, intent["id"])
+        if state is None or state["status"]["phase"] != "ready":
+            return False
+        replicas = replica_states(state)
+        return bool(replicas) and old_instance_id not in replicas
+
+    try:
+        await wait_for(
+            replaced,
+            timeout=180.0,
+            interval=0.5,
+            description="edit rolled out once the host was reachable",
+        )
+    except AssertionError as exc:
+        state = await get_intent(http_control, intent["id"])
+        raise AssertionError(
+            f"edit never rolled out after recovery; intent={state}\n{stack.tail()}"
+        ) from exc
+
+    await wait_for(
+        lambda: _spec_settled(http_control, intent["id"]),
+        timeout=60.0,
+        interval=0.5,
+        description="edited spec settled after recovery",
+    )
 
 
 async def _spec_settled(http_control, intent_id: str) -> bool:

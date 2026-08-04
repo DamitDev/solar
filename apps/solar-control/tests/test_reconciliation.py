@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
 
 from app.models.intent import (
     IntentPhase,
@@ -21,6 +22,7 @@ from app.services.reconciliation import (
     _detect_backend_drift,
     _intent_orphan,
     _intent_phase,
+    _spec_settled,
 )
 
 # ── Simple host stub ────────────────────────────────────────────
@@ -1012,6 +1014,170 @@ class TestSpecEditRollout:
 
         mock_stop.assert_awaited_once_with(host, "inst-1")
         mock_delete.assert_awaited_once_with(host, "inst-1")
+
+
+class TestSpecSettled:
+    """A pending spec change is only settled when it could be checked."""
+
+    def test_unreadable_replica_config_keeps_the_edit_pending(self):
+        """Not being able to compare is not the same as finding no drift.
+
+        Backend fields live in the replica's real configuration on the host;
+        the cached view carries almost none of them. Settling here would clear
+        the marker and lose the edit, leaving the replica on the old config
+        while the intent reported itself up to date.
+        """
+        observed = _make_observed(
+            managed=[{"instance_id": "i1", "_full_config_unknown": True}]
+        )
+
+        assert _spec_settled(observed, []) is False
+
+    def test_settles_when_every_replica_matches(self):
+        observed = _make_observed(
+            managed=[{"instance_id": "i1", "_full_config": {"max_length": 1024}}]
+        )
+
+        assert _spec_settled(observed, []) is True
+
+    def test_does_not_settle_while_a_replica_still_needs_replacing(self):
+        observed = _make_observed(managed=[{"instance_id": "i1", "_full_config": {}}])
+        actions = [
+            Action(
+                type=ActionType.REPLACE,
+                intent_id="intent-001",
+                alias="test-model",
+                host_id="h1",
+                instance_id="i1",
+                reason="backend config drift",
+            )
+        ]
+
+        assert _spec_settled(observed, actions) is False
+
+
+class TestCreateThatCannotStart:
+    """A replacement that will not start must leave nothing behind (§11.5)."""
+
+    @pytest.mark.anyio
+    async def test_failed_start_removes_the_instance_and_raises(self):
+        """One dead instance per retry would otherwise pile up on the host.
+
+        Each would also still count as an observed replica of the intent,
+        so the shortfall never shows the alias is down.
+        """
+        reconciler = Reconciler()
+        host = _HostStub(id="h1", name="h1")
+        action = Action(
+            type=ActionType.CREATE,
+            intent_id="intent-001",
+            alias="test-model",
+            host_id="h1",
+            reason="shortfall 1/1",
+        )
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch(
+                "app.services.migration.create_instance_on_host",
+                new=AsyncMock(return_value={"instance": {"id": "inst-new"}}),
+            ),
+            patch.object(
+                reconciler,
+                "_start_instance",
+                new=AsyncMock(side_effect=HTTPException(status_code=502, detail="oom")),
+            ),
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+
+            with pytest.raises(HTTPException):
+                await reconciler._act(_make_intent(), action)
+
+        mock_delete.assert_awaited_once_with(host, "inst-new")
+
+    @pytest.mark.anyio
+    async def test_rollout_moves_off_the_host_that_could_not_take_it(self):
+        """The strategy must consume the failure, not retry the same host."""
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=1, strategy="rolling")
+        host_b = _HostStub(id="h2", name="h2")
+        observed = _make_observed(
+            managed=[_make_managed_instance("i1", host_id="h1", max_length=512)],
+            candidates=[(host_b, _SnapshotStub(host_id="h2"))],
+        )
+        progress = {
+            "strategy": "rolling",
+            "target_model_source": intent.model_source,
+            "drifted_instance_ids": ["i1"],
+            "phase": "creating_replacement",
+            "step": "1/1",
+            "updated": 0,
+            "in_progress": 1,
+            "failed": 0,
+            "current_host_id": "h1",
+            "current_instance_id": None,
+            "pending_hosts": [],
+            "failed_hosts": [],
+            "started_at": "2026-01-01T00:00:00+00:00",
+        }
+
+        with (
+            patch.object(
+                reconciler,
+                "_act",
+                new=AsyncMock(side_effect=HTTPException(status_code=502, detail="oom")),
+            ),
+            patch.object(reconciler, "_update_status", new=AsyncMock()) as mock_status,
+        ):
+            await reconciler._continue_strategy(intent, observed, progress)
+
+        new_progress = mock_status.await_args.kwargs["strategy_progress"]
+        assert new_progress["current_host_id"] == "h2"
+        assert new_progress["failed_hosts"] == ["h1"]
+        assert mock_status.await_args.kwargs["last_error"]["message"]
+        # A retry on another host is progress, so it is not paced by backoff.
+        assert reconciler._backoff_active(intent.id) is False
+
+    @pytest.mark.anyio
+    async def test_rollout_holds_and_backs_off_when_no_host_is_left(self):
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=1, strategy="rolling")
+        observed = _make_observed(
+            managed=[_make_managed_instance("i1", host_id="h1", max_length=512)]
+        )
+        progress = {
+            "strategy": "rolling",
+            "target_model_source": intent.model_source,
+            "drifted_instance_ids": ["i1"],
+            "phase": "creating_replacement",
+            "step": "1/1",
+            "updated": 0,
+            "in_progress": 1,
+            "failed": 0,
+            "current_host_id": "h1",
+            "current_instance_id": None,
+            "pending_hosts": [],
+            "failed_hosts": [],
+            "started_at": "2026-01-01T00:00:00+00:00",
+        }
+
+        with (
+            patch.object(
+                reconciler,
+                "_act",
+                new=AsyncMock(side_effect=HTTPException(status_code=502, detail="oom")),
+            ),
+            patch.object(reconciler, "_update_status", new=AsyncMock()) as mock_status,
+        ):
+            await reconciler._continue_strategy(intent, observed, progress)
+
+        new_progress = mock_status.await_args.kwargs["strategy_progress"]
+        assert new_progress["phase"] == "failed"
+        assert "no other host" in new_progress["message"]
+        assert reconciler._backoff_active(intent.id) is True
 
 
 class TestActEvacuate:

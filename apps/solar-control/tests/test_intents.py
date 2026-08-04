@@ -912,6 +912,59 @@ async def test_update_intent_db_clears_rollout_on_spec_change():
 
 
 @pytest.mark.anyio
+async def test_update_status_keeps_an_edit_that_landed_mid_pass():
+    """A reconcile pass must not erase a spec change it never saw.
+
+    The whole status document is written at once, so a pass that read the
+    intent before the edit would otherwise clear the marker and the progress
+    reset the edit wrote — and the edit would be lost, since the marker is the
+    only record that the replicas still have to be compared against it.
+    """
+    from app.database.intents import IntentDB
+
+    row = _intent_row(
+        status_json={
+            "spec_changed_at": "2026-07-24T02:00:00Z",
+            "strategy_progress": None,
+        }
+    )
+    db = IntentDB()
+
+    with patch.object(IntentDB, "_session", return_value=_FakeSession(row)):
+        await db.update_status(
+            row.id,
+            status_json={
+                "spec_changed_at": None,
+                "strategy_progress": {"strategy": "rolling", "phase": "stopping"},
+                "ready_replicas": 2,
+            },
+            spec_version_seen=None,
+        )
+
+    assert row.status_json["spec_changed_at"] == "2026-07-24T02:00:00Z"
+    assert row.status_json["strategy_progress"] is None
+    assert row.status_json["ready_replicas"] == 2
+
+
+@pytest.mark.anyio
+async def test_update_status_settles_the_spec_the_pass_reconciled():
+    """The pass that did see the edit is the one allowed to clear it."""
+    from app.database.intents import IntentDB
+
+    row = _intent_row(status_json={"spec_changed_at": "2026-07-24T02:00:00Z"})
+    db = IntentDB()
+
+    with patch.object(IntentDB, "_session", return_value=_FakeSession(row)):
+        await db.update_status(
+            row.id,
+            status_json={"spec_changed_at": None, "strategy_progress": None},
+            spec_version_seen="2026-07-24T02:00:00Z",
+        )
+
+    assert row.status_json["spec_changed_at"] is None
+
+
+@pytest.mark.anyio
 async def test_update_intent_db_keeps_rollout_when_spec_is_identical():
     """Re-submitting the same spec must not disturb a running rollout."""
     from app.database.intents import IntentDB

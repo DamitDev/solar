@@ -146,6 +146,14 @@ class StrategyProgress(BaseModel):
     failed: int = 0
     current_host_id: str | None = None
     current_instance_id: str | None = None
+    current_old_instance_id: str | None = Field(
+        default=None,
+        description=(
+            "Replica the current step replaces. Recorded because a step can "
+            "end up placing its replacement on a different host than the "
+            "replica it retires, when the first host cannot take it."
+        ),
+    )
     pending_hosts: list[str] = Field(default_factory=list)
     failed_hosts: list[str] = Field(default_factory=list)
     started_at: str | None = None

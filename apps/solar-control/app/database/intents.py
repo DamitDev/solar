@@ -18,6 +18,13 @@ from .connection import get_session_factory
 from .tables import IntentRow
 
 
+class _Unset:
+    """Marker for "argument not supplied", where None is a real value."""
+
+
+_UNSET = _Unset()
+
+
 class IntentDB:
     """Database-backed intent management."""
 
@@ -302,6 +309,7 @@ class IntentDB:
         status_json: dict[str, Any] | None = None,
         last_reconciled_at: datetime | None = None,
         ready_at: datetime | str | None = None,
+        spec_version_seen: str | None | _Unset = _UNSET,
     ) -> IntentResponse | None:
         """Update an intent's status fields atomically.
 
@@ -312,6 +320,14 @@ class IntentDB:
         When *phase* transitions to ``"deleted"``, ``deleted_at`` is set
         automatically so ``list_active_for_reconciliation()`` excludes
         the intent from future reconciliation passes.
+
+        *spec_version_seen* is the ``spec_changed_at`` the caller reconciled
+        against. Because a whole status document is written at once, a pass
+        that read the intent before an edit landed would otherwise erase the
+        marker and the progress reset that edit just wrote — and the edit
+        would be lost for good, since the marker is the only record that the
+        replicas still have to be compared against the new spec. Pass it to
+        keep those two fields whenever the spec changed mid-pass.
         """
         now = datetime.now(timezone.utc)
         async with self._session() as session:
@@ -336,6 +352,14 @@ class IntentDB:
             if reconcile is not None:
                 row.reconcile = reconcile
             if status_json is not None:
+                stored = row.status_json or {}
+                if (
+                    not isinstance(spec_version_seen, _Unset)
+                    and stored.get("spec_changed_at") != spec_version_seen
+                ):
+                    status_json = dict(status_json)
+                    status_json["spec_changed_at"] = stored.get("spec_changed_at")
+                    status_json["strategy_progress"] = stored.get("strategy_progress")
                 row.status_json = status_json
             if last_reconciled_at is not None:
                 row.last_reconciled_at = last_reconciled_at

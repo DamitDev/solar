@@ -23,6 +23,7 @@ from app.services.strategies import (
     check_instance_healthy_sync,
     continue_strategy,
     initiate_strategy,
+    record_create_failure,
     should_initiate_strategy,
 )
 
@@ -1573,6 +1574,180 @@ class TestConfigOnlyEdit:
 
         assert action["type"] == "stop"
         assert action["instance_id"] == "i1"
+
+
+# ═════════════════════════════════════════════════════════════════
+#  a replacement that cannot be created (§11.5)
+# ═════════════════════════════════════════════════════════════════
+
+
+class TestCreateFailure:
+    """A host that cannot take the replacement must not be retried on."""
+
+    def _progress(self, **overrides) -> dict:
+        progress = {
+            "strategy": "rolling",
+            "target_model_source": "repo://test:v2",
+            "drifted_instance_ids": ["i1"],
+            "phase": StrategyPhase.CREATING_REPLACEMENT,
+            "step": "1/1",
+            "updated": 0,
+            "in_progress": 1,
+            "failed": 0,
+            "current_host_id": "h1",
+            "current_instance_id": None,
+            "pending_hosts": [],
+            "failed_hosts": [],
+            "started_at": "2026-01-01T00:00:00+00:00",
+        }
+        progress.update(overrides)
+        return progress
+
+    def test_moves_to_another_candidate_host(self):
+        progress = record_create_failure(
+            progress_data=self._progress(),
+            host_id="h1",
+            candidate_host_ids=["h1", "h2"],
+            message="Replacement failed on h1",
+        )
+
+        assert progress["phase"] == StrategyPhase.CREATING_REPLACEMENT
+        assert progress["current_host_id"] == "h2"
+        assert progress["current_instance_id"] is None
+        assert progress["failed"] == 1
+        assert progress["failed_hosts"] == ["h1"]
+        assert "retrying on h2" in progress["message"]
+
+    def test_holds_when_no_other_host_can_take_it(self):
+        """Nowhere else to go: report and stop, rather than churn."""
+        progress = record_create_failure(
+            progress_data=self._progress(),
+            host_id="h1",
+            candidate_host_ids=["h1"],
+            message="Replacement failed on h1",
+        )
+
+        assert progress["phase"] == StrategyPhase.FAILED
+        assert progress["in_progress"] == 0
+        assert "no other host" in progress["message"]
+
+    def test_never_returns_to_a_host_that_already_failed(self):
+        progress = self._progress(
+            current_host_id="h2", failed_hosts=["h1"], pending_hosts=["h1", "h3"]
+        )
+
+        progress = record_create_failure(
+            progress_data=progress,
+            host_id="h2",
+            candidate_host_ids=["h1", "h2"],
+            message="Replacement failed on h2",
+        )
+
+        assert progress["current_host_id"] == "h3"
+        assert progress["failed_hosts"] == ["h1", "h2"]
+        assert "h1" not in progress["pending_hosts"]
+
+    def test_failed_hosts_does_not_grow_on_repeated_failures(self):
+        progress = self._progress(failed_hosts=["h1"])
+
+        progress = record_create_failure(
+            progress_data=progress,
+            host_id="h1",
+            candidate_host_ids=["h2"],
+            message="Replacement failed on h1",
+        )
+
+        assert progress["failed_hosts"] == ["h1"]
+        assert progress["current_host_id"] == "h2"
+
+    def test_replacement_on_another_host_still_retires_the_original(self):
+        """The step keeps replacing the same replica after moving hosts.
+
+        Without that, the old replica outlives the rollout, the diff sees a
+        surplus and may stop the fresh replacement instead — replacing and
+        destroying replicas on every pass.
+        """
+        old = _make_managed_instance(
+            "i1", host_id="h1", model_source="repo://test:v1", max_length=512
+        )
+
+        progress = RollingStrategy.init(
+            intent_id="intent-001",
+            alias="test-model",
+            target_model_source="repo://test:v1",
+            desired_replicas=1,
+            managed_instances=[old],
+            candidates=_make_candidates("h2"),
+            drifted_instance_ids=["i1"],
+        )
+        assert progress["current_old_instance_id"] == "i1"
+
+        # h1 cannot take the replacement, so the step moves to h2.
+        progress = record_create_failure(
+            progress_data=progress,
+            host_id=progress["current_host_id"],
+            candidate_host_ids=["h2"],
+            message="Replacement failed on h1",
+        )
+        assert progress["current_host_id"] == "h2"
+        assert progress["current_old_instance_id"] == "i1"
+
+        progress["phase"] = StrategyPhase.WAITING_HEALTHY
+        progress["current_instance_id"] = "i2"
+        replacement = _make_managed_instance(
+            "i2", host_id="h2", model_source="repo://test:v1", max_length=1024
+        )
+
+        action, progress = RollingStrategy.continue_step(
+            progress_data=progress,
+            intent_id="intent-001",
+            alias="test-model",
+            desired_replicas=1,
+            managed_instances=[old, replacement],
+            candidates=_make_candidates("h2"),
+            gateway_aliases={"test-model"},
+            health_gate_started_at=5.0,
+            health_gate_timeout_s=300.0,
+        )
+
+        assert action["type"] == "stop"
+        assert action["instance_id"] == "i1"
+        assert action["host_id"] == "h1"  # retired where it actually runs
+        assert progress["phase"] == StrategyPhase.RETIRING_OLD
+
+        action, progress = RollingStrategy.continue_step(
+            progress_data=progress,
+            intent_id="intent-001",
+            alias="test-model",
+            desired_replicas=1,
+            managed_instances=[replacement],
+            candidates=_make_candidates("h2"),
+            gateway_aliases={"test-model"},
+            health_gate_started_at=6.0,
+            health_gate_timeout_s=300.0,
+        )
+        assert (action, progress) == (None, None)
+
+    def test_held_rollout_is_retired_so_the_diff_can_re_plan(self):
+        """The reconciler only gets here once its backoff has expired."""
+        for strategy, cls in (
+            ("rolling", RollingStrategy),
+            ("immediate", ImmediateStrategy),
+        ):
+            action, progress = cls.continue_step(
+                progress_data=self._progress(
+                    strategy=strategy, phase=StrategyPhase.FAILED
+                ),
+                intent_id="intent-001",
+                alias="test-model",
+                desired_replicas=1,
+                managed_instances=[],
+                candidates=[],
+                gateway_aliases=set(),
+                health_gate_started_at=0.0,
+                health_gate_timeout_s=300.0,
+            )
+            assert (action, progress) == (None, None), strategy
 
 
 # ═════════════════════════════════════════════════════════════════

@@ -377,8 +377,11 @@ class Reconciler:
         if not actions:
             # No actions needed — still update status to reflect current state.
             # Nothing to converge means every replica matches the spec, so a
-            # pending spec change is done rolling out (S-044).
-            await self._update_status(intent, observed, spec_settled=True)
+            # pending spec change is done rolling out (S-044) — unless a
+            # replica could not be compared against it at all.
+            await self._update_status(
+                intent, observed, spec_settled=_spec_settled(observed, actions)
+            )
             return
 
         # 3. Act — execute at most one action per tick for gradual convergence
@@ -436,7 +439,7 @@ class Reconciler:
             last_error=last_error,
             # No replica needed replacing, so nothing is left to roll out for
             # a pending spec change (S-044).
-            spec_settled=not any(a.type == ActionType.REPLACE for a in actions),
+            spec_settled=_spec_settled(observed, actions),
         )
 
     # ── S-042: Strategy helpers ──────────────────────────────────
@@ -501,7 +504,7 @@ class Reconciler:
         executes it, and updates status with new progress.
         """
         from app.config import settings
-        from app.services.strategies import continue_strategy
+        from app.services.strategies import continue_strategy, record_create_failure
 
         managed = observed["managed_instances"]
         candidates = observed["candidates"]
@@ -589,7 +592,14 @@ class Reconciler:
                     "source_uri": intent.model_source,
                     "at": datetime.now(timezone.utc).isoformat(),
                 }
-                if new_progress:
+                if new_progress and action_type == "create":
+                    new_progress = record_create_failure(
+                        progress_data=new_progress,
+                        host_id=action_dict.get("host_id"),
+                        candidate_host_ids=[h.id for h, _ in candidates],
+                        message=f"Replacement failed on {action_dict.get('host_id')}",
+                    )
+                elif new_progress:
                     new_progress["failed"] = new_progress.get("failed", 0) + 1
                     failed_hosts = list(new_progress.get("failed_hosts", []))
                     if action_dict.get("host_id"):
@@ -705,12 +715,19 @@ class Reconciler:
                 try:
                     full = await capture_instance_config(host, iid)
                 except Exception:
-                    logger.debug(
-                        "Could not load full config for instance %s on %s",
+                    # Without the real config there is nothing to compare the
+                    # new spec against, and the flat cache carries almost none
+                    # of the backend fields. Saying "no drift" here would
+                    # declare the edit rolled out and drop it for good, so the
+                    # replica is marked unknown and the edit stays pending.
+                    logger.warning(
+                        "Could not load full config for instance %s on %s; "
+                        "the pending spec change stays unsettled",
                         iid,
                         host.name,
                         exc_info=True,
                     )
+                    inst["_full_config_unknown"] = True
                     continue
                 cfg = full.get("config", full)
                 if isinstance(cfg, dict):
@@ -1298,7 +1315,20 @@ class Reconciler:
             instance_id = created.get("id") or created.get("instance_id")
             if instance_id:
                 logger.info("Starting instance %s on %s", instance_id, host.name)
-                await self._start_instance(host, instance_id)
+                try:
+                    await self._start_instance(host, instance_id)
+                except Exception:
+                    # A replica that will not start is not a replica. Leaving
+                    # it behind would pile up one dead instance per retry on
+                    # the host, and each would still count as an observed
+                    # replica of this intent.
+                    logger.warning(
+                        "Instance %s failed to start on %s; removing it",
+                        instance_id,
+                        host.name,
+                    )
+                    await self._delete_instance(host, instance_id)
+                    raise
             return result
 
         if action.type == ActionType.REPLACE:
@@ -1912,6 +1942,7 @@ class Reconciler:
             status_json=status_json,
             last_reconciled_at=now,
             ready_at=ready_at,
+            spec_version_seen=_spec_version(intent),
         )
 
         # ── Emit Socket.IO events for live WebUI updates (§10.4) ──
@@ -1965,6 +1996,22 @@ def _spec_version(intent: Any) -> str | None:
     (S-044), which is what makes it usable as a spec identity.
     """
     return getattr(getattr(intent, "status", None), "spec_changed_at", None)
+
+
+def _spec_settled(observed: dict[str, Any], actions: list[Action]) -> bool:
+    """Whether a pending spec change can be considered rolled out (S-044).
+
+    Two things have to hold: no replica still needs replacing, and every
+    replica could actually be compared against the spec. A replica whose real
+    configuration could not be read is not evidence of agreement — treating it
+    as settled would clear ``spec_changed_at`` and lose the edit, leaving the
+    replica on the old config while the intent reports itself up to date.
+    """
+    if any(a.type == ActionType.REPLACE for a in actions):
+        return False
+    return not any(
+        inst.get("_full_config_unknown") for inst in observed["managed_instances"]
+    )
 
 
 def _detect_backend_drift(intent: Any, instance_config: dict[str, Any]) -> bool:

@@ -431,6 +431,8 @@ Let `desired = I.replicas`, `observed = |managed(I)|`, and let `current[h]` be t
 
 Drift detection compares the intent's `model_source` and backend fields against the observed instance configuration. Since a spec can change under a running deployment (Section 12.5), a backend-only edit must be detected even for fields the cached instance view does not carry: while a spec change is pending, the comparison uses the instance's full configuration rather than the cached summary.
 
+That configuration lives on the host, so the comparison can fail to happen at all — an unreachable host, a rejected call. **A comparison that could not be made is not a finding of "no drift."** The pending change stays pending until every replica has actually been compared against it. Otherwise an edit submitted while a host is unreachable is declared rolled out and dropped: nothing records that the replica still has to be checked, so it serves the old configuration indefinitely while the intent reports itself up to date.
+
 The reconciler is the only component that decides what has drifted, and it hands the drifted replicas to the strategy that replaces them (Section 11.4). Nothing downstream may re-derive drift by comparing `model_source` alone: that misses a backend-only edit entirely, and it cannot tell an in-place replacement from the replica it replaces, since the two share a host *and* a source.
 
 A `replace` that runs outside a strategy retires the drifted replica with **stop + delete**, not stop alone. A stopped replica still counts towards `observed`, so leaving it holds the intent at its desired count with nothing serving: no `create` for the replacement, and the `recreate` that would restart it is suppressed by the pending `replace`.
@@ -697,7 +699,9 @@ While a `rolling`/`immediate` update is in flight, `status.strategy_progress` is
 }
 ```
 
-`drifted_instance_ids` are the replicas this rollout was planned to replace, as identified by the reconciler (Section 8.2). They are recorded by id because that is the only durable way to name them: a rollout may be replacing replicas that differ from the spec only in backend config, and an in-place replacement shares its host and `model_source` with the replica it retires. `updated` is therefore "managed replicas not in this set", and each step retires the drifted replica on the host it just brought a replacement up on. Progress written before this field existed carries no ids; such a rollout can only have been a `model_source` change and is completed by comparing sources.
+`drifted_instance_ids` are the replicas this rollout was planned to replace, as identified by the reconciler (Section 8.2). They are recorded by id because that is the only durable way to name them: a rollout may be replacing replicas that differ from the spec only in backend config, and an in-place replacement shares its host and `model_source` with the replica it retires. `updated` is therefore "managed replicas not in this set". Progress written before this field existed carries no ids; such a rollout can only have been a `model_source` change and is completed by comparing sources.
+
+`current_old_instance_id` is the replica the current step replaces, and the step retires it **on whichever host it runs**, not on the host the replacement went to. The two can differ: a step that cannot create its replacement on the intended host moves to another one (Section 11.5). Retiring by host instead of by replica would leave the old replica behind, and the diff would then see a surplus and could stop the fresh replacement instead — replacing and destroying replicas on every pass.
 
 ### 11.5 Failure behavior
 
@@ -707,6 +711,11 @@ While a `rolling`/`immediate` update is in flight, `status.strategy_progress` is
 | `immediate` | Replacements are attempted on placement; if some fail, the intent is `degraded`/`failed` with `ready_replicas` reflecting what came up. Because `immediate` already stopped the old replicas, there is no old version to fall back to — this is the documented downside of `immediate`. |
 
 In both strategies, partial failure never leaves duplicate replicas on a host and never silently abandons the intent — the diff is re-evaluated next tick.
+
+**A replacement that cannot be created** (the host has no room for a second replica, the backend will not start there) is a different failure from one that comes up and fails its health gate, and it must not be retried on the same host: the cause is usually the host itself, so repeating it produces the same failure every tick. The step moves to the next eligible host instead. When there is none, the rollout **holds** with the reason recorded in `strategy_progress.message` and `last_error`, and the failure paces the reconciler with backoff, so the retry is a fresh attempt planned against current state rather than a tight loop. Two rules keep such a retry from costing anything:
+
+- A created instance that fails to start is **deleted**, not left behind. Otherwise each retry adds one dead instance to the host, and each still counts as an observed replica of the intent — so the intent reports its replicas as present while the alias is down.
+- A held rollout is retired rather than resumed. The reconciler only re-enters a held rollout once its backoff has expired, and by then hosts may have come or gone and the spec may have been edited, so the diff re-plans from observed state.
 
 ### 11.5.1 Editing an intent during a rollout
 
@@ -806,6 +815,7 @@ Semantics:
 - Server-managed state (`status`, phases, timestamps) is not client-writable; the update touches the spec only.
 - The reconciler is woken on success, so the change is picked up immediately rather than on the next periodic tick.
 - Reconciliation of a spec that changes underneath a running pass is safe: the per-intent lock (Section 8.3) serialises passes across Solar Control replicas, each pass loads the intent inside that lock, and a recorded failure backoff is invalidated by a spec change so a corrective edit is retried at once instead of waiting out the previous spec's backoff.
+- An update does not take that lock — an operator's edit must not wait on a migration — so it can land in the middle of a pass, and the two write overlapping parts of the same status document. **A pass may only settle the spec version it actually reconciled.** A pass that read the intent before the edit landed knows nothing about it, and letting it write its status wholesale would erase both the pending marker and the rollout reset the edit just made, discarding the edit while returning 200 for it.
 
 ### 12.6 Error model
 
