@@ -91,7 +91,9 @@ async def test_catalog_proxies_data_repository_listing(
     repo_item = next(
         (i for i in repo_resp.json()["items"] if i["name"] == MODEL_NAME), None
     )
-    assert repo_item is not None, f"fixture model missing from data-repo: {repo_resp.text}"
+    assert (
+        repo_item is not None
+    ), f"fixture model missing from data-repo: {repo_resp.text}"
     assert item["latest_version"] == repo_item["latest_version"]
 
     # Clean state: hosts hold no models and no instances -> the model is
