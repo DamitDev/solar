@@ -1,16 +1,16 @@
 """Solar Control - Stateless multi-replica coordinator with Socket.IO."""
 
-import os
 import logging
+import os
 from contextlib import asynccontextmanager
-from importlib.metadata import version, PackageNotFoundError
+from importlib.metadata import PackageNotFoundError, version
 
 import socketio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import settings
 from app.auth import auth_middleware
+from app.config import settings
 
 
 def _get_version() -> str:
@@ -35,10 +35,10 @@ logging.getLogger("uvicorn.access").setLevel(getattr(logging, log_level, logging
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from app.database import init_db, close_db
+    from app.database import close_db, init_db
     from app.database.logs import gateway_logger
-    from app.redis_state import init_redis, close_redis
     from app.gateway import gateway
+    from app.redis_state import close_redis, init_redis
 
     logger.info("Starting Solar Control v%s ...", __version__)
 
@@ -78,12 +78,12 @@ async def lifespan(app: FastAPI):
 
     try:
         await gateway_logger.stop()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.error("Error stopping gateway logger: %s", e)
 
     try:
         await reconciler.stop()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.error("Error stopping reconciler: %s", e)
 
     await close_redis()
@@ -113,8 +113,8 @@ app.add_middleware(
 app.middleware("http")(auth_middleware)
 
 # Routes
-from app.routes.openai import router as openai_router  # noqa: E402
-from app.routes.management import router as management_router  # noqa: E402
+from app.routes.management import router as management_router
+from app.routes.openai import router as openai_router
 
 app.include_router(openai_router)
 app.include_router(management_router)
@@ -130,6 +130,7 @@ async def readiness_check():
     """Readiness probe - checks DB and Redis connectivity."""
     try:
         from sqlalchemy import text
+
         from app.database.connection import get_session_factory
         from app.redis_state.connection import redis_client
 
@@ -138,7 +139,7 @@ async def readiness_check():
         r = redis_client()
         await r.ping()
         return {"status": "ready"}
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         from fastapi.responses import JSONResponse
 
         return JSONResponse(
@@ -184,7 +185,7 @@ async def root():
 
 
 # Mount Socket.IO on top of FastAPI
-from app.socketio_app import sio  # noqa: E402
+from app.socketio_app import sio
 
 sio_asgi_app = socketio.ASGIApp(sio, other_asgi_app=app)
 

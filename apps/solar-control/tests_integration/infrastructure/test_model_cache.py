@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-
 from fixtures.constants import MODEL_SOURCE_URI
 
 pytestmark = pytest.mark.infrastructure

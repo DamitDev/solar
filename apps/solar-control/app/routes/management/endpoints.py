@@ -3,8 +3,8 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, model_validator
 
-from app.database.endpoints import endpoint_db
 from app.auth import invalidate_endpoint_cache
+from app.database.endpoints import endpoint_db
 
 router = APIRouter(prefix="/endpoints", tags=["endpoints"])
 
@@ -43,7 +43,7 @@ async def create_endpoint(data: EndpointCreate):
         )
         await invalidate_endpoint_cache()
         return ep.model_dump()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         if "unique" in str(e).lower():
             raise HTTPException(
                 status_code=409, detail="Endpoint name or API key already exists"

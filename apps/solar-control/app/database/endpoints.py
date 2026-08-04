@@ -4,13 +4,13 @@ Each API endpoint represents a tenant (dev, uat, prod) with its own API key.
 All endpoints serve the same models but have separate request logging.
 """
 
-import uuid
 import secrets
-from typing import Any
+import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from pydantic import BaseModel, Field
-from sqlalchemy import select, delete, update, func
+from sqlalchemy import delete, func, select, update
 
 from .connection import get_session_factory
 from .tables import ApiEndpointRow, GatewayRequestRow

@@ -13,10 +13,9 @@ All connection state is stored in Redis for multi-replica consistency.
 import asyncio
 import logging
 import uuid
-from typing import Any
 from datetime import datetime, timezone
+from typing import Any
 
-from .server import sio
 from app.database.hosts import host_db
 from app.database.jobs import job_db
 from app.models import Host, HostStatus
@@ -24,8 +23,8 @@ from app.models.job import JobStatus
 from app.models.socketio import (
     HostHealthPayload,
     HostPendingPayload,
-    InstancesUpdatePayload,
     InstanceStatePayload,
+    InstancesUpdatePayload,
     JobLifecyclePayload,
     JobLogPayload,
     LogPayload,
@@ -33,6 +32,8 @@ from app.models.socketio import (
 )
 from app.redis_state import host_store
 from app.services.host_status import build_host_status_payload
+
+from .server import sio
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +129,7 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> str | No
             gateway.refresh_model_registry(),
             name="registry-refresh-approve",
         )
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
 
     logger.info("Pending host approved -> '%s' (%s)", name, host_id)
@@ -148,7 +149,7 @@ async def reject_pending_host(pending_id: str) -> bool:
             namespace="/hosts",
         )
         await sio.disconnect(p["sid"], namespace="/hosts")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
 
     await sio.emit(
@@ -291,7 +292,7 @@ async def host_registration(sid: str, data: dict[str, Any]):
                 gateway.refresh_model_registry(),
                 name="registry-refresh-registration",
             )
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
         return
 
@@ -486,7 +487,7 @@ async def host_instances_update(sid: str, data: dict[str, Any]):
             gateway.refresh_model_registry(),
             name="registry-refresh-instances",
         )
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
 
     # Wake reconciler — instance changes may affect intent status

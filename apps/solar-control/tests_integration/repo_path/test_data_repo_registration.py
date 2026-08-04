@@ -10,7 +10,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-
 from fixtures.constants import FIXTURE_MODEL_DIR
 from fixtures.seed import read_test_model_files, register_model_in_data_repo
 

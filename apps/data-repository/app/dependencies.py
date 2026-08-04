@@ -51,8 +51,8 @@ from app.harbor import HarborClient, harbor_client
 from app.services.models import (
     DatasetDeletionService,
     DatasetQueryService,
-    DatasetUpdateService,
     DatasetRegistrationService,
+    DatasetUpdateService,
     ModelDeletionService,
     ModelQueryService,
     ModelRegistrationService,

@@ -1,9 +1,9 @@
 """Tests for the D-018 model catalog endpoint (GET /api/catalog/models)."""
 
-import pytest
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
+import pytest
 from fastapi import HTTPException
 
 from app.models import Host, HostStatus
@@ -323,12 +323,14 @@ async def test_catalog_counts_running_instances_from_source_variants(
 
 @pytest.mark.anyio
 async def test_catalog_data_repository_unreachable(catalog_settings):
-    with patch(
-        "aiohttp.ClientSession.get",
-        side_effect=aiohttp.ClientConnectionError("Refused"),
+    with (
+        patch(
+            "aiohttp.ClientSession.get",
+            side_effect=aiohttp.ClientConnectionError("Refused"),
+        ),
+        pytest.raises(HTTPException) as exc,
     ):
-        with pytest.raises(HTTPException) as exc:
-            await get_catalog_models()
+        await get_catalog_models()
     assert exc.value.status_code == 502
     assert "unreachable" in str(exc.value.detail)
 

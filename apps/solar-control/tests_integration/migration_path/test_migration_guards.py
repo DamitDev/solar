@@ -9,7 +9,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-
 from fixtures.constants import BACKEND_CLASSIFICATION, MODEL_SOURCE_URI
 from fixtures.helpers import wait_for
 from fixtures.intents import create_intent, get_intent, wait_intent_ready

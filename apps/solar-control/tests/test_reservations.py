@@ -1,8 +1,8 @@
 """Tests for reservation coordinator (S-038)."""
 
-import pytest
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi import HTTPException
 
 from app.models import Host, HostStatus
@@ -10,7 +10,7 @@ from app.models.reservation import (
     ReservationRequest,
     ReservationResponse,
 )
-from app.services.reservation import reserve_resources, release_reservation
+from app.services.reservation import release_reservation, reserve_resources
 
 # ── Fixtures ────────────────────────────────────────────────────
 

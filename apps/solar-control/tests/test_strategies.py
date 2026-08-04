@@ -824,7 +824,7 @@ class TestImmediateModelVersionChange:
             "message": "Stopping 2 old replica(s)",
         }
 
-        action, new_progress = ImmediateStrategy.continue_step(
+        action, _ = ImmediateStrategy.continue_step(
             progress_data=progress,
             intent_id="intent-001",
             alias="test-model",
@@ -1023,7 +1023,7 @@ class TestFailedHealthCheckRolling:
             "message": "Waiting for replacement",
         }
 
-        action, new_progress = RollingStrategy.continue_step(
+        _, new_progress = RollingStrategy.continue_step(
             progress_data=progress,
             intent_id="intent-001",
             alias="test-model",
@@ -1106,7 +1106,7 @@ class TestFailedHealthCheckImmediate:
         }
 
         # No old instances, no candidates → no hosts for replacement
-        action, new_progress = ImmediateStrategy.continue_step(
+        _, new_progress = ImmediateStrategy.continue_step(
             progress_data=progress,
             intent_id="intent-001",
             alias="test-model",
@@ -1635,7 +1635,7 @@ class TestEdgeCases:
         }
         candidates = _make_candidates("h3", "h4")
 
-        action, new_progress = _advance_to_next_rolling(
+        action, _ = _advance_to_next_rolling(
             progress_data=progress,
             managed_instances=instances,
             candidates=candidates,
@@ -1700,7 +1700,7 @@ class TestEdgeCases:
             "message": "",
         }
 
-        action, new_progress = RollingStrategy.continue_step(
+        _, new_progress = RollingStrategy.continue_step(
             progress_data=progress,
             intent_id="intent-001",
             alias="test-model",

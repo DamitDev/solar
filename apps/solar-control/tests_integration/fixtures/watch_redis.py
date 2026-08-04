@@ -21,8 +21,9 @@ for _ in range(120):
             capture_output=True,
             text=True,
             timeout=10,
+            check=False,
         ).stdout.splitlines()
-    except Exception:
+    except Exception:  # noqa: BLE001
         rows = []
     for row in rows:
         if "redis" in row.lower():
@@ -40,7 +41,7 @@ if not port:
     print("no redis container found", file=sys.stderr)
     sys.exit(1)
 
-import redis  # noqa: E402
+import redis
 
 r = redis.Redis(host="127.0.0.1", port=int(port), socket_timeout=5)
 with open(out, "a") as f:

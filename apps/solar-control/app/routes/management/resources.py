@@ -104,7 +104,7 @@ async def _fetch_host_resource_snapshot(
     except asyncio.TimeoutError:
         base.error = f"Host timed out ({_RESOURCE_TIMEOUT}s)"
         return base
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         base.error = f"Failed to fetch resources: {exc}"
         return base
 

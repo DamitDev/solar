@@ -5,7 +5,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-
 from fixtures.constants import MODEL_SOURCE_URI
 from fixtures.intents import create_intent, intent_payload
 

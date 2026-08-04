@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.dependencies import (
     get_model_deletion_service,
@@ -17,13 +17,13 @@ from app.exceptions import (
     ModelNotFoundError,
     ModelVersionNotFoundError,
 )
+from app.pagination import resolve_list_pagination
 from app.routes._artifact_list_params import (
     ARTIFACT_LIST_PAGE_DESCRIPTION,
     ARTIFACT_LIST_PAGE_SIZE_DESCRIPTION,
     ARTIFACT_LIST_SEARCH_DESCRIPTION,
 )
 from app.routes._error_handling import handle_registration_errors
-from app.pagination import resolve_list_pagination
 from app.schemas.artifacts import (
     ArtifactListResponse,
     ArtifactSummary,
@@ -32,17 +32,17 @@ from app.schemas.models import (
     GetModelMetadataResponse,
     GetModelVersionResponse,
     ListModelVersionsResponse,
-    UpdateModelMetadataRequest,
     RegisterModelVersionRequest,
     RegisterModelVersionResponse,
-    UpdateModelVersionResponse,
+    UpdateModelMetadataRequest,
     UpdateModelVersionRequest,
+    UpdateModelVersionResponse,
 )
 from app.services.models import (
     ModelDeletionService,
     ModelQueryService,
-    ModelUpdateService,
     ModelRegistrationService,
+    ModelUpdateService,
 )
 
 router = APIRouter(prefix="/api/models")

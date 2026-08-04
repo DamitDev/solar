@@ -13,7 +13,6 @@ import asyncio
 import uuid
 
 import pytest
-
 from conftest import (
     MANAGEMENT_API_KEY,
     _build_stack,

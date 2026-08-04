@@ -61,10 +61,7 @@ async def check_instance_healthy(
     if status != "running":
         return False
 
-    if alias not in gateway_aliases:
-        return False
-
-    return True
+    return alias in gateway_aliases
 
 
 def check_instance_healthy_sync(
@@ -85,10 +82,7 @@ def check_instance_healthy_sync(
     if status != "running":
         return False
 
-    if alias not in gateway_aliases:
-        return False
-
-    return True
+    return alias in gateway_aliases
 
 
 # ── Shared helpers ───────────────────────────────────────────────

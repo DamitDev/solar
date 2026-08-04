@@ -15,8 +15,9 @@ import signal
 import socket
 import subprocess
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,8 @@ class ServiceProcess:
     def start(self, ready_timeout: float = 45.0) -> None:
         log_dir = self.log_path.parent
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = open(self.log_path, "ab")
+        # The log handle must outlive this scope — Popen writes to it.
+        log_file = open(self.log_path, "ab")  # noqa: SIM115
         self.proc = subprocess.Popen(
             self.argv,
             cwd=str(self.cwd),
@@ -183,7 +185,7 @@ class ServiceProcess:
                     os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
                 except (ProcessLookupError, PermissionError):
                     pass
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, S110
                 pass
         self.proc = None
 
@@ -200,7 +202,7 @@ class ServiceProcess:
                 self.proc.wait(timeout=10)
             except (ProcessLookupError, subprocess.TimeoutExpired):
                 pass
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001, S110
                 pass
         self.proc = None
 
@@ -517,17 +519,14 @@ async def dump_instance_evidence(
 
     # 5. Host venv package versions (F6 hypothesis 2).
     env = clean_env()
-    proc = subprocess.run(
-        [
-            str(SOLAR_HOST_PYTHON),
-            "-m",
-            "pip",
-            "freeze",
-        ],
+    proc = await asyncio.to_thread(
+        subprocess.run,
+        [str(SOLAR_HOST_PYTHON), "-m", "pip", "freeze"],
         capture_output=True,
         text=True,
         timeout=60,
         env=env,
+        check=False,
     )
     wanted = (
         "tokenizers",
@@ -636,6 +635,7 @@ def rewrite_safetensors_with_metadata(
             text=True,
             timeout=120,
             env=clean_env(),
+            check=False,
         )
         if proc.returncode != 0 or "VERIFIED" not in proc.stdout:
             raise AssertionError(

@@ -31,14 +31,13 @@ import time
 from base64 import b64encode
 from pathlib import Path
 
-import requests
-import yaml
-
 import oras.client
 import oras.defaults
 import oras.oci
 import oras.provider
 import oras.utils
+import requests
+import yaml
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 REPO_ROOT = SCRIPT_DIR.parent
@@ -154,8 +153,7 @@ def create_test_large_file(base_dir: str, size_mb: int = 10) -> str:
     """Create a single large test file simulating a GGUF model."""
     fpath = os.path.join(base_dir, "test-model.gguf")
     with open(fpath, "wb") as f:
-        for _ in range(size_mb):
-            f.write(os.urandom(1024 * 1024))
+        f.writelines(os.urandom(1024 * 1024) for _ in range(size_mb))
     return fpath
 
 

@@ -1,12 +1,13 @@
 """Tests for shared placement policy (S-038 / S-041)."""
 
-import pytest
 from unittest.mock import AsyncMock, patch
 
-from app.models import Host, HostStatus, HostResourceSnapshot
+import pytest
+
+from app.models import Host, HostResourceSnapshot, HostStatus
 from app.services.placement import (
-    find_candidates,
     can_displace,
+    find_candidates,
     find_displaceable_instances,
     fits_resources,
 )

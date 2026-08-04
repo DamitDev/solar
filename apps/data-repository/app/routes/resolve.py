@@ -1,6 +1,7 @@
 """URI resolution routes under /api/resolve."""
 
 from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.dependencies import get_resolve_service

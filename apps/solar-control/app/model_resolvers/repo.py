@@ -49,35 +49,37 @@ async def resolve_from_data_repository(source_uri: str) -> dict[str, Any]:
         headers["X-API-Key"] = settings.data_repository_api_key
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(
                 url,
                 params={"uri": source_uri},
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=settings.data_repository_timeout_s),
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
+            ) as response,
+        ):
+            if response.status == 200:
+                return await response.json()
 
-                try:
-                    err = await response.json()
-                    detail = err.get("detail") or err.get("error")
-                except Exception:
-                    detail = await response.text()
+            try:
+                err = await response.json()
+                detail = err.get("detail") or err.get("error")
+            except Exception:  # noqa: BLE001
+                detail = await response.text()
 
-                if response.status in {404, 422}:
-                    raise HTTPException(
-                        status_code=response.status,
-                        detail=detail or "Data Repository resolution failed",
-                    )
-
+            if response.status in {404, 422}:
                 raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "Data Repository resolution failed "
-                        f"[{response.status}]: {detail}"
-                    ),
+                    status_code=response.status,
+                    detail=detail or "Data Repository resolution failed",
                 )
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Data Repository resolution failed "
+                    f"[{response.status}]: {detail}"
+                ),
+            )
     except HTTPException:
         raise
     except (
@@ -89,7 +91,7 @@ async def resolve_from_data_repository(source_uri: str) -> dict[str, Any]:
             status_code=502,
             detail=f"Data Repository is unreachable: {exc}",
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
             detail=f"Unexpected error during Data Repository resolve: {exc}",
@@ -173,44 +175,44 @@ async def post_harbor_pull(
     headers = {"X-API-Key": host_api_key, "Content-Type": "application/json"}
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(
                 url,
                 json=payload,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=_HOST_PULL_TIMEOUT_S),
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    path = data.get("path")
-                    if not path:
-                        raise HTTPException(
-                            status_code=502,
-                            detail=(
-                                f"Host '{label}' returned success but no path "
-                                "for model pull."
-                            ),
-                        )
-                    return path, bool(data.get("cached", False))
+            ) as response,
+        ):
+            if response.status == 200:
+                data = await response.json()
+                path = data.get("path")
+                if not path:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=(
+                            f"Host '{label}' returned success but no path "
+                            "for model pull."
+                        ),
+                    )
+                return path, bool(data.get("cached", False))
 
-                try:
-                    err = await response.json()
-                    detail = err.get("detail") or err.get("error")
-                except Exception:
-                    detail = await response.text()
+            try:
+                err = await response.json()
+                detail = err.get("detail") or err.get("error")
+            except Exception:  # noqa: BLE001
+                detail = await response.text()
 
-                out_code = (
-                    response.status
-                    if response.status in _PROPAGATED_HOST_CODES
-                    else 502
-                )
-                raise HTTPException(
-                    status_code=out_code,
-                    detail=(
-                        f"Model pull failed on host '{label}' "
-                        f"[{response.status}]: {detail}"
-                    ),
-                )
+            out_code = (
+                response.status if response.status in _PROPAGATED_HOST_CODES else 502
+            )
+            raise HTTPException(
+                status_code=out_code,
+                detail=(
+                    f"Model pull failed on host '{label}' "
+                    f"[{response.status}]: {detail}"
+                ),
+            )
     except HTTPException:
         raise
     except (
@@ -222,7 +224,7 @@ async def post_harbor_pull(
             status_code=502,
             detail=f"Host '{label}' is unreachable during model pull: {exc}",
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
             detail=f"Unexpected error during model pull on host '{label}': {exc}",

@@ -1,15 +1,17 @@
 from fastapi import APIRouter
+
 from app.jobs import router as jobs_router
+
 from . import (
-    hosts,
+    catalog,
     endpoints,
     gateway,
-    models,
-    resources,
+    hosts,
     instances,
-    reservations,
     intents,
-    catalog,
+    models,
+    reservations,
+    resources,
 )
 
 router = APIRouter(prefix="/api", tags=["management"])

@@ -5,7 +5,7 @@ app.dependency_overrides so HTTP-status mapping for every domain exception is
 verified without a DB, Harbor, or singleton dependency.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -57,7 +57,7 @@ _SUCCESS_GET_RESPONSE = GetModelVersionResponse(
     harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v3",
     size_bytes=123,
     checksum="sha256:abc",
-    created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+    created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
     metadata={"trainer": "etalon"},
 )
 
@@ -66,7 +66,7 @@ _SUCCESS_LIST_RESPONSE = ListModelVersionsResponse(
         ModelVersionListItem(
             version="v3",
             harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v3",
-            created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
             size_bytes=123,
             checksum="sha256:abc",
             training_config={"epochs": 3},
@@ -75,7 +75,7 @@ _SUCCESS_LIST_RESPONSE = ListModelVersionsResponse(
         ModelVersionListItem(
             version="v2",
             harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v2",
-            created_at=datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 1, 10, 0, tzinfo=UTC),
             size_bytes=120,
             checksum="sha256:def",
             training_config=None,
@@ -95,7 +95,7 @@ _SUCCESS_METADATA_RESPONSE = GetModelMetadataResponse(
         source_dataset="iris-tickets:v3",
         source_trainer="supernova-job-12345",
     ),
-    created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+    created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
     versions_count=3,
 )
 
@@ -456,7 +456,7 @@ _LIST_MODELS_RESPONSE = ArtifactListResponse[ArtifactSummary](
             description="Iris OSL model",
             versions_count=3,
             latest_version="v3",
-            created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
         ),
         ArtifactSummary(
             name="bert-base",
@@ -464,7 +464,7 @@ _LIST_MODELS_RESPONSE = ArtifactListResponse[ArtifactSummary](
             description=None,
             versions_count=1,
             latest_version="v1",
-            created_at=datetime(2026, 3, 1, 8, 0, tzinfo=timezone.utc),
+            created_at=datetime(2026, 3, 1, 8, 0, tzinfo=UTC),
         ),
     ],
 )

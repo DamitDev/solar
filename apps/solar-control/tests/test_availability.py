@@ -1,11 +1,13 @@
-import pytest
 import asyncio
 from unittest.mock import AsyncMock, patch
+
+import pytest
+
 from app.models import Host, HostStatus
 from app.routes.management.models import (
+    ModelAvailabilityResponse,
     _fetch_host_models,
     get_model_availability,
-    ModelAvailabilityResponse,
 )
 
 

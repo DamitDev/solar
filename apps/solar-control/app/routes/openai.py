@@ -11,14 +11,14 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from app.gateway import gateway
 from app.models import (
     ChatCompletionRequest,
-    CompletionRequest,
     ClassifyRequest,
+    CompletionRequest,
     EmbeddingRequest,
     RerankRequest,
 )
-from app.gateway import gateway
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["openai"])
@@ -44,7 +44,7 @@ def _safe_stream(
         try:
             async for chunk in stream:
                 yield chunk
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             payload = json.dumps({"error": str(e)})
             yield f"data: {payload}\n\n".encode()
         finally:
@@ -62,7 +62,7 @@ async def list_models():
             "models": result.get("models", []),
             "data": result.get("data", []),
         }
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -92,7 +92,7 @@ async def chat_completions(request: ChatCompletionRequest, client: Request):
             return response
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -122,7 +122,7 @@ async def completions(request: CompletionRequest, client: Request):
             return response
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -143,7 +143,7 @@ async def classify(request: ClassifyRequest, client: Request):
         return response
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -164,7 +164,7 @@ async def embeddings(request: EmbeddingRequest, client: Request):
         return response
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -185,5 +185,5 @@ async def rerank(request: RerankRequest, client: Request):
         return response
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))

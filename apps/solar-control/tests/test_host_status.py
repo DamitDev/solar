@@ -66,14 +66,14 @@ def job_definition():
 
 
 def _job(job_definition, **overrides) -> Job:
-    defaults = dict(
-        id="job-1",
-        host_id="host-1",
-        status=JobStatus.RUNNING,
-        payload=job_definition,
-        current_step_name="train",
-        current_step_index=1,
-    )
+    defaults = {
+        "id": "job-1",
+        "host_id": "host-1",
+        "status": JobStatus.RUNNING,
+        "payload": job_definition,
+        "current_step_name": "train",
+        "current_step_index": 1,
+    }
     defaults.update(overrides)
     return Job(**defaults)
 

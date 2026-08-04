@@ -1,6 +1,7 @@
-from pydantic import BaseModel, Field, ConfigDict
-from typing import Any
 from datetime import datetime, timezone
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ModelInfo(BaseModel):

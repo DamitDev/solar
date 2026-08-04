@@ -10,11 +10,12 @@ Uses a write queue with periodic batch inserts for high throughput.
 import asyncio
 import logging
 import time
-from dataclasses import dataclass, asdict
-from typing import Any
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from typing import Any
 
-from sqlalchemy import select, and_, func as sa_func
+from sqlalchemy import and_, select
+from sqlalchemy import func as sa_func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from .connection import get_session_factory
@@ -34,7 +35,7 @@ def _parse_ts(ts_str: str | None) -> datetime | None:
         return None
     try:
         return datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -185,7 +186,7 @@ class GatewayLogger:
                             )
                         )
                     await session.commit()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.error("Failed to flush events: %s", exc)
 
         if requests:
@@ -223,7 +224,7 @@ class GatewayLogger:
                         )
                         await session.execute(stmt)
                     await session.commit()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 logger.error("Failed to flush requests: %s", exc)
 
     async def _queue_event(
@@ -409,7 +410,7 @@ class GatewayLogger:
             s = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
             e = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
             return max(0.0, (e - s).total_seconds())
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     def _classify_error_status(self, message: str | None) -> str:

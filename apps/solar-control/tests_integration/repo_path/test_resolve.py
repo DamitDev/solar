@@ -9,7 +9,6 @@ propagate through the control path.
 from __future__ import annotations
 
 import pytest
-
 from fixtures.constants import MODEL_NAME, MODEL_SOURCE_URI, MODEL_VERSION
 
 pytestmark = pytest.mark.repo_path

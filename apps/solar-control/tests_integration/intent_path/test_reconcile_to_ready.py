@@ -10,7 +10,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-
 from fixtures.constants import MODEL_ALIAS
 from fixtures.helpers import wait_for
 from fixtures.intents import (

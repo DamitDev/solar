@@ -605,7 +605,7 @@ class Reconciler:
         # they are neither managed nor conflicts.
         try:
             r = redis_client()
-            disowned: set[str] = set(str(x) for x in await r.smembers(_DISOWNED_SET))
+            disowned: set[str] = {str(x) for x in await r.smembers(_DISOWNED_SET)}
         except Exception:  # noqa: BLE001
             disowned = set()
         seen_instance_ids: set[str] = set()
@@ -642,7 +642,7 @@ class Reconciler:
                 try:
                     r = redis_client()
                     await r.srem(_DISOWNED_SET, *stale)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.warning("Could not prune disowned set", exc_info=True)
 
         # 3. Gateway registry — which aliases are registered?
@@ -1068,7 +1068,7 @@ class Reconciler:
                 try:
                     r = redis_client()
                     await r.sadd(_DISOWNED_SET, action.instance_id)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.warning(
                         "Could not record disowned instance %s",
                         action.instance_id,
@@ -1148,7 +1148,7 @@ class Reconciler:
                         )
                         try:
                             await self._delete_instance(host, action.instance_id)
-                        except Exception:  # noqa: BLE001
+                        except Exception:
                             logger.warning(
                                 "Failed to delete instance %s on %s after failed restart",
                                 action.instance_id,
@@ -1234,7 +1234,7 @@ class Reconciler:
                     await stop_source_instance(source_host, action.instance_id)
                     try:
                         await self._delete_instance(source_host, action.instance_id)
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         logger.warning(
                             "Failed to delete instance %s on %s after stop",
                             action.instance_id,
@@ -1325,7 +1325,7 @@ class Reconciler:
                         "intent_id"
                     )
                     break
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning(
                 "Could not read priority for instance %s", instance_id, exc_info=True
             )

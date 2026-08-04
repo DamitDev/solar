@@ -9,7 +9,6 @@ gateway returns real scores.
 from __future__ import annotations
 
 import pytest
-
 from fixtures.constants import (
     BACKEND_CLASSIFICATION,
     MANAGEMENT_API_KEY,

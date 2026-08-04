@@ -11,17 +11,18 @@ Features:
 import logging
 from typing import Any
 
-from .server import sio
 from app.config import settings
 from app.database.hosts import host_db
 from app.models.socketio import InstancesUpdatePayload
 from app.services.host_status import build_host_status_payload
 from app.socketio_app.host_handlers import (
-    is_host_connected,
-    get_pending_hosts,
     get_connected_host_ids,
     get_host_instances,
+    get_pending_hosts,
+    is_host_connected,
 )
+
+from .server import sio
 
 logger = logging.getLogger(__name__)
 
@@ -123,10 +124,7 @@ async def _should_emit_to_client(
 
     # Filter by job_id (for job_log / job_lifecycle events)
     job_ids = session_filter.get("job_ids")
-    if job_ids is not None and data.get("job_id") not in job_ids:
-        return False
-
-    return True
+    return job_ids is None or data.get("job_id") in job_ids
 
 
 async def broadcast_to_webui(event: str, data: dict[str, Any]) -> None:

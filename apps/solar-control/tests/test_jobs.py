@@ -13,9 +13,9 @@ import pytest
 from sqlalchemy.dialects import postgresql
 
 from app.database.jobs import _ACTIVE_JOB_LIMIT, JobDB
-from app.jobs.host_selector import select_host
 from app.jobs.client import JobHostClient, JobHostClientError
-from app.jobs.router import _translate_payload, _resolve_train_input
+from app.jobs.host_selector import select_host
+from app.jobs.router import _resolve_train_input, _translate_payload
 from app.models import Host, HostStatus
 from app.models.job import Job, JobStatus
 
@@ -167,23 +167,27 @@ async def test_select_host_filters_by_disk(online_training_host, low_disk_host):
 @pytest.mark.anyio
 async def test_select_host_no_host_available(online_training_host):
     """Should raise RuntimeError when no host qualifies."""
-    with patch(
-        "app.jobs.host_selector.host_db.get_all_hosts",
-        AsyncMock(return_value=[online_training_host]),
+    with (
+        patch(
+            "app.jobs.host_selector.host_db.get_all_hosts",
+            AsyncMock(return_value=[online_training_host]),
+        ),
+        pytest.raises(RuntimeError, match="No training-capable host"),
     ):
-        with pytest.raises(RuntimeError, match="No training-capable host"):
-            await select_host(role="training", min_disk_gb=999999.0)
+        await select_host(role="training", min_disk_gb=999999.0)
 
 
 @pytest.mark.anyio
 async def test_select_host_empty_list():
     """Should raise RuntimeError when no hosts exist at all."""
-    with patch(
-        "app.jobs.host_selector.host_db.get_all_hosts",
-        AsyncMock(return_value=[]),
+    with (
+        patch(
+            "app.jobs.host_selector.host_db.get_all_hosts",
+            AsyncMock(return_value=[]),
+        ),
+        pytest.raises(RuntimeError, match="No training-capable host"),
     ):
-        with pytest.raises(RuntimeError, match="No training-capable host"):
-            await select_host(role="training")
+        await select_host(role="training")
 
 
 @pytest.mark.anyio
@@ -798,7 +802,7 @@ async def test_host_lifecycle_updates_status_and_forwards(online_training_host):
         await host_handlers._handle_job_lifecycle("job_completed", "sid-1", event)
 
     mock_update.assert_awaited_once()
-    args, kwargs = mock_update.await_args
+    args, _ = mock_update.await_args
     assert args[0] == "job-1"
     assert args[1] is JobStatus.COMPLETED
 

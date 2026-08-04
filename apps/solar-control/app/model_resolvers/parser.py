@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Union
+
 from fastapi import HTTPException
 
 
@@ -23,7 +23,7 @@ class LocalURI:
     scheme: str = "local"
 
 
-ParsedURI = Union[RepoURI, HuggingFaceURI, LocalURI]
+ParsedURI = RepoURI | HuggingFaceURI | LocalURI
 
 
 def parse(uri: str) -> ParsedURI:

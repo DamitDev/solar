@@ -134,35 +134,37 @@ async def _list_data_repository_models(
         params["search"] = search
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(
                 url,
                 params=params,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=settings.data_repository_timeout_s),
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
+            ) as response,
+        ):
+            if response.status == 200:
+                return await response.json()
 
-                try:
-                    err = await response.json()
-                    detail = err.get("detail") or err.get("error")
-                except Exception:
-                    detail = await response.text()
+            try:
+                err = await response.json()
+                detail = err.get("detail") or err.get("error")
+            except Exception:  # noqa: BLE001
+                detail = await response.text()
 
-                if response.status in {404, 422}:
-                    raise HTTPException(
-                        status_code=response.status,
-                        detail=detail or "Data Repository model list failed",
-                    )
-
+            if response.status in {404, 422}:
                 raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "Data Repository model list failed "
-                        f"[{response.status}]: {detail}"
-                    ),
+                    status_code=response.status,
+                    detail=detail or "Data Repository model list failed",
                 )
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Data Repository model list failed "
+                    f"[{response.status}]: {detail}"
+                ),
+            )
     except HTTPException:
         raise
     except (
@@ -174,7 +176,7 @@ async def _list_data_repository_models(
             status_code=502,
             detail=f"Data Repository is unreachable: {exc}",
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
             detail=f"Unexpected error during Data Repository model list: {exc}",
@@ -193,19 +195,21 @@ async def _fetch_models_from_host(host: Host) -> tuple[list[dict], bool]:
     url = f"{host.url.rstrip('/')}/models"
     headers = {"X-API-Key": host.api_key}
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(
                 url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)
-            ) as resp:
-                if resp.status == 200:
-                    return await resp.json(), True
-                logger.warning(
-                    "Host %s (%s) returned %d for GET /models",
-                    host.id,
-                    host.url,
-                    resp.status,
-                )
-    except Exception as e:
+            ) as resp,
+        ):
+            if resp.status == 200:
+                return await resp.json(), True
+            logger.warning(
+                "Host %s (%s) returned %d for GET /models",
+                host.id,
+                host.url,
+                resp.status,
+            )
+    except Exception as e:  # noqa: BLE001
         logger.warning("Failed to fetch models from host %s: %s", host.id, e)
     return [], False
 
