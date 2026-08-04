@@ -12,6 +12,12 @@ def _strip_api_key(data: Any) -> Any:
     return data
 
 
+_FILE_FILTERS_DESCRIPTION = (
+    "HuggingFace download filters (allow_patterns) applied when pulling the "
+    "model, e.g. ['*.safetensors', 'tokenizer*']"
+)
+
+
 class HuggingFaceCausalConfig(BaseModel):
     """Configuration for a HuggingFace AutoModelForCausalLM instance.
 
@@ -34,6 +40,10 @@ class HuggingFaceCausalConfig(BaseModel):
     model_id: str | None = Field(
         default=None,
         description="HuggingFace model ID or local path (e.g., 'meta-llama/Llama-2-7b-hf')",
+    )
+    file_filters: list[str] | None = Field(
+        default=None,
+        description=_FILE_FILTERS_DESCRIPTION,
     )
 
     @model_validator(mode="after")
@@ -83,6 +93,10 @@ class HuggingFaceClassificationConfig(BaseModel):
     )
     model_id: str | None = Field(
         default=None, description="HuggingFace model ID or local path"
+    )
+    file_filters: list[str] | None = Field(
+        default=None,
+        description=_FILE_FILTERS_DESCRIPTION,
     )
 
     @model_validator(mode="after")
@@ -135,6 +149,10 @@ class HuggingFaceEmbeddingConfig(BaseModel):
     model_id: str | None = Field(
         default=None,
         description="HuggingFace model ID or local path (e.g., 'sentence-transformers/all-MiniLM-L6-v2')",
+    )
+    file_filters: list[str] | None = Field(
+        default=None,
+        description=_FILE_FILTERS_DESCRIPTION,
     )
 
     @model_validator(mode="after")
@@ -190,6 +208,10 @@ class HuggingFaceVisionConfig(BaseModel):
     model_id: str | None = Field(
         default=None,
         description="HuggingFace model ID or local path (e.g., 'Qwen/Qwen2.5-VL-7B-Instruct')",
+    )
+    file_filters: list[str] | None = Field(
+        default=None,
+        description=_FILE_FILTERS_DESCRIPTION,
     )
 
     @model_validator(mode="after")

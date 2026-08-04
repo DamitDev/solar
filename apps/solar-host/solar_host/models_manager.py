@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 _REPO_PATTERN = re.compile(r"^repo://([A-Za-z0-9\-_]+):([A-Za-z0-9\-_.]+)(/.*)?$")
 _HF_PATTERN = re.compile(r"^huggingface://(.+)$")
+_SHARD_PATTERN = re.compile(r"-(\d{5})-of-\d{5}\.gguf$")
 
 MANIFEST_FILENAME = "manifest.json"
 MANIFEST_TMP_FILENAME = "manifest.json.tmp"
@@ -61,6 +62,9 @@ class ManifestEntry(BaseModel):
     # and verified on every cache hit (D-017). Absent on entries created
     # before this field existed — readers must treat it as optional.
     file_digests: dict | None = None
+    # HuggingFace allow_patterns the snapshot was downloaded with. None means
+    # the full repository is present, so it satisfies every later request.
+    file_filters: list[str] | None = None
 
 
 class Manifest(BaseModel):
@@ -153,6 +157,68 @@ def _select_gguf_path(model_dir: Path) -> Path | None:
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_size)
+
+
+def _is_trailing_shard(path: Path) -> bool:
+    """True for every shard of a split GGUF except the first one.
+
+    llama-server loads the remaining shards itself once pointed at
+    ``...-00001-of-000NN.gguf``, so trailing shards are never a valid
+    ``--model`` target.
+    """
+    m = _SHARD_PATTERN.search(path.name)
+    return m is not None and m.group(1) != "00001"
+
+
+def resolve_model_file(base_dir: Path, pattern: str) -> Path:
+    """Resolve a GGUF filename, relative path or glob to a concrete file.
+
+    Resolution order: an existing absolute path is returned as-is, then
+    ``base_dir / pattern``, then a glob at the root of *base_dir*, then a
+    recursive glob (the model lives in a subfolder of a filtered repo, or
+    the caller gave a bare filename such as ``mmproj-BF16.gguf``).
+
+    When several files match, trailing shards of a split GGUF are dropped
+    and the largest remaining file wins.  Raises ``FileNotFoundError`` when
+    nothing matches and ``ValueError`` when the match stays ambiguous.
+    """
+    candidate = Path(pattern)
+    if candidate.is_absolute():
+        if candidate.is_file():
+            return candidate
+        raise FileNotFoundError(f"Model file '{pattern}' does not exist")
+
+    direct = base_dir / pattern
+    if direct.is_file():
+        return direct
+
+    matches: list[Path] = []
+    for globber in (base_dir.glob, base_dir.rglob):
+        try:
+            matches = [p for p in globber(pattern) if p.is_file()]
+        except (ValueError, IndexError) as exc:  # malformed glob pattern
+            raise ValueError(f"Invalid model file pattern '{pattern}': {exc}") from exc
+        if matches:
+            break
+
+    if not matches:
+        raise FileNotFoundError(f"No file matching '{pattern}' found under {base_dir}")
+
+    if len(matches) > 1:
+        without_shards = [p for p in matches if not _is_trailing_shard(p)]
+        if without_shards:
+            matches = without_shards
+
+    if len(matches) == 1:
+        return matches[0]
+
+    matches.sort(key=lambda p: (-p.stat().st_size, str(p)))
+    if matches[0].stat().st_size == matches[1].stat().st_size:
+        names = ", ".join(sorted(str(p.relative_to(base_dir)) for p in matches))
+        raise ValueError(
+            f"Model file pattern '{pattern}' is ambiguous under {base_dir}: {names}"
+        )
+    return matches[0]
 
 
 def _manifest_path() -> Path:
@@ -453,8 +519,13 @@ def _pull_huggingface(
     model_id: str,
     target_dir: Path,
     source_uri: str,
+    allow_patterns: list[str] | None = None,
 ) -> None:
-    """Download a HuggingFace Hub model snapshot into *target_dir*."""
+    """Download a HuggingFace Hub model snapshot into *target_dir*.
+
+    *allow_patterns* restricts the download to matching files (e.g. a single
+    quantisation of a multi-quant GGUF repository).
+    """
     import huggingface_hub  # type: ignore[import-untyped]
 
     hf_token: str | None = settings.hf_token or None
@@ -463,7 +534,22 @@ def _pull_huggingface(
         repo_id=model_id,
         local_dir=str(target_dir),
         token=hf_token,
+        allow_patterns=allow_patterns or None,
     )
+
+
+def _filters_satisfied(stored: list[str] | None, requested: list[str] | None) -> bool:
+    """True when a cached snapshot already contains everything *requested*.
+
+    A stored ``None`` means the full repository was downloaded and therefore
+    satisfies any request. A filtered snapshot only satisfies requests whose
+    patterns it already covers; anything else needs a top-up download.
+    """
+    if stored is None:
+        return True
+    if not requested:
+        return False
+    return set(requested).issubset(set(stored))
 
 
 def pull_model(
@@ -480,6 +566,7 @@ def pull_model(
     checksum: str | None = None,
     metadata: dict | None = None,
     backend_type: str | None = None,
+    file_filters: list[str] | None = None,
 ) -> dict:
     """Download a model from Harbor or HuggingFace Hub and record it in the manifest.
 
@@ -496,6 +583,11 @@ def pull_model(
     llama-server model must be a file. An explicit subpath in the URI wins
     over selection. ``local://`` and ``huggingface://`` artifacts are never
     selected (they are used as directories).
+
+    ``file_filters`` restricts a HuggingFace snapshot to matching files. A
+    cached snapshot that already covers the requested patterns is reused; one
+    that does not is topped up in place with the union of both pattern sets.
+    ORAS (Harbor) pulls cannot be filtered and ignore the argument.
     """
     # 1. Validate that source_uri scheme matches the declared source.
     expected_prefix = _SOURCE_URI_PREFIXES.get(source)
@@ -528,12 +620,25 @@ def pull_model(
         #     explicit subpath always wins over selection.
         select_gguf = source == "harbor" and backend_type == "llamacpp" and not subpath
 
+        # 2c. ORAS pulls the whole artifact; there is no per-file selection.
+        if file_filters and source != "huggingface":
+            logger.warning(
+                "Ignoring file_filters for %s pull of %s: only HuggingFace "
+                "snapshots can be filtered",
+                source,
+                source_uri,
+            )
+            file_filters = None
+
         # 2. Cache check — manifest is the single source of truth, keyed by
         #    the base URI (the artifact identity).  Verify the resolved path
         #    (dir + optional subpath) still exists on disk AND the recorded
         #    per-file digests still match (a corrupt cached artifact would
         #    otherwise keep crashing every restart-in-place RECREATE).
         cached_entry = get_manifest_entry(cache_key)
+        # A filtered snapshot that lacks the newly requested patterns is
+        # topped up in place instead of re-downloaded from scratch.
+        augment_cached_dir = False
         if cached_entry is not None:
             cached_path = Path(cached_entry.path)
             resolved_cache = cached_path / subpath if subpath else cached_path
@@ -546,16 +651,33 @@ def pull_model(
                         f"No .gguf file found in artifact for llamacpp backend ({source_uri}).",
                         source_uri,
                     )
-            if resolved_cache.exists() and _verify_cached_digests(cached_entry):
+            usable = resolved_cache.exists() and _verify_cached_digests(cached_entry)
+            if usable and _filters_satisfied(cached_entry.file_filters, file_filters):
                 return {
                     "path": str(resolved_cache.resolve()),
                     "cached": True,
                     "source_uri": source_uri,
                 }
-            logger.warning(
-                "Manifest entry for %s is missing or corrupt on disk, re-pulling",
-                cache_key,
-            )
+            if usable:
+                # No filters means the whole repository is wanted, which
+                # supersedes the narrower set the snapshot was pulled with.
+                file_filters = (
+                    sorted(set(cached_entry.file_filters or []) | set(file_filters))
+                    if file_filters
+                    else None
+                )
+                augment_cached_dir = True
+                logger.info(
+                    "Cached snapshot for %s lacks the requested files, "
+                    "downloading the missing ones (filters: %s)",
+                    cache_key,
+                    file_filters,
+                )
+            else:
+                logger.warning(
+                    "Manifest entry for %s is missing or corrupt on disk, re-pulling",
+                    cache_key,
+                )
             with _manifest_lock:
                 remove_manifest_entry(cache_key)
 
@@ -599,7 +721,9 @@ def pull_model(
             )
 
         # 5. Remove any stale/partial directory from a previous failed pull.
-        if target_dir.exists():
+        #    A top-up download keeps the directory: its files are valid and
+        #    snapshot_download only fetches what is still missing.
+        if target_dir.exists() and not augment_cached_dir:
             logger.warning("Removing stale model directory before pull: %s", target_dir)
             shutil.rmtree(target_dir, ignore_errors=True)
 
@@ -618,7 +742,12 @@ def pull_model(
                     else:
                         future = pool.schedule(
                             _pull_huggingface,
-                            args=(model_id or "", target_dir, source_uri),
+                            args=(
+                                model_id or "",
+                                target_dir,
+                                source_uri,
+                                file_filters,
+                            ),
                         )
 
                     while not future.done():
@@ -645,7 +774,9 @@ def pull_model(
                         harbor_ref or "", target_dir, source_uri
                     )
                 else:
-                    _pull_huggingface(model_id or "", target_dir, source_uri)
+                    _pull_huggingface(
+                        model_id or "", target_dir, source_uri, file_filters
+                    )
         except ModelPullError:
             shutil.rmtree(target_dir, ignore_errors=True)
             raise
@@ -718,6 +849,7 @@ def pull_model(
             checksum=checksum,
             metadata=metadata,
             file_digests=file_digests,
+            file_filters=file_filters or None,
         )
         with _manifest_lock:
             add_manifest_entry(entry)

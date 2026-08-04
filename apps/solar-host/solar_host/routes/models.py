@@ -121,6 +121,10 @@ class PullRequest(BaseModel):
     # GGUF selection: the returned path resolves to the largest *.gguf
     # inside the artifact instead of the directory.  None = no selection.
     backend_type: str | None = None
+    # HuggingFace allow_patterns (e.g. ["*UD-Q4_K_XL*", "mmproj-BF16.gguf"]) so
+    # only the wanted files of a multi-quant repository are downloaded.
+    # Ignored for harbor pulls — ORAS cannot filter an artifact.
+    file_filters: list[str] | None = None
 
 
 class PullResponse(BaseModel):
@@ -190,6 +194,7 @@ async def pull_model(req: PullRequest) -> PullResponse | JSONResponse:
             checksum=req.checksum,
             metadata=req.metadata,
             backend_type=req.backend_type,
+            file_filters=req.file_filters,
         )
     except ModelPullError as exc:
         return JSONResponse(

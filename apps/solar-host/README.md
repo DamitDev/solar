@@ -255,7 +255,9 @@ All requests require an `X-API-Key` header with your configured API key from the
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `backend_type` | No | `"llamacpp"` | Backend type identifier |
-| `model` | Yes | - | Full path to the GGUF model file |
+| `model` | Yes | - | Full path to the GGUF model file (or the pulled model directory when `model_file` is set) |
+| `model_file` | No | - | Filename, relative path or `*` glob selecting the GGUF inside the model directory — see [Selecting a GGUF by pattern](#selecting-a-gguf-by-pattern) |
+| `file_filters` | No | - | HuggingFace download filters (`allow_patterns`) applied when the model is pulled, e.g. `["*UD-Q4_K_XL*", "mmproj-BF16.gguf"]` |
 | `alias` | Yes | - | Model alias (e.g., "llama-3:8b") used for routing |
 | `threads` | No | 1 | Number of CPU threads to use |
 | `n_gpu_layers` | No | 999 | Number of layers to offload to GPU (999 = all) |
@@ -329,6 +331,25 @@ All requests require an `X-API-Key` header with your configured API key from the
 | `cuda` | NVIDIA GPU (requires CUDA) |
 | `mps` | Apple Silicon GPU (macOS) |
 | `cpu` | CPU only |
+
+### Selecting a GGUF by pattern
+
+A pull resolves a `model_source` to a **directory**, but `llama-server --model` needs a **file**. `model_file` names it without hardcoding an absolute path:
+
+```json
+{
+  "backend_type": "llamacpp",
+  "alias": "qwen3-vl:235b",
+  "model_source": "huggingface://unsloth/Qwen3-VL-235B-Instruct-GGUF",
+  "model_file": "*UD-Q4_K_XL*.gguf",
+  "mmproj": "mmproj-BF16.gguf",
+  "file_filters": ["*UD-Q4_K_XL*", "mmproj-BF16.gguf"]
+}
+```
+
+The pattern is resolved against the pulled model directory: an absolute path is used as-is, then an exact relative path, then a glob at the directory root, and finally a recursive glob — so a bare filename or a broad pattern is still found inside a subfolder. Among multiple matches, the trailing shards of a split GGUF are dropped (llama-server loads them itself from `...-00001-of-000NN.gguf`) and the largest remaining file wins. `mmproj` accepts the same patterns.
+
+`file_filters` is a separate concern: it limits **what gets downloaded** (a file is kept when it matches any pattern), while `model_file` and `mmproj` decide which of the downloaded files each llama-server flag points at. Filters only apply to HuggingFace pulls — ORAS always pulls a Harbor artifact whole.
 
 ## Example Configurations
 

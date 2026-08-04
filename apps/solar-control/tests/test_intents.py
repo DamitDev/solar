@@ -243,6 +243,90 @@ def test_validate_intent_forbidden_backend_fields():
         ), f"Expected error for backend.{forbidden}"
 
 
+def test_validate_intent_model_file_requires_llamacpp():
+    """model_file selects a GGUF, which only llama.cpp consumes."""
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "huggingface://org/model",
+            "backend": {
+                "backend_type": "huggingface_causal",
+                "model_file": "*Q4*.gguf",
+            },
+        }
+    )
+    assert any(e["field"] == "backend.model_file" for e in errors)
+
+
+def test_validate_intent_model_file_accepted_for_llamacpp():
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "huggingface://unsloth/Model-GGUF",
+            "backend": {"backend_type": "llamacpp", "model_file": "*UD-Q4_K_XL*.gguf"},
+        }
+    )
+    assert errors == []
+
+
+def test_validate_intent_file_filters_require_huggingface_source():
+    """Only a HuggingFace snapshot can be restricted to a subset of files."""
+    for source in ["repo://x:v1", "local:///opt/models/x"]:
+        errors = validate_intent_create(
+            {
+                "alias": "x",
+                "model_source": source,
+                "backend": {
+                    "backend_type": "llamacpp",
+                    "file_filters": ["*UD-Q4_K_XL*"],
+                },
+            }
+        )
+        assert any(
+            e["field"] == "backend.file_filters" for e in errors
+        ), f"Expected a file_filters error for '{source}'"
+
+
+def test_validate_intent_file_filters_accepted_for_huggingface_source():
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "huggingface://unsloth/Model-GGUF",
+            "backend": {
+                "backend_type": "llamacpp",
+                "file_filters": ["*UD-Q4_K_XL*", "mmproj-BF16.gguf"],
+            },
+        }
+    )
+    assert errors == []
+
+
+def test_validate_intent_file_filters_must_be_patterns():
+    for filters in ["*UD-Q4_K_XL*", ["  "], [3]]:
+        errors = validate_intent_create(
+            {
+                "alias": "x",
+                "model_source": "huggingface://unsloth/Model-GGUF",
+                "backend": {"backend_type": "llamacpp", "file_filters": filters},
+            }
+        )
+        assert any(
+            e["field"] == "backend.file_filters" for e in errors
+        ), f"Expected a file_filters error for {filters!r}"
+
+
+def test_validate_intent_empty_file_filters_is_allowed():
+    """An empty list means no filtering, which is valid for any source."""
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "repo://x:v1",
+            "backend": {"backend_type": "llamacpp", "file_filters": []},
+        }
+    )
+    assert errors == []
+
+
 def test_validate_intent_empty_placement_roles():
     errors = validate_intent_create(
         {

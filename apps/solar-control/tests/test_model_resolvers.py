@@ -120,6 +120,59 @@ async def test_resolve_huggingface_success():
         assert args[0] == f"{host_url}/models/pull"
         assert kwargs["json"]["model_id"] == "microsoft/phi-3"
         assert kwargs["json"]["source_uri"] == uri
+        assert "file_filters" not in kwargs["json"]
+
+
+@pytest.mark.anyio
+async def test_resolve_huggingface_forwards_file_filters():
+    """Download filters reach the host pull so only wanted files land on disk."""
+    uri = "huggingface://unsloth/Model-GGUF"
+
+    with patch("aiohttp.ClientSession.post") as mock_post:
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json.return_value = {"path": "/opt/solar/models/hf--unsloth--Model"}
+        mock_post.return_value.__aenter__.return_value = mock_resp
+
+        await resolve(
+            uri,
+            "http://host:8000",
+            "key",
+            file_filters=["*UD-Q4_K_XL*", "mmproj-BF16.gguf"],
+        )
+
+        _, kwargs = mock_post.call_args
+        assert kwargs["json"]["file_filters"] == ["*UD-Q4_K_XL*", "mmproj-BF16.gguf"]
+
+
+@pytest.mark.anyio
+async def test_resolve_repo_ignores_file_filters():
+    """ORAS pulls the whole artifact, so repo:// must not carry filters."""
+    uri = "repo://iris-osl:v3"
+
+    with (
+        patch(
+            "app.model_resolvers.repo.resolve_from_data_repository",
+            new=AsyncMock(
+                return_value={
+                    "harbor_ref": "imgrepo.damit.hu/models/iris-osl:v3",
+                    "category": "model",
+                    "name": "iris-osl",
+                    "version": "v3",
+                }
+            ),
+        ),
+        patch("aiohttp.ClientSession.post") as mock_post,
+    ):
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json.return_value = {"path": "/opt/solar/models/repo--iris-osl--v3"}
+        mock_post.return_value.__aenter__.return_value = mock_resp
+
+        await resolve(uri, "http://host:8000", "key", file_filters=["*UD-Q4_K_XL*"])
+
+        _, kwargs = mock_post.call_args
+        assert "file_filters" not in kwargs["json"]
 
 
 @pytest.mark.anyio

@@ -29,16 +29,35 @@ class LlamaCppConfig(BaseModel):
         default=None, description="Model source URI (e.g. local://path/to/model.gguf)"
     )
     model: str | None = Field(default=None, description="Path to the GGUF model file")
+    model_file: str | None = Field(
+        default=None,
+        description=(
+            "Filename, relative path or glob (e.g. '*UD-Q4_K_XL*.gguf') selecting "
+            "the GGUF inside the pulled model directory; resolved into 'model'"
+        ),
+    )
+    file_filters: list[str] | None = Field(
+        default=None,
+        description=(
+            "HuggingFace download filters (allow_patterns) applied when pulling "
+            "the model, e.g. ['*UD-Q4_K_XL*', 'mmproj-BF16.gguf']"
+        ),
+    )
 
     @model_validator(mode="after")
     def check_model_or_source(self) -> "LlamaCppConfig":
+        # model_file alone is not enough: it is a selector that needs a
+        # directory to resolve against, which model/model_source provides.
         if not self.model and not self.model_source:
             raise ValueError("Either 'model' or 'model_source' must be provided")
         return self
 
     mmproj: str | None = Field(
         default=None,
-        description="Path to multimodal projector GGUF file for vision models",
+        description=(
+            "Path to the multimodal projector GGUF for vision models; a bare "
+            "filename or glob is resolved inside the model directory"
+        ),
     )
     mmproj_offload: bool = Field(
         default=True,

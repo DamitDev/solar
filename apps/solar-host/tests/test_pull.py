@@ -343,7 +343,12 @@ class TestGgufSelection:
     def _mock_pull_files(self, files: dict[str, bytes]):
         """Side effect for _pull_harbor that writes the given files."""
 
-        def _side_effect(harbor_ref: str, target_dir: Path, source_uri: str):
+        def _side_effect(
+            harbor_ref: str,
+            target_dir: Path,
+            source_uri: str,
+            allow_patterns: list[str] | None = None,
+        ):
             target_dir.mkdir(parents=True, exist_ok=True)
             for name, data in files.items():
                 file = target_dir / name
@@ -863,7 +868,7 @@ class TestHarborPull:
 
 class TestHuggingFacePull:
     def _make_mock_dl(self, _isolated_env: Path):
-        def _side_effect(model_id, target_dir, source_uri):
+        def _side_effect(model_id, target_dir, source_uri, allow_patterns=None):
             target_dir.mkdir(parents=True, exist_ok=True)
             (target_dir / "pytorch_model.bin").write_bytes(b"w" * 2048)
 
@@ -899,7 +904,7 @@ class TestHuggingFacePull:
         """When hf_token is empty string, snapshot_download must receive token=None."""
         captured = {}
 
-        def _capture(model_id, target_dir, source_uri):
+        def _capture(model_id, target_dir, source_uri, allow_patterns=None):
             captured["model_id"] = model_id
             captured["target_dir"] = target_dir
             target_dir.mkdir(parents=True, exist_ok=True)
@@ -916,7 +921,7 @@ class TestHuggingFacePull:
         monkeypatch.setattr("solar_host.config.settings.hf_token", "hf_mytoken123")
         captured_token = {}
 
-        def _fake_snapshot(repo_id, local_dir, token):
+        def _fake_snapshot(repo_id, local_dir, token, allow_patterns=None):
             captured_token["token"] = token
             Path(local_dir).mkdir(parents=True, exist_ok=True)
             (Path(local_dir) / "model.bin").write_bytes(b"x")
@@ -933,7 +938,7 @@ class TestHuggingFacePull:
         """Empty hf_token must become None, not empty string, in snapshot_download."""
         captured_token = {}
 
-        def _fake_snapshot(repo_id, local_dir, token):
+        def _fake_snapshot(repo_id, local_dir, token, allow_patterns=None):
             captured_token["token"] = token
             Path(local_dir).mkdir(parents=True, exist_ok=True)
             (Path(local_dir) / "model.bin").write_bytes(b"x")
@@ -943,6 +948,164 @@ class TestHuggingFacePull:
 
         assert resp.status_code == 200
         assert captured_token["token"] is None
+
+
+# ---------------------------------------------------------------------------
+# HuggingFace download filters
+# ---------------------------------------------------------------------------
+
+
+class TestFileFilters:
+    """A filtered snapshot downloads only the requested files."""
+
+    def _capturing_dl(self, calls: list, files: dict[str, bytes] | None = None):
+        def _side_effect(model_id, target_dir, source_uri, allow_patterns=None):
+            calls.append(allow_patterns)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            for name, data in (files or {"model.gguf": b"x" * 32}).items():
+                file = target_dir / name
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_bytes(data)
+
+        return _side_effect
+
+    def _seed_cache(self, models_dir: Path, file_filters: list[str] | None) -> Path:
+        ensure_models_dir()
+        slug_dir = models_dir / "hf--microsoft--phi-3"
+        slug_dir.mkdir(parents=True, exist_ok=True)
+        (slug_dir / "model.gguf").write_bytes(b"x" * 32)
+        add_manifest_entry(
+            _make_manifest_entry(
+                slug="hf--microsoft--phi-3",
+                source_uri="huggingface://microsoft/phi-3",
+                path=str(slug_dir.resolve()),
+                file_filters=file_filters,
+            )
+        )
+        return slug_dir
+
+    def test_filters_reach_snapshot_download(
+        self, client: TestClient, _isolated_env: Path
+    ):
+        captured = {}
+
+        def _fake_snapshot(repo_id, local_dir, token, allow_patterns=None):
+            captured["allow_patterns"] = allow_patterns
+            Path(local_dir).mkdir(parents=True, exist_ok=True)
+            (Path(local_dir) / "model.gguf").write_bytes(b"x")
+
+        with patch("huggingface_hub.snapshot_download", side_effect=_fake_snapshot):
+            body = _hf_body(file_filters=["*UD-Q4_K_XL*", "mmproj-BF16.gguf"])
+            resp = client.post("/models/pull", json=body, headers=_headers())
+
+        assert resp.status_code == 200
+        assert captured["allow_patterns"] == ["*UD-Q4_K_XL*", "mmproj-BF16.gguf"]
+
+    def test_filters_recorded_on_manifest(
+        self, client: TestClient, _isolated_env: Path
+    ):
+        with patch(
+            "solar_host.models_manager._pull_huggingface",
+            side_effect=self._capturing_dl([]),
+        ):
+            body = _hf_body(file_filters=["*UD-Q4_K_XL*"])
+            client.post("/models/pull", json=body, headers=_headers())
+
+        entry = get_manifest_entry("huggingface://microsoft/phi-3")
+        assert entry is not None
+        assert entry.file_filters == ["*UD-Q4_K_XL*"]
+
+    def test_no_filters_means_no_allow_patterns(
+        self, client: TestClient, _isolated_env: Path
+    ):
+        calls: list = []
+        with patch(
+            "solar_host.models_manager._pull_huggingface",
+            side_effect=self._capturing_dl(calls),
+        ):
+            client.post("/models/pull", json=_hf_body(), headers=_headers())
+
+        assert calls == [None]
+        entry = get_manifest_entry("huggingface://microsoft/phi-3")
+        assert entry is not None and entry.file_filters is None
+
+    def test_subset_request_reuses_cached_snapshot(
+        self, client: TestClient, _isolated_env: Path
+    ):
+        self._seed_cache(_isolated_env, ["*UD-Q4_K_XL*", "mmproj-BF16.gguf"])
+        with patch("solar_host.models_manager._pull_huggingface") as mock_dl:
+            body = _hf_body(file_filters=["*UD-Q4_K_XL*"])
+            resp = client.post("/models/pull", json=body, headers=_headers())
+
+        assert resp.status_code == 200
+        assert resp.json()["cached"] is True
+        mock_dl.assert_not_called()
+
+    def test_full_cached_snapshot_satisfies_any_filter(
+        self, client: TestClient, _isolated_env: Path
+    ):
+        self._seed_cache(_isolated_env, None)
+        with patch("solar_host.models_manager._pull_huggingface") as mock_dl:
+            body = _hf_body(file_filters=["*UD-Q4_K_XL*"])
+            resp = client.post("/models/pull", json=body, headers=_headers())
+
+        assert resp.status_code == 200
+        assert resp.json()["cached"] is True
+        mock_dl.assert_not_called()
+
+    def test_new_pattern_tops_up_cached_snapshot_with_union(
+        self, client: TestClient, _isolated_env: Path
+    ):
+        slug_dir = self._seed_cache(_isolated_env, ["*UD-Q4_K_XL*"])
+        calls: list = []
+        with patch(
+            "solar_host.models_manager._pull_huggingface",
+            side_effect=self._capturing_dl(calls),
+        ):
+            body = _hf_body(file_filters=["mmproj-BF16.gguf"])
+            resp = client.post("/models/pull", json=body, headers=_headers())
+
+        assert resp.status_code == 200
+        assert calls == [["*UD-Q4_K_XL*", "mmproj-BF16.gguf"]]
+        # The already-downloaded files survive the top-up.
+        assert (slug_dir / "model.gguf").exists()
+        entry = get_manifest_entry("huggingface://microsoft/phi-3")
+        assert entry is not None
+        assert entry.file_filters == ["*UD-Q4_K_XL*", "mmproj-BF16.gguf"]
+
+    def test_unfiltered_request_redownloads_filtered_snapshot(
+        self, client: TestClient, _isolated_env: Path
+    ):
+        self._seed_cache(_isolated_env, ["*UD-Q4_K_XL*"])
+        calls: list = []
+        with patch(
+            "solar_host.models_manager._pull_huggingface",
+            side_effect=self._capturing_dl(calls),
+        ):
+            resp = client.post("/models/pull", json=_hf_body(), headers=_headers())
+
+        assert resp.status_code == 200
+        assert calls == [None]
+        entry = get_manifest_entry("huggingface://microsoft/phi-3")
+        assert entry is not None and entry.file_filters is None
+
+    def test_filters_ignored_for_harbor_pull(
+        self, client: TestClient, _isolated_env: Path
+    ):
+        calls: list = []
+
+        def _side_effect(harbor_ref, target_dir, source_uri, allow_patterns=None):
+            calls.append(allow_patterns)
+            target_dir.mkdir(parents=True, exist_ok=True)
+            (target_dir / "model.gguf").write_bytes(b"x" * 32)
+
+        with patch("solar_host.models_manager._pull_harbor", side_effect=_side_effect):
+            body = _harbor_body(file_filters=["*UD-Q4_K_XL*"])
+            resp = client.post("/models/pull", json=body, headers=_headers())
+
+        assert resp.status_code == 200
+        entry = get_manifest_entry("repo://iris-osl:v3")
+        assert entry is not None and entry.file_filters is None
 
 
 # ---------------------------------------------------------------------------
@@ -1147,7 +1310,7 @@ class TestDiskFull:
     ):
         import errno as _errno
 
-        def _fail(model_id, target_dir, source_uri):
+        def _fail(model_id, target_dir, source_uri, allow_patterns=None):
             target_dir.mkdir(parents=True, exist_ok=True)
             raise OSError(_errno.ENOSPC, "No space left on device")
 

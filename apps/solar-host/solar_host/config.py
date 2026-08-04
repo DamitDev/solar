@@ -154,7 +154,78 @@ def resolve_model_source(model_source: str) -> str:
     return str(resolved_path)
 
 
-def parse_instance_config(config_data: dict[str, Any]) -> Any:
+def _artifact_base_dir(config_data: dict[str, Any]) -> Path | None:
+    """Return the directory a llama.cpp file pattern should resolve against.
+
+    The pulled artifact directory recorded in the manifest is authoritative
+    (it covers both ``repo://`` and ``huggingface://``). Falls back to the
+    ``local://`` target and finally to whatever ``model`` already points at,
+    so a pattern also works for hand-written instance configs.
+    """
+    # Imported lazily: models_manager imports this module for settings.
+    from solar_host.models_manager import get_manifest_entry, repo_base_uri
+
+    model_source = config_data.get("model_source")
+    if model_source:
+        entry = get_manifest_entry(repo_base_uri(model_source))
+        if entry:
+            return Path(entry.path)
+        if model_source.startswith("local://"):
+            local_path = Path(resolve_model_source(model_source))
+            return local_path if local_path.is_dir() else local_path.parent
+
+    model = config_data.get("model")
+    if model:
+        path = Path(model)
+        return path if path.is_dir() else path.parent
+
+    return None
+
+
+def _resolve_llamacpp_file_patterns(config_data: dict[str, Any], strict: bool) -> None:
+    """Resolve ``model_file`` and a non-absolute ``mmproj`` to real files.
+
+    ``model_file`` is a filename, relative path or glob that is looked up
+    inside the pulled artifact; when it resolves it replaces ``model`` (which
+    solar-control set to the artifact directory or an auto-selected GGUF).
+    With *strict* off (config reload) an unresolvable pattern is logged and
+    the recorded paths are kept, so a temporarily missing file does not drop
+    the instance from config.json.
+    """
+    from solar_host.models_manager import resolve_model_file
+
+    model_file = config_data.get("model_file")
+    mmproj = config_data.get("mmproj")
+
+    targets: list[tuple[str, str]] = []
+    if model_file and str(model_file).strip():
+        targets.append(("model", str(model_file).strip()))
+    if mmproj and str(mmproj).strip() and not Path(str(mmproj).strip()).is_file():
+        targets.append(("mmproj", str(mmproj).strip()))
+    if not targets:
+        return
+
+    base_dir = _artifact_base_dir(config_data)
+    if base_dir is None or not base_dir.is_dir():
+        message = (
+            f"Cannot resolve model file pattern: no model directory found for "
+            f"model_source={config_data.get('model_source')!r}"
+        )
+        if strict:
+            raise ValueError(message)
+        logger.warning("%s", message)
+        return
+
+    for field, pattern in targets:
+        try:
+            config_data[field] = str(resolve_model_file(base_dir, pattern))
+        except (FileNotFoundError, ValueError) as exc:
+            if strict:
+                raise ValueError(f"Cannot resolve {field} pattern: {exc}") from exc
+            logger.warning("Cannot resolve %s pattern: %s", field, exc)
+
+
+def parse_instance_config(config_data: dict[str, Any], strict: bool = True) -> Any:
     """Parse config data into the appropriate config type based on backend_type."""
     # Migrate first
     config_data = migrate_config_data(config_data)
@@ -179,6 +250,7 @@ def parse_instance_config(config_data: dict[str, Any]) -> Any:
             config_data["model_id"] = resolved_path
 
     if backend_type == "llamacpp":
+        _resolve_llamacpp_file_patterns(config_data, strict)
         return LlamaCppConfig(**config_data)
     elif backend_type == "huggingface_causal":
         return HuggingFaceCausalConfig(**config_data)
@@ -226,7 +298,7 @@ class ConfigManager:
                                     instance_data["config"]
                                 )
                             config = parse_instance_config(
-                                instance_data.get("config", {})
+                                instance_data.get("config", {}), strict=False
                             )
                             instance_data_copy = instance_data.copy()
                             instance_data_copy["config"] = config

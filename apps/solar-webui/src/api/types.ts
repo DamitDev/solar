@@ -22,6 +22,8 @@ export interface BaseInstanceConfig {
   alias: string;
   host: string;
   port?: number;
+  /** HuggingFace download filters (allow_patterns) used when pulling the model */
+  file_filters?: string[] | null;
   // Ownership marker (spec deployment-intent.md §5.1): set to "intent" + intent_id
   // for reconciler-managed instances; absent for manual instances.
   managed_by?: string | null;
@@ -32,6 +34,8 @@ export interface BaseInstanceConfig {
 export interface LlamaCppConfig extends BaseInstanceConfig {
   backend_type: 'llamacpp';
   model: string;
+  /** Filename, relative path or glob selecting the GGUF inside the pulled model directory */
+  model_file?: string | null;
   /** Path to multimodal projector GGUF (llama-server --mmproj) */
   mmproj?: string;
   /** Whether to GPU-offload the multimodal projector (default: true) */

@@ -94,6 +94,36 @@ describe('validateIntentRequest', () => {
         expect(messages.some((m) => m.includes(forbidden))).toBe(true);
       }
     });
+
+    it('allows a model file pattern only for llama.cpp', () => {
+      expect(fieldNames({ backend: { backend_type: 'llamacpp', model_file: '*Q4*.gguf' } })).not.toContain(
+        'backend.model_file',
+      );
+      expect(fieldNames({ backend: { backend_type: 'huggingface_causal', model_file: '*Q4*.gguf' } })).toContain(
+        'backend.model_file',
+      );
+    });
+
+    it('allows download filters only for huggingface:// sources', () => {
+      const backend = { backend_type: 'llamacpp', file_filters: ['*UD-Q4_K_XL*'] };
+      expect(fieldNames({ backend, model_source: 'huggingface://unsloth/Model-GGUF' })).not.toContain(
+        'backend.file_filters',
+      );
+      expect(fieldNames({ backend, model_source: 'repo://my-model:v1' })).toContain('backend.file_filters');
+      expect(
+        fieldNames({ backend: { backend_type: 'llamacpp', file_filters: [] }, model_source: 'repo://my-model:v1' }),
+      ).not.toContain('backend.file_filters');
+    });
+
+    it('rejects download filters that are not patterns', () => {
+      const source = 'huggingface://unsloth/Model-GGUF';
+      expect(
+        fieldNames({ backend: { backend_type: 'llamacpp', file_filters: '*Q4*' }, model_source: source }),
+      ).toContain('backend.file_filters');
+      expect(
+        fieldNames({ backend: { backend_type: 'llamacpp', file_filters: ['  '] }, model_source: source }),
+      ).toContain('backend.file_filters');
+    });
   });
 
   it('rejects empty placement roles', () => {

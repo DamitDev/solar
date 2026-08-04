@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { DEVICE_OPTIONS, DTYPE_OPTIONS, getBackendTypeFromSelection, getDefaultConfig } from '@/lib/backendConfig';
+import {
+  DEVICE_OPTIONS,
+  DTYPE_OPTIONS,
+  getBackendTypeFromSelection,
+  getDefaultConfig,
+  stripEmptyOptionalFields,
+} from '@/lib/backendConfig';
 
 describe('getBackendTypeFromSelection', () => {
   it('maps llamacpp to llamacpp regardless of mode', () => {
@@ -35,9 +41,34 @@ describe('getDefaultConfig', () => {
     expect(cfg.backend_type).toBe('llamacpp');
   });
 
+  it('offers a model file selector for intents instead of a model path', () => {
+    expect(getDefaultConfig('llamacpp', 'llm', true).model_file).toBe('');
+    expect(getDefaultConfig('llamacpp', 'llm').model_file).toBeUndefined();
+  });
+
   it('returns the huggingface shape for huggingface backends', () => {
     const cfg = getDefaultConfig('huggingface', 'classifier', true);
     expect(cfg.backend_type).toBe('huggingface_classification');
+  });
+});
+
+describe('stripEmptyOptionalFields', () => {
+  it('drops an empty model file pattern and keeps a real one', () => {
+    expect(stripEmptyOptionalFields({ backend_type: 'llamacpp', model_file: '' })).toEqual({
+      backend_type: 'llamacpp',
+    });
+    expect(stripEmptyOptionalFields({ backend_type: 'llamacpp', model_file: '*Q4*.gguf' }).model_file).toBe(
+      '*Q4*.gguf',
+    );
+  });
+
+  it('drops an empty download filter list and keeps a populated one', () => {
+    expect(stripEmptyOptionalFields({ backend_type: 'llamacpp', file_filters: [] })).toEqual({
+      backend_type: 'llamacpp',
+    });
+    expect(stripEmptyOptionalFields({ backend_type: 'llamacpp', file_filters: ['*Q4*'] }).file_filters).toEqual([
+      '*Q4*',
+    ]);
   });
 });
 
