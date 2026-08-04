@@ -1,0 +1,580 @@
+"""Socket.IO client for connecting to solar-control.
+
+This module provides a persistent Socket.IO connection to solar-control,
+handling:
+- Registration on connect (auth via api_key)
+- Event streaming (logs, instance state, health)
+- Reconnection with exponential backoff (application-managed)
+"""
+
+import asyncio
+import logging
+import ssl
+from datetime import UTC, datetime
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+try:
+    import socketio
+
+    HAS_SOCKETIO = True
+except ImportError:
+    socketio = None  # type: ignore
+    HAS_SOCKETIO = False
+
+
+def _to_http_url(ws_url: str) -> str:
+    """Convert a WebSocket or HTTP URL to an HTTP base URL for Socket.IO.
+
+    Strips any path component since Socket.IO only needs scheme://host:port.
+    Handles backward-compat ws:// URLs like ``ws://host:8015/ws/host-channel``.
+    """
+    from urllib.parse import urlparse
+
+    url = ws_url.strip()
+    if url.startswith("wss://"):
+        url = "https://" + url[6:]
+    elif url.startswith("ws://"):
+        url = "http://" + url[5:]
+    elif not (url.startswith(("http://", "https://"))):
+        url = "http://" + url
+
+    parsed = urlparse(url)
+    base = f"{parsed.scheme}://{parsed.hostname}"
+    if parsed.port:
+        base += f":{parsed.port}"
+    return base
+
+
+class SolarControlClient:
+    """Socket.IO client for maintaining persistent connection to solar-control.
+
+    Identification: The host identifies itself using its API key via auth
+    in the connect handshake. Solar-control looks up which registered host
+    has this API key and associates the connection.
+    """
+
+    NAMESPACE = "/hosts"
+
+    def __init__(
+        self,
+        control_url: str,
+        api_key: str,
+        host_name: str = "",
+        insecure: bool = False,
+    ):
+        self.control_url = control_url
+        self.base_url = _to_http_url(control_url)
+        self.api_key = api_key
+        self.host_name = host_name
+        self.insecure = insecure
+
+        # Host ID assigned by solar-control after registration_ack
+        self.host_id: str | None = None
+
+        self._sio: socketio.AsyncClient | None = None
+        self._connected = False
+        self._pending = False
+        self._running = False
+        self._connection_task: Any | None = None
+        self._registration_task: asyncio.Task | None = None
+
+    @property
+    def is_connected(self) -> bool:
+        """Check if currently connected to solar-control."""
+        return self._connected and self._sio is not None and self._sio.connected
+
+    async def start(self):
+        """Start the Socket.IO client and connect to solar-control."""
+        if not self.control_url:
+            logger.info(
+                "SolarControlClient: No control URL configured, skipping connection"
+            )
+            return
+
+        if not HAS_SOCKETIO:
+            logger.warning(
+                "SolarControlClient: python-socketio not installed, skipping connection"
+            )
+            return
+
+        self._running = True
+        self._main_loop = asyncio.get_running_loop()
+        self._connection_task = asyncio.create_task(self._run())
+        logger.info("SolarControlClient: Starting connection to %s", self.base_url)
+
+    async def stop(self):
+        """Stop the Socket.IO client and disconnect."""
+        self._running = False
+
+        if self._connection_task:
+            self._connection_task.cancel()
+            try:
+                await self._connection_task
+            except asyncio.CancelledError:
+                pass
+
+        if self._sio:
+            try:
+                await self._sio.disconnect()
+            except Exception:  # noqa: S110, BLE001
+                pass
+            self._sio = None
+
+        self._connected = False
+        logger.info("SolarControlClient: Stopped")
+
+    async def reconnect(self) -> bool:
+        """Force reconnection. Resets backoff and restarts the connection loop.
+
+        Called externally (e.g. via the /reconnect REST endpoint) when
+        solar-control detects that this host is no longer connected.
+        """
+        if self.is_connected:
+            return False
+        if not self._running:
+            return False
+
+        if self._connection_task:
+            self._connection_task.cancel()
+            try:
+                await self._connection_task
+            except asyncio.CancelledError:
+                pass
+        logger.info(
+            "SolarControlClient: Reconnect requested, restarting connection loop"
+        )
+        self._connection_task = asyncio.create_task(self._run())
+        return True
+
+    async def _run(self):
+        """Create client, register handlers, connect and keep running."""
+        from solar_host.config import settings as host_settings
+
+        ssl_verify = not self.insecure
+        http_session = None
+
+        reconnect_delay = host_settings.ws_reconnect_delay
+        reconnect_max_delay = host_settings.ws_reconnect_max_delay
+
+        if self.insecure and self.base_url.startswith("https://"):
+            import aiohttp
+
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            connector = aiohttp.TCPConnector(ssl=ctx)
+            http_session = aiohttp.ClientSession(connector=connector)
+
+        sio = socketio.AsyncClient(
+            reconnection=False,
+            ssl_verify=ssl_verify,
+            http_session=http_session,
+            handle_sigint=False,
+        )
+
+        sio.register_namespace(_HostNamespace(self))
+        self._sio = sio  # Set before connect so _on_connect can emit
+
+        outer_backoff = reconnect_delay
+        while self._running:
+            try:
+                if sio.connected:
+                    await sio.disconnect()
+                await sio.connect(
+                    self.base_url,
+                    namespaces=[self.NAMESPACE],
+                    auth={"api_key": self.api_key, "host_name": self.host_name},
+                    socketio_path="socket.io",
+                    transports=["websocket"],
+                )
+                outer_backoff = reconnect_delay
+                await sio.wait()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:  # noqa: BLE001
+                if self._running:
+                    logger.warning("SolarControlClient: Connection error: %s", e)
+                    await asyncio.sleep(outer_backoff)
+                    outer_backoff = min(outer_backoff * 2, reconnect_max_delay)
+
+        if sio.connected:
+            await sio.disconnect()
+
+        if http_session:
+            await http_session.close()
+
+    def _on_connect(self):
+        """Called when connected to /hosts namespace."""
+        self._connected = True
+        logger.info("SolarControlClient: Connected to %s", self.base_url)
+        if self._registration_task and not self._registration_task.done():
+            self._registration_task.cancel()
+        self._registration_task = asyncio.create_task(self._send_registration())
+
+    def _on_disconnect(self):
+        """Called when disconnected."""
+        self._connected = False
+        self._pending = False
+        self.host_id = None
+        if self._registration_task and not self._registration_task.done():
+            self._registration_task.cancel()
+        self._registration_task = None
+
+    def _on_registration_ack(self, data: dict):
+        """Handle registration_ack from server.
+
+        If we were pending, this means the admin just approved us --
+        re-send registration + health so solar-control has fresh data.
+        """
+        self._pending = False
+        self.host_id = data.get("host_id")
+        host_name = data.get("host_name", self.host_id)
+        logger.info(
+            "SolarControlClient: Registered as '%s' (id: %s)", host_name, self.host_id
+        )
+        # Re-send registration + health after approval regardless of the
+        # pending state. The initial _send_registration from _on_connect is
+        # swallowed by the `connected` guard (the attribute flips only after
+        # connect() returns), so pre-registered hosts would otherwise NEVER
+        # deliver roles/gpu_type/instances to solar-control.
+        asyncio.create_task(self._post_approval_sync())
+
+    def _on_pending(self, data: dict):
+        """Handle pending event - host is waiting for admin approval."""
+        self._pending = True
+        logger.info(
+            "SolarControlClient: Waiting for admin approval (pending_id: %s)",
+            data.get("pending_id", "?"),
+        )
+
+    def _on_rejected(self, data: dict):
+        """Handle rejected event - admin rejected this host.
+
+        Stops the client entirely so it won't retry.  The server
+        disconnects the sid right after sending this event; without
+        the flag the reconnection loop would immediately reconnect.
+        """
+        self._pending = False
+        self._running = False
+        reason = data.get("reason", "No reason given")
+        logger.warning(
+            "SolarControlClient: Registration rejected: %s. Stopping client.", reason
+        )
+
+    async def _send_registration(self):
+        """Send registration event with instance list."""
+        # NOTE: guard on self._connected (namespace-level flag set in
+        # _on_connect), NOT on self._sio.connected — that transport flag
+        # only flips after connect() returns, while _on_connect (and the
+        # registration_ack event) fire BEFORE that, so a `sio.connected`
+        # guard silently swallows the only registration ever sent for
+        # pre-registered hosts.
+        if not self._sio or not self._connected:
+            return
+
+        from solar_host.config import config_manager
+
+        instances = []
+        for instance in config_manager.get_all_instances():
+            instances.append(
+                {
+                    "id": instance.id,
+                    "alias": instance.config.alias,
+                    "status": instance.status.value,
+                    "port": instance.port,
+                    "supported_endpoints": instance.supported_endpoints,
+                    "backend_type": getattr(
+                        instance.config, "backend_type", "llamacpp"
+                    ),
+                    "priority": (
+                        instance.priority.value if instance.priority else "production"
+                    ),
+                    "managed_by": instance.managed_by,
+                    "intent_id": instance.intent_id,
+                    "model_source": getattr(instance.config, "model_source", None),
+                }
+            )
+
+        from solar_host import __version__
+        from solar_host.memory_monitor import detect_gpu_type
+
+        gpu_type = await asyncio.to_thread(detect_gpu_type)
+        await self._sio.emit(
+            "registration",
+            {
+                "host_name": self.host_name,
+                "instances": instances,
+                "roles": config_manager.roles,
+                "gpu_type": gpu_type,
+                "version": __version__,
+            },
+            namespace=self.NAMESPACE,
+        )
+
+    async def _post_approval_sync(self):
+        """Re-send registration, instance states, and health after approval.
+
+        Events sent while pending were silently dropped by solar-control,
+        so we push a full snapshot now.
+        """
+        await self._send_registration()
+        await self.send_instances_update()
+        await self.send_health()
+
+    async def _emit(self, event: str, data: dict):
+        """Emit event to solar-control (no-op if disconnected)."""
+        if not self._sio or not self._connected:
+            return
+        try:
+            await self._sio.emit(event, data, namespace=self.NAMESPACE)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("SolarControlClient: Emit error: %s", e)
+
+    async def send_log_batch(self, entries: list[dict]):
+        """Send a batch of log messages to solar-control in a single emit."""
+        await self._emit("log_batch", {"entries": entries})
+
+    async def send_step_log_batch(self, entries: list[dict]) -> None:
+        """Send a batch of step log lines to solar-control in a single emit."""
+        await self._emit("step_log", {"entries": entries})
+
+    async def send_job_lifecycle(self, event_name: str, data: dict) -> None:
+        """Emit a job lifecycle event directly by name (fire-and-forget)."""
+        await self._emit(event_name, data)
+
+    async def send_instance_state_batch(self, entries: list[dict]):
+        """Send a batch of instance state updates to solar-control."""
+        await self._emit("instance_state_batch", {"entries": entries})
+
+    async def send_health(
+        self,
+        memory: dict[str, Any] | None = None,
+        resource_manager: Any | None = None,
+    ):
+        """Send host health/memory update to solar-control.
+
+        The optional *resource_manager* is the ``ResourceManager`` instance
+        stored in ``app.state``.  When provided a ``reservations`` block is
+        added to the health payload (per-dimension totals + active count only —
+        no per-reservation list, per decision O4).
+        """
+        from solar_host.config import config_manager, settings
+        from solar_host.memory_monitor import (
+            detect_gpu_type,
+            get_disk_info,
+            get_memory_info,
+        )
+
+        if memory is None:
+            memory = await asyncio.to_thread(get_memory_info)
+
+        gpu_type = await asyncio.to_thread(detect_gpu_type)
+
+        instances = config_manager.get_all_instances()
+        running_count = sum(1 for i in instances if i.status.value == "running")
+
+        from solar_host import __version__
+
+        health_data: dict[str, Any] = {
+            "memory": memory,
+            "gpu_type": gpu_type,
+            "roles": config_manager.roles,
+            "instance_count": len(instances),
+            "running_instance_count": running_count,
+            "version": __version__,
+        }
+
+        disk = await asyncio.to_thread(get_disk_info, settings.models_dir)
+        if disk:
+            health_data["disk_total_gb"] = disk["total_gb"]
+            health_data["disk_used_gb"] = disk["used_gb"]
+            health_data["disk_available_gb"] = disk["available_gb"]
+
+        if resource_manager is not None:
+            try:
+                snap = await asyncio.to_thread(resource_manager.snapshot)
+                reservations_block: dict[str, Any] = {
+                    "active_count": len(snap.reservations),
+                }
+                for dim_name, dim in (
+                    ("vram", snap.vram),
+                    ("ram", snap.ram),
+                    ("disk", snap.disk),
+                ):
+                    if dim is not None:
+                        reservations_block[dim_name] = {
+                            "total_gb": dim.total_gb,
+                            "system_used_gb": dim.system_used_gb,
+                            "reserved_headroom_gb": dim.reserved_headroom_gb,
+                            "reported_used_gb": dim.reported_used_gb,
+                            "available_gb": dim.available_gb,
+                        }
+                health_data["reservations"] = reservations_block
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("send_health: failed to include reservations: %s", exc)
+
+        await self._emit(
+            "host_health",
+            {
+                "timestamp": datetime.now(UTC).isoformat(),
+                "data": health_data,
+            },
+        )
+
+    async def send_instances_update(self):
+        """Send full instance list to solar-control.
+
+        Called when instances change (create, delete, start, stop).
+        """
+        from solar_host.config import config_manager
+
+        instances = []
+        for instance in config_manager.get_all_instances():
+            instances.append(
+                {
+                    "id": instance.id,
+                    "alias": instance.config.alias,
+                    "status": instance.status.value,
+                    "port": instance.port,
+                    "supported_endpoints": instance.supported_endpoints,
+                    "backend_type": getattr(
+                        instance.config, "backend_type", "llamacpp"
+                    ),
+                    "priority": (
+                        instance.priority.value if instance.priority else "production"
+                    ),
+                    "managed_by": instance.managed_by,
+                    "intent_id": instance.intent_id,
+                    "model_source": getattr(instance.config, "model_source", None),
+                }
+            )
+
+        await self._emit(
+            "instances_update",
+            {
+                "timestamp": datetime.now(UTC).isoformat(),
+                "data": {"instances": instances},
+            },
+        )
+
+
+# Namespace handler for /hosts - must be defined after SolarControlClient
+if HAS_SOCKETIO and socketio is not None:
+
+    class _HostNamespace(socketio.AsyncClientNamespace):
+        """Socket.IO /hosts namespace handler."""
+
+        def __init__(self, client: SolarControlClient):
+            super().__init__(SolarControlClient.NAMESPACE)
+            self._client = client
+
+        def on_connect(self):
+            self._client._on_connect()
+
+        def on_disconnect(self):
+            self._client._on_disconnect()
+
+        def on_registration_ack(self, data):
+            self._client._on_registration_ack(data or {})
+
+        def on_pending(self, data):
+            self._client._on_pending(data or {})
+
+        def on_rejected(self, data):
+            self._client._on_rejected(data or {})
+
+
+# Global client instances (initialized in main.py)
+solar_control_clients: list[SolarControlClient] = []
+
+
+def get_clients() -> list[SolarControlClient]:
+    """Get all solar-control clients."""
+    return solar_control_clients
+
+
+def get_client() -> SolarControlClient | None:
+    """Get the first connected solar-control client (legacy compatibility)."""
+    for client in solar_control_clients:
+        if client.is_connected:
+            return client
+    return solar_control_clients[0] if solar_control_clients else None
+
+
+def init_clients(settings) -> list[SolarControlClient]:
+    """Initialize solar-control client from settings.
+
+    Uses single URL (first if multiple configured) - connect to load balancer.
+    """
+    global solar_control_clients
+
+    if not settings.solar_control_url:
+        logger.info("SolarControlClient: SOLAR_CONTROL_URL not configured")
+        return []
+
+    if not settings.api_key:
+        logger.warning("SolarControlClient: API_KEY not configured")
+        return []
+
+    url = settings.solar_control_url.split(",")[0].strip()
+    if not url:
+        logger.warning("SolarControlClient: No valid URL found")
+        return []
+
+    solar_control_clients = [
+        SolarControlClient(
+            control_url=url,
+            api_key=settings.api_key,
+            host_name=settings.host_name,
+            insecure=settings.insecure,
+        )
+    ]
+    logger.info("SolarControlClient: Configured 1 connection")
+    return solar_control_clients
+
+
+async def broadcast_log_batch(entries: list[dict]):
+    """Send a batch of log messages to solar-control."""
+    client = get_client()
+    if client:
+        await client.send_log_batch(entries)
+
+
+async def broadcast_step_log_batch(entries: list[dict]) -> None:
+    """Send a batch of step log lines to solar-control."""
+    client = get_client()
+    if client:
+        await client.send_step_log_batch(entries)
+
+
+async def broadcast_job_lifecycle(event_name: str, data: dict) -> None:
+    """Emit a job lifecycle event to solar-control (fire-and-forget, no-op if disconnected)."""
+    client = get_client()
+    if client:
+        await client.send_job_lifecycle(event_name, data)
+
+
+async def broadcast_instance_state_batch(entries: list[dict]):
+    """Send a batch of instance state updates to solar-control."""
+    client = get_client()
+    if client:
+        await client.send_instance_state_batch(entries)
+
+
+async def broadcast_health(
+    memory: dict[str, Any] | None = None,
+    resource_manager: Any | None = None,
+):
+    """Send health update to solar-control."""
+    client = get_client()
+    if client:
+        await client.send_health(memory, resource_manager=resource_manager)
+
+
+async def broadcast_instances_update():
+    """Send instance list update to solar-control."""
+    client = get_client()
+    if client:
+        await client.send_instances_update()

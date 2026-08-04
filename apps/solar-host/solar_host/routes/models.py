@@ -1,0 +1,301 @@
+"""GET /models, POST /models/pull, and DELETE /models/{name} routes.
+
+GET /models — lists models recorded in MODELS_DIR/manifest.json.
+Per S-009, the manifest is the single source of truth. This endpoint does not
+scan the filesystem for models; only entries present in the manifest are
+returned. Missing or invalid manifest yields an empty list (see read_manifest).
+
+POST /models/pull — pulls a model from Harbor (ORAS) or HuggingFace Hub and
+records it in the manifest. Returns the local path and whether it was a cache
+hit. Per S-015 / spec Section 3.6.
+
+DELETE /models/{name} — removes a model from disk and the manifest. Rejects
+the request with 409 if any active instance references the model. Per S-017.
+"""
+
+import asyncio
+import os
+from pathlib import Path
+from typing import Literal
+
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+from solar_host import models_manager
+from solar_host.config import config_manager
+from solar_host.models.base import InstanceStatus
+from solar_host.models_manager import ModelPullError, read_manifest
+
+router = APIRouter(prefix="/models", tags=["models"])
+
+
+# ---------------------------------------------------------------------------
+# GET /models — list
+# ---------------------------------------------------------------------------
+
+
+class ModelEntry(BaseModel):
+    """A single model entry returned by GET /models.
+
+    ``category``, ``model_name``, ``version`` and ``metadata`` are populated
+    from the manifest when the model was pulled with Data Repository
+    metadata (D-016); they are omitted on older entries.
+    """
+
+    model_config = {"protected_namespaces": ()}
+
+    name: str
+    path: str
+    size_bytes: int
+    source_uri: str | None = None
+    checksum: str | None = None
+    downloaded_at: str | None = None
+    category: str | None = None
+    model_name: str | None = None
+    version: str | None = None
+    metadata: dict | None = None
+
+
+def _manifest_to_entries() -> list[ModelEntry]:
+    manifest = read_manifest()
+    return [
+        ModelEntry(
+            name=e.slug,
+            path=e.path,
+            size_bytes=e.size_bytes,
+            source_uri=e.source_uri,
+            checksum=e.checksum or e.digest,
+            downloaded_at=e.downloaded_at,
+            category=e.category,
+            model_name=e.name,
+            version=e.version,
+            metadata=e.metadata,
+        )
+        for e in manifest.models
+    ]
+
+
+@router.get("", response_model=list[ModelEntry], summary="List managed models")
+async def list_models() -> list[ModelEntry]:
+    """Return all models listed in the managed models manifest.
+
+    Data comes only from ``manifest.json`` under ``MODELS_DIR`` (see
+    ``read_manifest``). No directory scanning is performed.
+
+    Returns an empty list when the manifest is missing, empty, or unreadable.
+    """
+    return await asyncio.to_thread(_manifest_to_entries)
+
+
+# ---------------------------------------------------------------------------
+# POST /models/pull
+# ---------------------------------------------------------------------------
+
+
+class PullRequest(BaseModel):
+    """Request body for POST /models/pull (spec Section 3.6).
+
+    The ``category``, ``name``, ``version``, ``checksum`` and ``metadata``
+    fields were added with D-016 so solar-control can forward the
+    authoritative metadata returned by Data Repository. They are optional and
+    stored on the manifest entry verbatim when present; the host does not
+    consult them for pull behaviour.
+    """
+
+    model_config = {"protected_namespaces": ()}
+
+    source: Literal["harbor", "huggingface"]
+    source_uri: str
+    harbor_ref: str | None = None
+    model_id: str | None = None
+    digest: str | None = None
+    size_bytes: int | None = None
+    category: str | None = None
+    name: str | None = None
+    version: str | None = None
+    checksum: str | None = None
+    metadata: dict | None = None
+    # Declared by solar-control when the pull targets a specific backend
+    # (e.g. "llamacpp" from an intent).  For harbor artifacts it enables
+    # GGUF selection: the returned path resolves to the largest *.gguf
+    # inside the artifact instead of the directory.  None = no selection.
+    backend_type: str | None = None
+
+
+class PullResponse(BaseModel):
+    """Response body for POST /models/pull (spec Section 3.6)."""
+
+    path: str
+    cached: bool
+    source_uri: str
+
+
+@router.post(
+    "/pull",
+    response_model=PullResponse,
+    summary="Pull a model from source",
+    responses={
+        200: {
+            "description": "Model available at returned path (cached or freshly downloaded)"
+        },
+        400: {
+            "description": "Invalid request (bad source_uri scheme or malformed URI)"
+        },
+        401: {"description": "Source authentication failed"},
+        404: {"description": "Model not found at source"},
+        422: {"description": "Missing required field for the chosen source"},
+        500: {"description": "Missing credentials or unexpected server error"},
+        502: {"description": "Source registry/hub unreachable"},
+        507: {"description": "Insufficient disk space"},
+    },
+)
+async def pull_model(req: PullRequest) -> PullResponse | JSONResponse:
+    """Pull a model from Harbor or HuggingFace Hub.
+
+    Checks the manifest cache first. On a cache hit the stored path is returned
+    immediately without re-downloading. On a cache miss the model is downloaded,
+    the manifest is updated atomically, and the new path is returned.
+
+    The caller blocks until the model is fully available.
+
+    Contract for Distribution (S-019):
+    Before issuing a pull, solar-control should query the target host's /health
+    endpoint to check disk.available_gb. If the model size is known, it should
+    be passed as size_bytes here for proactive validation. If available space
+    drops below min_free_disk_gb during download, the pull will be aborted.
+    """
+    # Validate conditional required fields before doing any I/O.
+    if req.source == "harbor" and not req.harbor_ref:
+        raise HTTPException(
+            status_code=422, detail="harbor_ref is required for harbor source"
+        )
+    if req.source == "huggingface" and not req.model_id:
+        raise HTTPException(
+            status_code=422, detail="model_id is required for huggingface source"
+        )
+
+    try:
+        result = await asyncio.to_thread(
+            models_manager.pull_model,
+            source=req.source,
+            source_uri=req.source_uri,
+            harbor_ref=req.harbor_ref,
+            model_id=req.model_id,
+            digest=req.digest,
+            size_bytes=req.size_bytes,
+            category=req.category,
+            name=req.name,
+            version=req.version,
+            checksum=req.checksum,
+            metadata=req.metadata,
+            backend_type=req.backend_type,
+        )
+    except ModelPullError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": exc.error,
+                "detail": exc.detail,
+                "source_uri": exc.source_uri,
+                "status_code": exc.status_code,
+            },
+        )
+
+    return PullResponse(**result)
+
+
+# ---------------------------------------------------------------------------
+# DELETE /models/{name}
+# ---------------------------------------------------------------------------
+
+# Statuses that mean an instance is actively using its model files.
+_ACTIVE_STATUSES = {
+    InstanceStatus.RUNNING,
+    InstanceStatus.STARTING,
+    InstanceStatus.STOPPING,
+}
+
+
+def _instance_uses_model(instance_config: object, model_dir: Path) -> bool:
+    """Return True if *instance_config* references a path under *model_dir*.
+
+    For LlamaCpp configs the ``model`` field is always a filesystem path to a
+    GGUF file.  For HuggingFace configs the ``model_id`` may be a Hub ID (e.g.
+    ``meta-llama/Llama-2-7b-hf``) or a local absolute path; only absolute
+    paths are checked against the model directory.
+    """
+    backend_type: str = getattr(instance_config, "backend_type", "")
+
+    if backend_type == "llamacpp":
+        instance_model = getattr(instance_config, "model", None)
+        if not instance_model:
+            return False
+        resolved = Path(instance_model).resolve()
+        return resolved == model_dir or resolved.is_relative_to(model_dir)
+
+    if backend_type.startswith("huggingface_"):
+        model_id: str = getattr(instance_config, "model_id", None) or ""
+        if not os.path.isabs(model_id):
+            # Hub ID (e.g. "org/model") — not a local path, skip.
+            return False
+        resolved = Path(model_id).resolve()
+        return resolved == model_dir or resolved.is_relative_to(model_dir)
+
+    return False
+
+
+def _find_using_instance(model_dir: Path) -> str | None:
+    """Return the ID of the first active instance using *model_dir*, or None."""
+    for instance in config_manager.get_all_instances():
+        if instance.status not in _ACTIVE_STATUSES:
+            continue
+        if _instance_uses_model(instance.config, model_dir):
+            return instance.id
+    return None
+
+
+class DeleteResponse(BaseModel):
+    """Response body for DELETE /models/{name}."""
+
+    detail: str
+    name: str
+
+
+@router.delete(
+    "/{name}",
+    response_model=DeleteResponse,
+    summary="Delete a managed model",
+    responses={
+        200: {"description": "Model deleted successfully"},
+        404: {"description": "Model not found in manifest"},
+        409: {"description": "Model is in use by a running instance"},
+    },
+)
+async def delete_model(name: str) -> DeleteResponse:
+    """Delete a model from disk and remove it from the manifest.
+
+    The ``name`` path parameter must match the slug returned by ``GET /models``.
+    Returns 404 if the model is not in the manifest.  Returns 409 if any
+    instance with status ``running``, ``starting``, or ``stopping`` references
+    the model — stop the instance first.
+    """
+
+    def _delete() -> DeleteResponse:
+        entry = models_manager.get_manifest_entry_by_slug(name)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="Model not found")
+
+        model_dir = Path(entry.path).resolve()
+        using_id = _find_using_instance(model_dir)
+        if using_id is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Model is in use by instance {using_id}. Stop the instance first.",
+            )
+
+        models_manager.delete_model_files(entry.path)
+        models_manager.remove_manifest_entry_by_slug(name)
+        return DeleteResponse(detail="Model deleted", name=name)
+
+    return await asyncio.to_thread(_delete)
