@@ -547,7 +547,9 @@ local:///path/to/model.gguf     → Use local filesystem path (legacy/fallback)
 - "I want to train on a host with 20 GB free VRAM" → Solar Control frees resources and allocates
 - Solar WebUI shifts from configuring instances to monitoring how Solar Control arranges them
 
-Specified in detail in the [Declarative Deployment Intent API Specification](docs/specs/deployment-intent.md) (S-039): intent schema, lifecycle, reconciliation semantics, placement, and the `rolling`/`immediate` strategies.
+Specified in detail in the [Declarative Deployment Intent API Specification](docs/specs/deployment-intent.md) (S-039): intent schema, lifecycle, reconciliation semantics, placement, and the `rolling`/`immediate` strategies. A deployment is edited by updating its intent (S-044), not by deleting and resubmitting it.
+
+The same reconciliation loop covers host maintenance: marking a host as **draining** stops new placement and moves its managed replicas to other hosts, specified in the [Host Draining Specification](docs/specs/host-draining.md) (S-043).
 
 ### 6.7 Data Repository Integration
 
@@ -593,6 +595,8 @@ Architectural decisions made during the planning phase.
 | 21  | Etalon image CI/CD                  | **GitHub Actions on local runners**                                    | Same pattern as all other services. Per-branch images.                                                                                                                                                                                   |
 | 22  | Artifact retention                  | **SuperNova-managed**                                                  | Retention policy configurable per-job. Cleanup executed as a step-based action.                                                                                                                                                          |
 | 23  | Harbor client library               | **Shared package (`harbor-oci-client`)**                               | Data Repository, Solar Control, and step containers all need Harbor API and/or ORAS operations. Extracted into a shared library to avoid maintaining identical code in 3+ repos. Installed via `pip install harbor-oci-client`. |
+| 24  | Host maintenance                    | **Declarative draining, reconciled**                                   | Draining is a durable state on the host, not an orchestrated job: placement skips the host and the existing reconciler evacuates its managed replicas one at a time. Restart-safe and needs no new cross-replica coordination. Manual instances are never evacuated — they block the drain until stopped. |
+| 25  | Drain without capacity              | **Stall, never shrink**                                                | If no host can accept a replica, it keeps serving and the drain stays unfinished with a reported reason. Solar never trades away serving capacity to complete an operator's drain; scaling down is an explicit intent change. |
 
 
 ---

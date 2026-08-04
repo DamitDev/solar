@@ -6,8 +6,8 @@
 | Status      | Done                                           |
 | Created     | 2026-05-29                                     |
 | Depends on  | —                                              |
-| Depended by | S-040, S-041, S-042, U-003, N-019, N-020       |
-| References  | S-019, S-035, S-036, S-037, S-038, model-source-uri.md |
+| Depended by | S-040, S-041, S-042, S-043, S-044, U-003, U-005, U-006, N-019, N-020 |
+| References  | S-019, S-035, S-036, S-037, S-038, model-source-uri.md, host-draining.md |
 
 ## 1. Overview
 
@@ -425,7 +425,11 @@ Let `desired = I.replicas`, `observed = |managed(I)|`, and let `current[h]` be t
 | `observed > desired` | **Stop**: remove surplus managed instances. Selection order: failed/unhealthy first, then most-recently-created, then least-loaded (so long-lived healthy replicas survive). |
 | managed instance's `model_source` ≠ `I.model_source` (or backend/priority drift) | **Replace**: transition the replica to the new config per `strategy` (Section 11). |
 | managed instance is `failed`/`stopped` unexpectedly (drift) | **Recreate**: restart or recreate on the same or a new host (with backoff). |
+| managed instance runs on a **draining** host | **Evacuate**: migrate it to another placement candidate via S-037. If none exists, leave it serving and report the stall — a drain never reduces capacity. See [host-draining.md](host-draining.md) §4.2. |
+| managed instance is `failed`/`stopped` on a **draining** host | **Stop** (stop + delete) rather than recreate, so the next `create` places the replica elsewhere. Recreating in place would fight the drain. |
 | desired state already met | **No-op**. |
+
+Drift detection compares the intent's `model_source` and backend fields against the observed instance configuration. Since a spec can change under a running deployment (Section 12.5), a backend-only edit must be detected even for fields the cached instance view does not carry: while a spec change is pending, the comparison uses the instance's full configuration rather than the cached summary.
 
 ### 8.3 Idempotency and safety
 
@@ -441,6 +445,7 @@ Placement selects target hosts for new/replacement replicas. It MUST be a **sing
 ```
 candidates = hosts where:
     status == online / connected
+    host is not draining or drained                  # host-draining.md §4.1
     roles ⊇ placement.roles
     (placement.gpu_type is null or host.gpu_type == placement.gpu_type)
     (host_allow empty or host.id in host_allow)
@@ -696,13 +701,19 @@ While a `rolling`/`immediate` update is in flight, `status.strategy_progress` is
 
 In both strategies, partial failure never leaves duplicate replicas on a host and never silently abandons the intent — the diff is re-evaluated next tick.
 
+### 11.5.1 Editing an intent during a rollout
+
+`strategy_progress` records the target the rollout was planned against, and the reconciler drives that state machine instead of re-diffing while it is set. An update (Section 12.5) that changes the spec therefore **clears `strategy_progress`**: the next tick re-diffs against the new spec and initiates a fresh rollout under the `strategy` in the updated spec. Replicas already converted by the abandoned rollout are not reverted — they are simply re-evaluated for drift against the new spec like any other replica.
+
+This is also the supported rollback path: submitting the previous `model_source` while a rollout is stalled restarts the rollout toward the old version instead of waiting out the failed one.
+
 ### 11.6 Test scenarios (for S-042)
 
 The S-042 implementation should cover at least: scale up, scale down, model version change (rolling, verifying one-at-a-time and availability), model version change (immediate), failed health check (rolling holds and retains availability), failed health check (immediate degraded), and shortfall (fewer hosts than replicas).
 
 ---
 
-## 12. API (S-040)
+## 12. API (S-040, update in S-044)
 
 All endpoints are under `/api/intents`, require the management API key (`X-API-Key` or `Authorization: Bearer`, same middleware as other `/api/*` routes), and use JSON. IDs are UUID strings; timestamps are ISO 8601 UTC.
 
@@ -770,12 +781,24 @@ Remove an intent and scale down its managed instances.
 - **202 Accepted** → intent transitions to `deleting`; body returns the record with `status.phase = "deleting"`.
 - **404 Not Found** → unknown id (a previously-deleted id may return 404 or a tombstone depending on retention; deletion is idempotent for the caller).
 
-### 12.5 Update (out of scope for S-040; documented for completeness)
+### 12.5 `PUT /api/intents/{id}` — update (S-044)
 
-S-040 implements create/list/delete only. To change an existing deployment (scale, version, strategy) before an update endpoint exists, clients re-`POST` is **not** allowed (alias conflict). The intended path:
+Change an existing deployment: scale, model version, strategy, priority, backend configuration, placement, resources, or metadata. Accepts the **same request schema as create** (Section 4.1) with **full-replace** semantics — a field omitted from the request is reset to its documented default, exactly as on create. Clients must therefore send the complete spec, not a diff.
 
-- **v1:** `DELETE` then `POST` is discouraged for `production` (causes downtime). Prefer adding an update endpoint.
-- **Recommended (future S-04x / N-020):** `PUT /api/intents/{id}` accepting the same request schema; changing `replicas`/`model_source`/`strategy`/`priority`/`backend` triggers reconciliation under the configured strategy. This spec defines the semantics (Sections 8 and 11) so the update endpoint is purely an API addition. Mutating `alias` is not allowed (it is the identity); changing the served name means a new intent.
+- **200 OK** → the updated intent record (Section 10.1).
+- **404 Not Found** → unknown or already-deleted intent.
+- **409 Conflict** → the intent is being deleted (`phase = deleting`), or the alias is taken by another active intent.
+- **422 Unprocessable Entity** → validation failure, in the same structured shape as create. Update applies **every** create rule (Section 4.7); the two validators are shared so they cannot drift apart.
+
+Semantics:
+
+- **`alias` is immutable.** It is the served name and the deployment's identity; a request that changes it is rejected. Serving a different name means a new intent.
+- Changing `replicas` converges through the normal diff (Section 8.2): scale up creates, scale down stops surplus. `replicas: 0` remains valid and means "stop all replicas, keep the intent" — it is not a deletion.
+- Changing `model_source`, `backend` or `priority` is drift, and converges under the `strategy` **in the updated spec** (Section 11).
+- An in-flight rollout is reset so it cannot keep converging toward a superseded target (Section 11.5.1).
+- Server-managed state (`status`, phases, timestamps) is not client-writable; the update touches the spec only.
+- The reconciler is woken on success, so the change is picked up immediately rather than on the next periodic tick.
+- Reconciliation of a spec that changes underneath a running pass is safe: the per-intent lock (Section 8.3) serialises passes across Solar Control replicas, each pass loads the intent inside that lock, and a recorded failure backoff is invalidated by a spec change so a corrective edit is retried at once instead of waiting out the previous spec's backoff.
 
 ### 12.6 Error model
 
@@ -864,23 +887,26 @@ Submit a `production` intent for `wp:27b` needing a `nvidia_cuda` host, but both
 | S-040 | Implements create/list/get/delete (Section 12), persistence, validation, and the `pending`/unreconciled status contract (Section 7.3). |
 | S-041 | Implements the reconciliation engine, ownership model, idempotency, and one-replica-per-host (Sections 5, 8). |
 | S-042 | Implements `rolling`/`immediate` strategies, the health gate, and failure behavior (Section 11). |
+| S-043 (host draining) | Adds the draining host filter to placement (Section 8.4) and the evacuate/stop rules for managed replicas on a draining host (Section 8.2). Defined in [host-draining.md](host-draining.md). |
+| S-044 (intent update) | Implements `PUT /api/intents/{id}` (Section 12.5), the rollout reset (Section 11.5.1), and update-safe reconciliation (Section 8.3). |
 | U-003 | Builds the intent form (Section 4 fields) and live status view (Sections 10.1–10.4). |
-| N-019/N-020 | Build deployment intents from job config and submit/poll them (Sections 4.1, 12). |
+| U-005 | Surfaces host draining in the WebUI Resources page (see [host-draining.md](host-draining.md) §5–§7). |
+| U-006 | Builds the intent edit form on top of Section 12.5. |
+| N-019/N-020 | Build deployment intents from job config and submit/poll them (Sections 4.1, 12). N-020 may update an existing deployment instead of deleting and resubmitting. |
 
 ### 15.1 Cross-repo change summary
 
 | Repo | Change |
 |------|--------|
 | `solar-host` | Add optional `managed_by` and `intent_id` to instance config models (all backends), persisted and echoed in instance/host status. Sibling to S-036 `priority`. |
-| `solar-control` | New intent store (Postgres `intents` table) + API (S-040), reconciliation engine (S-041), strategies (S-042), placement helper shared with S-038, and `intent_update`/`intent_removed` `/webui` events. Round-trip `managed_by`/`intent_id` in the proxied instance config. |
-| `solar-webui` | Intent submission form and status view (U-003). |
+| `solar-control` | New intent store (Postgres `intents` table) + API (S-040), reconciliation engine (S-041), strategies (S-042), placement helper shared with S-038, and `intent_update`/`intent_removed` `/webui` events. Round-trip `managed_by`/`intent_id` in the proxied instance config. Later: intent update endpoint (S-044) and host draining (S-043). |
+| `solar-webui` | Intent submission form and status view (U-003), intent editing (U-006), host draining controls (U-005). |
 | `supernova-control` | Build/submit/poll intents (N-019/N-020). |
 
 ---
 
 ## 16. Future Extensions
 
-- **Update endpoint (`PUT /api/intents/{id}`).** First-class spec mutation with strategy-driven reconciliation (Section 12.5).
 - **Adoption of manual instances.** Optionally let an intent adopt a matching manual instance (by alias) by stamping ownership, instead of treating it as a conflict (Section 5.4).
 - **Additional strategies.** `canary` / `blue-green` (deploy a candidate alias alongside production, shift gradually), beyond v1's `rolling`/`immediate`.
 - **Autoscaling.** Replica count driven by load/latency signals from the gateway rather than a fixed number.
@@ -894,8 +920,9 @@ Submit a `production` intent for `wp:27b` needing a `nvidia_cuda` host, but both
 ## 17. Related Specifications
 
 - [Model Source URI Specification](model-source-uri.md) — `repo://`, `huggingface://`, `local://` resolution, `POST /models/pull`, distribution.
+- [Host Draining Specification](host-draining.md) — taking a host out of service: drain states, preflight, evacuation, and the placement filter reconciliation honours.
 - [Job Step Workspace Specification](job-step-workspace.md) — training pipeline workspace (context for SuperNova's produce→deploy flow).
 - README §6.6 (Declarative Intent-Based Management), §3 (Topology), Decisions #12, #14, #18.
-- S-040 (intent API), S-041 (reconciliation engine), S-042 (deployment strategies) — implementation consumers.
+- S-040 (intent API), S-041 (reconciliation engine), S-042 (deployment strategies), S-044 (intent update) — implementation consumers.
 - S-019 (distribution), S-035 (resources), S-036 (priority), S-037 (migration), S-038 (reservation coordinator) — reused/aligned mechanisms.
 - U-003 (Solar WebUI intent form), N-019/N-020 (SuperNova deployment automation) — downstream clients.
