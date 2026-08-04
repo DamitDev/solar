@@ -29,7 +29,9 @@ jobs:
             CHANGED=$(git diff --name-only "origin/$GITHUB_BASE_REF...HEAD" || true)
           else
             BASE="${GITHUB_EVENT_BEFORE:-HEAD~1}"
-            [ "$BASE" = "0000000000000000000000000000000000000000" ] && BASE="HEAD~1"
+            if [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+              BASE="HEAD~1"
+            fi
             CHANGED=$(git diff --name-only "$BASE...HEAD" || true)
           fi
 
@@ -47,11 +49,19 @@ jobs:
                 ALL=1;;
             esac
           done
-          [ "$ALL" = "1" ] && APPS=" solar-control solar-host solar-webui data-repository supernova-steps"
+          if [ "$ALL" = "1" ]; then
+            APPS=" solar-control solar-host solar-webui data-repository supernova-steps"
+          fi
 
-          APPS=$(printf '%s' "$APPS" | tr ' ' '\n' | awk '!seen[$0]++' | grep -v '^$' | paste -sd ' ' -)
+          # Dedupe + drop empties in one awk pass. NOTE: never pipe through
+          # `grep -v '^$'` here — with empty input grep exits 1 and, under
+          # `set -o pipefail`, kills the step (hit on no-op commits).
+          APPS=$(printf '%s' "$APPS" | tr ' ' '\n' | awk '!seen[$0]++ && NF' | paste -sd ' ' -)
           echo "changed apps: ${APPS:-none}"
-          JSON=$(printf '%s' "$APPS" | jq -R -c 'split(" ") | map(select(length > 0))')
+          # --arg form always emits a valid JSON array ([] for empty input);
+          # piping through `jq -R` reads zero lines for empty input and prints
+          # nothing, which would leave the matrix output unparseable.
+          JSON=$(jq -nc --arg s "$APPS" '$s | split(" ") | map(select(length > 0))')
           echo "apps=$JSON" >> "$GITHUB_OUTPUT"
           echo "count=$(printf '%s' "$APPS" | wc -w)" >> "$GITHUB_OUTPUT"
 
