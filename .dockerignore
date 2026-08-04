@@ -1,0 +1,27 @@
+# Keep the root build context (apps/solar-webui) lean.
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Env & local state
+.env
+.env.*
+!.env.example
+logs/
+hf-cache/
+models/
+jobs/
+
+# Git / CI
+.git/
+.github/

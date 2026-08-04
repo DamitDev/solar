@@ -2,6 +2,7 @@
   "name": "solar",
   "private": true,
   "version": "0.0.0-dev",
+  "packageManager": "pnpm@11.11.0",
   "scripts": {
     "dev:webui": "pnpm --filter solar-webui dev",
     "build:webui": "pnpm --filter solar-webui build",

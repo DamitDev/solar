@@ -32,7 +32,7 @@
       "image": "solar-webui",
       "registry_ns": "imgrepo.damit.hu/aiops",
       "secret_scope": "AIOPS",
-      "context": "apps/solar-webui",
+      "context": ".",
       "dockerfile": "apps/solar-webui/Dockerfile",
       "app_version": true
     },

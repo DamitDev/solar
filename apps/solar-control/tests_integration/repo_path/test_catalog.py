@@ -85,7 +85,14 @@ async def test_catalog_proxies_data_repository_listing(
     assert item is not None, f"fixture model missing from catalog: {body}"
     assert item["category"] == "model"
     assert item["versions_count"] >= 1
-    assert item["latest_version"] == "v1"
+    # The intent-path strategy tests register test-model:v2 (rolling version
+    # change), so the fixture model's latest version is not guaranteed to be
+    # v1 — assert passthrough against data-repo's own view instead.
+    repo_item = next(
+        (i for i in repo_resp.json()["items"] if i["name"] == MODEL_NAME), None
+    )
+    assert repo_item is not None, f"fixture model missing from data-repo: {repo_resp.text}"
+    assert item["latest_version"] == repo_item["latest_version"]
 
     # Clean state: hosts hold no models and no instances -> the model is
     # honestly unavailable and the availability source answered (ok).

@@ -1,45 +1,41 @@
-# Stage 1: Build the React application
+# Stage 1: dependencies (uses the workspace root lockfile)
+FROM node:24-alpine AS deps
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@11.11.0 --activate
+COPY pnpm-lock.yaml package.json pnpm-workspace.yaml ./
+COPY apps/solar-webui/package.json apps/solar-webui/
+RUN pnpm install --frozen-lockfile --filter ./apps/solar-webui
+
+# Stage 2: build
 FROM node:24-alpine AS builder
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@11.11.0 --activate
+COPY --from=deps /app/node_modules node_modules
+COPY --from=deps /app/apps/solar-webui/node_modules apps/solar-webui/node_modules
+COPY apps/solar-webui/ apps/solar-webui/
 
 ARG APP_VERSION=0.0.0-dev
+RUN sed -i "s/\"version\": \".*\"/\"version\": \"${APP_VERSION}\"/" apps/solar-webui/package.json
 
-WORKDIR /app
+RUN pnpm --filter solar-webui build
 
-# Copy package files
-COPY package.json pnpm-lock.yaml ./
-
-# Install dependencies
-RUN corepack enable && pnpm install --frozen-lockfile
-
-# Copy source code
-COPY . .
-
-# Patch version before build
-RUN sed -i "s/\"version\": \".*\"/\"version\": \"${APP_VERSION}\"/" package.json
-
-# Build the application
-RUN pnpm run build
-
-# Stage 2: Run the middleware server
+# Stage 3: runtime — express middleware server
 FROM node:24-alpine
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@11.11.0 --activate
+COPY pnpm-lock.yaml package.json pnpm-workspace.yaml ./
+COPY apps/solar-webui/package.json apps/solar-webui/
+RUN pnpm install --frozen-lockfile --filter ./apps/solar-webui --prod
 
 ARG APP_VERSION=0.0.0-dev
-
-WORKDIR /app
 ENV NODE_ENV=production \
     APP_VERSION=${APP_VERSION}
 
-# Copy patched package files from builder and install production dependencies
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/pnpm-lock.yaml ./
-RUN corepack enable && pnpm install --prod --frozen-lockfile
+# server/index.js resolves ../dist and ../package.json via __dirname,
+# so the app dir keeps its layout (dist + server + node_modules).
+COPY --from=builder --chown=node:node /app/apps/solar-webui/dist apps/solar-webui/dist
+COPY --from=builder --chown=node:node /app/apps/solar-webui/server apps/solar-webui/server
 
-# Use the existing node user (UID 1000 in alpine)
-# Copy built assets and server
-COPY --from=builder --chown=node:node /app/dist ./dist
-COPY --from=builder --chown=node:node /app/server ./server
-
-# Switch to non-root user
 USER node
 
 # Set port from build arg
@@ -50,4 +46,4 @@ ENV PORT=${PORT}
 EXPOSE ${PORT}
 
 # Start the middleware server
-CMD ["node", "server/index.js"]
+CMD ["node", "apps/solar-webui/server/index.js"]
