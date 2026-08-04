@@ -61,7 +61,9 @@ export const getDefaultConfig = (primary: PrimaryBackend, mode: string, forInten
     return {
       ...base,
       backend_type: 'llamacpp',
-      ...(forIntent ? {} : { model: '' }),
+      // An intent points at a model directory, so it selects the GGUF by
+      // pattern; an instance is given the resolved path directly.
+      ...(forIntent ? { model_file: '' } : { model: '' }),
       mmproj: '',
       ...(forIntent ? {} : { alias: '' }),
       threads: 1,
@@ -145,10 +147,12 @@ export const stripEmptyOptionalFields = (config: Record<string, any>): Record<st
     'reasoning',
     'ot',
     'mmproj',
+    'model_file',
     'pooling',
   ]) {
     if (!next[field]) delete next[field];
   }
   if (!next.spec_type) delete next.spec_draft_n_max;
+  if (Array.isArray(next.file_filters) && next.file_filters.length === 0) delete next.file_filters;
   return next;
 };

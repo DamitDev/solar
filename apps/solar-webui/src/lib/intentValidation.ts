@@ -76,6 +76,26 @@ export function validateIntentRequest(req: IntentCreateRequest): IntentFieldErro
         });
       }
     }
+
+    const modelFile = req.backend.model_file;
+    if (modelFile && backendType !== 'llamacpp') {
+      errors.push({
+        field: 'backend.model_file',
+        message: 'Model file selection is only available for the llama.cpp backend',
+      });
+    }
+
+    const filters = req.backend.file_filters;
+    if (filters !== undefined && filters !== null) {
+      if (!Array.isArray(filters) || filters.some((f) => typeof f !== 'string' || !f.trim())) {
+        errors.push({ field: 'backend.file_filters', message: 'Every download filter must be a non-empty pattern' });
+      } else if (filters.length > 0 && !source.startsWith('huggingface://')) {
+        errors.push({
+          field: 'backend.file_filters',
+          message: 'Download filters only apply to huggingface:// model sources',
+        });
+      }
+    }
   }
 
   if (req.placement?.roles !== undefined && req.placement.roles.length === 0) {

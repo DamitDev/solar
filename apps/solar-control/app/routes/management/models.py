@@ -222,11 +222,17 @@ async def _post_pull_to_host(
 
 
 async def _pull_on_host(
-    parsed: Any, source_uri: str, host: Host
+    parsed: Any,
+    source_uri: str,
+    host: Host,
+    file_filters: list[str] | None = None,
 ) -> tuple[str, bool] | _StructuredPullError:
     """
     Tells the target host to pull the model.
     Returns (local_path, cached_bool) on success, or a _StructuredPullError on failure.
+
+    ``file_filters`` limits a HuggingFace snapshot to matching files; it has no
+    effect on Harbor artifacts, which ORAS always pulls whole.
 
     Raises HTTPException for connection-level/dependency failures (5xx).
     Returns _StructuredPullError for expected request/content failures (4xx, 507).
@@ -270,11 +276,13 @@ async def _pull_on_host(
             status_code=400,
         )
 
-    payload = {
+    payload: dict[str, Any] = {
         "source": "huggingface",
         "model_id": parsed.model_id,
         "source_uri": source_uri,
     }
+    if file_filters:
+        payload["file_filters"] = file_filters
     return await _post_pull_to_host(host, source_uri, payload)
 
 

@@ -61,9 +61,14 @@ async def create_instance_on_host(
     if model_source and not config.get("model") and not config.get("model_id"):
         backend_type = config.get("backend_type", "llamacpp")
         # Forward the backend so repo:// pulls for llama.cpp resolve to the
-        # largest *.gguf in the artifact instead of the directory.
+        # largest *.gguf in the artifact instead of the directory, and the
+        # file filters so a HuggingFace snapshot only downloads what is needed.
         resolved = await resolve(
-            model_source, host.url, host.api_key, backend_type=backend_type
+            model_source,
+            host.url,
+            host.api_key,
+            backend_type=backend_type,
+            file_filters=config.get("file_filters"),
         )
         # Extract filesystem path from local:// URI (scheme is 8 chars)
         if resolved.startswith("local://"):
@@ -319,9 +324,12 @@ async def validate_target_fitness(
 
 
 async def ensure_model_on_target(
-    target_host: Host, model_source: str
+    target_host: Host, model_source: str, file_filters: list[str] | None = None
 ) -> tuple[str, bool]:
     """Ensure *model_source* is pulled on *target_host* via S-019.
+
+    ``file_filters`` carries the migrating instance's HuggingFace download
+    filters so the target snapshot matches the source one.
 
     Returns ``(local_path, cached)`` on success.
     Raises ``HTTPException`` on failure.
@@ -330,7 +338,7 @@ async def ensure_model_on_target(
     from app.routes.management.models import _pull_on_host
 
     parsed = parse(model_source)
-    result = await _pull_on_host(parsed, model_source, target_host)
+    result = await _pull_on_host(parsed, model_source, target_host, file_filters)
 
     from app.routes.management.models import _StructuredPullError
 
@@ -702,7 +710,11 @@ async def execute_migration(
 
     # ── 5. Ensure model on target ───────────────────────────────
     try:
-        path, cached = await ensure_model_on_target(target_host, model_source)
+        path, cached = await ensure_model_on_target(
+            target_host,
+            model_source,
+            _config_field(instance_config, "file_filters"),
+        )
         steps.append(
             MigrationStep(
                 step="ensure_model",

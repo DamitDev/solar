@@ -28,6 +28,11 @@ interface MetadataRow {
   value: string;
 }
 
+/** Ready-made patterns for the most common filtered HuggingFace pulls. */
+const FILTER_SUGGESTIONS = ['*UD-Q4_K_XL*', '*Q8_0*', 'mmproj-BF16.gguf', '*.safetensors', 'tokenizer*'];
+
+const isHuggingFaceSource = (source: string) => source.trim().startsWith('huggingface://');
+
 const PRIORITY_EXPLANATIONS: Record<IntentPriority, string> = {
   production: 'Never displaced automatically; may displace lower priorities.',
   staging: 'May be displaced by production; migrates when possible.',
@@ -42,6 +47,7 @@ export function NewIntentModal({ initial, onClose, onCreated }: NewIntentModalPr
   const [priority, setPriority] = useState<IntentPriority>(initial?.priority ?? 'production');
   const [strategy, setStrategy] = useState<IntentStrategy>(initial?.strategy ?? 'rolling');
   const [backend, setBackend] = useState<Record<string, any>>(() => getDefaultConfig('llamacpp', 'llm', true));
+  const [fileFilters, setFileFilters] = useState<string[]>([]);
 
   const [roles, setRoles] = useState<string[]>(['inference']);
   const [gpuType, setGpuType] = useState<string>('');
@@ -103,6 +109,13 @@ export function NewIntentModal({ initial, onClose, onCreated }: NewIntentModalPr
   const toggleInArray = (arr: string[], value: string): string[] =>
     arr.includes(value) ? arr.filter((v) => v !== value) : [...arr, value];
 
+  const filtersApply = isHuggingFaceSource(modelSource);
+
+  const handleFilterAdd = (pattern = '') => setFileFilters((prev) => [...prev, pattern]);
+  const handleFilterChange = (index: number, pattern: string) =>
+    setFileFilters((prev) => prev.map((row, i) => (i === index ? pattern : row)));
+  const handleFilterRemove = (index: number) => setFileFilters((prev) => prev.filter((_, i) => i !== index));
+
   const handleMetadataAdd = () => setMetadataRows((prev) => [...prev, { key: '', value: '' }]);
   const handleMetadataChange = (index: number, patch: Partial<MetadataRow>) =>
     setMetadataRows((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
@@ -117,13 +130,18 @@ export function NewIntentModal({ initial, onClose, onCreated }: NewIntentModalPr
       if (row.key.trim()) metadata[row.key.trim()] = row.value;
     }
 
+    // Filters only reach the server for huggingface:// sources — nothing else
+    // can restrict which files are downloaded.
+    const patterns = filtersApply ? fileFilters.map((p) => p.trim()).filter(Boolean) : [];
+    const submittedBackend = { ...backend, file_filters: patterns };
+
     const request: IntentCreateRequest = {
       alias: alias.trim(),
       model_source: modelSource.trim(),
       replicas,
       priority,
       strategy,
-      backend,
+      backend: submittedBackend,
       placement: {
         roles,
         gpu_type: gpuType || null,
@@ -151,7 +169,7 @@ export function NewIntentModal({ initial, onClose, onCreated }: NewIntentModalPr
     try {
       const created = await solarClient.createIntent({
         ...request,
-        backend: sanitizeIntentBackend(stripEmptyOptionalFields(backend)),
+        backend: sanitizeIntentBackend(stripEmptyOptionalFields(submittedBackend)),
       });
       onCreated(created);
     } catch (err: any) {
@@ -253,6 +271,63 @@ export function NewIntentModal({ initial, onClose, onCreated }: NewIntentModalPr
                 {fieldError('model_source')}
               </div>
 
+              {filtersApply && (
+                <div className="md:col-span-2">
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-sm font-medium text-nord-4">Download filters (optional)</label>
+                    <button
+                      type="button"
+                      onClick={() => handleFilterAdd()}
+                      className="flex items-center gap-1 px-2 py-1 rounded text-xs text-nord-10 hover:bg-nord-2 transition-colors"
+                    >
+                      <Plus size={14} /> Add filter
+                    </button>
+                  </div>
+                  <p className="text-xs text-nord-4 mb-2">
+                    Download only the matching files instead of the whole repository — useful for repos that ship many
+                    quantizations. One pattern per row, <code>*</code> allowed.
+                  </p>
+                  {fileFilters.length === 0 ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-nord-4">No filters — the full repository is downloaded. Try:</span>
+                      {FILTER_SUGGESTIONS.map((suggestion) => (
+                        <button
+                          key={suggestion}
+                          type="button"
+                          onClick={() => handleFilterAdd(suggestion)}
+                          className="px-2 py-1 rounded-full text-xs font-mono border border-nord-3 bg-nord-2 text-nord-4 hover:border-nord-10 hover:text-nord-10 transition-colors"
+                        >
+                          + {suggestion}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {fileFilters.map((pattern, index) => (
+                        <div key={index} className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={pattern}
+                            onChange={(e) => handleFilterChange(index, e.target.value)}
+                            placeholder="*UD-Q4_K_XL*"
+                            className={`${inputClass} font-mono text-sm`}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleFilterRemove(index)}
+                            className="p-2 rounded hover:bg-nord-2 text-nord-4 hover:text-nord-11 transition-colors"
+                            title="Remove filter"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {fieldError('backend.file_filters')}
+                </div>
+              )}
+
               <div>
                 <label className="block text-sm font-medium text-nord-4 mb-1">Replicas</label>
                 <input
@@ -307,8 +382,9 @@ export function NewIntentModal({ initial, onClose, onCreated }: NewIntentModalPr
           {/* Section 2: Backend */}
           <div>
             <h3 className="text-xs font-semibold text-nord-4 uppercase tracking-wide mb-3">Backend</h3>
-            <BackendConfigFields value={backend} onChange={setBackend} />
+            <BackendConfigFields value={backend} onChange={setBackend} forIntent />
             {fieldError('backend')}
+            {fieldError('backend.model_file')}
           </div>
 
           {/* Section 3: Placement (optional) */}

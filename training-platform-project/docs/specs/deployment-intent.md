@@ -157,7 +157,7 @@ The client supplies the **desired** fields only. Server-managed fields (`id`, `s
 | `replicas` | integer | no | `1` | Desired replica count. `>= 0`. `0` means "registered intent, no running instances" (useful to pre-create then scale up). One replica per host. |
 | `priority` | enum | no | `production` | `production` \| `staging` \| `ephemeral`. See Section 4.3. Maps to instance `config.priority` (S-036). |
 | `strategy` | enum | no | `rolling` | `rolling` \| `immediate`. Applies when replacing replicas (version/config change, scale-down churn). See Section 11. |
-| `backend` | object | yes | — | Backend/instance config template (Section 6). Carries `backend_type` and runtime params. Must **not** include `alias`, `model_source`, `host`, `port`, `api_key`. |
+| `backend` | object | yes | — | Backend/instance config template (Section 6). Carries `backend_type` and runtime params, plus the optional `model_file` and `file_filters` model selectors (Section 4.7.1). Must **not** include `alias`, `model_source`, `host`, `port`, `api_key`. |
 | `placement` | object | no | `{ "roles": ["inference"] }` | Placement constraints. See Section 4.5. |
 | `resources` | object | no | `{}` | Resource hints for placement. See Section 4.6. |
 | `metadata` | object (string→string) | no | `{}` | Free-form audit labels (e.g. originating job, requester). Stored, surfaced in status, never interpreted by placement. |
@@ -237,7 +237,33 @@ The S-040 API must reject invalid intents with `400`/`422` (Section 12.5):
 - `strategy` ∈ {`rolling`, `immediate`}.
 - `backend.backend_type` ∈ the supported backend types (`llamacpp`, `huggingface_causal`, `huggingface_classification`, `huggingface_embedding`, `huggingface_vision`).
 - `backend` must not contain `alias`, `model_source`, `host`, `port`, or `api_key` (these are server-derived).
+- `backend.model_file` (if set) requires `backend_type == "llamacpp"` and must be a non-empty string.
+- `backend.file_filters` (if set) must be a list of non-empty patterns, and a non-empty list requires a `huggingface://` `model_source`.
 - `placement.roles` non-empty; `gpu_type` (if set) is a known type.
+
+### 4.7.1 Model file selection and download filters
+
+A `model_source` names a whole artifact, but a llama.cpp instance needs one GGUF **file**, and a HuggingFace GGUF repository typically ships many quantisations. Two optional `backend` fields close that gap:
+
+| Field | Backend | Description |
+|-------|---------|-------------|
+| `model_file` | `llamacpp` | Filename, relative path or `*` glob selecting the GGUF inside the pulled model directory. Resolved by Solar Host into the instance's `model` path. |
+| `file_filters` | any | HuggingFace Hub `allow_patterns`; only matching files are downloaded. Requires a `huggingface://` source — ORAS pulls a Harbor artifact whole and `local://` is already on disk. |
+
+```json
+{
+  "alias": "qwen3-vl:235b",
+  "model_source": "huggingface://unsloth/Qwen3-VL-235B-Instruct-GGUF",
+  "backend": {
+    "backend_type": "llamacpp",
+    "model_file": "*UD-Q4_K_XL*.gguf",
+    "mmproj": "mmproj-BF16.gguf",
+    "file_filters": ["*UD-Q4_K_XL*", "mmproj-BF16.gguf"]
+  }
+}
+```
+
+Resolution happens on Solar Host, which owns the filesystem — see [model-source-uri.md](model-source-uri.md) §4.3. `mmproj` accepts the same patterns. Omitting `model_file` keeps the previous behaviour: the largest GGUF at the root of a Harbor artifact is served.
 
 ---
 
@@ -302,7 +328,7 @@ The reconciler composes a concrete Solar Host `InstanceConfig` for each replica 
 
 Notes:
 
-- Intents use `model_source` **exclusively**. The legacy raw `model` / `model_id` path fields are not part of the intent contract (they remain for manual/backward-compatible flows only).
+- Intents use `model_source` **exclusively**. The legacy raw `model` / `model_id` path fields are not part of the intent contract (they remain for manual/backward-compatible flows only). `backend.model_file` is the intent-level way to pick a file inside the resolved source (Section 4.7.1).
 - The `backend` template is validated against the matching backend config model at submit time (best-effort) and again when the instance is created on the host (authoritative).
 - Backend-specific required fields (e.g. `model_type` for llama.cpp embedding vs. reranker) travel inside `backend`. The intent layer does not enumerate them; it defers to the existing per-backend config models.
 

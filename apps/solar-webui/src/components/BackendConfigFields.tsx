@@ -38,6 +38,10 @@ interface BackendConfigFieldsProps {
   showAlias?: boolean;
   /** model path / model_id — AddInstanceModal: true; intent: false */
   showModelFields?: boolean;
+  /** Intent form: true. Keeps server-derived fields out of the backend object
+   *  on backend/mode switches and shows the model file selector instead of an
+   *  absolute model path. */
+  forIntent?: boolean;
   /** Bound through for AddInstanceModal (alias is part of its formData). */
   aliasValue?: string;
   onAliasChange?: (v: string) => void;
@@ -60,6 +64,7 @@ export function BackendConfigFields({
   onChange,
   showAlias = false,
   showModelFields = false,
+  forIntent = false,
   aliasValue,
   onAliasChange,
 }: BackendConfigFieldsProps) {
@@ -76,7 +81,7 @@ export function BackendConfigFields({
   const handlePrimaryBackendChange = (newBackend: PrimaryBackend) => {
     setPrimaryBackend(newBackend);
     const mode = newBackend === 'llamacpp' ? llamaCppMode : huggingFaceMode;
-    onChange(getDefaultConfig(newBackend, mode));
+    onChange(getDefaultConfig(newBackend, mode, forIntent));
     setLabelsInput('');
   };
 
@@ -86,7 +91,7 @@ export function BackendConfigFields({
     } else {
       setHuggingFaceMode(mode as HuggingFaceMode);
     }
-    onChange(getDefaultConfig(primaryBackend, mode));
+    onChange(getDefaultConfig(primaryBackend, mode, forIntent));
     setLabelsInput('');
   };
 
@@ -242,6 +247,25 @@ export function BackendConfigFields({
                 </div>
               )}
 
+              {/* Model file selector — intents point at a directory, not a file */}
+              {forIntent && (
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-nord-4 mb-1">Model file</label>
+                  <input
+                    type="text"
+                    name="model_file"
+                    value={value.model_file || ''}
+                    onChange={handleChange}
+                    placeholder="*UD-Q4_K_XL*.gguf"
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent font-mono text-sm"
+                  />
+                  <p className="text-xs text-nord-4 mt-1">
+                    Which GGUF to serve. A filename, relative path or <code>*</code> glob, searched recursively in the
+                    downloaded model directory. Leave empty to use the largest GGUF found.
+                  </p>
+                </div>
+              )}
+
               {/* Multimodal projector (vision) — LLM only */}
               {llamaCppMode === 'llm' && (
                 <div className="md:col-span-2">
@@ -251,11 +275,12 @@ export function BackendConfigFields({
                     name="mmproj"
                     value={value.mmproj || ''}
                     onChange={handleChange}
-                    placeholder="/path/to/mmproj.gguf"
+                    placeholder={forIntent ? 'mmproj-BF16.gguf' : '/path/to/mmproj.gguf'}
                     className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
                   />
                   <p className="text-xs text-nord-4 mt-1">
-                    Passed to llama-server as <code>--mmproj</code> for vision-capable models.
+                    Passed to llama-server as <code>--mmproj</code> for vision-capable models. A bare filename or glob
+                    is resolved in the model directory, same as the model file.
                   </p>
                 </div>
               )}

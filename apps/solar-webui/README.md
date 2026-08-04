@@ -197,6 +197,15 @@ src/
 - **Max Length**: Maximum sequence length
 - **Normalize Embeddings**: L2 normalize output vectors (recommended for similarity search)
 
+## Submitting Intents
+
+An intent declares the desired deployment (alias, model source, replicas, priority) and lets solar-control place it. Unlike an instance, it never names a host or an absolute path — two fields bridge that gap for GGUF models:
+
+- **Model file** (llama.cpp): which GGUF to serve, given as a filename, relative path or `*` glob such as `*UD-Q4_K_XL*.gguf`. It is searched recursively in the downloaded model directory, so it works even when the file sits in a subfolder. Leave it empty to serve the largest GGUF found. The **Multimodal projector** field accepts the same patterns (e.g. `mmproj-BF16.gguf`).
+- **Download filters** (`huggingface://` sources only): download just the matching files instead of the whole repository — the difference between a few GB and every quantisation of a large GGUF repo. Add one pattern per row; a file is downloaded when it matches any of them.
+
+The two are independent: the filters decide what lands on disk, the model file and projector decide which of those files each llama-server flag points at.
+
 ## Technology Stack
 
 - **React 18** - Modern UI library

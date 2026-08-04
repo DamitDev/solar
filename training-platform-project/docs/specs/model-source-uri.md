@@ -215,6 +215,19 @@ Resolution is idempotent. Repeated calls with the same URI produce the same resu
 }
 ```
 
+`file_filters` restricts a HuggingFace snapshot to the matching files — a file is downloaded when it matches **any** pattern. Without it the whole repository is downloaded, which is wasteful for GGUF repositories that ship every quantisation:
+
+```json
+{
+  "source": "huggingface",
+  "model_id": "unsloth/Qwen3-VL-235B-Instruct-GGUF",
+  "source_uri": "huggingface://unsloth/Qwen3-VL-235B-Instruct-GGUF",
+  "file_filters": ["*UD-Q4_K_XL*", "mmproj-BF16.gguf"]
+}
+```
+
+Filters are ignored for `harbor` pulls: ORAS always pulls a whole artifact.
+
 **Response body:**
 
 ```json
@@ -267,6 +280,27 @@ The directory name (slug) is deterministically derived from the source URI:
 
 The slug is deterministic: given a source URI, the expected directory can always be computed. However, directory existence alone does not constitute a cache hit — only manifest entries count (see Section 5).
 
+### 4.3 Selecting a file inside an artifact
+
+A pull resolves to a **directory**, but `llama-server --model` needs a **file**. There are three ways to name it, in order of precedence:
+
+| Mechanism | Where it lives | Notes |
+|-----------|----------------|-------|
+| `model_file` pattern | instance config / intent `backend.model_file` | Filename, relative path or `*` glob. Works for every scheme. |
+| `repo://name:version/subpath` | the URI itself | Exact path inside a Harbor artifact, resolved at pull time. |
+| Largest root GGUF | automatic | Fallback for `repo://` + `llamacpp` when neither of the above is given. |
+
+Solar Host resolves a `model_file` pattern against the artifact directory (the manifest `path`, or the `local://` target) in this order:
+
+1. An absolute path is used as-is.
+2. `<artifact dir>/<pattern>` when that exact file exists.
+3. A glob at the root of the artifact directory.
+4. A recursive glob — this is what makes a bare filename or a broad pattern work when the file sits in a subfolder of a filtered repository.
+
+When several files match, the trailing shards of a split GGUF (`...-00002-of-00003.gguf`) are dropped because `llama-server` loads them itself from the first shard, and the largest remaining file wins. A tie between equally sized candidates is an error, not a guess.
+
+The llama.cpp `mmproj` field accepts the same patterns, resolved against the same directory. Note that filters and selectors are independent: `file_filters` decides what lands on disk, `model_file` / `mmproj` decide which of those files each llama-server flag points at.
+
 ## 5. Caching
 
 ### 5.1 Manifest as single source of truth
@@ -298,12 +332,19 @@ The manifest file (`MODELS_DIR/manifest.json`) is the **single source of truth**
 | `size_bytes` | integer | Total size of model files in bytes |
 | `digest` | string, optional | Content digest (from Harbor or computed) |
 | `downloaded_at` | string | ISO 8601 timestamp of download completion |
+| `file_filters` | list of strings, optional | HuggingFace patterns the snapshot was downloaded with. Absent/`null` means the full repository is present. |
 
 ### 5.3 Cache behavior per scheme
 
 **`repo://`**: Cache key is the full `source_uri` (e.g. `repo://iris-osl:v3`). Versions are immutable in Data Repository — same version always refers to the same artifact. Skip download if manifest entry exists with matching `source_uri`. No TTL-based invalidation.
 
 **`huggingface://`**: Cache key is the full `source_uri` (e.g. `huggingface://microsoft/phi-3`). Skip download if manifest entry exists with matching `source_uri`. HuggingFace models can change upstream — the cached version is treated as valid unless explicit re-download is requested (future: force-refresh flag).
+
+A filtered snapshot narrows what "cached" means, so the recorded `file_filters` participate in the check. One repository always keeps one directory:
+
+- Recorded `null` (full repository) satisfies every request.
+- A recorded pattern set satisfies a request whose patterns it already covers.
+- Otherwise the snapshot is **topped up in place** with the union of both pattern sets (or unfiltered, when the new request wants everything). The directory is kept — its files are valid and `snapshot_download` only fetches what is missing.
 
 **`local://`**: No caching. Path is resolved on every use. The file or directory must exist at resolution time.
 

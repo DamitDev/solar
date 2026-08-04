@@ -46,6 +46,58 @@ def validate_priority(instance_data: dict[str, Any]) -> None:
         )
 
 
+def _validate_backend_model_selection(
+    backend: dict[str, Any], model_source: Any
+) -> list[dict[str, str]]:
+    """Validate the model file selector and the download filters.
+
+    ``model_file`` picks a GGUF inside the pulled model directory and only
+    llama.cpp consumes it; ``file_filters`` maps to HuggingFace Hub
+    ``allow_patterns``, which ORAS (``repo://``) and ``local://`` cannot honour.
+    """
+    errors: list[dict[str, str]] = []
+
+    model_file = backend.get("model_file")
+    if model_file is not None:
+        if backend.get("backend_type") != "llamacpp":
+            errors.append(
+                {
+                    "field": "backend.model_file",
+                    "message": "model_file is only supported for the llamacpp backend",
+                }
+            )
+        elif not isinstance(model_file, str) or not model_file.strip():
+            errors.append(
+                {
+                    "field": "backend.model_file",
+                    "message": "model_file must be a non-empty string",
+                }
+            )
+
+    file_filters = backend.get("file_filters")
+    if file_filters is not None:
+        if not isinstance(file_filters, list) or not all(
+            isinstance(f, str) and f.strip() for f in file_filters
+        ):
+            errors.append(
+                {
+                    "field": "backend.file_filters",
+                    "message": "file_filters must be a list of non-empty patterns",
+                }
+            )
+        elif file_filters and not str(model_source).startswith("huggingface://"):
+            errors.append(
+                {
+                    "field": "backend.file_filters",
+                    "message": (
+                        "file_filters only applies to huggingface:// model sources"
+                    ),
+                }
+            )
+
+    return errors
+
+
 def validate_intent_create(data: dict[str, Any]) -> list[dict[str, str]]:
     """Validate an intent creation request (S-039 §4.7).
 
@@ -139,6 +191,8 @@ def validate_intent_create(data: dict[str, Any]) -> list[dict[str, str]]:
                         "message": f"'{forbidden}' is server-derived and must not be set by the client",
                     }
                 )
+
+        errors.extend(_validate_backend_model_selection(backend, model_source))
 
     # placement
     placement = data.get("placement", {})
