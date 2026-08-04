@@ -31,7 +31,7 @@ test-supernova-steps:
 	cd apps/supernova-steps && uv run pytest -q
 
 test-solar-webui:
-	pnpm --filter solar-webui lint
+	pnpm --filter solar-webui lint && pnpm --filter solar-webui test
 
 lint-solar-control:
 	cd apps/solar-control && uv run ruff check . && uv run black --check .
