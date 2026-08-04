@@ -14,7 +14,6 @@ import uuid
 
 import pytest
 from conftest import (
-    MANAGEMENT_API_KEY,
     _build_stack,
     _ensure_model_registered,
 )
@@ -54,6 +53,7 @@ def wake_stack(
             stub_harbor,
             harbor_ref,
             tmp_root=tmp_root,
+            run_secrets=stack.secrets,
             reconcile_interval_s=3600.0,
         )
     )
@@ -72,7 +72,7 @@ async def test_intent_create_wakes_reconciler(wake_stack, clean_state):
 
     async with httpx.AsyncClient(
         base_url=wake_stack.control_url,
-        headers={"X-API-Key": MANAGEMENT_API_KEY},
+        headers={"X-API-Key": wake_stack.secrets["management"]},
         timeout=15.0,
     ) as http_control:
         intent = await create_intent(http_control, alias=f"wake-{uuid.uuid4().hex[:8]}")

@@ -43,13 +43,9 @@ os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:1/0")
 import pytest
 import pytest_asyncio
 from fixtures.constants import (
-    DATA_REPOSITORY_API_KEY,
     FIXTURE_MODEL_DIR,
     HARBOR_PASSWORD,
     HARBOR_USERNAME,
-    HOST_A_API_KEY,
-    HOST_B_API_KEY,
-    MANAGEMENT_API_KEY,
     MODEL_NAME,
     MODEL_VERSION,
 )
@@ -156,7 +152,26 @@ def stub_harbor(tmp_path_factory: pytest.TempPathFactory):
 
 
 @pytest.fixture(scope="session")
-def db_env(postgres_container, redis_container):
+def run_secrets() -> dict[str, str]:
+    """Per-run API keys — concurrent suite runs on one machine must not share
+    keys: a foreign host (zombie/port-race) would authenticate against the
+    wrong control and leak instances across runs. Every key is unique per
+    session, so any cross-run connection is rejected at the auth layer."""
+
+    import uuid
+
+    rid = uuid.uuid4().hex[:8]
+    return {
+        "run_id": rid,
+        "management": f"test-mgmt-{rid}",
+        "data_repository": f"repo-{rid}",
+        "host_a": f"test-host-a-{rid}-key",
+        "host_b": f"test-host-b-{rid}-key",
+    }
+
+
+@pytest.fixture(scope="session")
+def db_env(postgres_container, redis_container, run_secrets):
     """Session-wide environment + connection URLs shared by all services."""
     pg_host = postgres_container.get_container_host_ip()
     pg_port = postgres_container.get_exposed_port(5432)
@@ -193,8 +208,8 @@ def db_env(postgres_container, redis_container):
     }
     os.environ["DATABASE_URL"] = urls["control_db"]
     os.environ["REDIS_URL"] = urls["redis"]
-    os.environ["DATA_REPOSITORY_API_KEY"] = DATA_REPOSITORY_API_KEY
-    os.environ["MANAGEMENT_API_KEY"] = MANAGEMENT_API_KEY
+    os.environ["DATA_REPOSITORY_API_KEY"] = run_secrets["data_repository"]
+    os.environ["MANAGEMENT_API_KEY"] = run_secrets["management"]
     os.environ["RECONCILE_INTERVAL_S"] = "0.5"
     os.environ["RECONCILE_HEALTH_GATE_TIMEOUT_S"] = "5"
     try:
@@ -294,6 +309,9 @@ class Stack:
 
     reconcile_interval_s: float = 0.5
 
+    run_id: str = ""
+    secrets: dict[str, str] = field(default_factory=dict)
+
     def host_url(self, letter: str) -> str:
         if letter == "a":
             return self.host_a_url
@@ -315,6 +333,13 @@ class Stack:
             return self.host_b
         return self.extra_hosts.get(letter)
 
+    def host_key(self, letter: str) -> str:
+        if letter == "a":
+            return self.secrets["host_a"]
+        if letter == "b":
+            return self.secrets["host_b"]
+        return f"test-host-{letter}-{self.run_id}-key"
+
     async def spawn_extra_host(self, letter: str) -> str:
         """Spawn an additional host subprocess and register it in control.
 
@@ -324,9 +349,11 @@ class Stack:
         """
         if letter in self.extra_hosts:
             return self.extra_host_urls[letter]
-        api_key = f"test-host-{letter}-key"
+        api_key = self.host_key(letter)
         port = free_port()
-        async with _control_client(self.control_url) as client:
+        async with _control_client(
+            self.control_url, self.secrets["management"]
+        ) as client:
             host_id = await register_host_via_api(
                 client,
                 f"host-{letter}",
@@ -433,6 +460,7 @@ async def _build_stack(
     harbor_ref: str,
     *,
     tmp_root: Path,
+    run_secrets: dict[str, str],
     reconcile_interval_s: float = 0.5,
 ) -> Stack:
     """Spawn data-repo, control (with 2 pre-registered hosts), and 2 hosts."""
@@ -445,6 +473,8 @@ async def _build_stack(
         models_dir_a=tmp_root / "models-a",
         models_dir_b=tmp_root / "models-b",
         reconcile_interval_s=reconcile_interval_s,
+        run_id=run_secrets["run_id"],
+        secrets=run_secrets,
     )
     logs_dir = stack.logs_dir
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -493,8 +523,8 @@ async def _build_stack(
         DATABASE_URL=db_env["control_db"],
         REDIS_URL=db_env["redis"],
         DATA_REPOSITORY_URL=stack.data_repo_url,
-        DATA_REPOSITORY_API_KEY=DATA_REPOSITORY_API_KEY,
-        MANAGEMENT_API_KEY=MANAGEMENT_API_KEY,
+        DATA_REPOSITORY_API_KEY=run_secrets["data_repository"],
+        MANAGEMENT_API_KEY=run_secrets["management"],
         RECONCILE_INTERVAL_S=str(reconcile_interval_s),
         RECONCILE_HEALTH_GATE_TIMEOUT_S="5",
         # Fast pacing for the test env: the settle/cooldown windows exist to
@@ -534,7 +564,7 @@ async def _build_stack(
     stack.host_a_env = build_subprocess_env(
         base,
         **host_common,
-        API_KEY=HOST_A_API_KEY,
+        API_KEY=run_secrets["host_a"],
         PORT="8001",
         CONFIG_FILE=str(tmp_root / "config-a.json"),
         LOG_DIR=str(tmp_root / "logs-a"),
@@ -545,7 +575,7 @@ async def _build_stack(
     stack.host_b_env = build_subprocess_env(
         base,
         **host_common,
-        API_KEY=HOST_B_API_KEY,
+        API_KEY=run_secrets["host_b"],
         PORT="8002",
         CONFIG_FILE=str(tmp_root / "config-b.json"),
         LOG_DIR=str(tmp_root / "logs-b"),
@@ -570,19 +600,21 @@ async def _build_stack(
 
     host_a_port = free_port()
     host_b_port = free_port()
-    async with _control_client(stack.control_url) as http_control:
+    async with _control_client(
+        stack.control_url, run_secrets["management"]
+    ) as http_control:
         host_a_id = await register_host_via_api(
             http_control,
             "host-a",
             f"http://127.0.0.1:{host_a_port}",
-            HOST_A_API_KEY,
+            run_secrets["host_a"],
             roles=["inference"],
         )
         host_b_id = await register_host_via_api(
             http_control,
             "host-b",
             f"http://127.0.0.1:{host_b_port}",
-            HOST_B_API_KEY,
+            run_secrets["host_b"],
             roles=["inference"],
         )
 
@@ -661,7 +693,8 @@ async def _wait_host_online(stack: Stack, name: str, timeout: float = 40.0) -> N
     import httpx
 
     async with httpx.AsyncClient(
-        base_url=stack.control_url, headers={"X-API-Key": MANAGEMENT_API_KEY}
+        base_url=stack.control_url,
+        headers={"X-API-Key": stack.secrets["management"]},
     ) as client:
 
         async def online() -> bool:
@@ -707,13 +740,13 @@ async def _ensure_model_registered(stack: Stack) -> None:
         )
 
 
-def _control_client(base_url: str):
+def _control_client(base_url: str, api_key: str):
     """Return an httpx.AsyncClient for control's management API."""
     import httpx
 
     return httpx.AsyncClient(
         base_url=base_url,
-        headers={"X-API-Key": MANAGEMENT_API_KEY},
+        headers={"X-API-Key": api_key},
         timeout=15.0,
     )
 
@@ -725,6 +758,7 @@ def stack(
     stub_model_artifact,
     alembic_data_repo,
     alembic_solar_control,
+    run_secrets,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Any:
     """One full stack for the whole session (previously per module).
@@ -744,7 +778,13 @@ def stack(
     tmp_root = tmp_path_factory.mktemp("stack")
     harbor_ref, _files = stub_model_artifact
     stack = asyncio.run(
-        _build_stack(db_env, stub_harbor, harbor_ref, tmp_root=tmp_root)
+        _build_stack(
+            db_env,
+            stub_harbor,
+            harbor_ref,
+            tmp_root=tmp_root,
+            run_secrets=run_secrets,
+        )
     )
     try:
         asyncio.run(_ensure_model_registered(stack))
@@ -773,7 +813,9 @@ async def http_data_repo(stack: Stack):
 
 @pytest_asyncio.fixture
 async def http_control(stack: Stack):
-    async with _control_client(stack.control_url) as client:
+    async with _control_client(
+        stack.control_url, stack.secrets["management"]
+    ) as client:
         yield client
 
 
@@ -784,7 +826,7 @@ async def http_host(stack: Stack):
 
     async with httpx.AsyncClient(
         base_url=stack.host_a_url,
-        headers={"X-API-Key": HOST_A_API_KEY},
+        headers={"X-API-Key": stack.secrets["host_a"]},
         timeout=15.0,
     ) as client:
         yield client
@@ -796,7 +838,7 @@ async def http_host_b(stack: Stack):
 
     async with httpx.AsyncClient(
         base_url=stack.host_b_url,
-        headers={"X-API-Key": HOST_B_API_KEY},
+        headers={"X-API-Key": stack.secrets["host_b"]},
         timeout=15.0,
     ) as client:
         yield client
@@ -807,13 +849,13 @@ async def _delete_all_instances(stack: Stack) -> None:
     import httpx
 
     targets: list[tuple[str, str]] = [
-        (stack.host_a_url, HOST_A_API_KEY),
-        (stack.host_b_url, HOST_B_API_KEY),
+        (stack.host_a_url, stack.secrets["host_a"]),
+        (stack.host_b_url, stack.secrets["host_b"]),
     ]
     # Extra hosts (e.g. host-c from the shortfall test) persist for the rest
     # of the session — clean them too, or their instances leak across tests.
     for letter, url in stack.extra_host_urls.items():
-        targets.append((url, f"test-host-{letter}-key"))
+        targets.append((url, stack.host_key(letter)))
     for url, api_key in targets:
         async with httpx.AsyncClient(
             base_url=url, headers={"X-API-Key": api_key}, timeout=15.0
