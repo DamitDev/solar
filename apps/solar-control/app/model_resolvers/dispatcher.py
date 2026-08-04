@@ -1,5 +1,5 @@
-from .parser import parse, RepoURI, HuggingFaceURI, LocalURI
 from .huggingface import resolve_huggingface
+from .parser import HuggingFaceURI, LocalURI, RepoURI, parse
 from .repo import resolve_repo
 
 

@@ -1,8 +1,8 @@
 """Tests for intent API (S-040)."""
 
-import pytest
 from unittest.mock import AsyncMock, patch
 
+import pytest
 
 from app.models.intent import (
     IntentCreate,
@@ -366,8 +366,9 @@ async def test_create_intent_alias_conflict(valid_intent_create):
         "app.routes.management.intents.intent_db.check_alias_conflict",
         new=AsyncMock(return_value=True),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.post(
@@ -386,8 +387,9 @@ async def test_create_intent_validation_error():
         "app.routes.management.intents.intent_db.check_alias_conflict",
         new=AsyncMock(return_value=False),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.post(
@@ -410,8 +412,9 @@ async def test_create_intent_validation_error():
 @pytest.mark.anyio
 async def test_create_intent_unauthorized(valid_intent_create):
     """POST without API key returns 401."""
-    from app.main import app
     from fastapi.testclient import TestClient
+
+    from app.main import app
 
     client = TestClient(app)
     response = client.post(
@@ -429,8 +432,9 @@ async def test_list_intents(mock_intent_response):
         "app.routes.management.intents.intent_db.list_intents",
         new=AsyncMock(return_value=[mock_intent_response]),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.get(
@@ -452,8 +456,9 @@ async def test_get_intent_found(mock_intent_response):
         "app.routes.management.intents.intent_db.get_intent",
         new=AsyncMock(return_value=mock_intent_response),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.get(
@@ -472,8 +477,9 @@ async def test_get_intent_not_found():
         "app.routes.management.intents.intent_db.get_intent",
         new=AsyncMock(return_value=None),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.get(
@@ -492,8 +498,9 @@ async def test_delete_intent_success(mock_intent_response):
         "app.routes.management.intents.intent_db.soft_delete_intent",
         new=AsyncMock(return_value=mock_intent_response),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.delete(
@@ -513,8 +520,9 @@ async def test_delete_intent_not_found():
         "app.routes.management.intents.intent_db.soft_delete_intent",
         new=AsyncMock(return_value=None),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.delete(
@@ -533,8 +541,9 @@ async def test_delete_intent_with_orphan(mock_intent_response):
         "app.routes.management.intents.intent_db.soft_delete_intent",
         new=AsyncMock(return_value=mock_intent_response),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.delete(
@@ -555,8 +564,9 @@ async def test_list_intents_with_filters(mock_intent_response):
         "app.routes.management.intents.intent_db.list_intents",
         new=mock_list,
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.get(

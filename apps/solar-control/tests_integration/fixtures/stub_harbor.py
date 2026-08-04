@@ -83,7 +83,7 @@ class _StubHarborState:
                 auth = headers.get("Authorization", "")[:12]
                 with open(self.log_file, "a") as f:
                     f.write(f"{method} {path} auth={auth}\n")
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
 
     def received_requests(self) -> list[tuple[str, str, dict[str, str]]]:
@@ -172,7 +172,7 @@ class StubHarborHandler(BaseHTTPRequestHandler):
     def state(self) -> _StubHarborState:
         return self.server.state  # type: ignore[attr-defined]
 
-    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+    def log_message(self, format: str, *args: Any) -> None:
         logger.debug("stub-harbor: " + format, *args)
 
     def _send(self, status: int, body: bytes, headers: dict[str, str]) -> None:
@@ -207,7 +207,7 @@ class StubHarborHandler(BaseHTTPRequestHandler):
             return False
         try:
             decoded = base64.b64decode(auth[6:]).decode()
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
         # Accept any non-empty user:password (robot-style creds).
         return ":" in decoded and len(decoded) > 1
@@ -230,13 +230,13 @@ class StubHarborHandler(BaseHTTPRequestHandler):
     # dispatch
     # ------------------------------------------------------------------
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         self._dispatch("GET")
 
-    def do_HEAD(self) -> None:  # noqa: N802
+    def do_HEAD(self) -> None:
         self._dispatch("HEAD")
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         self._dispatch("POST")
 
     def _dispatch(self, method: str) -> None:

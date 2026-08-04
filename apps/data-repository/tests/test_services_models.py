@@ -9,7 +9,10 @@ exercised — the service builds the repo internally and the test swaps it out.
 """
 
 import uuid
-from datetime import datetime, timezone
+
+# Context-manager helper used by many tests.
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -48,9 +51,6 @@ from app.services.models import (
     ModelRegistrationService,
     ModelUpdateService,
 )
-
-# Context-manager helper used by many tests.
-from contextlib import asynccontextmanager
 
 pytestmark = pytest.mark.asyncio
 
@@ -390,7 +390,7 @@ async def test_get_model_version_success():
         harbor_ref="imgrepo.damit.hu/supernova/mymodel:v3",
         size_bytes=2048,
         checksum="sha256:abc",
-        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
         metadata={"k": "v"},
     )
 
@@ -416,7 +416,7 @@ async def test_get_model_version_latest_alias_passed_through():
         harbor_ref="imgrepo.damit.hu/supernova/mymodel:v7",
         size_bytes=None,
         checksum=None,
-        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
         metadata={},
     )
     get_mock = AsyncMock(return_value=record)
@@ -461,7 +461,7 @@ async def test_list_model_versions_success_extracts_top_level_metadata():
             harbor_ref="imgrepo.damit.hu/supernova/mymodel:v3",
             size_bytes=2048,
             checksum="sha256:abc",
-            created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
             metadata={
                 "training_config": {"epochs": 3},
                 "eval_metrics": {"accuracy": 0.98},
@@ -474,7 +474,7 @@ async def test_list_model_versions_success_extracts_top_level_metadata():
             harbor_ref="imgrepo.damit.hu/supernova/mymodel:v2",
             size_bytes=1024,
             checksum="sha256:def",
-            created_at=datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 1, 10, 0, tzinfo=UTC),
             metadata={},
         ),
     ]
@@ -525,7 +525,7 @@ async def test_get_model_metadata_success_maps_metadata_sections():
                 "source_trainer": "supernova-job-12345",
             },
         },
-        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
         versions_count=3,
     )
 
@@ -561,7 +561,7 @@ async def test_update_model_metadata_partial_merge_keeps_existing_sections():
                 "source_trainer": "old-job",
             },
         },
-        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
         versions_count=3,
     )
     updated = ArtifactMetadataRecord(
@@ -577,7 +577,7 @@ async def test_update_model_metadata_partial_merge_keeps_existing_sections():
                 "source_trainer": "supernova-job-12345",
             },
         },
-        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
         versions_count=3,
     )
 
@@ -634,7 +634,7 @@ async def test_update_model_metadata_rejects_invalid_lineage_reference_format():
         category="model",
         description="old desc",
         metadata={},
-        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
         versions_count=1,
     )
 
@@ -664,7 +664,7 @@ async def test_get_dataset_metadata_success_maps_metadata_sections():
             "training_config": {"format": "parquet"},
             "lineage": {"source_trainer": "supernova-job-12345"},
         },
-        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
         versions_count=2,
     )
 
@@ -684,7 +684,7 @@ async def test_update_dataset_metadata_description_only_skips_latest_metadata_up
         category="dataset",
         description="old",
         metadata={"training_config": {"format": "json"}},
-        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
         versions_count=2,
     )
     updated = ArtifactMetadataRecord(
@@ -692,7 +692,7 @@ async def test_update_dataset_metadata_description_only_skips_latest_metadata_up
         category="dataset",
         description="new",
         metadata={"training_config": {"format": "json"}},
-        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
         versions_count=2,
     )
 
@@ -727,7 +727,7 @@ async def test_get_dataset_version_success():
         harbor_ref="imgrepo.damit.hu/supernova/iris-tickets:v3",
         size_bytes=2048,
         checksum="sha256:def",
-        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
         metadata={"format": "parquet"},
     )
 
@@ -753,7 +753,7 @@ async def test_get_dataset_version_latest_alias_passed_through():
         harbor_ref="imgrepo.damit.hu/supernova/iris-tickets:v7",
         size_bytes=None,
         checksum=None,
-        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
         metadata={},
     )
     get_mock = AsyncMock(return_value=record)
@@ -798,7 +798,7 @@ async def test_list_dataset_versions_success_returns_core_fields():
             harbor_ref="imgrepo.damit.hu/supernova/iris-tickets:v4",
             size_bytes=4096,
             checksum="sha256:ghi",
-            created_at=datetime(2026, 4, 3, 10, 0, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 3, 10, 0, tzinfo=UTC),
             metadata={"description": "2026-03 export", "format": "parquet"},
         ),
         ArtifactVersionRecord(
@@ -808,7 +808,7 @@ async def test_list_dataset_versions_success_returns_core_fields():
             harbor_ref="imgrepo.damit.hu/supernova/iris-tickets:v3",
             size_bytes=2048,
             checksum="sha256:def",
-            created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
             metadata={},
         ),
     ]
@@ -934,7 +934,7 @@ async def test_delete_dataset_version_not_found_propagates(exc):
 # list_models (ModelQueryService)
 # ---------------------------------------------------------------------------
 
-from app.repositories.artifacts import ArtifactListRecord  # noqa: E402
+from app.repositories.artifacts import ArtifactListRecord
 
 
 def _make_list_record(
@@ -944,7 +944,7 @@ def _make_list_record(
     description: str | None = None,
     versions_count: int = 2,
     latest_version: str | None = "v2",
-    created_at: datetime = datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc),
+    created_at: datetime = datetime(2026, 4, 1, 10, 0, tzinfo=UTC),
 ) -> ArtifactListRecord:
     return ArtifactListRecord(
         name=name,
@@ -965,7 +965,7 @@ async def test_list_models_returns_paginated_response():
         repo_overrides={
             "list_artifacts_by_category": AsyncMock(return_value=(2, records)),
         }
-    ) as (svc, mock_repo):
+    ) as (svc, _):
         result = await svc.list_models()
 
     assert result.total == 2
@@ -1025,7 +1025,7 @@ async def test_list_models_empty_returns_zero_total():
 
 
 async def test_list_models_maps_description_and_created_at():
-    ts = datetime(2026, 1, 15, 8, 0, tzinfo=timezone.utc)
+    ts = datetime(2026, 1, 15, 8, 0, tzinfo=UTC)
     records = [
         _make_list_record(
             name="described-model", description="A great model", created_at=ts
@@ -1101,7 +1101,7 @@ async def test_list_datasets_empty_returns_zero_total():
 
 
 async def test_list_datasets_maps_description_and_created_at():
-    ts = datetime(2026, 3, 10, 12, 0, tzinfo=timezone.utc)
+    ts = datetime(2026, 3, 10, 12, 0, tzinfo=UTC)
     records = [
         _make_list_record(
             name="annotated-data",

@@ -1,15 +1,17 @@
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 from fastapi import HTTPException
+
+from app.model_resolvers.parser import RepoURI, parse
 from app.models import Host, HostStatus
 from app.routes.management.models import (
-    _pull_on_host,
-    _check_disk_space,
-    distribute_model,
     DistributeRequest,
+    _check_disk_space,
+    _pull_on_host,
     _StructuredPullError,
+    distribute_model,
 )
-from app.model_resolvers.parser import RepoURI, parse
 
 
 @pytest.fixture

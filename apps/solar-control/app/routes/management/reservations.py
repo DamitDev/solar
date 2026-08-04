@@ -14,7 +14,7 @@ from app.models.reservation import (
     ReservationRequest,
     ReservationResponse,
 )
-from app.services.reservation import reserve_resources, release_reservation
+from app.services.reservation import release_reservation, reserve_resources
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,8 @@
-import aiohttp
 import asyncio
+
+import aiohttp
 from fastapi import HTTPException
+
 from .parser import HuggingFaceURI
 
 
@@ -21,40 +23,38 @@ async def resolve_huggingface(
 
     try:
         # Long timeout for model pull as it might involve downloading GBs
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(
                 url,
                 json=payload,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=300),
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    path = data.get("path")
-                    if not path:
-                        raise HTTPException(
-                            status_code=502,
-                            detail=f"Host '{host_url}' returned success but no path for model pull.",
-                        )
-                    return f"local://{path}"
-
-                # Propagate specific error codes, wrap others in 502
-                PROPAGATED_CODES = {404, 507}
-                try:
-                    err = await response.json()
-                    detail = (
-                        err.get("detail") or err.get("error") or await response.text()
+            ) as response,
+        ):
+            if response.status == 200:
+                data = await response.json()
+                path = data.get("path")
+                if not path:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Host '{host_url}' returned success but no path for model pull.",
                     )
-                except Exception:
-                    detail = await response.text()
+                return f"local://{path}"
 
-                out_code = (
-                    response.status if response.status in PROPAGATED_CODES else 502
-                )
-                raise HTTPException(
-                    status_code=out_code,
-                    detail=f"Model pull failed on host '{host_url}' [{response.status}]: {detail}",
-                )
+            # Propagate specific error codes, wrap others in 502
+            PROPAGATED_CODES = {404, 507}
+            try:
+                err = await response.json()
+                detail = err.get("detail") or err.get("error") or await response.text()
+            except Exception:  # noqa: BLE001
+                detail = await response.text()
+
+            out_code = response.status if response.status in PROPAGATED_CODES else 502
+            raise HTTPException(
+                status_code=out_code,
+                detail=f"Model pull failed on host '{host_url}' [{response.status}]: {detail}",
+            )
     except HTTPException:
         raise
     except (
@@ -66,7 +66,7 @@ async def resolve_huggingface(
             status_code=502,
             detail=f"Host '{host_url}' is unreachable during model pull: {e}",
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502, detail=f"Unexpected error during model pull on host: {e}"
         )

@@ -12,7 +12,7 @@ from fastapi import Request, status
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.database.endpoints import endpoint_db, ApiEndpoint
+from app.database.endpoints import ApiEndpoint, endpoint_db
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ async def invalidate_endpoint_cache() -> None:
             keys.append(key)
         if keys:
             await r.delete(*keys)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning("Failed to invalidate endpoint cache: %s", e)
 
 
@@ -71,7 +71,7 @@ async def _resolve_endpoint(api_key: str) -> ApiEndpoint | None:
         if cached:
             data = json.loads(cached)
             return ApiEndpoint(**data)
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
 
     ep = await endpoint_db.get_endpoint_by_api_key(api_key)
@@ -85,7 +85,7 @@ async def _resolve_endpoint(api_key: str) -> ApiEndpoint | None:
                 ep.model_dump_json(),
                 ex=ENDPOINT_CACHE_TTL,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
     return ep
 

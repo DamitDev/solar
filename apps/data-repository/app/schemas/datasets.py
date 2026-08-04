@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.artifacts import ArtifactListResponse, ArtifactSummary
 from app.schemas.models import LineageMetadata
@@ -13,8 +13,8 @@ _ALLOWED_DATASET_FORMATS = {"parquet", "hdf5", "json"}
 __all__ = [
     "ArtifactListResponse",
     "ArtifactSummary",
-    "LineageMetadata",
     "GetDatasetMetadataResponse",
+    "LineageMetadata",
     "UpdateDatasetMetadataRequest",
 ]
 
@@ -55,7 +55,7 @@ class RegisterDatasetVersionRequest(BaseModel):
             return value
 
         if not isinstance(data_format, str):
-            raise ValueError("metadata.format must be a string")
+            raise TypeError("metadata.format must be a string")
 
         if data_format not in _ALLOWED_DATASET_FORMATS:
             allowed = ", ".join(sorted(_ALLOWED_DATASET_FORMATS))

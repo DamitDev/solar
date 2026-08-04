@@ -6,8 +6,8 @@ Create Date: 2026-03-26
 
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects.postgresql import ENUM, JSONB, TIMESTAMP, UUID
 
 revision = "0001"

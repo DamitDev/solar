@@ -40,19 +40,21 @@ def fits_resources(
     if not snapshot.reachable:
         return False
 
-    if snapshot.vram_available_gb is not None:
-        if snapshot.vram_available_gb < vram_gb:
-            return False
+    if snapshot.vram_available_gb is not None and snapshot.vram_available_gb < vram_gb:
+        return False
 
-    if ram_gb is not None and snapshot.ram_available_gb is not None:
-        if snapshot.ram_available_gb < ram_gb:
-            return False
+    if (
+        ram_gb is not None
+        and snapshot.ram_available_gb is not None
+        and snapshot.ram_available_gb < ram_gb
+    ):
+        return False
 
-    if disk_gb is not None and snapshot.disk_available_gb is not None:
-        if snapshot.disk_available_gb < disk_gb:
-            return False
-
-    return True
+    return not (
+        disk_gb is not None
+        and snapshot.disk_available_gb is not None
+        and snapshot.disk_available_gb < disk_gb
+    )
 
 
 async def find_candidates(
@@ -179,9 +181,12 @@ async def find_displaceable_instances(
         alias = cfg.get("alias")
 
         # Check one-replica preservation
-        if preserve_alias and alias == preserve_alias:
-            if alias_counts.get(alias, 0) <= 1:
-                continue  # Must preserve at least one replica
+        if (
+            preserve_alias
+            and alias == preserve_alias
+            and alias_counts.get(alias, 0) <= 1
+        ):
+            continue  # Must preserve at least one replica
 
         if can_displace(request_priority, priority):
             inst["_priority"] = priority

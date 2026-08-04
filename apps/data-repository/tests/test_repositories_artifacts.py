@@ -6,7 +6,7 @@ to substitute.
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -47,7 +47,7 @@ def _make_artifact_row(
     name: str = "mymodel",
     category: str = "model",
     description: str | None = "desc",
-    created_at: datetime = datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+    created_at: datetime = datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
 ):
     row = MagicMock()
     row.id = artifact_id
@@ -235,7 +235,7 @@ def _make_version_row(
     harbor_ref: str = "imgrepo.damit.hu/supernova/mymodel:v3",
     size_bytes: int | None = 1024,
     digest: str | None = "sha256:abc",
-    created_at: datetime = datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+    created_at: datetime = datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
     metadata: dict | None = None,
 ):
     row = MagicMock()
@@ -664,7 +664,7 @@ def _make_list_row(
     description: str | None = None,
     versions_count: int | None = 2,
     latest_version: str | None = "v2",
-    created_at: datetime | None = datetime(2026, 4, 1, 10, 0, tzinfo=timezone.utc),
+    created_at: datetime | None = datetime(2026, 4, 1, 10, 0, tzinfo=UTC),
     match_total: int = 2,
 ):
     row = MagicMock()

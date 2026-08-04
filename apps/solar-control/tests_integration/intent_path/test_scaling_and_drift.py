@@ -10,7 +10,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-
 from fixtures.helpers import wait_for
 from fixtures.intents import (
     create_intent,
@@ -114,7 +113,7 @@ async def test_scale_down_surplus_stop(http_control, stack, clean_state):
     assert list(states.values()) == ["running"]
 
     # The surviving replica is one of the originals (surplus stopped first).
-    assert list(states.keys())[0] in replica_states(ready)
+    assert next(iter(states)) in replica_states(ready)
 
 
 async def _observed_is(http_control, intent_id: str, n: int) -> bool:

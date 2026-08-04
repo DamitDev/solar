@@ -1,11 +1,12 @@
 """PostgreSQL-backed job CRUD operations using SQLAlchemy ORM."""
 
-from typing import Any
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
-from sqlalchemy import select, delete, update
+from sqlalchemy import delete, select, update
 
 from app.models.job import Job, JobStatus
+
 from .connection import get_session_factory
 from .tables import JobRow
 

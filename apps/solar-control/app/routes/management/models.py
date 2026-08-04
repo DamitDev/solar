@@ -9,13 +9,13 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.database.hosts import host_db
-from app.models import Host
-from app.model_resolvers.parser import parse, HuggingFaceURI, RepoURI, LocalURI
+from app.model_resolvers.parser import HuggingFaceURI, LocalURI, RepoURI, parse
 from app.model_resolvers.repo import (
     build_harbor_pull_payload,
     resolve_from_data_repository,
     validate_resolved_model,
 )
+from app.models import Host
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,7 @@ async def _check_disk_space(host: Host) -> float | None:
                     data = await resp.json()
                     # Expecting structure like {"disk": {"available_gb": 10.5, ...}, ...}
                     return data.get("disk", {}).get("available_gb")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning("Failed to check disk space on host %s: %s", host.id, e)
     return None
 
@@ -149,56 +149,54 @@ async def _post_pull_to_host(
     headers = {"X-API-Key": host.api_key, "Content-Type": "application/json"}
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(
                 url,
                 json=payload,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=_HOST_PULL_TIMEOUT_S),
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    path = data.get("path")
-                    cached = data.get("cached", False)
-                    if not path:
-                        return _StructuredPullError(
-                            error="bad_response",
-                            detail=(
-                                f"Host '{host.name}' ({host.url}) returned success "
-                                "but no path"
-                            ),
-                            source_uri=source_uri,
-                            status_code=502,
-                        )
-                    return path, cached
-
-                try:
-                    err = await response.json()
-                    if err.get("error") and err.get("status_code"):
-                        return _StructuredPullError(
-                            error=err["error"],
-                            detail=err.get("detail", await response.text()),
-                            source_uri=err.get("source_uri", source_uri),
-                            status_code=err.get("status_code", response.status),
-                        )
-                    detail = (
-                        err.get("detail") or err.get("error") or await response.text()
+            ) as response,
+        ):
+            if response.status == 200:
+                data = await response.json()
+                path = data.get("path")
+                cached = data.get("cached", False)
+                if not path:
+                    return _StructuredPullError(
+                        error="bad_response",
+                        detail=(
+                            f"Host '{host.name}' ({host.url}) returned success "
+                            "but no path"
+                        ),
+                        source_uri=source_uri,
+                        status_code=502,
                     )
-                except Exception:
-                    detail = await response.text()
+                return path, cached
 
-                out_code = (
-                    response.status if response.status in PROPAGATED_CODES else 502
-                )
-                return _StructuredPullError(
-                    error="pull_failed",
-                    detail=(
-                        f"Model pull failed on host '{host.name}' "
-                        f"[{response.status}]: {detail}"
-                    ),
-                    source_uri=source_uri,
-                    status_code=out_code,
-                )
+            try:
+                err = await response.json()
+                if err.get("error") and err.get("status_code"):
+                    return _StructuredPullError(
+                        error=err["error"],
+                        detail=err.get("detail", await response.text()),
+                        source_uri=err.get("source_uri", source_uri),
+                        status_code=err.get("status_code", response.status),
+                    )
+                detail = err.get("detail") or err.get("error") or await response.text()
+            except Exception:  # noqa: BLE001
+                detail = await response.text()
+
+            out_code = response.status if response.status in PROPAGATED_CODES else 502
+            return _StructuredPullError(
+                error="pull_failed",
+                detail=(
+                    f"Model pull failed on host '{host.name}' "
+                    f"[{response.status}]: {detail}"
+                ),
+                source_uri=source_uri,
+                status_code=out_code,
+            )
     except (
         aiohttp.ClientConnectionError,
         aiohttp.ClientConnectorError,
@@ -288,20 +286,22 @@ async def _fetch_host_models(host: Host) -> list[dict]:
     url = f"{host.url.rstrip('/')}/models"
     headers = {"X-API-Key": host.api_key}
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
+        async with (
+            aiohttp.ClientSession() as session,
+            session.get(
                 url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)
-            ) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                else:
-                    logger.warning(
-                        "Host %s (%s) returned %d for GET /models",
-                        host.id,
-                        host.url,
-                        resp.status,
-                    )
-    except Exception as e:
+            ) as resp,
+        ):
+            if resp.status == 200:
+                return await resp.json()
+            else:
+                logger.warning(
+                    "Host %s (%s) returned %d for GET /models",
+                    host.id,
+                    host.url,
+                    resp.status,
+                )
+    except Exception as e:  # noqa: BLE001
         logger.warning("Failed to fetch models from host %s: %s", host.id, e)
     return []
 
@@ -333,10 +333,7 @@ async def distribute_model(req: DistributeRequest) -> list[DistributeResult]:
 
     results: list[DistributeResult] = []
     for uri in uris:
-        try:
-            parsed = parse(uri)  # Raises 400 on bad URI
-        except HTTPException:
-            raise
+        parsed = parse(uri)  # Raises 400 on bad URI
 
         pull_result = await _pull_on_host(parsed, uri, host)
         if isinstance(pull_result, _StructuredPullError):

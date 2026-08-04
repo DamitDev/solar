@@ -20,7 +20,6 @@ disturb the session-scoped stack for every later module.
 from __future__ import annotations
 
 import pytest
-
 from fixtures.constants import MODEL_ALIAS, MODEL_NAME, MODEL_SOURCE_URI
 from fixtures.helpers import wait_for
 

@@ -19,5 +19,7 @@ sio = socketio.AsyncServer(
 sio_app = socketio.ASGIApp(sio, socketio_path="socket.io")
 
 # Register namespace handlers (import triggers registration)
-from . import host_handlers  # noqa: E402, F401
-from . import webui_handlers  # noqa: E402, F401
+from . import (
+    host_handlers,  # noqa: F401
+    webui_handlers,  # noqa: F401
+)

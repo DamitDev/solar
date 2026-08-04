@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Generic, TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -23,7 +23,7 @@ class ArtifactSummary(BaseModel):
     created_at: datetime
 
 
-class ArtifactListResponse(BaseModel, Generic[T]):
+class ArtifactListResponse[T](BaseModel):
     """Paginated list response for artifacts."""
 
     total: int = Field(..., ge=0)

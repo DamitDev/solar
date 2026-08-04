@@ -16,7 +16,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-
 from conftest import MANAGEMENT_API_KEY
 from fixtures.helpers import wait_for
 from fixtures.intents import create_intent, get_intent, wait_intent_ready

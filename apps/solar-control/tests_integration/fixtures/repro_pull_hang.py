@@ -13,8 +13,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fixtures.helpers import make_certs  # noqa: E402
-from fixtures.stub_harbor import StubHarbor  # noqa: E402
+from fixtures.helpers import make_certs
+from fixtures.stub_harbor import StubHarbor
 
 MODEL_DIR = Path(__file__).resolve().parent / "test_model"
 
@@ -80,6 +80,7 @@ print("ALL_DONE", flush=True)
         capture_output=True,
         text=True,
         timeout=90,
+        check=False,
     )
     print("RC:", proc.returncode)
     print(proc.stdout[-2000:])

@@ -1,11 +1,12 @@
 """PostgreSQL-backed host CRUD operations using SQLAlchemy ORM."""
 
-from typing import Any
 from datetime import datetime, timezone
+from typing import Any
 
-from sqlalchemy import select, delete, update
+from sqlalchemy import delete, select, update
 
 from app.models import Host, HostStatus, MemoryInfo
+
 from .connection import get_session_factory
 from .tables import HostRow
 

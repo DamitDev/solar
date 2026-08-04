@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from fixtures.constants import MODEL_NAME, MODEL_SOURCE_URI, MODEL_VERSION
 
 pytestmark = pytest.mark.repo_path

@@ -3,21 +3,23 @@
 All routing state is stored in Redis for multi-replica consistency.
 """
 
-import aiohttp
 import asyncio
 import logging
 import re
-import uuid
 import time
-from typing import Any, AsyncIterator
-from contextlib import asynccontextmanager
+import uuid
 from collections import defaultdict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from typing import Any
+
+import aiohttp
 
 from app.config import settings
 from app.database.hosts import host_db
 from app.models import HostStatus, RegistryEntry
-from app.redis_state import registry_store, health_store, routing_store, host_store
+from app.redis_state import health_store, host_store, registry_store, routing_store
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +219,7 @@ class OpenAIGateway:
                                 await host_db.update_host_status(
                                     host.id, HostStatus.ERROR
                                 )
-                    except Exception:
+                    except Exception:  # noqa: BLE001
                         refresh_failed = True
                         cached = await get_host_instances(host.id)
                         if cached:
@@ -265,7 +267,7 @@ class OpenAIGateway:
             h = refreshed or host
             payload = await build_host_status_payload(h, connected=False)
             await sio.emit("host_status", payload.model_dump(), namespace="/webui")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.debug("Failed to notify WebUI of host online: %s", e)
 
     async def _request_host_reconnect(self, host) -> None:
@@ -294,7 +296,7 @@ class OpenAIGateway:
                         host.name,
                         resp.status,
                     )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.debug("Reconnect request to '%s' error: %s", host.name, e)
 
     # ── Background tasks ──────────────────────────────────────
@@ -391,7 +393,7 @@ class OpenAIGateway:
             writer.close()
             await writer.wait_closed()
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
     # ── Helpers ────────────────────────────────────────────────
@@ -440,7 +442,7 @@ class OpenAIGateway:
                 if isinstance(data.get("decode_ms_per_token"), (int, float)):
                     out["decode_ms_per_token"] = float(data["decode_ms_per_token"])
                 return out
-        except Exception:
+        except Exception:  # noqa: BLE001
             return {}
 
     async def _fetch_instance_context_size(self, instance: RegistryEntry) -> int | None:
@@ -462,7 +464,7 @@ class OpenAIGateway:
                     return None
                 data = await resp.json()
                 return RegistryEntry._extract_context_size(data)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     @staticmethod
@@ -550,7 +552,7 @@ class OpenAIGateway:
                             model = self._override_context_metadata(model, context_size)
                             if model_id not in data_dict:
                                 data_dict[model_id] = model
-            except Exception:
+            except Exception:  # noqa: BLE001
                 if alias not in data_dict:
                     fallback_caps = self._fallback_capabilities(instance.backend_type)
                     created = int(datetime.now(timezone.utc).timestamp())
@@ -605,11 +607,11 @@ class OpenAIGateway:
 
     async def _resolve_model_name(self, model: str) -> str | None:
         registry = await registry_store.get_registry()
-        if model in registry and registry[model]:
+        if registry.get(model):
             return model
         matching = [m for m in registry if m.startswith(model) and registry[m]]
         if matching:
-            return sorted(matching)[0]
+            return min(matching)
         return None
 
     def _parse_model_size(self, alias: str) -> float | None:
@@ -628,7 +630,7 @@ class OpenAIGateway:
             if unit.lower() == "m":
                 return multiplier * (value / 1000.0)
             return None
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     async def _get_next_instance(
@@ -696,7 +698,7 @@ class OpenAIGateway:
                     ),
                 )
             )
-            chosen_host = sorted(free_hosts, key=lambda h: host_names.get(h, h))[0]
+            chosen_host = min(free_hosts, key=lambda h: host_names.get(h, h))
         else:
             host_weights: dict[str, float] = {}
             for hid in candidate_host_ids:
@@ -713,7 +715,7 @@ class OpenAIGateway:
                     ),
                 )
             )
-            chosen_host = sorted(min_hosts, key=lambda h: host_names.get(h, h))[0]
+            chosen_host = min(min_hosts, key=lambda h: host_names.get(h, h))
 
         host_insts = host_to_instances[chosen_host]
         if len(host_insts) == 1:
@@ -746,10 +748,11 @@ class OpenAIGateway:
     ) -> None:
         """Broadcast a routing event to WebUI via Socket.IO and log to database."""
         from dataclasses import asdict
+
         from app.database.logs import gateway_logger
         from app.socketio_app.webui_handlers import (
-            broadcast_to_webui,
             broadcast_gateway_request,
+            broadcast_to_webui,
         )
 
         try:
@@ -758,7 +761,7 @@ class OpenAIGateway:
             )
             if summary:
                 await broadcast_gateway_request(asdict(summary))
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.error("Logging error: %s", e)
 
         try:
@@ -767,7 +770,7 @@ class OpenAIGateway:
             if endpoint_id is not None:
                 data["endpoint_id"] = endpoint_id
             await broadcast_to_webui(event_type, data)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning("Failed to broadcast routing event to WebUI: %s", e)
 
     def _ts(self) -> str:
@@ -863,7 +866,7 @@ class OpenAIGateway:
                 await routing_store.decrement_active(
                     instance.host_id, instance.instance_id
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.warning(
                     "Failed to decrement instance active for %s/%s",
                     instance.host_id,
@@ -871,7 +874,7 @@ class OpenAIGateway:
                 )
             try:
                 await routing_store.decrement_host_active(instance.host_id)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.warning(
                     "Failed to decrement host active for %s",
                     instance.host_id,
@@ -879,7 +882,7 @@ class OpenAIGateway:
             if weight is not None:
                 try:
                     await routing_store.remove_weight(instance.host_id, weight)
-                except Exception:
+                except Exception:  # noqa: BLE001
                     logger.warning(
                         "Failed to remove weight for %s",
                         instance.host_id,
@@ -904,7 +907,7 @@ class OpenAIGateway:
             attempted.clear()
             try:
                 await self.refresh_model_registry()
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
             delay = max(0.0, float(settings.route_retry_delay_s))
             if delay > 0:
@@ -1066,7 +1069,7 @@ class OpenAIGateway:
                                 endpoint_id,
                                 instance=instance,
                             )
-                            raise Exception(msg)
+                            raise ValueError(msg)
 
                 except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
                     await health_store.mark_failed(
@@ -1104,7 +1107,7 @@ class OpenAIGateway:
             client_ip=client_ip,
         )
         if attempted:
-            raise Exception(error_msg)
+            raise ValueError(error_msg)
         raise ValueError(error_msg)
 
     async def stream_request(
@@ -1246,7 +1249,7 @@ class OpenAIGateway:
                                 endpoint_id,
                                 instance=instance,
                             )
-                            raise Exception(msg)
+                            raise ValueError(msg)
 
                 except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
                     await health_store.mark_failed(
@@ -1270,7 +1273,7 @@ class OpenAIGateway:
                                 instance=instance,
                                 client_ip=client_ip,
                             )
-                        except Exception:
+                        except Exception:  # noqa: BLE001, S110
                             pass
                     return
                 except Exception as e:
@@ -1299,7 +1302,7 @@ class OpenAIGateway:
             client_ip=client_ip,
         )
         if attempted:
-            raise Exception(error_msg)
+            raise ValueError(error_msg)
         raise ValueError(error_msg)
 
 

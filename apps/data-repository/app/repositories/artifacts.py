@@ -10,11 +10,13 @@ executing SQL.
 
 import json
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Sequence
+from typing import Any
 
 from sqlalchemy import (
+    String,
     and_,
     cast,
     delete,
@@ -22,7 +24,6 @@ from sqlalchemy import (
     lateral,
     or_,
     select,
-    String,
     true,
     update,
 )
@@ -43,7 +44,6 @@ from app.exceptions import (
     ModelVersionNotFoundError,
     VersionAlreadyExistsError,
 )
-
 from app.types import ArtifactCategory
 
 

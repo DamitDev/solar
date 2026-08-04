@@ -1,21 +1,21 @@
 """Unit tests for app/services/resolve.py and app/routes/resolve.py."""
 
-import pytest
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
-from datetime import datetime, timezone
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.dependencies import get_resolve_service
 from app.exceptions import (
     CatalogArtifactNotFoundError,
     CatalogVersionNotFoundError,
     InvalidArtifactNameError,
 )
-from app.services.resolve import ResolveService
-from app.dependencies import get_resolve_service
-from app.routes.resolve import router
 from app.repositories.artifacts import ArtifactVersionRecord
+from app.routes.resolve import router
+from app.services.resolve import ResolveService
 
 # ---------------------------------------------------------------------------
 # Service Tests
@@ -35,7 +35,7 @@ async def test_resolve_service_success():
         harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v3",
         size_bytes=1024,
         checksum="sha256:abc",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         metadata={"a": 1},
     )
     service._repo.resolve_artifact_version = AsyncMock(return_value=record)
@@ -62,7 +62,7 @@ async def test_resolve_service_latest():
         harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v10",
         size_bytes=2048,
         checksum="sha256:def",
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         metadata={},
     )
     service._repo.resolve_artifact_version = AsyncMock(return_value=record)
@@ -117,7 +117,7 @@ def test_route_resolve_success():
             "size_bytes": 123,
             "checksum": "sha256:abc",
             "metadata": {},
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
     )
 

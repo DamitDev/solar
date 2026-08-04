@@ -1,7 +1,8 @@
 """Shared exception-to-HTTP mapping for registration endpoints."""
 
+from collections.abc import Callable, Coroutine
 from functools import wraps
-from typing import Any, Callable, Coroutine
+from typing import Any
 
 from fastapi import HTTPException
 

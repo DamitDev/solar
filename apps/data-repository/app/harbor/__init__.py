@@ -16,18 +16,18 @@ from harbor_oci_client import (
 )
 
 __all__ = [
-    "HarborClient",
-    "ArtifactInfo",
     "ArtifactDetail",
-    "HarborError",
-    "HarborConnectionError",
-    "HarborAuthError",
+    "ArtifactInfo",
     "ArtifactNotFoundError",
     "HarborAPIError",
-    "media_types",
+    "HarborAuthError",
+    "HarborClient",
+    "HarborConnectionError",
+    "HarborError",
+    "close_harbor",
     "harbor_client",
     "init_harbor",
-    "close_harbor",
+    "media_types",
 ]
 
 _client: HarborClient | None = None

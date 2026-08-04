@@ -23,15 +23,16 @@ Routes use dependency providers in :mod:`app.dependencies`; the services never
 call global singleton accessors.
 """
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import logging
 import re
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol, cast
 
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.catalog_search import normalize_artifact_list_search
 from app.exceptions import (
     ArtifactNotFoundInHarborError,
     HarborVerificationError,
@@ -46,7 +47,6 @@ from app.harbor import (
     HarborClient,
     HarborConnectionError,
 )
-from app.catalog_search import normalize_artifact_list_search
 from app.repositories.artifacts import ArtifactMetadataRecord, ArtifactRepository
 from app.schemas.artifacts import ArtifactListResponse, ArtifactSummary
 from app.schemas.datasets import (
@@ -673,7 +673,7 @@ class ModelUpdateService(BaseArtifactUpdateService):
         return UpdateModelVersionResponse(
             name=updated.name,
             version=updated.version,
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
             metadata=updated.metadata,
         )
 
@@ -713,7 +713,7 @@ class DatasetUpdateService(BaseArtifactUpdateService):
         return UpdateDatasetVersionResponse(
             name=updated.name,
             version=updated.version,
-            updated_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(UTC),
             metadata=updated.metadata,
         )
 

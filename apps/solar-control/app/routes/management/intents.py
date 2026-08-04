@@ -10,13 +10,13 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.database.intents import intent_db
 from app.models.intent import (
     IntentCreate,
     IntentDeletedResponse,
     IntentPhase,
     IntentResponse,
 )
-from app.database.intents import intent_db
 from app.validation import validate_intent_create
 
 logger = logging.getLogger(__name__)

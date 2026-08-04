@@ -1,7 +1,7 @@
 """Unit tests for dataset registration, update, and deletion services."""
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,9 +21,9 @@ from app.schemas.datasets import (
     UpdateDatasetMetadataRequest,
 )
 from app.services.models import (
+    DatasetDeletionService,
     DatasetRegistrationService,
     DatasetUpdateService,
-    DatasetDeletionService,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -67,7 +67,7 @@ def _make_repo_mock(existing_versions=None) -> AsyncMock:
         category="dataset",
         description="desc",
         metadata={},
-        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
         versions_count=1,
     )
     return repo
@@ -97,7 +97,7 @@ async def _svc(
 
 
 async def test_response_shape_dataset_category():
-    async with _svc(DatasetRegistrationService) as (svc, repo):
+    async with _svc(DatasetRegistrationService) as (svc, _):
         result = await svc.register_dataset_version(
             "iris-tickets", _make_request(version="v1")
         )
@@ -109,21 +109,21 @@ async def test_response_shape_dataset_category():
 
 
 async def test_auto_version_first_is_v1():
-    async with _svc(DatasetRegistrationService, existing_versions=[]) as (svc, repo):
+    async with _svc(DatasetRegistrationService, existing_versions=[]) as (svc, _):
         result = await svc.register_dataset_version("iris-tickets", _make_request())
 
     assert result.version == "v1"
 
 
 async def test_invalid_name_raises():
-    async with _svc(DatasetRegistrationService) as (svc, repo):
+    async with _svc(DatasetRegistrationService) as (svc, _):
         with pytest.raises(InvalidArtifactNameError):
             await svc.register_dataset_version("BAD", _make_request())
 
 
 @pytest.mark.parametrize("reserved", ["latest", "Latest", "LATEST"])
 async def test_register_rejects_latest_as_version(reserved: str):
-    async with _svc(DatasetRegistrationService) as (svc, repo):
+    async with _svc(DatasetRegistrationService) as (svc, _):
         with pytest.raises(InvalidArtifactNameError, match="reserved"):
             await svc.register_dataset_version(
                 "iris-tickets", _make_request(version=reserved)
@@ -134,7 +134,7 @@ async def test_harbor_not_found_maps_to_domain_error():
     harbor = _make_harbor_mock(
         side_effect=harbor_mod.ArtifactNotFoundError("not found")
     )
-    async with _svc(DatasetRegistrationService, harbor=harbor) as (svc, repo):
+    async with _svc(DatasetRegistrationService, harbor=harbor) as (svc, _):
         with pytest.raises(ArtifactNotFoundInHarborError):
             await svc.register_dataset_version("iris-tickets", _make_request())
 
@@ -157,7 +157,7 @@ async def test_category_conflict_propagates():
     async with _svc(
         DatasetRegistrationService,
         upsert_side_effect=ArtifactCategoryConflictError("conflict"),
-    ) as (svc, repo):
+    ) as (svc, _):
         with pytest.raises(ArtifactCategoryConflictError):
             await svc.register_dataset_version("iris-tickets", _make_request())
 
@@ -171,7 +171,7 @@ async def test_update_dataset_metadata_passes_dataset_metadata_to_repo():
         category="dataset",
         description="desc",
         metadata={},
-        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
         versions_count=1,
     )
 
@@ -199,7 +199,7 @@ async def test_update_dataset_metadata_without_metadata_does_not_touch_latest_ve
         category="dataset",
         description="desc",
         metadata={"training_config": {"format": "json"}},
-        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
         versions_count=1,
     )
 
@@ -235,13 +235,13 @@ async def test_delete_dataset_version_calls_repo():
 
 
 async def test_delete_dataset_version_invalid_name_raises():
-    async with _svc(DatasetDeletionService) as (svc, repo):
+    async with _svc(DatasetDeletionService) as (svc, _):
         with pytest.raises(InvalidArtifactNameError):
             await svc.delete_dataset_version("BAD", "v1")
 
 
 async def test_delete_dataset_version_rejects_latest_alias():
-    async with _svc(DatasetDeletionService) as (svc, repo):
+    async with _svc(DatasetDeletionService) as (svc, _):
         # Match matches the message in BaseArtifactDeletionService
         with pytest.raises(InvalidArtifactNameError, match="reserved alias"):
             await svc.delete_dataset_version("iris-tickets", "latest")

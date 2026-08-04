@@ -1,15 +1,12 @@
-from logging.config import fileConfig
-
-from sqlalchemy import engine_from_config, pool
-
-from alembic import context
-
 import os
 import sys
+from logging.config import fileConfig
+
+from alembic import context
+from dotenv import load_dotenv
+from sqlalchemy import engine_from_config, pool
 
 from app.database.models import Base
-
-from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -34,7 +31,7 @@ def get_url():
     if all([db, user, password, host, port]):
         return f"postgresql://{user}:{password}@{host}:{port}/{db}"
     else:
-        raise EnvironmentError(
+        raise OSError(
             "Database configuration environment variables are not fully set. "
             "Required: POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_HOST, POSTGRES_PORT"
         )

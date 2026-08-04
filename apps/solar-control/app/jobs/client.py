@@ -197,7 +197,7 @@ async def _read_body(response: aiohttp.ClientResponse) -> Any:
     """Try to read response as JSON, fall back to text."""
     try:
         return await response.json()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return await response.text()
 
 

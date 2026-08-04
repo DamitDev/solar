@@ -40,10 +40,9 @@ from typing import Any
 os.environ.setdefault("DATABASE_URL", "postgresql://x:x@127.0.0.1:1/none")
 os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:1/0")
 
-import pytest  # noqa: E402
-import pytest_asyncio  # noqa: E402
-
-from fixtures.constants import (  # noqa: E402
+import pytest
+import pytest_asyncio
+from fixtures.constants import (
     DATA_REPOSITORY_API_KEY,
     FIXTURE_MODEL_DIR,
     HARBOR_PASSWORD,
@@ -54,7 +53,7 @@ from fixtures.constants import (  # noqa: E402
     MODEL_NAME,
     MODEL_VERSION,
 )
-from fixtures.helpers import (  # noqa: E402
+from fixtures.helpers import (
     DATA_REPO_PYTHON,
     DATA_REPO_ROOT,
     REPO_ROOT,
@@ -67,13 +66,13 @@ from fixtures.helpers import (  # noqa: E402
     tail_service_logs,
     wait_for,
 )
-from fixtures.seed import (  # noqa: E402
+from fixtures.seed import (
+    read_test_model_files,
     register_host_via_api,
     register_model_in_data_repo,
-    read_test_model_files,
     truncate_intents,
 )
-from fixtures.stub_harbor import StubHarbor  # noqa: E402
+from fixtures.stub_harbor import StubHarbor
 
 logger = logging.getLogger(__name__)
 
@@ -218,6 +217,7 @@ def _run_alembic(python: Path, cwd: Path, env: dict[str, str]) -> None:
         capture_output=True,
         text=True,
         timeout=180,
+        check=False,
     )
     assert (
         result.returncode == 0

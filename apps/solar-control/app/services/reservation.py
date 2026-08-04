@@ -27,12 +27,12 @@ from app.models.reservation import (
     ReservationResponse,
 )
 from app.redis_state.connection import redis_client
+from app.services.migration import execute_migration
 from app.services.placement import (
     find_candidates,
     find_displaceable_instances,
     fits_resources,
 )
-from app.services.migration import execute_migration
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ async def _call_host_reserve(
             status_code=502,
             detail=f"Host '{host.name}' is unreachable at {host.url}",
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
             detail=f"Cannot reach host '{host.name}': {e}",
@@ -129,7 +129,7 @@ async def _call_host_release(
             status_code=502,
             detail=f"Host '{host.name}' is unreachable at {host.url}",
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
             detail=f"Cannot reach host '{host.name}': {e}",
@@ -201,7 +201,7 @@ async def reserve_resources(
         )
 
     # ── 2. Fetch resource snapshots ─────────────────────────────
-    from app.routes.management.resources import (  # noqa: F811
+    from app.routes.management.resources import (
         _fetch_host_resource_snapshot,
     )
 
@@ -306,7 +306,7 @@ async def reserve_resources(
                                     target_host = host
                                     target_snapshot = snapshots[host.id]
                                     break
-                        except Exception as e:
+                        except Exception as e:  # noqa: BLE001
                             logger.warning(
                                 "Migration attempt failed: %s → %s: %s",
                                 host.id,

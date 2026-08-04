@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fixtures.stub_harbor import StubHarbor  # noqa: E402
+from fixtures.stub_harbor import StubHarbor
 
 
 def _make_certs(cert_dir: str) -> tuple[str, str]:
@@ -133,9 +133,9 @@ def main() -> int:
         names = sorted(Path(f).name for f in pulled)
         print(f"OrasHelper.pull -> {names}")
         assert names == ["config.json", "model.safetensors", "tokenizer.json"], names
-        for name in files:
+        for name, expected in files.items():
             data = Path(outdir, name).read_bytes()
-            assert data == files[name], f"{name} content mismatch"
+            assert data == expected, f"{name} content mismatch"
     print("OrasHelper.pull OK (flat files, no tarball)")
 
     # 3. HarborClient.verify_artifact (the data-repository client path)

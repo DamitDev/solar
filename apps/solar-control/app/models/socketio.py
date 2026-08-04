@@ -1,7 +1,8 @@
-from pydantic import BaseModel, Field
-from typing import Any
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 from .host import ActiveJobSummary, Host, MemoryInfo
 

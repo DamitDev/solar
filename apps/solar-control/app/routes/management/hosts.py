@@ -8,8 +8,8 @@ import aiohttp
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from app.models import Host, HostCreate, HostResponse, HostStatus
 from app.database.hosts import host_db
+from app.models import Host, HostCreate, HostResponse, HostStatus
 from app.services.migration import create_instance_on_host
 from app.validation import validate_priority
 
@@ -127,9 +127,9 @@ async def refresh_host_status(host_id: str):
                     )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         await host_db.update_host_status(host_id, HostStatus.OFFLINE)
-        raise HTTPException(status_code=500, detail=f"Failed to connect: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to connect: {e!s}")
 
 
 @router.post("/refresh-all")
@@ -164,7 +164,7 @@ async def refresh_all_hosts():
                         results.append(
                             {"host_id": host.id, "name": host.name, "status": "error"}
                         )
-            except Exception:
+            except Exception:  # noqa: BLE001
                 await host_db.update_host_status(host.id, HostStatus.OFFLINE)
                 results.append(
                     {"host_id": host.id, "name": host.name, "status": "offline"}
@@ -213,7 +213,7 @@ async def _proxy_instance_action(
         raise HTTPException(
             status_code=502, detail=f"Host '{host.name}' is unreachable at {host.url}"
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502, detail=f"Cannot reach host '{host.name}': {e}"
         )
@@ -243,7 +243,7 @@ async def _proxy_get(host: Host, path: str, *, timeout: int = 10) -> Any:
         raise HTTPException(
             status_code=502, detail=f"Host '{host.name}' is unreachable at {host.url}"
         )
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502, detail=f"Cannot reach host '{host.name}': {e}"
         )

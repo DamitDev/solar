@@ -18,7 +18,7 @@ async def health_check():
         async with factory() as session:
             await session.execute(text("SELECT 1"))
         db_status = "ok"
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.error("Health check failed: %s", e)
         return JSONResponse(
             status_code=503,

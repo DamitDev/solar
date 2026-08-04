@@ -1,9 +1,10 @@
 """Data Repository — lightweight metadata catalog for OCI artifacts."""
 
-import os
 import logging
+import os
 from contextlib import asynccontextmanager
-from importlib.metadata import version as _pkg_version, PackageNotFoundError
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 
 from fastapi import FastAPI
 from fastapi.responses import Response
@@ -28,8 +29,8 @@ logging.getLogger("uvicorn.access").setLevel(getattr(logging, log_level, logging
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from app.database import init_db, close_db
-    from app.harbor import init_harbor, close_harbor
+    from app.database import close_db, init_db
+    from app.harbor import close_harbor, init_harbor
 
     logger.info("Starting Data Repository v%s ...", __version__)
 
@@ -59,11 +60,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-from app.routes.artifacts import router as artifacts_router  # noqa: E402
-from app.routes.datasets import router as datasets_router  # noqa: E402
-from app.routes.health import router as health_router  # noqa: E402
-from app.routes.models import router as models_router  # noqa: E402
-from app.routes.resolve import router as resolve_router  # noqa: E402
+from app.routes.artifacts import router as artifacts_router
+from app.routes.datasets import router as datasets_router
+from app.routes.health import router as health_router
+from app.routes.models import router as models_router
+from app.routes.resolve import router as resolve_router
 
 app.include_router(health_router)
 app.include_router(artifacts_router)

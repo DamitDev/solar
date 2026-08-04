@@ -5,7 +5,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-
 from fixtures.constants import BACKEND_CLASSIFICATION, MODEL_SOURCE_URI
 from fixtures.helpers import wait_for
 

@@ -13,6 +13,7 @@ from app.models.intent import (
     ReconcileState,
     ResourceRequirements,
 )
+
 from .connection import get_session_factory
 from .tables import IntentRow
 
@@ -223,9 +224,7 @@ class IntentDB:
             row = result.scalar_one_or_none()
             if row is None:
                 return False
-            if exclude_id and str(row.id) == exclude_id:
-                return False
-            return True
+            return not (exclude_id and str(row.id) == exclude_id)
 
     async def update_status(
         self,

@@ -1,7 +1,7 @@
 """Gateway monitoring REST API endpoints (under /api/gateway)."""
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
-from datetime import datetime, timezone, timedelta
 
 from fastapi import APIRouter, Query
 
@@ -17,7 +17,7 @@ def _parse_iso(ts: str | None) -> datetime | None:
         return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(
             timezone.utc
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
