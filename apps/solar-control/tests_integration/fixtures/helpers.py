@@ -144,9 +144,9 @@ class ServiceProcess:
     def start(self, ready_timeout: float = 45.0) -> None:
         log_dir = self.log_path.parent
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = open(
+        log_file = open(  # noqa: SIM115 — handle must outlive this scope (Popen writes to it)
             self.log_path, "ab"
-        )  # noqa: SIM115 — handle must outlive this scope (Popen writes to it)
+        )
         self.proc = subprocess.Popen(
             self.argv,
             cwd=str(self.cwd),
