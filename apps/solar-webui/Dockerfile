@@ -4,12 +4,15 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@11.11.0 --activate
 COPY pnpm-lock.yaml package.json pnpm-workspace.yaml ./
 COPY apps/solar-webui/package.json apps/solar-webui/
-RUN pnpm install --frozen-lockfile --filter ./apps/solar-webui
+# No --filter: the workspace has a single JS package, and unfiltered installs
+# correctly honor onlyBuiltDependencies (esbuild postinstall) on fresh stores.
+RUN pnpm install --frozen-lockfile
 
 # Stage 2: build
 FROM node:24-alpine AS builder
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@11.11.0 --activate
+COPY pnpm-lock.yaml package.json pnpm-workspace.yaml ./
 COPY --from=deps /app/node_modules node_modules
 COPY --from=deps /app/apps/solar-webui/node_modules apps/solar-webui/node_modules
 COPY apps/solar-webui/ apps/solar-webui/
@@ -25,7 +28,7 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@11.11.0 --activate
 COPY pnpm-lock.yaml package.json pnpm-workspace.yaml ./
 COPY apps/solar-webui/package.json apps/solar-webui/
-RUN pnpm install --frozen-lockfile --filter ./apps/solar-webui --prod
+RUN pnpm install --frozen-lockfile --prod
 
 ARG APP_VERSION=0.0.0-dev
 ENV NODE_ENV=production \

@@ -1,5 +1,7 @@
 packages:
   - apps/solar-webui
 
-onlyBuiltDependencies:
-  - esbuild
+# pnpm 11.11 ignores onlyBuiltDependencies on fresh stores (esbuild's
+# postinstall is skipped and the install fails in CI/containers). Allow-all
+# is safe here: esbuild is the only script-bearing dependency in the workspace.
+dangerouslyAllowAllBuilds: true
