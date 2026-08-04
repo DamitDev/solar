@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Nord Dark Theme */
+    --background: 220 16% 22%; /* nord0 */
+    --foreground: 219 28% 88%; /* nord4 */
+    --border: 220 17% 32%; /* nord3 */
+    --primary: 213 32% 52%; /* nord10 */
+    --primary-foreground: 219 28% 88%; /* nord4 */
+    --secondary: 220 17% 29%; /* nord2 */
+    --secondary-foreground: 218 27% 92%; /* nord5 */
+    --destructive: 354 42% 56%; /* nord11 red */
+    --destructive-foreground: 219 28% 88%;
+    --muted: 220 17% 32%; /* nord3 */
+    --muted-foreground: 220 16% 36%; /* between nord3-nord4 */
+    --accent: 179 25% 65%; /* nord7 cyan */
+    --accent-foreground: 219 28% 88%;
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-nord-0 text-nord-4;
+  }
+}
+
+/* Nord-themed custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+/* Drawer / overlay entrance animations (transform + opacity only) */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes slide-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+::-webkit-scrollbar-track {
+  background: #3b4252; /* nord1 */
+}
+
+::-webkit-scrollbar-thumb {
+  background: #4c566a; /* nord3 */
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #5e81ac; /* nord10 */
+}
+
+/* Hide scrollbar on horizontally scrollable strips (e.g. top navigation) */
+.no-scrollbar {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE/Edge */
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

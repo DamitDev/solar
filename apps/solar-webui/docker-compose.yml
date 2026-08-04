@@ -1,0 +1,20 @@
+services:
+  solar-webui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PORT: ${PORT:-8080}
+    container_name: solar-webui
+    ports:
+      - "${PORT:-8080}:${PORT:-8080}"
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - NODE_ENV=production
+      - PORT=${PORT:-8080}
+      - SOLAR_CONTROL_URL=${SOLAR_CONTROL_URL:-http://host.docker.internal:8015}
+      - SOLAR_CONTROL_API_KEY=${SOLAR_CONTROL_API_KEY}
+      - SOLAR_WEBUI_AUTH_KEY=${SOLAR_WEBUI_AUTH_KEY}
+      - SOLAR_WEBUI_DEBUG=${SOLAR_WEBUI_DEBUG:-false}
