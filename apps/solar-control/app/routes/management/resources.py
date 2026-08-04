@@ -45,6 +45,7 @@ async def _fetch_host_resource_snapshot(
         host_name=host.name,
         url=host.url,
         status=host.status,
+        drain_state=host.drain_state,
         roles=host.roles or [],
         gpu_type=host.gpu_type,
         version=host.version,
@@ -67,6 +68,10 @@ async def _fetch_host_resource_snapshot(
                 backend_type=i.get("backend_type"),
                 port=i.get("port"),
                 supported_endpoints=list(i.get("supported_endpoints") or []),
+                # Ownership markers let consumers tell intent-managed
+                # replicas from manual instances (S-043 §6).
+                managed_by=i.get("managed_by"),
+                intent_id=i.get("intent_id"),
             )
             for i in instances
             if i.get("id")

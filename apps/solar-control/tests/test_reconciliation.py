@@ -1,9 +1,11 @@
 """Tests for reconciliation engine (S-041)."""
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
 
 from app.models.intent import (
     IntentPhase,
@@ -17,9 +19,11 @@ from app.services.reconciliation import (
     Action,
     ActionType,
     Reconciler,
+    StartOutcomeUnknown,
     _detect_backend_drift,
     _intent_orphan,
     _intent_phase,
+    _spec_settled,
 )
 
 # ── Simple host stub ────────────────────────────────────────────
@@ -34,6 +38,7 @@ class _HostStub:
     api_key: str = "test-key"
     roles: list | None = None
     gpu_type: str | None = None
+    drain_state: str | None = None
 
     def __post_init__(self):
         if self.roles is None:
@@ -427,6 +432,165 @@ class TestDiff:
         assert len(migrates) == 1  # 1 displacement needed for remaining shortfall
 
 
+# ── Drain diff tests (S-043) ───────────────────────────────────
+
+
+class TestDrainDiff:
+    """Test evacuation planning for replicas on draining hosts."""
+
+    def _draining_observed(self, *, candidates=None, managed=None, **kwargs):
+        return _make_observed(
+            managed=managed
+            or [
+                _make_managed_instance("inst-1", host_id="h1", host_name="h1"),
+                _make_managed_instance("inst-2", host_id="h2", host_name="h2"),
+            ],
+            hosts=[
+                _HostStub(id="h1", name="h1", drain_state="draining"),
+                _HostStub(id="h2", name="h2"),
+            ],
+            candidates=candidates or [],
+            **kwargs,
+        )
+
+    def test_evacuates_replica_to_best_candidate(self):
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=2)
+        observed = self._draining_observed(
+            candidates=[(_HostStub(id="h3", name="h3"), _SnapshotStub("h3"))]
+        )
+
+        actions = reconciler._diff(intent, observed)
+        evacuations = [a for a in actions if a.type == ActionType.EVACUATE]
+
+        assert len(evacuations) == 1
+        assert evacuations[0].instance_id == "inst-1"
+        assert evacuations[0].host_id == "h1"
+        assert evacuations[0].target_host_id == "h3"
+
+    def test_evacuation_without_target_carries_the_stall_reason(self):
+        """No candidate still emits the action so the stall is reported (§4.3)."""
+        reconciler = Reconciler()
+        intent = _make_intent(
+            replicas=2,
+            placement=PlacementConstraints(roles=["inference"], gpu_type="nvidia_cuda"),
+            resources=ResourceRequirements(vram_gb=48.0),
+        )
+        observed = self._draining_observed()
+
+        actions = reconciler._diff(intent, observed)
+        evacuations = [a for a in actions if a.type == ActionType.EVACUATE]
+
+        assert len(evacuations) == 1
+        assert evacuations[0].target_host_id is None
+        assert "No eligible host" in evacuations[0].reason
+        assert "nvidia_cuda" in evacuations[0].reason
+        assert "48.0 GB" in evacuations[0].reason
+
+    def test_evacuation_runs_last(self):
+        """Evacuation must not starve the intent's own convergence."""
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=3)
+        observed = self._draining_observed(
+            candidates=[(_HostStub(id="h3", name="h3"), _SnapshotStub("h3"))]
+        )
+
+        actions = reconciler._diff(intent, observed)
+
+        assert actions[-1].type == ActionType.EVACUATE
+
+    def test_replicas_on_healthy_hosts_are_left_alone(self):
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=2)
+        observed = self._draining_observed(
+            candidates=[(_HostStub(id="h3", name="h3"), _SnapshotStub("h3"))]
+        )
+
+        actions = reconciler._diff(intent, observed)
+
+        assert [a.instance_id for a in actions if a.type == ActionType.EVACUATE] == [
+            "inst-1"
+        ]
+
+    def test_stopped_replica_is_stopped_instead_of_recreated(self):
+        """RECREATE would rebuild it on the host being emptied (§4.2)."""
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=2)
+        observed = self._draining_observed(
+            managed=[
+                _make_managed_instance(
+                    "inst-1", host_id="h1", host_name="h1", status="failed"
+                ),
+                _make_managed_instance("inst-2", host_id="h2", host_name="h2"),
+            ],
+            candidates=[(_HostStub(id="h3", name="h3"), _SnapshotStub("h3"))],
+        )
+
+        actions = reconciler._diff(intent, observed)
+
+        assert [a.type for a in actions if a.instance_id == "inst-1"] == [
+            ActionType.STOP
+        ]
+
+    def test_surplus_replica_is_taken_from_the_draining_host(self):
+        """Dropping it as surplus is cheaper than migrating it (§4.2)."""
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=1)
+        observed = self._draining_observed()
+
+        actions = reconciler._diff(intent, observed)
+        stops = [a for a in actions if a.type == ActionType.STOP]
+
+        assert [a.instance_id for a in stops] == ["inst-1"]
+        # Already leaving; no need to also plan a migration for it
+        assert not [a for a in actions if a.type == ActionType.EVACUATE]
+
+    def test_drift_replacement_takes_precedence(self):
+        """A REPLACE already relocates the replica through placement, which
+        excludes the draining host, so the drain progresses without an
+        evacuation."""
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=2, model_source="repo://test:v2")
+        observed = self._draining_observed(
+            managed=[
+                _make_managed_instance(
+                    "inst-1",
+                    host_id="h1",
+                    host_name="h1",
+                    model_source="repo://test:v1",
+                ),
+                _make_managed_instance(
+                    "inst-2",
+                    host_id="h2",
+                    host_name="h2",
+                    model_source="repo://test:v2",
+                ),
+            ],
+            candidates=[(_HostStub(id="h3", name="h3"), _SnapshotStub("h3"))],
+        )
+
+        actions = reconciler._diff(intent, observed)
+        by_instance = [a.type for a in actions if a.instance_id == "inst-1"]
+
+        assert ActionType.EVACUATE not in by_instance
+        assert ActionType.REPLACE in by_instance
+
+    def test_no_evacuation_without_draining_hosts(self):
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=2)
+        observed = _make_observed(
+            managed=[
+                _make_managed_instance("inst-1", host_id="h1"),
+                _make_managed_instance("inst-2", host_id="h2"),
+            ],
+            hosts=[_HostStub(id="h1"), _HostStub(id="h2")],
+        )
+
+        actions = reconciler._diff(intent, observed)
+
+        assert not [a for a in actions if a.type == ActionType.EVACUATE]
+
+
 # ── Build instance config test ──────────────────────────────────
 
 
@@ -790,6 +954,448 @@ class TestActMigrate:
             assert result is None
             mock_stop.assert_not_called()
             mock_delete.assert_not_called()
+
+
+class TestSpecEditRollout:
+    """An edited spec (S-044) rolls out under the intent's strategy."""
+
+    def test_backend_drift_initiates_a_rollout(self):
+        """A config-only edit is a rollout, not a no-op.
+
+        The replica still carries the intent's model_source, so the strategy
+        can only recognise it from the REPLACE the diff planned.
+        """
+        reconciler = Reconciler()
+        intent = _make_intent(
+            replicas=1,
+            strategy="rolling",
+            backend={"backend_type": "hf", "max_length": 1024},
+        )
+        observed = _make_observed(
+            managed=[_make_managed_instance("inst-1", max_length=512)]
+        )
+        actions = reconciler._diff(intent, observed)
+
+        progress = reconciler._maybe_initiate_strategy(intent, observed, actions)
+
+        assert progress is not None
+        assert progress["strategy"] == "rolling"
+        assert progress["drifted_instance_ids"] == ["inst-1"]
+
+    @pytest.mark.anyio
+    async def test_replace_retires_the_replica_it_stops(self):
+        """A stopped replica still counts, so REPLACE has to delete it too.
+
+        Otherwise observed_replicas stays at the desired count with nothing
+        serving: no CREATE for the replacement, and the RECREATE that would
+        restart it is suppressed by this REPLACE.
+        """
+        reconciler = Reconciler()
+        host = _HostStub(id="h1", name="h1")
+        action = Action(
+            type=ActionType.REPLACE,
+            intent_id="intent-001",
+            alias="test-model",
+            host_id="h1",
+            instance_id="inst-1",
+            reason="backend config drift",
+        )
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch(
+                "app.services.migration.stop_source_instance", new=AsyncMock()
+            ) as mock_stop,
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+            await reconciler._act(_make_intent(), action)
+
+        mock_stop.assert_awaited_once_with(host, "inst-1")
+        mock_delete.assert_awaited_once_with(host, "inst-1")
+
+
+class TestSpecSettled:
+    """A pending spec change is only settled when it could be checked."""
+
+    def test_unreadable_replica_config_keeps_the_edit_pending(self):
+        """Not being able to compare is not the same as finding no drift.
+
+        Backend fields live in the replica's real configuration on the host;
+        the cached view carries almost none of them. Settling here would clear
+        the marker and lose the edit, leaving the replica on the old config
+        while the intent reported itself up to date.
+        """
+        observed = _make_observed(
+            managed=[{"instance_id": "i1", "_full_config_unknown": True}]
+        )
+
+        assert _spec_settled(observed, []) is False
+
+    def test_settles_when_every_replica_matches(self):
+        observed = _make_observed(
+            managed=[{"instance_id": "i1", "_full_config": {"max_length": 1024}}]
+        )
+
+        assert _spec_settled(observed, []) is True
+
+    def test_does_not_settle_while_a_replica_still_needs_replacing(self):
+        observed = _make_observed(managed=[{"instance_id": "i1", "_full_config": {}}])
+        actions = [
+            Action(
+                type=ActionType.REPLACE,
+                intent_id="intent-001",
+                alias="test-model",
+                host_id="h1",
+                instance_id="i1",
+                reason="backend config drift",
+            )
+        ]
+
+        assert _spec_settled(observed, actions) is False
+
+
+class TestCreateThatCannotStart:
+    """A replacement that will not start must leave nothing behind (§11.5)."""
+
+    @pytest.mark.anyio
+    async def test_failed_start_removes_the_instance_and_raises(self):
+        """One dead instance per retry would otherwise pile up on the host.
+
+        Each would also still count as an observed replica of the intent,
+        so the shortfall never shows the alias is down.
+        """
+        reconciler = Reconciler()
+        host = _HostStub(id="h1", name="h1")
+        action = Action(
+            type=ActionType.CREATE,
+            intent_id="intent-001",
+            alias="test-model",
+            host_id="h1",
+            reason="shortfall 1/1",
+        )
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch(
+                "app.services.migration.create_instance_on_host",
+                new=AsyncMock(return_value={"instance": {"id": "inst-new"}}),
+            ),
+            patch.object(
+                reconciler,
+                "_start_instance",
+                new=AsyncMock(side_effect=HTTPException(status_code=502, detail="oom")),
+            ),
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+
+            with pytest.raises(HTTPException):
+                await reconciler._act(_make_intent(), action)
+
+        mock_delete.assert_awaited_once_with(host, "inst-new")
+
+    @pytest.mark.anyio
+    async def test_start_with_no_answer_keeps_the_instance(self):
+        """A start the host never answered is not a start that failed.
+
+        The host's start blocks while it launches the server, so a timeout
+        under load says nothing — and the replica is usually coming up.
+        Deleting it would destroy a healthy replica mid-start.
+        """
+        reconciler = Reconciler()
+        host = _HostStub(id="h1", name="h1")
+        action = Action(
+            type=ActionType.CREATE,
+            intent_id="intent-001",
+            alias="test-model",
+            host_id="h1",
+            reason="shortfall 1/1",
+        )
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch(
+                "app.services.migration.create_instance_on_host",
+                new=AsyncMock(return_value={"instance": {"id": "inst-new"}}),
+            ),
+            patch.object(
+                reconciler,
+                "_start_instance",
+                new=AsyncMock(side_effect=StartOutcomeUnknown("timeout")),
+            ),
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+
+            with pytest.raises(StartOutcomeUnknown):
+                await reconciler._act(_make_intent(), action)
+
+        mock_delete.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_recreate_keeps_a_replica_whose_restart_had_no_answer(self):
+        reconciler = Reconciler()
+        host = _HostStub(id="h1", name="h1")
+        action = Action(
+            type=ActionType.RECREATE,
+            intent_id="intent-001",
+            alias="test-model",
+            host_id="h1",
+            instance_id="inst-1",
+            reason="Instance stopped, recreating",
+        )
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch.object(
+                reconciler,
+                "_start_instance",
+                new=AsyncMock(side_effect=StartOutcomeUnknown("timeout")),
+            ),
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+
+            with pytest.raises(StartOutcomeUnknown):
+                await reconciler._act(_make_intent(), action)
+
+        mock_delete.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_rollout_stays_put_when_the_start_outcome_is_unknown(self):
+        """Moving hosts now could leave two replacements, not one."""
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=1, strategy="rolling")
+        host_b = _HostStub(id="h2", name="h2")
+        observed = _make_observed(
+            managed=[_make_managed_instance("i1", host_id="h1", max_length=512)],
+            candidates=[(host_b, _SnapshotStub(host_id="h2"))],
+        )
+        progress = {
+            "strategy": "rolling",
+            "target_model_source": intent.model_source,
+            "drifted_instance_ids": ["i1"],
+            "phase": "creating_replacement",
+            "step": "1/1",
+            "updated": 0,
+            "in_progress": 1,
+            "failed": 0,
+            "current_host_id": "h1",
+            "current_instance_id": None,
+            "pending_hosts": [],
+            "failed_hosts": [],
+            "started_at": "2026-01-01T00:00:00+00:00",
+        }
+
+        with (
+            patch.object(
+                reconciler,
+                "_act",
+                new=AsyncMock(side_effect=StartOutcomeUnknown("timeout")),
+            ),
+            patch.object(reconciler, "_update_status", new=AsyncMock()) as mock_status,
+        ):
+            await reconciler._continue_strategy(intent, observed, progress)
+
+        new_progress = mock_status.await_args.kwargs["strategy_progress"]
+        assert new_progress["current_host_id"] == "h1"
+        assert new_progress["failed_hosts"] == []
+        assert new_progress["failed"] == 1
+
+    @pytest.mark.anyio
+    async def test_rollout_moves_off_the_host_that_could_not_take_it(self):
+        """The strategy must consume the failure, not retry the same host."""
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=1, strategy="rolling")
+        host_b = _HostStub(id="h2", name="h2")
+        observed = _make_observed(
+            managed=[_make_managed_instance("i1", host_id="h1", max_length=512)],
+            candidates=[(host_b, _SnapshotStub(host_id="h2"))],
+        )
+        progress = {
+            "strategy": "rolling",
+            "target_model_source": intent.model_source,
+            "drifted_instance_ids": ["i1"],
+            "phase": "creating_replacement",
+            "step": "1/1",
+            "updated": 0,
+            "in_progress": 1,
+            "failed": 0,
+            "current_host_id": "h1",
+            "current_instance_id": None,
+            "pending_hosts": [],
+            "failed_hosts": [],
+            "started_at": "2026-01-01T00:00:00+00:00",
+        }
+
+        with (
+            patch.object(
+                reconciler,
+                "_act",
+                new=AsyncMock(side_effect=HTTPException(status_code=502, detail="oom")),
+            ),
+            patch.object(reconciler, "_update_status", new=AsyncMock()) as mock_status,
+        ):
+            await reconciler._continue_strategy(intent, observed, progress)
+
+        new_progress = mock_status.await_args.kwargs["strategy_progress"]
+        assert new_progress["current_host_id"] == "h2"
+        assert new_progress["failed_hosts"] == ["h1"]
+        assert mock_status.await_args.kwargs["last_error"]["message"]
+        # A retry on another host is progress, so it is not paced by backoff.
+        assert reconciler._backoff_active(intent.id) is False
+
+    @pytest.mark.anyio
+    async def test_rollout_holds_and_backs_off_when_no_host_is_left(self):
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=1, strategy="rolling")
+        observed = _make_observed(
+            managed=[_make_managed_instance("i1", host_id="h1", max_length=512)]
+        )
+        progress = {
+            "strategy": "rolling",
+            "target_model_source": intent.model_source,
+            "drifted_instance_ids": ["i1"],
+            "phase": "creating_replacement",
+            "step": "1/1",
+            "updated": 0,
+            "in_progress": 1,
+            "failed": 0,
+            "current_host_id": "h1",
+            "current_instance_id": None,
+            "pending_hosts": [],
+            "failed_hosts": [],
+            "started_at": "2026-01-01T00:00:00+00:00",
+        }
+
+        with (
+            patch.object(
+                reconciler,
+                "_act",
+                new=AsyncMock(side_effect=HTTPException(status_code=502, detail="oom")),
+            ),
+            patch.object(reconciler, "_update_status", new=AsyncMock()) as mock_status,
+        ):
+            await reconciler._continue_strategy(intent, observed, progress)
+
+        new_progress = mock_status.await_args.kwargs["strategy_progress"]
+        assert new_progress["phase"] == "failed"
+        assert "no other host" in new_progress["message"]
+        assert reconciler._backoff_active(intent.id) is True
+
+
+class TestActEvacuate:
+    """_act EVACUATE: drain evacuation must leave the source host empty."""
+
+    def _action(self, target_host_id: str | None = "h2") -> Action:
+        return Action(
+            type=ActionType.EVACUATE,
+            intent_id="intent-001",
+            alias="test-model",
+            host_id="h1",
+            host_name="h1",
+            instance_id="inst-1",
+            target_host_id=target_host_id,
+            target_host_name="h2" if target_host_id else None,
+            reason="host draining → migrate to h2",
+        )
+
+    @pytest.mark.anyio
+    async def test_deletes_the_disowned_source_instance(self):
+        """S-037 leaves the source stopped; a drain must remove it.
+
+        The leftover keeps serving the alias in the host's instance list, so
+        placement would exclude this host for the intent from then on — the
+        replica could never return and the next drain would stall on it.
+        """
+        reconciler = Reconciler()
+        host = _HostStub(id="h1", name="h1")
+        migration = SimpleNamespace(
+            migration_id="mig-1", status="completed", error=None
+        )
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch(
+                "app.services.migration.execute_migration",
+                new=AsyncMock(return_value=migration),
+            ) as mock_migrate,
+            patch("app.services.drain.clear_stall", new=AsyncMock()) as mock_clear,
+            patch("app.services.drain.record_stall", new=AsyncMock()) as mock_stall,
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+
+            result = await reconciler._act(_make_intent(), self._action())
+
+        assert result == {"migration_id": "mig-1", "status": "completed"}
+        assert mock_migrate.await_args.kwargs["target_host_id"] == "h2"
+        mock_delete.assert_awaited_once_with(host, "inst-1")
+        mock_clear.assert_awaited_once_with("h1", "inst-1")
+        mock_stall.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_no_target_records_stall_without_touching_the_replica(self):
+        """A stall is not a failure: the replica keeps serving (§4.3)."""
+        reconciler = Reconciler()
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch(
+                "app.services.migration.execute_migration", new=AsyncMock()
+            ) as mock_migrate,
+            patch("app.services.drain.record_stall", new=AsyncMock()) as mock_stall,
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=_HostStub(id="h1"))
+
+            result = await reconciler._act(
+                _make_intent(), self._action(target_host_id=None)
+            )
+
+        assert result is None
+        mock_migrate.assert_not_called()
+        mock_delete.assert_not_called()
+        mock_stall.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_incomplete_migration_stalls_and_keeps_the_source(self):
+        reconciler = Reconciler()
+        migration = SimpleNamespace(
+            migration_id="mig-1", status="failed", error="pull failed"
+        )
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch(
+                "app.services.migration.execute_migration",
+                new=AsyncMock(return_value=migration),
+            ),
+            patch("app.services.drain.record_stall", new=AsyncMock()) as mock_stall,
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=_HostStub(id="h1"))
+
+            with pytest.raises(RuntimeError, match="pull failed"):
+                await reconciler._act(_make_intent(), self._action())
+
+        mock_delete.assert_not_called()
+        assert "pull failed" in mock_stall.await_args.args[2]
 
 
 class TestUpdateStatusConditions:

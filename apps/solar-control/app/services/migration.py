@@ -355,14 +355,16 @@ async def ensure_model_on_target(
     return result  # (path, cached)
 
 
-async def check_no_active_training(host: Host) -> None:
-    """Verify *host* has no active training job steps.
+async def active_job_ids_on_host(host: Host) -> list[str]:
+    """Return the ids of non-terminal job steps running on *host*.
 
-    Queries the host's ``GET /jobs`` endpoint. Raises ``HTTPException(409)``
-    if any job step is in an active (non-terminal) state.
+    Asks the host directly (``GET /jobs``) rather than the jobs table, so
+    the answer reflects what is actually executing. An empty list also
+    covers hosts that do not implement the endpoint.
 
-    This implements the S-037 requirement that active training jobs from
-    S-032/S-033 are non-migratable workloads.
+    Raises ``HTTPException(502)`` when the host cannot be reached: callers
+    gate destructive operations on this, so an unknown answer must not
+    read as "no jobs".
     """
     TERMINAL_STATES = {"completed", "failed", "cancelled", "error"}
 
@@ -383,7 +385,7 @@ async def check_no_active_training(host: Host) -> None:
                         "assuming no training jobs",
                         host.name,
                     )
-                    return
+                    return []
                 else:
                     text = await response.text()
                     logger.warning(
@@ -392,7 +394,7 @@ async def check_no_active_training(host: Host) -> None:
                         response.status,
                         text,
                     )
-                    return
+                    return []
 
         active_ids: list[str] = []
         for job in jobs if isinstance(jobs, list) else []:
@@ -400,19 +402,7 @@ async def check_no_active_training(host: Host) -> None:
             if status not in TERMINAL_STATES:
                 job_id = job.get("job_id") or job.get("id", "unknown")
                 active_ids.append(job_id)
-
-        if active_ids:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Source host '{host.name}' has {len(active_ids)} "
-                    f"active training job(s): {', '.join(active_ids[:5])}"
-                    f"{'...' if len(active_ids) > 5 else ''}. "
-                    f"Training jobs are non-migratable workloads. "
-                    f"Stop or wait for training jobs to complete before "
-                    f"migrating instances from this host."
-                ),
-            )
+        return active_ids
     except HTTPException:
         raise
     except (
@@ -423,17 +413,38 @@ async def check_no_active_training(host: Host) -> None:
         raise HTTPException(
             status_code=502,
             detail=(
-                f"Source host '{host.name}' is unreachable for training job "
-                f"check at {host.url}. Cannot verify no active training jobs "
-                f"– migration rejected."
+                f"Host '{host.name}' is unreachable for the training job "
+                f"check at {host.url}. Cannot verify that no training jobs "
+                f"are active."
             ),
         )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
             detail=(
-                f"Cannot reach source host '{host.name}' for training job "
-                f"check: {e}. Migration rejected."
+                f"Cannot reach host '{host.name}' for the training job " f"check: {e}."
+            ),
+        )
+
+
+async def check_no_active_training(host: Host) -> None:
+    """Verify *host* has no active training job steps.
+
+    Raises ``HTTPException(409)`` if any job step is in an active
+    (non-terminal) state, per the S-037 requirement that active training
+    jobs from S-032/S-033 are non-migratable workloads.
+    """
+    active_ids = await active_job_ids_on_host(host)
+    if active_ids:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Source host '{host.name}' has {len(active_ids)} "
+                f"active training job(s): {', '.join(active_ids[:5])}"
+                f"{'...' if len(active_ids) > 5 else ''}. "
+                f"Training jobs are non-migratable workloads. "
+                f"Stop or wait for training jobs to complete before "
+                f"migrating instances from this host."
             ),
         )
 

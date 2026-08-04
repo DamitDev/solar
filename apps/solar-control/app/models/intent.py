@@ -81,6 +81,16 @@ class IntentCreate(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
+class IntentUpdate(IntentCreate):
+    """Request body for PUT /api/intents/{id} (S-039 §12.5, S-044).
+
+    Same schema as create, with full-replace semantics: an omitted field is
+    reset to its default, so clients send the complete spec rather than a
+    diff. ``alias`` must match the stored one — it is the served name and
+    the deployment's identity, not an editable field.
+    """
+
+
 # ── Response models ────────────────────────────────────────────
 
 
@@ -119,6 +129,16 @@ class StrategyProgress(BaseModel):
 
     strategy: str
     target_model_source: str | None = None
+    drifted_instance_ids: list[str] | None = Field(
+        default=None,
+        description=(
+            "Replicas this rollout is replacing. Identifies them by id rather "
+            "than by model_source, because an edited spec (S-044) can change "
+            "backend config alone, and an in-place replacement shares both "
+            "host and source with the replica it replaces. None means the "
+            "rollout predates the field and only model_source drift applies."
+        ),
+    )
     phase: str | None = None
     step: str | None = None
     updated: int = 0
@@ -126,6 +146,14 @@ class StrategyProgress(BaseModel):
     failed: int = 0
     current_host_id: str | None = None
     current_instance_id: str | None = None
+    current_old_instance_id: str | None = Field(
+        default=None,
+        description=(
+            "Replica the current step replaces. Recorded because a step can "
+            "end up placing its replacement on a different host than the "
+            "replica it retires, when the first host cannot take it."
+        ),
+    )
     pending_hosts: list[str] = Field(default_factory=list)
     failed_hosts: list[str] = Field(default_factory=list)
     started_at: str | None = None
@@ -157,6 +185,14 @@ class IntentStatus(BaseModel):
     conditions: list[Condition] = Field(default_factory=list)
     strategy_progress: StrategyProgress | None = None
     last_error: LastError | None = None
+    spec_changed_at: str | None = Field(
+        default=None,
+        description=(
+            "Set when the spec was updated (S-044) and cleared once the "
+            "replicas match it again. While set, the reconciler compares the "
+            "full instance configuration so backend-only edits roll out"
+        ),
+    )
     created_at: str | None = None
     updated_at: str | None = None
     last_reconciled_at: str | None = None

@@ -1,32 +1,49 @@
 /**
- * NewIntentModal — declarative intent submission form (U-003).
+ * IntentFormModal — declarative intent form, for both submission (U-003) and
+ * editing (U-006).
  *
  * Fields per spec deployment-intent.md §4.1: alias, model_source, replicas,
  * priority, strategy, backend (shared editor), placement, resources, metadata.
  * Client-side shape rules (§4.7) run before submit; the server stays
  * authoritative. Server errors surface as a red alert: 409 = alias conflict,
  * 422 = structured errors[] list.
+ *
+ * Passing `intent` switches to edit mode: every field is seeded from that
+ * intent and the form PUTs to §12.5, which has full-replace semantics — so the
+ * form must send a complete spec, and anything it fails to hydrate would be
+ * silently reset to a default.
  */
 
 import { useEffect, useMemo, useState } from 'react';
-import { X, Plus, Trash2, ChevronDown } from 'lucide-react';
+import { X, Plus, Trash2, ChevronDown, AlertTriangle } from 'lucide-react';
 import solarClient from '@/api/client';
 import { Host, Intent, IntentCreateRequest, IntentPriority, IntentStrategy } from '@/api/types';
 import { extractApiError } from '@/lib/apiErrors';
+import { cn } from '@/lib/utils';
 import { validateIntentRequest, sanitizeIntentBackend } from '@/lib/intentValidation';
 import { getDefaultConfig, stripEmptyOptionalFields } from '@/lib/backendConfig';
 import { BackendConfigFields } from './BackendConfigFields';
 
-interface NewIntentModalProps {
+interface IntentFormModalProps {
+  /** Edit mode: seed from this intent and update it instead of creating one. */
+  intent?: Intent;
   initial?: Partial<IntentCreateRequest>;
   onClose: () => void;
-  onCreated: (intent: Intent) => void;
+  onSaved: (intent: Intent) => void;
 }
 
 interface MetadataRow {
   key: string;
   value: string;
 }
+
+const numberToInput = (value: number | null | undefined): string => (value == null ? '' : String(value));
+
+/** Either seed: a stored intent widens priority/strategy to plain strings. */
+type IntentSeed = Omit<Partial<IntentCreateRequest>, 'priority' | 'strategy'> & {
+  priority?: string;
+  strategy?: string;
+};
 
 /** Ready-made patterns for the most common filtered HuggingFace pulls. */
 const FILTER_SUGGESTIONS = ['*UD-Q4_K_XL*', '*Q8_0*', 'mmproj-BF16.gguf', '*.safetensors', 'tokenizer*'];
@@ -39,23 +56,43 @@ const PRIORITY_EXPLANATIONS: Record<IntentPriority, string> = {
   ephemeral: 'Lowest priority — first to be stopped or migrated when capacity is needed.',
 };
 
-export function NewIntentModal({ initial, onClose, onCreated }: NewIntentModalProps) {
-  const [loading, setLoading] = useState(false);
-  const [alias, setAlias] = useState(initial?.alias ?? '');
-  const [modelSource, setModelSource] = useState(initial?.model_source ?? '');
-  const [replicas, setReplicas] = useState<number>(initial?.replicas ?? 1);
-  const [priority, setPriority] = useState<IntentPriority>(initial?.priority ?? 'production');
-  const [strategy, setStrategy] = useState<IntentStrategy>(initial?.strategy ?? 'rolling');
-  const [backend, setBackend] = useState<Record<string, any>>(() => getDefaultConfig('llamacpp', 'llm', true));
-  const [fileFilters, setFileFilters] = useState<string[]>([]);
+export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFormModalProps) {
+  const editing = intent != null;
+  // In edit mode the intent is the source of truth for every field; `initial`
+  // only ever pre-fills a new intent.
+  const seed: IntentSeed | undefined = intent ?? initial;
 
-  const [roles, setRoles] = useState<string[]>(['inference']);
-  const [gpuType, setGpuType] = useState<string>('');
-  const [hostAllow, setHostAllow] = useState<string[]>([]);
-  const [hostDeny, setHostDeny] = useState<string[]>([]);
-  const [vramGb, setVramGb] = useState<string>('');
-  const [ramGb, setRamGb] = useState<string>('');
-  const [metadataRows, setMetadataRows] = useState<MetadataRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [alias, setAlias] = useState(seed?.alias ?? '');
+  const [modelSource, setModelSource] = useState(seed?.model_source ?? '');
+  const [replicas, setReplicas] = useState<number>(seed?.replicas ?? 1);
+  const [priority, setPriority] = useState<IntentPriority>((seed?.priority as IntentPriority) ?? 'production');
+  const [strategy, setStrategy] = useState<IntentStrategy>((seed?.strategy as IntentStrategy) ?? 'rolling');
+  const [backend, setBackend] = useState<Record<string, any>>(() =>
+    seed?.backend ? { ...seed.backend } : getDefaultConfig('llamacpp', 'llm', true),
+  );
+  const [fileFilters, setFileFilters] = useState<string[]>(() => seed?.backend?.file_filters ?? []);
+
+  const [roles, setRoles] = useState<string[]>(seed?.placement?.roles ?? ['inference']);
+  const [gpuType, setGpuType] = useState<string>(seed?.placement?.gpu_type ?? '');
+  const [hostAllow, setHostAllow] = useState<string[]>(seed?.placement?.host_allow ?? []);
+  const [hostDeny, setHostDeny] = useState<string[]>(seed?.placement?.host_deny ?? []);
+  const [vramGb, setVramGb] = useState<string>(numberToInput(seed?.resources?.vram_gb));
+  const [ramGb, setRamGb] = useState<string>(numberToInput(seed?.resources?.ram_gb));
+  const [metadataRows, setMetadataRows] = useState<MetadataRow[]>(() =>
+    Object.entries(seed?.metadata ?? {}).map(([key, value]) => ({ key, value })),
+  );
+
+  // A rollout in flight is abandoned and re-planned against the saved spec
+  // (§11.5.1), so saying so beats letting the operator discover it.
+  const rolloutInFlight = intent?.status?.strategy_progress != null;
+
+  // Collapsed optional sections would hide seeded constraints the operator is
+  // about to re-submit, so open them whenever they hold anything.
+  const [placementOpen, setPlacementOpen] = useState(
+    () => gpuType !== '' || hostAllow.length > 0 || hostDeny.length > 0 || roles.join() !== 'inference',
+  );
+  const [extrasOpen, setExtrasOpen] = useState(() => vramGb !== '' || ramGb !== '' || metadataRows.length > 0);
 
   const [hosts, setHosts] = useState<Host[]>([]);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -167,16 +204,21 @@ export function NewIntentModal({ initial, onClose, onCreated }: NewIntentModalPr
 
     setLoading(true);
     try {
-      const created = await solarClient.createIntent({
+      const payload = {
         ...request,
         backend: sanitizeIntentBackend(stripEmptyOptionalFields(submittedBackend)),
-      });
-      onCreated(created);
+      };
+      const saved = editing
+        ? await solarClient.updateIntent(intent!.id, payload)
+        : await solarClient.createIntent(payload);
+      onSaved(saved);
     } catch (err: any) {
-      console.error('Failed to create intent:', err);
+      console.error(editing ? 'Failed to update intent:' : 'Failed to create intent:', err);
       const detail = extractApiError(err);
       if (err?.response?.status === 409) {
-        setServerError({ message: `Alias already claimed by an active intent — "${detail.message}"` });
+        setServerError({
+          message: editing ? detail.message : `Alias already claimed by an active intent — "${detail.message}"`,
+        });
       } else {
         setServerError({ message: detail.message, errors: detail.errors });
       }
@@ -198,13 +240,31 @@ export function NewIntentModal({ initial, onClose, onCreated }: NewIntentModalPr
       <div className="bg-nord-1 rounded-lg shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto border border-nord-3">
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-nord-3 sticky top-0 bg-nord-1 z-10">
-          <h2 className="text-xl font-bold text-nord-6">New Intent</h2>
+          <h2 className="text-xl font-bold text-nord-6">{editing ? `Edit ${intent!.alias}` : 'New Intent'}</h2>
           <button onClick={onClose} className="p-1 hover:bg-nord-2 rounded transition-colors text-nord-4">
             <X size={20} />
           </button>
         </div>
 
         <form onSubmit={handleSubmit} className="p-6 space-y-6">
+          {editing && (
+            <div className="rounded-md border border-nord-3 bg-nord-2 p-3 space-y-1">
+              <p className="text-sm text-nord-4">
+                Saving replaces the whole spec. Replicas are converted using the{' '}
+                <span className="font-medium text-nord-6">{strategy}</span> strategy below —{' '}
+                {strategy === 'rolling'
+                  ? 'one replica at a time, so the alias keeps serving.'
+                  : 'all replicas stop before the replacements start, so the alias briefly serves nothing.'}
+              </p>
+              {rolloutInFlight && (
+                <p className="flex items-center gap-2 text-sm text-nord-13">
+                  <AlertTriangle size={14} className="shrink-0" />A rollout is in progress. Saving restarts it against
+                  the new spec.
+                </p>
+              )}
+            </div>
+          )}
+
           {serverError && (
             <div className="rounded-md border border-nord-11 bg-nord-11 bg-opacity-10 p-3">
               <p className="text-sm font-medium text-nord-11">{serverError.message}</p>
@@ -240,9 +300,14 @@ export function NewIntentModal({ initial, onClose, onCreated }: NewIntentModalPr
                     });
                   }}
                   placeholder="model-name:size"
-                  className={inputClass}
+                  disabled={editing}
+                  className={cn(inputClass, editing && 'opacity-60 cursor-not-allowed')}
                 />
-                <p className="text-xs text-nord-4 mt-1">Served model name — the deployment identity.</p>
+                <p className="text-xs text-nord-4 mt-1">
+                  {editing
+                    ? 'Served model name — the deployment identity, so it cannot be changed. Serving a different name means a new intent.'
+                    : 'Served model name — the deployment identity.'}
+                </p>
                 {fieldError('alias')}
               </div>
 
@@ -388,7 +453,11 @@ export function NewIntentModal({ initial, onClose, onCreated }: NewIntentModalPr
           </div>
 
           {/* Section 3: Placement (optional) */}
-          <details className="group border border-nord-3 rounded-md">
+          <details
+            open={placementOpen}
+            onToggle={(e) => setPlacementOpen((e.currentTarget as HTMLDetailsElement).open)}
+            className="group border border-nord-3 rounded-md"
+          >
             <summary className="flex items-center justify-between px-4 py-3 cursor-pointer select-none list-none">
               <span className="text-sm font-medium text-nord-4">Placement (optional)</span>
               <ChevronDown size={16} className="text-nord-4 transition-transform group-open:rotate-180" />
@@ -489,7 +558,11 @@ export function NewIntentModal({ initial, onClose, onCreated }: NewIntentModalPr
           </details>
 
           {/* Section 4: Resources & Metadata (optional) */}
-          <details className="group border border-nord-3 rounded-md">
+          <details
+            open={extrasOpen}
+            onToggle={(e) => setExtrasOpen((e.currentTarget as HTMLDetailsElement).open)}
+            className="group border border-nord-3 rounded-md"
+          >
             <summary className="flex items-center justify-between px-4 py-3 cursor-pointer select-none list-none">
               <span className="text-sm font-medium text-nord-4">Resources &amp; Metadata (optional)</span>
               <ChevronDown size={16} className="text-nord-4 transition-transform group-open:rotate-180" />
@@ -584,7 +657,7 @@ export function NewIntentModal({ initial, onClose, onCreated }: NewIntentModalPr
               disabled={loading}
               className="flex-1 px-4 py-2 bg-nord-10 text-nord-6 rounded-md hover:bg-nord-9 transition-colors disabled:opacity-50 font-medium"
             >
-              {loading ? 'Submitting...' : 'Submit Intent'}
+              {loading ? 'Saving...' : editing ? 'Save changes' : 'Submit Intent'}
             </button>
           </div>
         </form>

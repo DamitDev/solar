@@ -98,11 +98,40 @@ def _validate_backend_model_selection(
     return errors
 
 
+def validate_intent_update(
+    data: dict[str, Any], *, current_alias: str
+) -> list[dict[str, str]]:
+    """Validate an intent update request (S-039 §12.5).
+
+    Applies every creation rule — an update must not be able to write a
+    spec that submission would reject — plus alias immutability.
+    """
+    errors = validate_intent_create(data)
+
+    alias = data.get("alias")
+    if isinstance(alias, str) and alias.strip() and alias != current_alias:
+        errors.append(
+            {
+                "field": "alias",
+                "message": (
+                    f"alias is immutable (currently '{current_alias}'). It is the "
+                    f"served name and the deployment's identity — create a new "
+                    f"intent to serve a different alias"
+                ),
+            }
+        )
+
+    return errors
+
+
 def validate_intent_create(data: dict[str, Any]) -> list[dict[str, str]]:
     """Validate an intent creation request (S-039 §4.7).
 
     Returns a list of {field, message} errors. Empty list means valid.
     Does NOT raise — the route handler decides the HTTP status.
+
+    Shared with the update path (:func:`validate_intent_update`) so the two
+    cannot drift apart.
     """
     errors: list[dict[str, str]] = []
 

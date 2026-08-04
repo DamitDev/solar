@@ -1,7 +1,21 @@
-import { useState } from 'react';
-import { AlertTriangle, ChevronDown, ChevronUp, Cpu, HardDrive, Layers, MemoryStick, Server } from 'lucide-react';
-import { ActiveJobSummary, HostResourceSnapshot } from '@/api/types';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronUp,
+  Cpu,
+  HardDrive,
+  Layers,
+  MemoryStick,
+  MoveRight,
+  PlayCircle,
+  PowerOff,
+  Server,
+} from 'lucide-react';
+import solarClient from '@/api/client';
+import { ActiveJobSummary, HostDrainStatus, HostResourceSnapshot } from '@/api/types';
 import { cn, getStatusColor, getGpuTypeLabel, getGpuTypeBadgeClass, getRoleBadgeClass } from '@/lib/utils';
+import { DrainHostModal } from './DrainHostModal';
 import { ResourceBar, ResourceBarSegment } from './ResourceBar';
 
 const DIM_LABELS: Record<'vram' | 'ram' | 'disk', string> = {
@@ -89,9 +103,111 @@ function ActiveJobsList({ jobs }: { jobs: ActiveJobSummary[] }) {
   );
 }
 
-export function HostResourceCard({ snapshot }: { snapshot: HostResourceSnapshot }) {
+/**
+ * Drain progress for a host being emptied (U-005, host-draining.md §4.3–§4.4).
+ * A stalled drain is called out separately: it looks identical to a progressing
+ * one in replica counts, but only one of them needs an operator.
+ */
+function DrainPanel({ status }: { status: HostDrainStatus }) {
+  const drained = status.drain_state === 'drained';
+  const blocked = status.replicas.filter((r) => r.blocked_reason);
+
+  return (
+    <div
+      className={cn(
+        'rounded-md border p-3 space-y-2 text-sm',
+        status.stalled ? 'border-nord-11 bg-nord-11 bg-opacity-10' : 'border-nord-12/50 bg-nord-12 bg-opacity-5',
+      )}
+    >
+      <p className="flex items-center gap-2 text-nord-6">
+        {status.stalled ? (
+          <AlertTriangle size={14} className="shrink-0 text-nord-11" />
+        ) : (
+          <MoveRight size={14} className="shrink-0 text-nord-13" />
+        )}
+        {drained ? (
+          <span>Drained — nothing is running here. Safe to take offline.</span>
+        ) : status.stalled ? (
+          <span>
+            Drain stalled — {status.managed_remaining} managed replica{status.managed_remaining === 1 ? '' : 's'} cannot
+            be moved
+          </span>
+        ) : (
+          <span>
+            Draining — {status.managed_remaining} managed replica{status.managed_remaining === 1 ? '' : 's'} left to
+            move
+          </span>
+        )}
+      </p>
+
+      {blocked.length > 0 && (
+        <ul className="space-y-1">
+          {blocked.map((r) => (
+            <li key={r.instance_id} className="text-xs text-nord-4">
+              <span className="font-medium text-nord-6">{r.alias || r.instance_id}</span>: {r.blocked_reason}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {status.manual_running > 0 && (
+        <p className="text-xs text-nord-13">
+          {status.manual_running} manual instance{status.manual_running === 1 ? '' : 's'} still running — draining
+          leaves those to you.
+        </p>
+      )}
+    </div>
+  );
+}
+
+export function HostResourceCard({
+  snapshot,
+  onDrainChanged,
+}: {
+  snapshot: HostResourceSnapshot;
+  onDrainChanged?: () => void;
+}) {
   const [expanded, setExpanded] = useState(false);
+  const [drainStatus, setDrainStatus] = useState<HostDrainStatus | null>(null);
+  const [showDrainModal, setShowDrainModal] = useState(false);
+  const [resuming, setResuming] = useState(false);
+  const [drainError, setDrainError] = useState<string | null>(null);
   const unreachable = !snapshot.reachable;
+  const draining = snapshot.drain_state != null;
+
+  // Progress (and stall reasons) only exist while a drain is running, so the
+  // extra request is scoped to that. Re-runs when the page refetches with a
+  // changed instance count, i.e. when a replica has actually moved.
+  const refreshDrainStatus = useCallback(async () => {
+    try {
+      setDrainStatus(await solarClient.getDrainStatus(snapshot.host_id));
+    } catch (err) {
+      console.error('Failed to read drain status:', err);
+    }
+  }, [snapshot.host_id]);
+
+  useEffect(() => {
+    if (!draining) {
+      setDrainStatus(null);
+      return;
+    }
+    refreshDrainStatus();
+  }, [draining, snapshot.instance_count, snapshot.running_instance_count, refreshDrainStatus]);
+
+  const handleResume = async () => {
+    setResuming(true);
+    setDrainError(null);
+    try {
+      await solarClient.resumeHost(snapshot.host_id);
+      setDrainStatus(null);
+      onDrainChanged?.();
+    } catch (err: any) {
+      console.error('Failed to resume host:', err);
+      setDrainError(err?.response?.data?.detail || err?.message || 'Failed to resume host');
+    } finally {
+      setResuming(false);
+    }
+  };
 
   return (
     <div
@@ -126,6 +242,30 @@ export function HostResourceCard({ snapshot }: { snapshot: HostResourceSnapshot 
           <span className={cn('px-2 py-1 rounded-full text-xs font-medium', getStatusColor(snapshot.status))}>
             {snapshot.status}
           </span>
+          {/* Separate from the status badge on purpose: a draining host is
+              still online, and the two answer different questions. */}
+          {snapshot.drain_state === 'draining' && (
+            <span
+              className={cn(
+                'px-2 py-1 rounded-full text-xs font-medium flex items-center gap-1',
+                drainStatus?.stalled
+                  ? 'bg-nord-11 bg-opacity-30 text-nord-11'
+                  : 'bg-nord-13 bg-opacity-30 text-nord-13',
+              )}
+              title={drainStatus?.stalled ? 'No host can accept a remaining replica' : 'Evacuating managed replicas'}
+            >
+              {drainStatus?.stalled && <AlertTriangle size={12} />}
+              {drainStatus?.stalled ? 'draining (stalled)' : 'draining'}
+            </span>
+          )}
+          {snapshot.drain_state === 'drained' && (
+            <span
+              className="px-2 py-1 rounded-full text-xs font-medium bg-nord-3 text-nord-4"
+              title="Evacuated — safe to take offline"
+            >
+              drained
+            </span>
+          )}
           {unreachable && (
             <span
               className="px-2 py-1 rounded-full text-xs font-medium bg-nord-11 bg-opacity-30 text-nord-11 flex items-center gap-1"
@@ -135,8 +275,31 @@ export function HostResourceCard({ snapshot }: { snapshot: HostResourceSnapshot 
               unreachable
             </span>
           )}
+          {draining ? (
+            <button
+              onClick={handleResume}
+              disabled={resuming}
+              className="px-2 py-1 rounded text-xs font-medium bg-nord-3 text-nord-6 hover:bg-nord-2 transition-colors disabled:opacity-50 flex items-center gap-1"
+              title="Return this host to service"
+            >
+              <PlayCircle size={12} />
+              {resuming ? 'Resuming...' : 'Resume'}
+            </button>
+          ) : (
+            <button
+              onClick={() => setShowDrainModal(true)}
+              className="px-2 py-1 rounded text-xs font-medium bg-nord-3 text-nord-6 hover:bg-nord-2 transition-colors flex items-center gap-1"
+              title="Move managed replicas away and stop new placement (maintenance)"
+            >
+              <PowerOff size={12} />
+              Drain
+            </button>
+          )}
         </div>
       </div>
+
+      {drainError && <p className="text-sm text-nord-11">{drainError}</p>}
+      {draining && drainStatus && <DrainPanel status={drainStatus} />}
 
       {/* Per-dimension segmented bars */}
       {(['vram', 'ram', 'disk'] as const).map((dim) => {
@@ -213,6 +376,21 @@ export function HostResourceCard({ snapshot }: { snapshot: HostResourceSnapshot 
                               {inst.status}
                             </span>
                           )}
+                          {/* Whether an instance is intent-managed decides
+                              whether a drain can move it (S-043 §3). */}
+                          <span
+                            className={cn(
+                              'px-2 py-0.5 rounded-full text-xs',
+                              inst.managed_by === 'intent' ? 'bg-nord-10/30 text-nord-8' : 'bg-nord-3 text-nord-4',
+                            )}
+                            title={
+                              inst.managed_by === 'intent'
+                                ? `Managed by intent ${inst.intent_id ?? ''} — moved automatically when draining`
+                                : 'Created manually — never moved by a drain'
+                            }
+                          >
+                            {inst.managed_by === 'intent' ? 'intent' : 'manual'}
+                          </span>
                           {inst.backend_type && <span className="text-xs text-nord-4">{inst.backend_type}</span>}
                           {inst.port != null && <span className="font-mono text-xs text-nord-4">:{inst.port}</span>}
                         </li>
@@ -283,6 +461,19 @@ export function HostResourceCard({ snapshot }: { snapshot: HostResourceSnapshot 
           </div>
         )}
       </div>
+
+      {showDrainModal && (
+        <DrainHostModal
+          hostId={snapshot.host_id}
+          hostName={snapshot.host_name}
+          onClose={() => setShowDrainModal(false)}
+          onDraining={() => {
+            setShowDrainModal(false);
+            refreshDrainStatus();
+            onDrainChanged?.();
+          }}
+        />
+      )}
     </div>
   );
 }

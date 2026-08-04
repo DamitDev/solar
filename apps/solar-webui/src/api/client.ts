@@ -17,9 +17,11 @@ import {
   CatalogResponse,
   Intent,
   IntentCreateRequest,
+  IntentUpdateRequest,
   IntentDeletedResponse,
   AggregatedResourceResponse,
   ResourcesQueryParams,
+  HostDrainStatus,
 } from './types';
 
 const DEFAULT_RELATIVE_CONTROL_BASE = '/api/control';
@@ -294,6 +296,15 @@ class SolarClient {
     return response.data as Intent;
   }
 
+  /**
+   * Replace an intent's spec (U-006, S-044). Full-replace semantics: send the
+   * complete spec, since anything omitted is reset to its default server-side.
+   */
+  async updateIntent(id: string, data: IntentUpdateRequest): Promise<Intent> {
+    const response = await this.client.put(`/api/intents/${id}`, data);
+    return response.data as Intent;
+  }
+
   async deleteIntent(id: string, orphan = false): Promise<IntentDeletedResponse> {
     const response = await this.client.delete(`/api/intents/${id}`, { params: { orphan } });
     return response.data as IntentDeletedResponse;
@@ -303,6 +314,29 @@ class SolarClient {
   async getResources(params?: ResourcesQueryParams): Promise<AggregatedResourceResponse> {
     const response = await this.client.get('/api/resources', { params });
     return response.data as AggregatedResourceResponse;
+  }
+
+  // Host draining (U-005, S-043)
+
+  /**
+   * Start draining a host. Rejects with 409 and a `blockers` list while
+   * manual instances are running or job steps are active.
+   */
+  async drainHost(hostId: string): Promise<HostDrainStatus> {
+    const response = await this.client.post(`/api/hosts/${hostId}/drain`);
+    return response.data as HostDrainStatus;
+  }
+
+  /** Cancel a drain, or return a drained host to service. */
+  async resumeHost(hostId: string): Promise<HostDrainStatus> {
+    const response = await this.client.delete(`/api/hosts/${hostId}/drain`);
+    return response.data as HostDrainStatus;
+  }
+
+  /** Drain progress: what remains, what blocks it, and why a replica is stuck. */
+  async getDrainStatus(hostId: string): Promise<HostDrainStatus> {
+    const response = await this.client.get(`/api/hosts/${hostId}/drain`);
+    return response.data as HostDrainStatus;
   }
 
   // OpenAI Gateway

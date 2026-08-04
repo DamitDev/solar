@@ -106,6 +106,26 @@ Migration files are in `app/database/migrations/versions/` and follow a `NNNN_de
 - `GET /api/hosts/{host_id}/instances` - Get instances from a host
 - `POST /api/hosts/refresh-all` - Refresh all hosts (reconnect and sync instances)
 
+### Host Draining (Maintenance)
+
+- `POST /api/hosts/{host_id}/drain` - Take a host out of service. Returns `202` with the drain status, or `409` with a `blockers` list when the preflight refuses (a running manually created instance, or an active training job step). Idempotent
+- `DELETE /api/hosts/{host_id}/drain` - Cancel a drain or return a drained host to service
+- `GET /api/hosts/{host_id}/drain` - Drain progress: `drain_state`, `managed_remaining`, `manual_running`, per-replica `blocked_reason`, and the preflight `blockers`
+
+A drain marks the host `draining` in the database, which excludes it from placement and from new manual instances (`409`). The reconciler then evacuates the intent-managed replicas, one migration per tick, deleting each source instance once its replacement is up, and the host becomes `drained` once nothing managed and nothing running remains. A replica with no eligible target keeps serving and the drain waits — serving capacity is never dropped to finish a drain. See `training-platform-project/docs/specs/host-draining.md`.
+
+### Declarative Intents
+
+- `GET /api/intents` - List intents (filters: `alias`, `priority`, `phase`, `limit`, `offset`)
+- `POST /api/intents` - Submit an intent; solar-control chooses the hosts
+- `GET /api/intents/{intent_id}` - Intent spec and status (replica set, conditions, rollout progress)
+- `PUT /api/intents/{intent_id}` - Replace the spec. Full-replace semantics: an omitted field is reset to its default, so send a complete spec. `alias` is immutable (`422`), and the reconciler converges the change under the strategy in the new spec, abandoning any rollout that was in flight
+- `DELETE /api/intents/{intent_id}` - Delete the intent and stop its instances; `?orphan=true` leaves them running with the ownership markers cleared
+
+A rollout that cannot bring its replacement up on the intended host tries the next eligible host, and holds with the reason in `status.strategy_progress.message` and `status.last_error` when there is none — retried with backoff rather than every tick. An instance the host refuses to start is deleted, so a retry never leaves dead instances behind; a start the host never answers is left alone instead, since it is probably still coming up. An edit whose replicas could not be read (unreachable host) stays pending in `status.spec_changed_at` instead of being reported as rolled out.
+
+See `training-platform-project/docs/specs/deployment-intent.md`.
+
 ### Pending Host Approval (Management API)
 
 - `GET /api/hosts/pending` - List hosts awaiting approval

@@ -3,6 +3,7 @@
 POST   /api/intents          — submit a deployment intent
 GET    /api/intents          — list active intents
 GET    /api/intents/{id}     — get a single intent
+PUT    /api/intents/{id}     — replace an intent's spec (S-044)
 DELETE /api/intents/{id}     — delete an intent (soft-delete)
 """
 
@@ -16,8 +17,9 @@ from app.models.intent import (
     IntentDeletedResponse,
     IntentPhase,
     IntentResponse,
+    IntentUpdate,
 )
-from app.validation import validate_intent_create
+from app.validation import validate_intent_create, validate_intent_update
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +98,74 @@ async def get_intent(request: Request, intent_id: str) -> IntentResponse:
     intent = await intent_db.get_intent(intent_id)
     if intent is None:
         raise HTTPException(status_code=404, detail="Intent not found")
+    return intent
+
+
+@router.put("/{intent_id}", response_model=IntentResponse)
+async def update_intent(
+    request: Request, intent_id: str, body: IntentUpdate
+) -> IntentResponse:
+    """Replace an intent's spec (S-039 §12.5).
+
+    Full-replace semantics: the request carries the complete spec, and a
+    field left out is reset to its default exactly as on create. The
+    reconciler converges the change under the strategy in the updated spec.
+    """
+    existing = await intent_db.get_intent(intent_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Intent not found")
+    if existing.status.phase == IntentPhase.DELETING:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    f"Intent '{existing.alias}' is being deleted and cannot be "
+                    f"updated"
+                )
+            },
+        )
+
+    data = body.model_dump()
+
+    errors = validate_intent_update(data, current_alias=existing.alias)
+    if errors:
+        raise HTTPException(
+            status_code=422,
+            detail={"detail": "Invalid intent", "errors": errors},
+        )
+
+    conflict = await intent_db.check_alias_conflict(
+        existing.alias, exclude_id=intent_id
+    )
+    if conflict:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": (
+                    f"An active intent already exists for alias " f"'{existing.alias}'"
+                )
+            },
+        )
+
+    intent = await intent_db.update_intent(
+        intent_id,
+        model_source=data["model_source"],
+        replicas=data.get("replicas", 1),
+        priority=data.get("priority", "production"),
+        strategy=data.get("strategy", "rolling"),
+        backend=data["backend"],
+        placement=data.get("placement", {}),
+        resources=data.get("resources", {}),
+        metadata=data.get("metadata", {}),
+    )
+    if intent is None:
+        raise HTTPException(status_code=404, detail="Intent not found")
+
+    logger.info("Intent updated: id=%s alias=%s", intent.id, intent.alias)
+    # Wake the reconciler so the change is applied now, not on the next tick
+    from app.services.reconciliation import reconciler
+
+    reconciler.wake()
     return intent
 
 

@@ -44,6 +44,7 @@ class ActionType:
     REPLACE = "replace"
     RECREATE = "recreate"
     MIGRATE = "migrate"
+    EVACUATE = "evacuate"
     DISOWN = "disown"
     NOOP = "noop"
 
@@ -58,8 +59,8 @@ class Action:
     host_id: str | None = None
     host_name: str | None = None
     instance_id: str | None = None  # for stop / replace / recreate / migrate / disown
-    target_host_id: str | None = None  # for migrate: where to move the instance
-    target_host_name: str | None = None  # for migrate
+    target_host_id: str | None = None  # for migrate/evacuate: where to move it
+    target_host_name: str | None = None  # for migrate/evacuate
     reason: str = ""
     priority: int = 0  # lower executes first (stops before creates)
 
@@ -67,6 +68,22 @@ class Action:
 # Exponential backoff bounds (seconds)
 _BACKOFF_MIN_S = 10
 _BACKOFF_MAX_S = 300
+
+
+class StartOutcomeUnknown(HTTPException):
+    """A start call the host never answered, so the outcome is unknown.
+
+    Not the same as a host that answered with an error. The host's start
+    blocks while it launches the server and retries, so a client timeout or a
+    dropped connection says nothing about whether the instance is coming up —
+    and under load it usually is. Nothing may be deleted on this failure: the
+    next observation reports what actually happened, whereas deleting would
+    destroy a replica mid-start and pay for the cold start again.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(status_code=504, detail=detail)
+
 
 # Hard bound on a single reconciliation action. Host calls are individually
 # time-bounded, but a MIGRATE can chain several (pull with ORAS retries,
@@ -148,8 +165,14 @@ class Reconciler:
         """Clear backoff state for *intent_id* after a successful tick."""
         self._backoff.pop(intent_id, None)
 
-    def _backoff_record_failure(self, intent_id: str) -> None:
-        """Record a failure and set the next retry time with exponential backoff."""
+    def _backoff_record_failure(
+        self, intent_id: str, *, spec_version: str | None = None
+    ) -> None:
+        """Record a failure and set the next retry time with exponential backoff.
+
+        *spec_version* is the spec the failure belongs to, so a later edit
+        can void the backoff instead of inheriting it (S-044).
+        """
         now = datetime.now(timezone.utc)
         entry = self._backoff.get(intent_id, {"failures": 0})
         entry["failures"] = entry.get("failures", 0) + 1
@@ -157,6 +180,7 @@ class Reconciler:
         entry["next_retry_at"] = (
             datetime.fromtimestamp(now.timestamp() + delay, tz=timezone.utc)
         ).isoformat()
+        entry["spec_version"] = spec_version
         self._backoff[intent_id] = entry
         logger.debug(
             "Backoff for intent %s: failures=%d delay=%.0fs",
@@ -164,6 +188,21 @@ class Reconciler:
             entry["failures"],
             delay,
         )
+
+    def _backoff_void_on_spec_change(self, intent: Any) -> None:
+        """Drop the backoff if the intent's spec changed since the failure.
+
+        The delay was earned by a spec that no longer exists, and an edit is
+        often the fix for whatever was failing, so it must be retried at
+        once rather than inheriting the old spec's penalty (S-044 §12.5).
+        """
+        entry = self._backoff.get(intent.id)
+        if entry and entry.get("spec_version") != _spec_version(intent):
+            logger.debug(
+                "Intent %s spec changed since its last failure, clearing backoff",
+                intent.id,
+            )
+            self._backoff.pop(intent.id, None)
 
     def _backoff_active(self, intent_id: str) -> bool:
         """Return True if backoff is active and retry should be skipped."""
@@ -202,10 +241,9 @@ class Reconciler:
     async def _reconcile_all(self) -> None:
         """Fetch all active intents and reconcile each one."""
         from app.database.intents import intent_db
+        from app.services.drain import sweep_drained_hosts
 
         intents = await intent_db.list_active_for_reconciliation()
-        if not intents:
-            return
 
         logger.debug("Reconciling %d active intent(s)", len(intents))
         for intent in intents:
@@ -220,11 +258,26 @@ class Reconciler:
                 logger.debug("Intent %s locked by another replica, skipping", intent.id)
                 continue
             try:
-                await self._reconcile_one(intent)
+                # Reload under the lock: the list above was read before the
+                # lock, so the spec may have been edited (S-044) or the intent
+                # deleted since. Acting on the copy we listed would converge
+                # toward a spec that no longer exists.
+                fresh = await intent_db.get_intent(intent.id)
+                if fresh is None:
+                    continue
+                await self._reconcile_one(fresh)
             except Exception:
                 logger.exception("Reconciliation failed for intent %s", intent.id)
             finally:
                 await r.delete(lock_key)
+
+        # A drain finishes once its host is empty. Checked after the intents
+        # so this tick's evacuations are already reflected (S-043 §4.4), and
+        # unconditionally so a host with no intents at all can still drain.
+        try:
+            await sweep_drained_hosts()
+        except Exception:
+            logger.exception("Drain sweep failed")
 
     # ── Per-intent reconciliation ──────────────────────────────
 
@@ -237,7 +290,8 @@ class Reconciler:
         delegates to the strategy state machine instead of the normal
         diff/act path (S-042 §11).
         """
-        # Check backoff before acting
+        # An edit voids the failure backoff earned by the previous spec.
+        self._backoff_void_on_spec_change(intent)
         if self._backoff_active(intent.id):
             logger.debug("Intent %s in backoff, skipping", intent.id)
             return
@@ -247,21 +301,10 @@ class Reconciler:
         # duplicate-create window; still refresh status).
         if time.monotonic() < self._settle_until.get(intent.id, 0.0):
             logger.debug("Intent %s in settle window, skipping diff", intent.id)
-            # Reload the intent: the status refresh below must never
-            # overwrite a phase transition that happened since this pass's
-            # intent was loaded (e.g. a DELETE that set phase=deleting —
-            # writing a stale "pending"-derived phase would kill the delete
-            # flow and the reconciler would recreate forever).
-            from app.database.intents import intent_db
-
-            fresh = await intent_db.get_intent(intent.id)
-            if fresh is None:
-                return
-            if _intent_phase(fresh) == "deleting":
-                # A delete raced the settle window — fall through to the
-                # normal (delete) flow instead of the status-only refresh.
-                intent = fresh
-            else:
+            # A delete that raced the settle window falls through to the
+            # normal (delete) flow; anything else only refreshes status. The
+            # phase is trustworthy here because the intent was just reloaded.
+            if _intent_phase(intent) != "deleting":
                 await self._update_status(intent, await self._observe(intent))
                 return
 
@@ -321,7 +364,9 @@ class Reconciler:
             if action_succeeded and last_error is None:
                 self._backoff_clear(intent.id)
             elif last_error is not None:
-                self._backoff_record_failure(intent.id)
+                self._backoff_record_failure(
+                    intent.id, spec_version=_spec_version(intent)
+                )
             t_upd = time.monotonic()
             await self._update_status(intent, observed, last_error=last_error)
             logger.debug(
@@ -346,8 +391,13 @@ class Reconciler:
             return
 
         if not actions:
-            # No actions needed — still update status to reflect current state
-            await self._update_status(intent, observed)
+            # No actions needed — still update status to reflect current state.
+            # Nothing to converge means every replica matches the spec, so a
+            # pending spec change is done rolling out (S-044) — unless a
+            # replica could not be compared against it at all.
+            await self._update_status(
+                intent, observed, spec_settled=_spec_settled(observed, actions)
+            )
             return
 
         # 3. Act — execute at most one action per tick for gradual convergence
@@ -396,10 +446,17 @@ class Reconciler:
         if action_succeeded and last_error is None:
             self._backoff_clear(intent.id)
         elif last_error is not None:
-            self._backoff_record_failure(intent.id)
+            self._backoff_record_failure(intent.id, spec_version=_spec_version(intent))
 
         # 4. Update status
-        await self._update_status(intent, observed, last_error=last_error)
+        await self._update_status(
+            intent,
+            observed,
+            last_error=last_error,
+            # No replica needed replacing, so nothing is left to roll out for
+            # a pending spec change (S-044).
+            spec_settled=_spec_settled(observed, actions),
+        )
 
     # ── S-042: Strategy helpers ──────────────────────────────────
 
@@ -426,8 +483,11 @@ class Reconciler:
         """Check if a deployment strategy should be initiated.
 
         A strategy is needed when:
-        - There are REPLACE actions (model_source drift)
+        - There are REPLACE actions (model_source or backend config drift)
         - The intent specifies a known strategy (rolling / immediate)
+
+        The REPLACE actions name the replicas to replace, so the rollout
+        covers an edited backend config (S-044) as well as a version change.
 
         Returns strategy_progress dict if initiated, None otherwise.
         """
@@ -444,6 +504,7 @@ class Reconciler:
             intent=intent,
             managed_instances=managed,
             candidates=candidates,
+            drifted_instance_ids=[a.instance_id for a in replaces if a.instance_id],
         )
         return progress
 
@@ -459,7 +520,7 @@ class Reconciler:
         executes it, and updates status with new progress.
         """
         from app.config import settings
-        from app.services.strategies import continue_strategy
+        from app.services.strategies import continue_strategy, record_create_failure
 
         managed = observed["managed_instances"]
         candidates = observed["candidates"]
@@ -547,7 +608,19 @@ class Reconciler:
                     "source_uri": intent.model_source,
                     "at": datetime.now(timezone.utc).isoformat(),
                 }
-                if new_progress:
+                if new_progress and isinstance(e, StartOutcomeUnknown):
+                    # The replacement may be coming up. Hold the step where it
+                    # is: the next tick adopts the instance if it exists, and
+                    # moving to another host now could leave two.
+                    new_progress["failed"] = new_progress.get("failed", 0) + 1
+                elif new_progress and action_type == "create":
+                    new_progress = record_create_failure(
+                        progress_data=new_progress,
+                        host_id=action_dict.get("host_id"),
+                        candidate_host_ids=[h.id for h, _ in candidates],
+                        message=f"Replacement failed on {action_dict.get('host_id')}",
+                    )
+                elif new_progress:
                     new_progress["failed"] = new_progress.get("failed", 0) + 1
                     failed_hosts = list(new_progress.get("failed_hosts", []))
                     if action_dict.get("host_id"):
@@ -557,7 +630,7 @@ class Reconciler:
         # If strategy reached FAILED state, record backoff so retries
         # are paced per §11.5 ("Reconciler retries with backoff").
         if new_progress and new_progress.get("phase") == "failed":
-            self._backoff_record_failure(intent.id)
+            self._backoff_record_failure(intent.id, spec_version=_spec_version(intent))
 
         # Update status with strategy progress
         await self._update_status(
@@ -644,6 +717,42 @@ class Reconciler:
                     await r.srem(_DISOWNED_SET, *stale)
                 except Exception:
                     logger.warning("Could not prune disowned set", exc_info=True)
+
+        # 2.5 Backend deep-compare inputs (S-044). The WS instance cache is
+        # flat, so most backend fields never appear in it and a backend-only
+        # edit would not read as drift. While a spec change is pending, load
+        # each replica's real configuration so the comparison in _diff sees
+        # every field. Bounded to that window: in steady state this would be
+        # a host round-trip per replica per tick.
+        if _spec_version(intent) and managed_instances:
+            from app.services.migration import capture_instance_config
+
+            hosts_by_id = {h.id: h for h in hosts}
+            for inst in managed_instances:
+                host = hosts_by_id.get(inst.get("_host_id"))
+                iid = inst.get("instance_id") or inst.get("id")
+                if host is None or not iid:
+                    continue
+                try:
+                    full = await capture_instance_config(host, iid)
+                except Exception:
+                    # Without the real config there is nothing to compare the
+                    # new spec against, and the flat cache carries almost none
+                    # of the backend fields. Saying "no drift" here would
+                    # declare the edit rolled out and drop it for good, so the
+                    # replica is marked unknown and the edit stays pending.
+                    logger.warning(
+                        "Could not load full config for instance %s on %s; "
+                        "the pending spec change stays unsettled",
+                        iid,
+                        host.name,
+                        exc_info=True,
+                    )
+                    inst["_full_config_unknown"] = True
+                    continue
+                cfg = full.get("config", full)
+                if isinstance(cfg, dict):
+                    inst["_full_config"] = cfg
 
         # 3. Gateway registry — which aliases are registered?
         gateway_aliases: set[str] = set()
@@ -828,7 +937,11 @@ class Reconciler:
             inst_source = cfg.get("model_source") or inst.get("model_source")
             inst_id = inst.get("instance_id") or inst.get("id")
             has_source_drift = inst_source and inst_source != intent.model_source
-            has_backend_drift = _detect_backend_drift(intent, cfg)
+            # _observe attaches the full config while a spec change is
+            # pending; otherwise the flat cache entry is all there is.
+            has_backend_drift = _detect_backend_drift(
+                intent, inst.get("_full_config") or cfg
+            )
 
             if has_source_drift:
                 actions.append(
@@ -931,6 +1044,10 @@ class Reconciler:
                     )
                     remaining -= 1
 
+        draining_host_ids = {
+            h.id for h in observed.get("hosts", []) if h.drain_state is not None
+        }
+
         # ── Observed > Desired → STOP surplus ────────────────────
         surplus = observed_count - desired
         if surplus > 0:
@@ -959,6 +1076,12 @@ class Reconciler:
             # sort: a single reverse=True would also flip the load tiebreak.
             healthy_insts.sort(key=_host_load)
             healthy_insts.sort(key=lambda i: i.get("created_at") or "0", reverse=True)
+            # A replica on a draining host is the best one to give up: the
+            # host is being emptied anyway, so removing it as surplus saves a
+            # migration (S-043 §4.2). Stable, so it only reorders ties.
+            if draining_host_ids:
+                for group in (unhealthy_insts, healthy_insts):
+                    group.sort(key=lambda i: i.get("_host_id") not in draining_host_ids)
             to_stop = (unhealthy_insts + healthy_insts)[:surplus]
             for inst in to_stop:
                 inst_id = inst.get("instance_id") or inst.get("id")
@@ -975,9 +1098,117 @@ class Reconciler:
                         )
                     )
 
+        # ── Draining hosts → evacuate managed replicas (S-043 §4.2) ──
+        if draining_host_ids:
+            actions = self._apply_drain_actions(
+                intent, observed, actions, draining_host_ids
+            )
+
         # Sort by priority so stops/disowns execute before migrates/creates
         actions.sort(key=lambda a: a.priority)
         return actions
+
+    def _no_evacuation_target_reason(self, intent: Any) -> str:
+        """Explain what a host would have to satisfy to accept this replica."""
+        placement = intent.placement
+        roles = list(placement.roles) if placement.roles else ["inference"]
+        parts = [f"roles {roles}"]
+        gpu_type = getattr(placement, "gpu_type", None)
+        if gpu_type:
+            parts.append(f"gpu_type '{gpu_type}'")
+        vram_gb = getattr(intent.resources, "vram_gb", None)
+        if vram_gb:
+            parts.append(f"vram >= {vram_gb} GB")
+        host_allow = getattr(placement, "host_allow", None)
+        if host_allow:
+            parts.append(f"host in allow-list {list(host_allow)}")
+        parts.append(f"no existing replica of '{intent.alias}'")
+        return "No eligible host: needs " + ", ".join(parts)
+
+    def _apply_drain_actions(
+        self,
+        intent: Any,
+        observed: dict[str, Any],
+        actions: list[Action],
+        draining_host_ids: set[str],
+    ) -> list[Action]:
+        """Add evacuation actions for managed replicas on draining hosts.
+
+        Implements host-draining.md §4.2:
+
+        - A running replica is migrated to the best remaining placement
+          candidate. With no candidate the action is still emitted (with no
+          target) so the stall is recorded and reported rather than silently
+          skipped — the replica keeps serving either way.
+        - A replica that is not running would otherwise be RECREATE'd on the
+          same host, which fights the drain; it is stopped and deleted
+          instead so the next CREATE places it elsewhere.
+        - A replica already being replaced for drift is left to that path:
+          the rollout places its replacement through placement, which
+          excludes the draining host, so the drain progresses anyway.
+        """
+        candidates = observed.get("candidates", [])
+        target = candidates[0][0] if candidates else None
+
+        result = list(actions)
+        for inst in observed["managed_instances"]:
+            host_id = inst.get("_host_id")
+            inst_id = inst.get("instance_id") or inst.get("id")
+            if not inst_id or host_id not in draining_host_ids:
+                continue
+
+            existing = [a for a in result if a.instance_id == inst_id]
+            if any(
+                a.type in (ActionType.REPLACE, ActionType.STOP, ActionType.DISOWN)
+                for a in existing
+            ):
+                continue
+
+            status = inst.get("status") or inst.get("state", "")
+            if status in ("failed", "stopped", "error"):
+                result = [
+                    a
+                    for a in result
+                    if a.type != ActionType.RECREATE or a.instance_id != inst_id
+                ]
+                result.append(
+                    Action(
+                        type=ActionType.STOP,
+                        intent_id=intent.id,
+                        alias=intent.alias,
+                        host_id=host_id,
+                        instance_id=inst_id,
+                        reason=f"host draining, replica is {status}",
+                        priority=0,
+                    )
+                )
+                continue
+
+            if any(a.type == ActionType.EVACUATE for a in existing):
+                continue
+
+            result.append(
+                Action(
+                    type=ActionType.EVACUATE,
+                    intent_id=intent.id,
+                    alias=intent.alias,
+                    host_id=host_id,
+                    host_name=inst.get("_host_name"),
+                    instance_id=inst_id,
+                    target_host_id=target.id if target else None,
+                    target_host_name=target.name if target else None,
+                    reason=(
+                        f"host draining → migrate to {target.name}"
+                        if target
+                        else self._no_evacuation_target_reason(intent)
+                    ),
+                    # Last: evacuation must never starve the intent's own
+                    # convergence, and a stalled drain retries every tick.
+                    priority=60,
+                )
+            )
+
+        return result
 
     # ── Act ────────────────────────────────────────────────────
 
@@ -1105,20 +1336,49 @@ class Reconciler:
             instance_id = created.get("id") or created.get("instance_id")
             if instance_id:
                 logger.info("Starting instance %s on %s", instance_id, host.name)
-                await self._start_instance(host, instance_id)
+                try:
+                    await self._start_instance(host, instance_id)
+                except StartOutcomeUnknown:
+                    logger.warning(
+                        "Start outcome unknown for new instance %s on %s; "
+                        "leaving it in place",
+                        instance_id,
+                        host.name,
+                    )
+                    raise
+                except Exception:
+                    # A replica the host refused to start is not a replica.
+                    # Leaving it behind would pile up one dead instance per
+                    # retry on the host, and each would still count as an
+                    # observed replica of this intent.
+                    logger.warning(
+                        "Instance %s failed to start on %s; removing it",
+                        instance_id,
+                        host.name,
+                    )
+                    await self._delete_instance(host, instance_id)
+                    raise
             return result
 
         if action.type == ActionType.REPLACE:
-            # Replace = stop old + create new on next tick
+            # Replace = retire the drifted replica; the next tick's CREATE
+            # places its replacement per placement policy. Reached only when
+            # no strategy took the rollout over (deployment-intent.md §11).
+            #
+            # Retiring means stop *and* delete: a stopped replica still counts
+            # towards observed_replicas, so leaving it would hold the intent at
+            # its desired count with nothing serving — no CREATE for the
+            # replacement, and a RECREATE suppressed by this very REPLACE.
             if action.instance_id and action.host_id:
                 host = await host_db.get_host(action.host_id)
                 if host:
                     logger.info(
-                        "Stopping drifted instance %s on %s for replacement",
+                        "Retiring drifted instance %s on %s for replacement",
                         action.instance_id,
                         host.name,
                     )
                     await stop_source_instance(host, action.instance_id)
+                    await self._delete_instance(host, action.instance_id)
             return None
 
         if action.type == ActionType.RECREATE:
@@ -1139,6 +1399,16 @@ class Reconciler:
                     try:
                         await self._start_instance(host, action.instance_id)
                         return None
+                    except StartOutcomeUnknown:
+                        # The replica may be starting right now; the next
+                        # observation decides. Only the backoff is recorded.
+                        logger.warning(
+                            "Restart outcome unknown for instance %s on %s; "
+                            "leaving it in place",
+                            action.instance_id,
+                            host.name,
+                        )
+                        raise
                     except HTTPException:
                         logger.warning(
                             "Restart failed for instance %s on %s, recreating",
@@ -1157,6 +1427,83 @@ class Reconciler:
                             )
                         raise  # record backoff so retries are paced
             return None
+
+        if action.type == ActionType.EVACUATE:
+            # Evacuate = move this intent's own replica off a draining host
+            # (S-043 §4.2). The target was chosen in _diff from the intent's
+            # placement candidates, so it already satisfies roles, GPU type,
+            # allow/deny, resources and one-replica-per-host.
+            if not action.instance_id or not action.host_id:
+                return None
+            from app.services import drain as drain_service
+            from app.services.migration import execute_migration
+
+            if not action.target_host_id:
+                # Nowhere to go: the replica keeps serving and the drain stays
+                # unfinished (§4.3). Recorded, not raised — a stall is not a
+                # failure, and backing off would only slow down the retry that
+                # succeeds once capacity appears.
+                await drain_service.record_stall(
+                    action.host_id, action.instance_id, action.reason
+                )
+                logger.warning(
+                    "Cannot evacuate instance %s (%s) from draining host %s: %s",
+                    action.instance_id,
+                    action.alias,
+                    action.host_id,
+                    action.reason,
+                )
+                return None
+
+            logger.info(
+                "Evacuating instance %s (%s) from draining host %s to %s",
+                action.instance_id,
+                action.alias,
+                action.host_name or action.host_id,
+                action.target_host_name or action.target_host_id,
+            )
+            # Leave this intent alone while the migration disowns the source
+            # and brings the target up — otherwise the next diff sees neither
+            # and races a duplicate CREATE.
+            self._settle_until[intent.id] = time.monotonic() + _MIGRATE_SETTLE_S
+            try:
+                result = await execute_migration(
+                    instance_id=action.instance_id,
+                    source_host_id=action.host_id,
+                    target_host_id=action.target_host_id,
+                    # An operator's drain request is the explicit policy
+                    # decision the S-037 production safeguard asks for.
+                    allow_production=True,
+                )
+            except Exception:
+                logger.exception(
+                    "Evacuation failed for instance %s: %s → %s",
+                    action.instance_id,
+                    action.host_id,
+                    action.target_host_id,
+                )
+                raise
+            if result.status != "completed":
+                message = result.error or "migration did not complete"
+                await drain_service.record_stall(
+                    action.host_id, action.instance_id, f"Migration failed: {message}"
+                )
+                raise RuntimeError(f"Evacuation failed: {message}")
+            await drain_service.clear_stall(action.host_id, action.instance_id)
+
+            # S-037 leaves the source stopped and disowned, which is right for
+            # an operator's one-off move but wrong for a drain: the leftover
+            # still serves the alias in the host's instance list, so placement
+            # excludes this host for the intent from then on (exclude_alias).
+            # The replica could never come back, a later drain of its new host
+            # would stall with "no existing replica of <alias>", and the intent
+            # would carry a permanent ManualInstanceConflict condition. The
+            # drain contract is that the host ends up empty, so remove it.
+            source_host = await host_db.get_host(action.host_id)
+            if source_host is not None:
+                await self._delete_instance(source_host, action.instance_id)
+
+            return {"migration_id": result.migration_id, "status": result.status}
 
         if action.type == ActionType.MIGRATE:
             # Migrate = use S-037 to move instance off this host, freeing capacity
@@ -1360,12 +1707,9 @@ class Reconciler:
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    f"Host '{host.name}' unreachable during instance start "
-                    f"for {instance_id}: {e}"
-                ),
+            raise StartOutcomeUnknown(
+                f"Host '{host.name}' did not answer the start call for "
+                f"{instance_id}: {e}"
             )
 
     async def _delete_instance(self, host: Any, instance_id: str) -> None:
@@ -1436,12 +1780,18 @@ class Reconciler:
         observed: dict[str, Any],
         last_error: dict[str, Any] | None = None,
         strategy_progress: dict[str, Any] | None = None,
+        spec_settled: bool = False,
     ) -> None:
         """Compute and persist the intent status after reconciliation.
 
         Implements deployment-intent.md §10.2 status fields.
         When *strategy_progress* is provided (S-042), it is persisted
         into the status JSON so strategy state survives restarts.
+
+        *spec_settled* clears the ``spec_changed_at`` marker: the pass found
+        no replica drifting from the spec, so the deep-compare window from
+        S-044 has served its purpose. Status JSON is rebuilt from scratch on
+        every write, so the marker has to be carried forward explicitly.
         """
         from app.database.intents import intent_db
         from app.models.intent import (
@@ -1601,6 +1951,7 @@ class Reconciler:
             "conditions": conditions,
             "strategy_progress": strategy_progress,
             "last_error": last_error_model.model_dump() if last_error_model else None,
+            "spec_changed_at": None if spec_settled else _spec_version(intent),
         }
 
         # Determine reconcile state
@@ -1627,6 +1978,7 @@ class Reconciler:
             status_json=status_json,
             last_reconciled_at=now,
             ready_at=ready_at,
+            spec_version_seen=_spec_version(intent),
         )
 
         # ── Emit Socket.IO events for live WebUI updates (§10.4) ──
@@ -1670,6 +2022,32 @@ def _intent_orphan(intent: Any) -> bool:
         return intent.metadata.get("orphan") == "true"
     except (AttributeError, TypeError):
         return False
+
+
+def _spec_version(intent: Any) -> str | None:
+    """Return a marker that changes when the intent's spec is edited.
+
+    ``status.updated_at`` cannot serve here — it moves on every status
+    write. ``spec_changed_at`` is stamped only by an actual spec update
+    (S-044), which is what makes it usable as a spec identity.
+    """
+    return getattr(getattr(intent, "status", None), "spec_changed_at", None)
+
+
+def _spec_settled(observed: dict[str, Any], actions: list[Action]) -> bool:
+    """Whether a pending spec change can be considered rolled out (S-044).
+
+    Two things have to hold: no replica still needs replacing, and every
+    replica could actually be compared against the spec. A replica whose real
+    configuration could not be read is not evidence of agreement — treating it
+    as settled would clear ``spec_changed_at`` and lose the edit, leaving the
+    replica on the old config while the intent reports itself up to date.
+    """
+    if any(a.type == ActionType.REPLACE for a in actions):
+        return False
+    return not any(
+        inst.get("_full_config_unknown") for inst in observed["managed_instances"]
+    )
 
 
 def _detect_backend_drift(intent: Any, instance_config: dict[str, Any]) -> bool:

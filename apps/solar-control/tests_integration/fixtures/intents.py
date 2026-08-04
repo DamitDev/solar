@@ -45,6 +45,34 @@ async def create_intent(http_control: Any, **overrides: Any) -> dict[str, Any]:
     return resp.json()
 
 
+async def update_intent(
+    http_control: Any, intent: dict[str, Any], **changes: Any
+) -> dict[str, Any]:
+    """PUT /api/intents/{id} with *intent*'s spec plus *changes* (asserts 200).
+
+    The endpoint is full-replace (S-044 §12.5), so the body is rebuilt from
+    the current spec — sending only the changed fields would reset the rest
+    to defaults.
+    """
+    payload = intent_payload(
+        intent["alias"],
+        model_source=intent["model_source"],
+        replicas=intent["replicas"],
+        priority=intent["priority"],
+        strategy=intent["strategy"],
+        backend=dict(intent["backend"]),
+        placement=dict(intent.get("placement") or {}),
+        resources=dict(intent.get("resources") or {}),
+        metadata=dict(intent.get("metadata") or {}),
+    )
+    payload.update(changes)
+    resp = await http_control.put(f"/api/intents/{intent['id']}", json=payload)
+    assert (
+        resp.status_code == 200
+    ), f"intent update failed: {resp.status_code} {resp.text}"
+    return resp.json()
+
+
 async def get_intent(http_control: Any, intent_id: str) -> dict[str, Any] | None:
     resp = await http_control.get(f"/api/intents/{intent_id}")
     if resp.status_code == 404:

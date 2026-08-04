@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy import delete, select, update
 
-from app.models import Host, HostStatus, MemoryInfo
+from app.models import DrainState, Host, HostStatus, MemoryInfo
 
 from .connection import get_session_factory
 from .tables import HostRow
@@ -41,6 +41,8 @@ class HostDB:
             disk_available_gb=row.disk_available_gb,
             memory_available_gb=row.memory_available_gb,
             version=row.version,
+            drain_state=DrainState(row.drain_state) if row.drain_state else None,
+            drain_requested_at=row.drain_requested_at,
             created_at=row.created_at,
         )
 
@@ -60,6 +62,8 @@ class HostDB:
             "disk_available_gb": host.disk_available_gb,
             "memory_available_gb": host.memory_available_gb,
             "version": host.version,
+            "drain_state": host.drain_state.value if host.drain_state else None,
+            "drain_requested_at": host.drain_requested_at,
             "created_at": host.created_at,
         }
 
@@ -174,6 +178,43 @@ class HostDB:
             )
             await session.commit()
             return result.rowcount == 1
+
+    async def set_drain_state(
+        self, host_id: str, drain_state: DrainState | None
+    ) -> Host | None:
+        """Set (or clear) the drain state of *host_id* (S-043 §2.1).
+
+        ``drain_requested_at`` is stamped when a drain starts and cleared
+        when the host is resumed; the `draining` → `drained` promotion
+        keeps the original request time.
+        """
+        values: dict[str, Any] = {
+            "drain_state": drain_state.value if drain_state else None
+        }
+        if drain_state == DrainState.DRAINING:
+            values["drain_requested_at"] = datetime.now(timezone.utc)
+        elif drain_state is None:
+            values["drain_requested_at"] = None
+
+        async with self._session() as session:
+            row = await session.get(HostRow, host_id)
+            if row is None:
+                return None
+            for key, value in values.items():
+                setattr(row, key, value)
+            await session.commit()
+            await session.refresh(row)
+            return self._row_to_host(row)
+
+    async def list_draining_hosts(self) -> list[Host]:
+        """List hosts with a drain state set, oldest request first."""
+        async with self._session() as session:
+            result = await session.execute(
+                select(HostRow)
+                .where(HostRow.drain_state.is_not(None))
+                .order_by(HostRow.drain_requested_at)
+            )
+            return [self._row_to_host(row) for row in result.scalars()]
 
     async def update_host_registration(
         self,

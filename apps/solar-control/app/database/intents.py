@@ -18,6 +18,13 @@ from .connection import get_session_factory
 from .tables import IntentRow
 
 
+class _Unset:
+    """Marker for "argument not supplied", where None is a real value."""
+
+
+_UNSET = _Unset()
+
+
 class IntentDB:
     """Database-backed intent management."""
 
@@ -50,6 +57,7 @@ class IntentDB:
                 conditions=status.get("conditions", []),
                 strategy_progress=status.get("strategy_progress"),
                 last_error=status.get("last_error"),
+                spec_changed_at=status.get("spec_changed_at"),
                 created_at=row.created_at.isoformat() if row.created_at else None,
                 updated_at=row.updated_at.isoformat() if row.updated_at else None,
                 last_reconciled_at=(
@@ -108,6 +116,72 @@ class IntentDB:
                 updated_at=now,
             )
             session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return self._row_to_response(row)
+
+    async def update_intent(
+        self,
+        intent_id: str,
+        *,
+        model_source: str,
+        replicas: int,
+        priority: str,
+        strategy: str,
+        backend: dict[str, Any],
+        placement: dict[str, Any],
+        resources: dict[str, Any],
+        metadata: dict[str, str],
+    ) -> IntentResponse | None:
+        """Replace an intent's spec (S-044, §12.5 full-replace semantics).
+
+        Returns None when the intent is unknown, already soft-deleted, or
+        being deleted — a spec write must not resurrect a deleting intent.
+
+        ``alias`` is immutable and therefore not a parameter.
+
+        When the spec actually changes, the in-flight ``strategy_progress``
+        is dropped so the next tick re-plans the rollout against the new
+        spec instead of continuing toward the superseded target (§11.5.1),
+        and ``spec_changed_at`` is stamped so the reconciler compares the
+        full instance configuration until the replicas match again.
+        """
+        now = datetime.now(timezone.utc)
+        async with self._session() as session:
+            row = await session.get(IntentRow, intent_id)
+            if row is None or row.deleted_at is not None or row.phase == "deleting":
+                return None
+
+            spec_changed = (
+                row.model_source != model_source
+                or row.replicas != replicas
+                or row.priority != priority
+                or row.strategy != strategy
+                or (row.backend or {}) != backend
+                or (row.placement or {}) != placement
+                or (row.resources or {}) != resources
+                or (row.metadata_ or {}) != metadata
+            )
+
+            row.model_source = model_source
+            row.replicas = replicas
+            row.priority = priority
+            row.strategy = strategy
+            row.backend = backend
+            row.placement = placement
+            row.resources = resources
+            row.metadata_ = metadata
+            row.updated_at = now
+
+            if spec_changed:
+                status = dict(row.status_json or {})
+                status["strategy_progress"] = None
+                status["spec_changed_at"] = now.isoformat()
+                # The recorded error belongs to the previous spec; the next
+                # pass reports whatever the new one runs into.
+                status["last_error"] = None
+                row.status_json = status
+
             await session.commit()
             await session.refresh(row)
             return self._row_to_response(row)
@@ -235,6 +309,7 @@ class IntentDB:
         status_json: dict[str, Any] | None = None,
         last_reconciled_at: datetime | None = None,
         ready_at: datetime | str | None = None,
+        spec_version_seen: str | None | _Unset = _UNSET,
     ) -> IntentResponse | None:
         """Update an intent's status fields atomically.
 
@@ -245,6 +320,14 @@ class IntentDB:
         When *phase* transitions to ``"deleted"``, ``deleted_at`` is set
         automatically so ``list_active_for_reconciliation()`` excludes
         the intent from future reconciliation passes.
+
+        *spec_version_seen* is the ``spec_changed_at`` the caller reconciled
+        against. Because a whole status document is written at once, a pass
+        that read the intent before an edit landed would otherwise erase the
+        marker and the progress reset that edit just wrote — and the edit
+        would be lost for good, since the marker is the only record that the
+        replicas still have to be compared against the new spec. Pass it to
+        keep those two fields whenever the spec changed mid-pass.
         """
         now = datetime.now(timezone.utc)
         async with self._session() as session:
@@ -269,6 +352,14 @@ class IntentDB:
             if reconcile is not None:
                 row.reconcile = reconcile
             if status_json is not None:
+                stored = row.status_json or {}
+                if (
+                    not isinstance(spec_version_seen, _Unset)
+                    and stored.get("spec_changed_at") != spec_version_seen
+                ):
+                    status_json = dict(status_json)
+                    status_json["spec_changed_at"] = stored.get("spec_changed_at")
+                    status_json["strategy_progress"] = stored.get("strategy_progress")
                 row.status_json = status_json
             if last_reconciled_at is not None:
                 row.last_reconciled_at = last_reconciled_at

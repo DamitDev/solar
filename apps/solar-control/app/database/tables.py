@@ -59,6 +59,12 @@ class HostRow(Base):
     disk_available_gb: Mapped[float | None] = mapped_column(Double, nullable=True)
     memory_available_gb: Mapped[float | None] = mapped_column(Double, nullable=True)
     version: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Drain lifecycle (S-043): NULL = not draining. Orthogonal to `status`,
+    # which reports reachability — a draining host is still online.
+    drain_state: Mapped[str | None] = mapped_column(Text, nullable=True)
+    drain_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -10,13 +10,13 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { AlertCircle, RefreshCw, Target, Trash2, Plus } from 'lucide-react';
+import { AlertCircle, RefreshCw, Target, Trash2, Plus, Pencil } from 'lucide-react';
 import solarClient from '@/api/client';
 import { Intent, IntentCreateRequest } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
 import { formatRelativeTime } from '@/lib/utils';
 import { IntentPhaseBadge } from './IntentBadges';
-import { NewIntentModal } from './NewIntentModal';
+import { IntentFormModal } from './IntentFormModal';
 import { DeleteIntentModal } from './DeleteIntentModal';
 
 const POLL_INTERVAL_MS = 10_000;
@@ -32,6 +32,7 @@ export function IntentsPage() {
 
   const [showNewIntent, setShowNewIntent] = useState(false);
   const [intentInitial, setIntentInitial] = useState<Partial<IntentCreateRequest> | undefined>(undefined);
+  const [editTarget, setEditTarget] = useState<Intent | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Intent | null>(null);
 
   // Events overwrite REST records (both are full records)
@@ -92,6 +93,11 @@ export function IntentsPage() {
   const handleCreated = (intent: Intent) => {
     setShowNewIntent(false);
     navigate(`/intents/${intent.id}`);
+  };
+
+  const handleEdited = (intent: Intent) => {
+    setEditTarget(null);
+    setRestIntents((prev) => new Map(prev).set(intent.id, intent));
   };
 
   const handleDeleted = () => {
@@ -226,7 +232,17 @@ export function IntentsPage() {
                     <td className="py-2.5 pr-4 text-nord-4 whitespace-nowrap">
                       {formatRelativeTime(intent.status?.updated_at ?? intent.status?.created_at ?? undefined)}
                     </td>
-                    <td className="py-2.5 text-right">
+                    <td className="py-2.5 text-right whitespace-nowrap">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEditTarget(intent);
+                        }}
+                        className="p-1.5 rounded hover:bg-nord-3 text-nord-4 hover:text-nord-6 transition-colors"
+                        title="Edit intent"
+                      >
+                        <Pencil size={16} />
+                      </button>
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
@@ -247,8 +263,9 @@ export function IntentsPage() {
       </main>
 
       {showNewIntent && (
-        <NewIntentModal initial={intentInitial} onClose={() => setShowNewIntent(false)} onCreated={handleCreated} />
+        <IntentFormModal initial={intentInitial} onClose={() => setShowNewIntent(false)} onSaved={handleCreated} />
       )}
+      {editTarget && <IntentFormModal intent={editTarget} onClose={() => setEditTarget(null)} onSaved={handleEdited} />}
       {deleteTarget && (
         <DeleteIntentModal intent={deleteTarget} onClose={() => setDeleteTarget(null)} onDeleted={handleDeleted} />
       )}

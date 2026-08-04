@@ -76,7 +76,8 @@ async def find_candidates(
     fewest instances → host id. The first ``(host, snapshot)`` pair is
     the best choice.
 
-    Implements deployment-intent.md §8.4 placement policy.
+    Implements deployment-intent.md §8.4 placement policy, including the
+    draining-host exclusion from host-draining.md §4.1.
     """
     host_allow_set = set(host_allow) if host_allow else None
     host_deny_set = set(host_deny) if host_deny else None
@@ -84,6 +85,13 @@ async def find_candidates(
     candidates: list[tuple[Host, HostResourceSnapshot]] = []
 
     for host in hosts:
+        # Draining hosts are being emptied — never place new work there,
+        # and never make one the target of another host's evacuation
+        # (host-draining.md §4.1). Applied here so intent reconciliation and
+        # the S-038 reservation coordinator share the same rule.
+        if host.drain_state is not None:
+            continue
+
         # Role filter
         if not _has_roles(host, roles):
             continue

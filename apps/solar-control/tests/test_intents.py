@@ -13,7 +13,7 @@ from app.models.intent import (
     ReconcileState,
     ResourceRequirements,
 )
-from app.validation import validate_intent_create
+from app.validation import validate_intent_create, validate_intent_update
 
 # ── Validation unit tests ──────────────────────────────────────
 
@@ -666,3 +666,340 @@ async def test_list_intents_with_filters(mock_intent_response):
             limit=10,
             offset=0,
         )
+
+
+# ── Update validation (S-044) ──────────────────────────────────
+
+
+def _update_payload(**overrides) -> dict:
+    data = {
+        "alias": "test-model",
+        "model_source": "repo://test:v2",
+        "replicas": 3,
+        "priority": "production",
+        "strategy": "rolling",
+        "backend": {"backend_type": "llamacpp"},
+    }
+    data.update(overrides)
+    return data
+
+
+def test_validate_intent_update_accepts_unchanged_alias():
+    assert validate_intent_update(_update_payload(), current_alias="test-model") == []
+
+
+def test_validate_intent_update_rejects_changed_alias():
+    """The alias is the served name and the deployment's identity (§12.5)."""
+    errors = validate_intent_update(
+        _update_payload(alias="other-model"), current_alias="test-model"
+    )
+    assert [e["field"] for e in errors] == ["alias"]
+    assert "immutable" in errors[0]["message"]
+
+
+def test_validate_intent_update_applies_creation_rules():
+    """An update must not write a spec that creation would have rejected."""
+    errors = validate_intent_update(
+        _update_payload(model_source="http://bad", replicas=-1),
+        current_alias="test-model",
+    )
+    fields = {e["field"] for e in errors}
+    assert "model_source" in fields
+    assert "replicas" in fields
+
+
+# ── Update route (S-044) ───────────────────────────────────────
+
+
+@pytest.fixture
+def mock_updated_intent(mock_intent_response) -> IntentResponse:
+    return mock_intent_response.model_copy(update={"model_source": "repo://test:v2"})
+
+
+def _put_intent(payload: dict, intent_id: str = "550e8400-e29b-41d4-a716-446655440000"):
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    return TestClient(app).put(
+        f"/api/intents/{intent_id}",
+        json=payload,
+        headers={"X-API-Key": "change-me-management"},
+    )
+
+
+@pytest.mark.anyio
+async def test_update_intent_success(mock_intent_response, mock_updated_intent):
+    """PUT /api/intents/{id} replaces the spec and wakes the reconciler."""
+    mock_update = AsyncMock(return_value=mock_updated_intent)
+    with (
+        patch(
+            "app.routes.management.intents.intent_db.get_intent",
+            new=AsyncMock(return_value=mock_intent_response),
+        ),
+        patch(
+            "app.routes.management.intents.intent_db.check_alias_conflict",
+            new=AsyncMock(return_value=False),
+        ),
+        patch("app.routes.management.intents.intent_db.update_intent", new=mock_update),
+        patch("app.services.reconciliation.reconciler.wake") as mock_wake,
+    ):
+        response = _put_intent(_update_payload())
+
+    assert response.status_code == 200
+    assert response.json()["model_source"] == "repo://test:v2"
+    assert mock_update.await_args.kwargs["replicas"] == 3
+    mock_wake.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_update_intent_not_found():
+    with patch(
+        "app.routes.management.intents.intent_db.get_intent",
+        new=AsyncMock(return_value=None),
+    ):
+        response = _put_intent(_update_payload(), intent_id="nonexistent")
+
+    assert response.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_update_intent_rejects_alias_change(mock_intent_response):
+    """A changed alias is a 422, not a silent no-op."""
+    mock_update = AsyncMock()
+    with (
+        patch(
+            "app.routes.management.intents.intent_db.get_intent",
+            new=AsyncMock(return_value=mock_intent_response),
+        ),
+        patch("app.routes.management.intents.intent_db.update_intent", new=mock_update),
+    ):
+        response = _put_intent(_update_payload(alias="renamed"))
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["errors"][0]["field"] == "alias"
+    mock_update.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_update_intent_rejects_deleting_intent(mock_intent_response):
+    """A spec write must not resurrect an intent that is being torn down."""
+    mock_intent_response.status.phase = IntentPhase.DELETING
+    mock_update = AsyncMock()
+    with (
+        patch(
+            "app.routes.management.intents.intent_db.get_intent",
+            new=AsyncMock(return_value=mock_intent_response),
+        ),
+        patch("app.routes.management.intents.intent_db.update_intent", new=mock_update),
+    ):
+        response = _put_intent(_update_payload())
+
+    assert response.status_code == 409
+    mock_update.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_update_intent_requires_api_key():
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    response = TestClient(app).put(
+        "/api/intents/550e8400-e29b-41d4-a716-446655440000",
+        json=_update_payload(),
+    )
+
+    assert response.status_code == 401
+
+
+# ── Update persistence (S-044) ─────────────────────────────────
+
+
+class _FakeSession:
+    """Minimal stand-in for an AsyncSession over a single known row."""
+
+    def __init__(self, row):
+        self._row = row
+        self.committed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def get(self, _model, _pk):
+        return self._row
+
+    async def commit(self):
+        self.committed = True
+
+    async def refresh(self, _row):
+        return None
+
+
+def _intent_row(**overrides):
+    from datetime import datetime, timezone
+
+    from app.database.tables import IntentRow
+
+    row = IntentRow(
+        id="550e8400-e29b-41d4-a716-446655440000",
+        alias="test-model",
+        model_source="repo://test:v1",
+        replicas=2,
+        priority="production",
+        strategy="rolling",
+        backend={"backend_type": "llamacpp"},
+        placement={},
+        resources={},
+        metadata_={},
+        phase="ready",
+        reconcile="idle",
+        status_json={
+            "strategy_progress": {"strategy": "rolling", "phase": "stopping"},
+            "last_error": {
+                "code": "start_failed",
+                "message": "previous spec failed to start",
+                "at": "2026-07-24T01:00:00Z",
+            },
+        },
+        created_at=datetime(2026, 7, 24, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 7, 24, tzinfo=timezone.utc),
+        deleted_at=None,
+    )
+    for key, value in overrides.items():
+        setattr(row, key, value)
+    return row
+
+
+def _update_kwargs(**overrides) -> dict:
+    kwargs = {
+        "model_source": "repo://test:v1",
+        "replicas": 2,
+        "priority": "production",
+        "strategy": "rolling",
+        "backend": {"backend_type": "llamacpp"},
+        "placement": {},
+        "resources": {},
+        "metadata": {},
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+@pytest.mark.anyio
+async def test_update_intent_db_clears_rollout_on_spec_change():
+    """A changed spec abandons the in-flight rollout so the next tick
+    re-plans against the new target instead of the superseded one (§11.5.1)."""
+    from app.database.intents import IntentDB
+
+    row = _intent_row()
+    session = _FakeSession(row)
+    db = IntentDB()
+
+    with patch.object(IntentDB, "_session", return_value=session):
+        result = await db.update_intent(row.id, **_update_kwargs(replicas=4))
+
+    assert row.replicas == 4
+    assert row.status_json["strategy_progress"] is None
+    assert row.status_json["spec_changed_at"] is not None
+    assert row.status_json["last_error"] is None
+    assert result is not None
+    assert result.status.strategy_progress is None
+    assert session.committed is True
+
+
+@pytest.mark.anyio
+async def test_update_status_keeps_an_edit_that_landed_mid_pass():
+    """A reconcile pass must not erase a spec change it never saw.
+
+    The whole status document is written at once, so a pass that read the
+    intent before the edit would otherwise clear the marker and the progress
+    reset the edit wrote — and the edit would be lost, since the marker is the
+    only record that the replicas still have to be compared against it.
+    """
+    from app.database.intents import IntentDB
+
+    row = _intent_row(
+        status_json={
+            "spec_changed_at": "2026-07-24T02:00:00Z",
+            "strategy_progress": None,
+        }
+    )
+    db = IntentDB()
+
+    with patch.object(IntentDB, "_session", return_value=_FakeSession(row)):
+        await db.update_status(
+            row.id,
+            status_json={
+                "spec_changed_at": None,
+                "strategy_progress": {"strategy": "rolling", "phase": "stopping"},
+                "ready_replicas": 2,
+            },
+            spec_version_seen=None,
+        )
+
+    assert row.status_json["spec_changed_at"] == "2026-07-24T02:00:00Z"
+    assert row.status_json["strategy_progress"] is None
+    assert row.status_json["ready_replicas"] == 2
+
+
+@pytest.mark.anyio
+async def test_update_status_settles_the_spec_the_pass_reconciled():
+    """The pass that did see the edit is the one allowed to clear it."""
+    from app.database.intents import IntentDB
+
+    row = _intent_row(status_json={"spec_changed_at": "2026-07-24T02:00:00Z"})
+    db = IntentDB()
+
+    with patch.object(IntentDB, "_session", return_value=_FakeSession(row)):
+        await db.update_status(
+            row.id,
+            status_json={"spec_changed_at": None, "strategy_progress": None},
+            spec_version_seen="2026-07-24T02:00:00Z",
+        )
+
+    assert row.status_json["spec_changed_at"] is None
+
+
+@pytest.mark.anyio
+async def test_update_intent_db_keeps_rollout_when_spec_is_identical():
+    """Re-submitting the same spec must not disturb a running rollout."""
+    from app.database.intents import IntentDB
+
+    row = _intent_row()
+    db = IntentDB()
+
+    with patch.object(IntentDB, "_session", return_value=_FakeSession(row)):
+        await db.update_intent(row.id, **_update_kwargs())
+
+    assert row.status_json["strategy_progress"] == {
+        "strategy": "rolling",
+        "phase": "stopping",
+    }
+    assert "spec_changed_at" not in row.status_json
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "row_overrides",
+    [
+        pytest.param({"phase": "deleting"}, id="deleting"),
+        pytest.param(
+            {"deleted_at": "2026-07-25T00:00:00Z"},
+            id="soft-deleted",
+        ),
+    ],
+)
+async def test_update_intent_db_refuses_deleted_intents(row_overrides):
+    from app.database.intents import IntentDB
+
+    row = _intent_row(**row_overrides)
+    db = IntentDB()
+
+    with patch.object(IntentDB, "_session", return_value=_FakeSession(row)):
+        assert await db.update_intent(row.id, **_update_kwargs(replicas=9)) is None
+
+    assert row.replicas == 2

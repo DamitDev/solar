@@ -92,7 +92,10 @@ export function ResourcesPage() {
   // Event-driven refresh: refetch (debounced) only when the live stream signature changes
   const streamSignature = useMemo(() => {
     const hostSig = Array.from(hostStatuses.values())
-      .map((h) => `${h.host_id}:${h.status}:${h.memory?.used_gb ?? ''}:${h.memory_available_gb ?? ''}`)
+      .map(
+        (h) =>
+          `${h.host_id}:${h.status}:${h.drain_state ?? ''}:${h.memory?.used_gb ?? ''}:${h.memory_available_gb ?? ''}`,
+      )
       .sort()
       .join('|');
     const instSig = Array.from(hostInstances.entries())
@@ -354,7 +357,7 @@ export function ResourcesPage() {
           {/* Host cards */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
             {data?.hosts.map((h) => (
-              <HostResourceCard key={h.host_id} snapshot={h} />
+              <HostResourceCard key={h.host_id} snapshot={h} onDrainChanged={fetchResources} />
             ))}
           </div>
 

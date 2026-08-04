@@ -63,6 +63,7 @@ from fixtures.helpers import (
     wait_for,
 )
 from fixtures.seed import (
+    clear_host_drain_state,
     read_test_model_files,
     register_host_via_api,
     register_model_in_data_repo,
@@ -922,6 +923,7 @@ async def clean_state(stack: Stack):
     pull that races the cache wipe (re-creating the model dir after it).
     """
     truncate_intents(stack.db_env["control_db"])
+    clear_host_drain_state(stack.db_env["control_db"])
     await _delete_all_instances(stack)
     _wipe_model_caches(stack)
     await _flush_volatile_redis(stack.db_env["redis"])
@@ -929,6 +931,7 @@ async def clean_state(stack: Stack):
     yield
     # Teardown: leave nothing behind for the next test.
     truncate_intents(stack.db_env["control_db"])
+    clear_host_drain_state(stack.db_env["control_db"])
     await _delete_all_instances(stack)
     _wipe_model_caches(stack)
     await _flush_volatile_redis(stack.db_env["redis"])
