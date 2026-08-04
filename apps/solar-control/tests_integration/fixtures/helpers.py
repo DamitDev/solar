@@ -555,11 +555,9 @@ async def http_control_get_models(stack: Any) -> dict:
     """GET /v1/models through control (used by the evidence dump)."""
     import httpx
 
-    from fixtures.constants import MANAGEMENT_API_KEY
-
     async with httpx.AsyncClient(
         base_url=stack.control_url,
-        headers={"X-API-Key": MANAGEMENT_API_KEY},
+        headers={"X-API-Key": stack.secrets["management"]},
         timeout=10.0,
     ) as client:
         resp = await client.get("/v1/models")

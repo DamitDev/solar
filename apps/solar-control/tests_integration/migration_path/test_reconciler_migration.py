@@ -144,7 +144,6 @@ async def test_recreate_failure_records_backoff_and_recovers(
     backoff recorded. Restoring the key lets the next RECREATE restart the
     instance in place (§8.2).
     """
-    from fixtures.constants import HOST_A_API_KEY, HOST_B_API_KEY
     from fixtures.seed import update_host_api_key
 
     hosts = await _hosts(http_control)
@@ -156,7 +155,9 @@ async def test_recreate_failure_records_backoff_and_recovers(
     instance_id = replica["instance_id"]
     host_id = replica["host_id"]
     host_name = next(n for n, h in hosts.items() if h["id"] == host_id)
-    real_key = HOST_A_API_KEY if host_name == "host-a" else HOST_B_API_KEY
+    real_key = (
+        stack.secrets["host_a"] if host_name == "host-a" else stack.secrets["host_b"]
+    )
 
     # Drift: stop the instance.
     resp = await http_control.post(f"/api/hosts/{host_id}/instances/{instance_id}/stop")

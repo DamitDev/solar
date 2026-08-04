@@ -16,7 +16,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from conftest import MANAGEMENT_API_KEY
 from fixtures.helpers import wait_for
 from fixtures.intents import create_intent, get_intent, wait_intent_ready
 
@@ -29,7 +28,7 @@ async def test_failed_create_backoff(stack, clean_state):
 
     async with httpx.AsyncClient(
         base_url=stack.control_url,
-        headers={"X-API-Key": MANAGEMENT_API_KEY},
+        headers={"X-API-Key": stack.secrets["management"]},
         timeout=15.0,
     ) as http_control:
         # Kill data-repo: the reconciler's resolve step fails deterministically.

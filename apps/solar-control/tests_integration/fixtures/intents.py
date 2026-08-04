@@ -167,7 +167,11 @@ async def classify_until_ok(
     """
     import time
 
-    from fixtures.constants import MANAGEMENT_API_KEY as _KEY
+    _KEY = (
+        stack.secrets["management"]
+        if stack is not None
+        else http_control.headers.get("X-API-Key")
+    )
 
     last_status = 0
     last_text = ""

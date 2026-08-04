@@ -11,7 +11,6 @@ from __future__ import annotations
 import pytest
 from fixtures.constants import (
     BACKEND_CLASSIFICATION,
-    MANAGEMENT_API_KEY,
     MODEL_ALIAS,
     MODEL_SOURCE_URI,
 )
@@ -98,9 +97,10 @@ async def test_create_instance_via_control_and_classify(
     # ── Inference through the normal Solar route ──
     # The registry gate above only proves the alias is listed; the
     # hf_server can still be importing torch when the first request
-    # lands — retry the classify briefly (the backend binds within a
-    # few seconds).
-    body = await classify_until_ok(http_control, MODEL_ALIAS, timeout=20.0)
+    # lands — retry the classify (the backend binds within a few
+    # seconds solo; concurrent CI runs on a shared machine can
+    # double that window).
+    body = await classify_until_ok(http_control, MODEL_ALIAS, timeout=45.0)
     assert body["model"] == MODEL_ALIAS
     assert len(body["choices"]) == 1
     assert body["choices"][0]["score"] > 0.0
@@ -110,7 +110,7 @@ async def test_create_instance_via_control_and_classify(
     resp2 = await http_control.post(
         "/v1/classify",
         json={"model": MODEL_ALIAS, "input": "hello integration world"},
-        headers={"X-API-Key": MANAGEMENT_API_KEY},
+        headers={"X-API-Key": stack.secrets["management"]},
     )
     assert resp2.status_code == 200
     assert resp2.json()["choices"][0]["label"] == body["choices"][0]["label"]

@@ -5,13 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-MANAGEMENT_API_KEY = "test-mgmt-key"
-DATA_REPOSITORY_API_KEY = "repo-key"
-# Distinct per-host keys: control looks hosts up by api_key
-# (get_host_by_api_key → scalar_one_or_none) — a shared key between the
-# two registered host rows crashes the WS connect handler.
-HOST_A_API_KEY = "test-host-a-key"
-HOST_B_API_KEY = "test-host-b-key"
 HARBOR_USERNAME = "robot$test"
 HARBOR_PASSWORD = "test"
 
