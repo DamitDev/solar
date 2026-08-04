@@ -86,12 +86,29 @@ async def test_migrated_target_auto_started(http_control, stack, clean_state):
 
     # (4) The reconciler auto-starts the managed target (RECREATE) and it
     # lands in the gateway registry.
-    await wait_for(
-        lambda: _instance_running(http_control, dst_id, target_instance_id),
-        timeout=30.0,
-        interval=0.5,
-        description="migration target auto-started by reconciler",
-    )
+    # Window is generous on purpose: this is a COLD start of a new instance
+    # on the destination host (model pull + torch import + health gate).
+    # Self-hosted runners share the machine with Docker builds and other
+    # jobs — under that load the warm-up has exceeded 30s three times.
+    # On timeout, dump the full state: target/source instance records, the
+    # intent, and service log tails — the runners fail this wait while the
+    # dev machine never does, and the plain assertion cannot say why.
+    try:
+        await wait_for(
+            lambda: _instance_running(http_control, dst_id, target_instance_id),
+            timeout=60.0,
+            interval=0.5,
+            description="migration target auto-started by reconciler",
+        )
+    except AssertionError as exc:
+        target = await _find_instance(http_control, dst_id, target_instance_id)
+        source = await _find_instance(http_control, source_host_id, source_instance_id)
+        intent_state = await get_intent(http_control, intent["id"])
+        raise AssertionError(
+            "migration target never reached running; "
+            f"target={target} source={source} intent={intent_state}\n"
+            f"{stack.tail()}"
+        ) from exc
     await wait_for(
         lambda: _registry_visible(http_control, alias),
         timeout=60.0,
