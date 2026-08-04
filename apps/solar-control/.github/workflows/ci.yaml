@@ -1,0 +1,69 @@
+name: Build & push image to Harbor on Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: imgrepo.damit.hu
+  IMAGE_PATH: aiops/solar-control
+  IMAGE: imgrepo.damit.hu/aiops/solar-control
+
+jobs:
+  build-and-push:
+    runs-on: [self-hosted, fast]
+
+    steps:
+      - name: Check out at the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Extract Docker metadata (tags/labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ github.event.release.tag_name }}
+          labels: |
+            org.opencontainers.image.source=${{ github.repository }}
+            org.opencontainers.image.version=${{ github.event.release.tag_name }}
+
+      - name: Decide whether to also tag 'latest'
+        id: latest
+        run: |
+          if [ "${{ github.event.release.prerelease }}" = "true" ]; then
+            echo "also=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "also=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Buildx (host docker)
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+          driver: docker
+
+      - name: Login to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.AIOPS_HARBOR_USERNAME }}
+          password: ${{ secrets.AIOPS_HARBOR_PASSWORD }}
+
+      - name: Build & push (amd64) to Harbor
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          build-args: |
+            APP_VERSION=${{ github.event.release.tag_name }}
+          tags: |
+            ${{ env.IMAGE }}:${{ github.event.release.tag_name }}
+            ${{ steps.latest.outputs.also == 'true' && format('{0}:latest', env.IMAGE) || '' }}
+          labels: ${{ steps.meta.outputs.labels }}
