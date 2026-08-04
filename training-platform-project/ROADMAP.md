@@ -102,6 +102,8 @@ Enables Solar to autonomously manage resources, migrate instances, and fulfill d
 | S-040 | Implement intent submission API in solar-control. `POST /api/intents` - accept desired state. `GET /api/intents` - list active intents. `DELETE /api/intents/{id}` - remove. | solar-control | M | S-039 |
 | S-041 | Implement intent reconciliation engine in solar-control. Compare desired state (intents) with current state (running instances). Compute actions: create, migrate, stop. Enforce one-replica-per-host rule. | solar-control | L | S-040, S-037 |
 | S-042 | Implement deployment strategies in reconciliation. `rolling`: update one host at a time, verify healthy before next. `immediate`: stop all, replace, start. | solar-control | M | S-041 |
+| S-043 | Implement host draining. Durable drain state on the host, drain/resume/progress endpoints, placement excludes draining hosts, reconciler evacuates managed replicas. Manual instances block the drain; a drain never reduces serving capacity. | solar-control | L | S-037, S-041 |
+| S-044 | Implement intent update. `PUT /api/intents/{id}` with full-replace semantics, immutable alias, in-flight rollout reset, and update-safe reconciliation. | solar-control | M | S-040, S-042 |
 
 ---
 
@@ -260,6 +262,8 @@ Enables Solar to autonomously manage resources, migrate instances, and fulfill d
 | U-002 | Add model catalog view. New page listing models from Data Repository via solar-control catalog endpoint. Show versions, deployment status, metadata. | solar-webui | M | D-018 |
 | U-003 | Implement declarative intent submission UI. Replace or supplement per-host instance creation with intent form: model, replicas, strategy. | solar-webui | L | S-040 |
 | U-004 | Implement resource utilization dashboard. Visual breakdown of each host's resource allocation: inference instances, training jobs, reserved, free. | solar-webui | M | S-035 |
+| U-005 | Add host draining controls to the Resources page. Drain/resume actions, drain state badges, blocker list before confirming, and stalled-drain reporting. | solar-webui | M | S-043 |
+| U-006 | Add intent editing UI. Generalise the intent form into create/edit modes with full hydration, read-only alias, and a warning when an edit restarts an in-flight rollout. | solar-webui | M | S-044 |
 
 ---
 
@@ -279,12 +283,12 @@ No detailed issue breakdown yet. High-level items for future planning:
 
 | Phase | Issues | Estimated Effort |
 |-------|--------|-----------------|
-| Phase 0: Solar Evolution | 42 issues (S-001 → S-042) | ~35-45 days |
+| Phase 0: Solar Evolution | 44 issues (S-001 → S-044) | ~37-48 days |
 | Phase 1: Data Repository | 18 issues (D-001 → D-018) | ~15-20 days |
 | Phase 2: SuperNova Control | 29 issues (N-001 → N-029) | ~25-35 days |
 | Phase 3: SuperNova WebUI | 15 issues (W-001 → W-015) | ~15-20 days |
-| Phase 4: Solar WebUI | 4 issues (U-001 → U-004) | ~5-8 days |
-| **Total** | **108 issues** | **~95-128 days** |
+| Phase 4: Solar WebUI | 6 issues (U-001 → U-006) | ~7-11 days |
+| **Total** | **112 issues** | **~99-134 days** |
 
 Note: Effort estimates assume single developer. With Phase 0 and Phase 1 running in parallel across team members, calendar time can be reduced significantly.
 
