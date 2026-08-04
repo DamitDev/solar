@@ -122,7 +122,7 @@ A drain marks the host `draining` in the database, which excludes it from placem
 - `PUT /api/intents/{intent_id}` - Replace the spec. Full-replace semantics: an omitted field is reset to its default, so send a complete spec. `alias` is immutable (`422`), and the reconciler converges the change under the strategy in the new spec, abandoning any rollout that was in flight
 - `DELETE /api/intents/{intent_id}` - Delete the intent and stop its instances; `?orphan=true` leaves them running with the ownership markers cleared
 
-A rollout that cannot bring its replacement up on the intended host tries the next eligible host, and holds with the reason in `status.strategy_progress.message` and `status.last_error` when there is none — retried with backoff rather than every tick. An instance that fails to start is deleted, so a retry never leaves dead instances behind. An edit whose replicas could not be read (unreachable host) stays pending in `status.spec_changed_at` instead of being reported as rolled out.
+A rollout that cannot bring its replacement up on the intended host tries the next eligible host, and holds with the reason in `status.strategy_progress.message` and `status.last_error` when there is none — retried with backoff rather than every tick. An instance the host refuses to start is deleted, so a retry never leaves dead instances behind; a start the host never answers is left alone instead, since it is probably still coming up. An edit whose replicas could not be read (unreachable host) stays pending in `status.spec_changed_at` instead of being reported as rolled out.
 
 See `training-platform-project/docs/specs/deployment-intent.md`.
 

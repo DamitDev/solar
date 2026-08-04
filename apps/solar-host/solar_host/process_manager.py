@@ -419,12 +419,16 @@ class ProcessManager:
         if not instance:
             return False
 
-        # Check if already running (verify subprocess is still alive)
-        if instance.status == InstanceStatus.RUNNING:
+        # Check if already running or starting (verify subprocess is alive).
+        # A start blocks while the server comes up, so a caller that gave up
+        # waiting (a client timeout) and retried must not launch a second
+        # process for the same instance: the first one would be orphaned,
+        # still holding its port and its share of the GPU.
+        if instance.status in (InstanceStatus.RUNNING, InstanceStatus.STARTING):
             proc = self.processes.get(instance_id)
             if proc and proc.poll() is None:
                 return True
-            # Stale RUNNING: process missing or dead -- reset and continue start
+            # Stale status: process missing or dead -- reset and continue start
             if proc is not None:
                 self.processes.pop(instance_id, None)
             self._purge_instance_resources(instance_id, call_runner_on_stop=True)

@@ -69,6 +69,22 @@ class Action:
 _BACKOFF_MIN_S = 10
 _BACKOFF_MAX_S = 300
 
+
+class StartOutcomeUnknown(HTTPException):
+    """A start call the host never answered, so the outcome is unknown.
+
+    Not the same as a host that answered with an error. The host's start
+    blocks while it launches the server and retries, so a client timeout or a
+    dropped connection says nothing about whether the instance is coming up —
+    and under load it usually is. Nothing may be deleted on this failure: the
+    next observation reports what actually happened, whereas deleting would
+    destroy a replica mid-start and pay for the cold start again.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(status_code=504, detail=detail)
+
+
 # Hard bound on a single reconciliation action. Host calls are individually
 # time-bounded, but a MIGRATE can chain several (pull with ORAS retries,
 # create, start, delete) and stall the whole loop for minutes; the bound
@@ -592,7 +608,12 @@ class Reconciler:
                     "source_uri": intent.model_source,
                     "at": datetime.now(timezone.utc).isoformat(),
                 }
-                if new_progress and action_type == "create":
+                if new_progress and isinstance(e, StartOutcomeUnknown):
+                    # The replacement may be coming up. Hold the step where it
+                    # is: the next tick adopts the instance if it exists, and
+                    # moving to another host now could leave two.
+                    new_progress["failed"] = new_progress.get("failed", 0) + 1
+                elif new_progress and action_type == "create":
                     new_progress = record_create_failure(
                         progress_data=new_progress,
                         host_id=action_dict.get("host_id"),
@@ -1317,11 +1338,19 @@ class Reconciler:
                 logger.info("Starting instance %s on %s", instance_id, host.name)
                 try:
                     await self._start_instance(host, instance_id)
+                except StartOutcomeUnknown:
+                    logger.warning(
+                        "Start outcome unknown for new instance %s on %s; "
+                        "leaving it in place",
+                        instance_id,
+                        host.name,
+                    )
+                    raise
                 except Exception:
-                    # A replica that will not start is not a replica. Leaving
-                    # it behind would pile up one dead instance per retry on
-                    # the host, and each would still count as an observed
-                    # replica of this intent.
+                    # A replica the host refused to start is not a replica.
+                    # Leaving it behind would pile up one dead instance per
+                    # retry on the host, and each would still count as an
+                    # observed replica of this intent.
                     logger.warning(
                         "Instance %s failed to start on %s; removing it",
                         instance_id,
@@ -1370,6 +1399,16 @@ class Reconciler:
                     try:
                         await self._start_instance(host, action.instance_id)
                         return None
+                    except StartOutcomeUnknown:
+                        # The replica may be starting right now; the next
+                        # observation decides. Only the backoff is recorded.
+                        logger.warning(
+                            "Restart outcome unknown for instance %s on %s; "
+                            "leaving it in place",
+                            action.instance_id,
+                            host.name,
+                        )
+                        raise
                     except HTTPException:
                         logger.warning(
                             "Restart failed for instance %s on %s, recreating",
@@ -1668,12 +1707,9 @@ class Reconciler:
         except HTTPException:
             raise
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    f"Host '{host.name}' unreachable during instance start "
-                    f"for {instance_id}: {e}"
-                ),
+            raise StartOutcomeUnknown(
+                f"Host '{host.name}' did not answer the start call for "
+                f"{instance_id}: {e}"
             )
 
     async def _delete_instance(self, host: Any, instance_id: str) -> None:

@@ -712,10 +712,21 @@ While a `rolling`/`immediate` update is in flight, `status.strategy_progress` is
 
 In both strategies, partial failure never leaves duplicate replicas on a host and never silently abandons the intent — the diff is re-evaluated next tick.
 
-**A replacement that cannot be created** (the host has no room for a second replica, the backend will not start there) is a different failure from one that comes up and fails its health gate, and it must not be retried on the same host: the cause is usually the host itself, so repeating it produces the same failure every tick. The step moves to the next eligible host instead. When there is none, the rollout **holds** with the reason recorded in `strategy_progress.message` and `last_error`, and the failure paces the reconciler with backoff, so the retry is a fresh attempt planned against current state rather than a tight loop. Two rules keep such a retry from costing anything:
+**A replacement the host refuses to create or start** (no room for a second replica, a backend that will not run there) is a different failure from one that comes up and fails its health gate, and it must not be retried on the same host: the cause is usually the host itself, so repeating it produces the same failure every tick. The step moves to the next eligible host instead. When there is none, the rollout **holds** with the reason recorded in `strategy_progress.message` and `last_error`, and the failure paces the reconciler with backoff, so the retry is a fresh attempt planned against current state rather than a tight loop. Two rules keep such a retry from costing anything:
 
-- A created instance that fails to start is **deleted**, not left behind. Otherwise each retry adds one dead instance to the host, and each still counts as an observed replica of the intent — so the intent reports its replicas as present while the alias is down.
+- A created instance the host refused to start is **deleted**, not left behind. Otherwise each retry adds one dead instance to the host, and each still counts as an observed replica of the intent — so the intent reports its replicas as present while the alias is down.
 - A held rollout is retired rather than resumed. The reconciler only re-enters a held rollout once its backoff has expired, and by then hosts may have come or gone and the spec may have been edited, so the diff re-plans from observed state.
+
+#### A start with no answer is not a failed start
+
+Starting an instance blocks on the host while it launches the server, so a client timeout or a dropped connection leaves the outcome **unknown** — and under load the replica is usually coming up. Such a failure is recorded (backoff, `last_error`) but nothing is deleted and nothing moves:
+
+- Neither `create` nor `recreate` may delete the instance. Deleting destroys a replica mid-start and pays for the cold start again, which under the load that caused the timeout only makes the next attempt slower.
+- A rollout step keeps its host rather than trying the next one, because the replacement it just asked for may exist. On the following tick the step **adopts** a replacement found on its own host that it has no id for — the instance a create it never got an answer for left behind — instead of creating a second one.
+
+This is what separates "the host said no" from "the host did not answer". Only the former is evidence about the replica.
+
+The host closes the same gap from its side: a start for an instance whose process is already alive returns instead of launching a second one. A retry that arrives while the first start is still running would otherwise orphan that process, which keeps its port and its share of the GPU with nothing tracking it.
 
 ### 11.5.1 Editing an intent during a rollout
 

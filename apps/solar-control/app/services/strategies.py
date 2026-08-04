@@ -189,6 +189,29 @@ def _pick_step_old_instance(
     return _instance_id(on_host or drifted[0])
 
 
+def _untracked_replacement(
+    managed: list[dict[str, Any]],
+    host_id: str | None,
+    drifted_ids: Collection[str] | None,
+) -> dict[str, Any] | None:
+    """A replacement already on *host_id* that this rollout never recorded.
+
+    A create whose outcome the reconciler never learned leaves no instance id
+    in the progress, and yet the instance may exist. Adopting it is what keeps
+    the step from creating another one on every tick. Replicas this rollout is
+    replacing are excluded: an in-place step shares its host with the one it
+    retires.
+    """
+    ids = set(drifted_ids or ())
+    for inst in managed:
+        if inst.get("_host_id") != host_id:
+            continue
+        iid = _instance_id(inst)
+        if iid and iid not in ids:
+            return inst
+    return None
+
+
 def _step_old_instance(
     managed: list[dict[str, Any]],
     progress_data: dict[str, Any],
@@ -355,10 +378,16 @@ class RollingStrategy:
                     "No replacement host available",
                 )
 
-            # If we already have a current_instance_id (from a prior
-            # tick that executed the create), transition to waiting.
-            if current_instance_id:
+            # The replacement is either one this rollout recorded on an
+            # earlier tick, or one it created without learning the outcome
+            # (§11.5). Either way the step is past creating.
+            replacement_id = current_instance_id or _instance_id(
+                _untracked_replacement(managed_instances, current_host_id, drifted_ids)
+                or {}
+            )
+            if replacement_id:
                 new_progress = dict(progress_data)
+                new_progress["current_instance_id"] = replacement_id
                 new_progress["phase"] = StrategyPhase.WAITING_HEALTHY
                 new_progress["step_started_at"] = datetime.now(timezone.utc).isoformat()
                 new_progress["message"] = (

@@ -1618,6 +1618,57 @@ class TestCreateFailure:
         assert progress["failed_hosts"] == ["h1"]
         assert "retrying on h2" in progress["message"]
 
+    def test_adopts_a_replacement_it_never_recorded(self):
+        """A create whose outcome was never learned still made an instance.
+
+        Without adopting it the step would create another one every tick,
+        which is the churn this whole path exists to avoid.
+        """
+        old = _make_managed_instance(
+            "i1", host_id="h1", model_source="repo://test:v2", max_length=512
+        )
+        orphan = _make_managed_instance(
+            "i2", host_id="h1", model_source="repo://test:v2", max_length=1024
+        )
+
+        action, progress = RollingStrategy.continue_step(
+            progress_data=self._progress(current_host_id="h1"),
+            intent_id="intent-001",
+            alias="test-model",
+            desired_replicas=1,
+            managed_instances=[old, orphan],
+            candidates=_make_candidates("h1"),
+            gateway_aliases=set(),
+            health_gate_started_at=0.0,
+            health_gate_timeout_s=300.0,
+        )
+
+        assert action["type"] == "wait"
+        assert progress["phase"] == StrategyPhase.WAITING_HEALTHY
+        assert progress["current_instance_id"] == "i2"
+
+    def test_creates_when_only_the_replica_being_replaced_is_there(self):
+        """The replica being retired must not be mistaken for a replacement."""
+        old = _make_managed_instance(
+            "i1", host_id="h1", model_source="repo://test:v2", max_length=512
+        )
+
+        action, progress = RollingStrategy.continue_step(
+            progress_data=self._progress(current_host_id="h1"),
+            intent_id="intent-001",
+            alias="test-model",
+            desired_replicas=1,
+            managed_instances=[old],
+            candidates=_make_candidates("h1"),
+            gateway_aliases=set(),
+            health_gate_started_at=0.0,
+            health_gate_timeout_s=300.0,
+        )
+
+        assert action["type"] == "create"
+        assert action["host_id"] == "h1"
+        assert progress["phase"] == StrategyPhase.CREATING_REPLACEMENT
+
     def test_holds_when_no_other_host_can_take_it(self):
         """Nowhere else to go: report and stop, rather than churn."""
         progress = record_create_failure(

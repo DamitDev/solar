@@ -19,6 +19,7 @@ from app.services.reconciliation import (
     Action,
     ActionType,
     Reconciler,
+    StartOutcomeUnknown,
     _detect_backend_drift,
     _intent_orphan,
     _intent_phase,
@@ -1097,6 +1098,118 @@ class TestCreateThatCannotStart:
                 await reconciler._act(_make_intent(), action)
 
         mock_delete.assert_awaited_once_with(host, "inst-new")
+
+    @pytest.mark.anyio
+    async def test_start_with_no_answer_keeps_the_instance(self):
+        """A start the host never answered is not a start that failed.
+
+        The host's start blocks while it launches the server, so a timeout
+        under load says nothing — and the replica is usually coming up.
+        Deleting it would destroy a healthy replica mid-start.
+        """
+        reconciler = Reconciler()
+        host = _HostStub(id="h1", name="h1")
+        action = Action(
+            type=ActionType.CREATE,
+            intent_id="intent-001",
+            alias="test-model",
+            host_id="h1",
+            reason="shortfall 1/1",
+        )
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch(
+                "app.services.migration.create_instance_on_host",
+                new=AsyncMock(return_value={"instance": {"id": "inst-new"}}),
+            ),
+            patch.object(
+                reconciler,
+                "_start_instance",
+                new=AsyncMock(side_effect=StartOutcomeUnknown("timeout")),
+            ),
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+
+            with pytest.raises(StartOutcomeUnknown):
+                await reconciler._act(_make_intent(), action)
+
+        mock_delete.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_recreate_keeps_a_replica_whose_restart_had_no_answer(self):
+        reconciler = Reconciler()
+        host = _HostStub(id="h1", name="h1")
+        action = Action(
+            type=ActionType.RECREATE,
+            intent_id="intent-001",
+            alias="test-model",
+            host_id="h1",
+            instance_id="inst-1",
+            reason="Instance stopped, recreating",
+        )
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch.object(
+                reconciler,
+                "_start_instance",
+                new=AsyncMock(side_effect=StartOutcomeUnknown("timeout")),
+            ),
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+
+            with pytest.raises(StartOutcomeUnknown):
+                await reconciler._act(_make_intent(), action)
+
+        mock_delete.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_rollout_stays_put_when_the_start_outcome_is_unknown(self):
+        """Moving hosts now could leave two replacements, not one."""
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=1, strategy="rolling")
+        host_b = _HostStub(id="h2", name="h2")
+        observed = _make_observed(
+            managed=[_make_managed_instance("i1", host_id="h1", max_length=512)],
+            candidates=[(host_b, _SnapshotStub(host_id="h2"))],
+        )
+        progress = {
+            "strategy": "rolling",
+            "target_model_source": intent.model_source,
+            "drifted_instance_ids": ["i1"],
+            "phase": "creating_replacement",
+            "step": "1/1",
+            "updated": 0,
+            "in_progress": 1,
+            "failed": 0,
+            "current_host_id": "h1",
+            "current_instance_id": None,
+            "pending_hosts": [],
+            "failed_hosts": [],
+            "started_at": "2026-01-01T00:00:00+00:00",
+        }
+
+        with (
+            patch.object(
+                reconciler,
+                "_act",
+                new=AsyncMock(side_effect=StartOutcomeUnknown("timeout")),
+            ),
+            patch.object(reconciler, "_update_status", new=AsyncMock()) as mock_status,
+        ):
+            await reconciler._continue_strategy(intent, observed, progress)
+
+        new_progress = mock_status.await_args.kwargs["strategy_progress"]
+        assert new_progress["current_host_id"] == "h1"
+        assert new_progress["failed_hosts"] == []
+        assert new_progress["failed"] == 1
 
     @pytest.mark.anyio
     async def test_rollout_moves_off_the_host_that_could_not_take_it(self):
