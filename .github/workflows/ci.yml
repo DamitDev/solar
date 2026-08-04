@@ -18,13 +18,16 @@ jobs:
           cache-dependency-path: |
             download-model/requirements.txt
             download-dataset/requirements.txt
+            upload-model/requirements.txt
       - name: Install test tools
-        run: python -m pip install --upgrade pip pytest ruff -r download-model/requirements.txt -r download-dataset/requirements.txt
+        run: python -m pip install --upgrade pip pytest ruff -r download-model/requirements.txt -r download-dataset/requirements.txt -r upload-model/requirements.txt
       - name: Run unit tests
         run: python -m pytest -q
       - name: Lint and format check
-        run: python -m ruff check download-model download-dataset && python -m ruff format --check download-model download-dataset
+        run: python -m ruff check download-model download-dataset upload-model && python -m ruff format --check download-model download-dataset upload-model
       - name: Build model step image
         run: docker build -f download-model/Dockerfile -t supernova-step-download-model:ci .
       - name: Build dataset step image
         run: docker build -f download-dataset/Dockerfile -t supernova-step-download-dataset:ci .
+      - name: Build upload model step image
+        run: docker build -f upload-model/Dockerfile -t supernova-step-upload-model:ci .
