@@ -1,19 +1,19 @@
 /**
  * IntentDetail — per-intent status view (U-003, spec deployment-intent.md
  * §10.1–10.3): replica counts, replica_set, conditions, strategy_progress,
- * last_error, the intent spec, and delete. No edit/scale controls — the
- * update endpoint is pending (§12.5).
+ * last_error, the intent spec, plus edit (§12.5) and delete.
  */
 
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { AlertCircle, ArrowLeft, ChevronDown, Trash2, TriangleAlert } from 'lucide-react';
+import { AlertCircle, ArrowLeft, ChevronDown, Pencil, Trash2, TriangleAlert } from 'lucide-react';
 import solarClient from '@/api/client';
 import { Intent, IntentCondition } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
 import { cn, formatDateTime, formatRelativeTime } from '@/lib/utils';
 import { IntentPhaseBadge } from './IntentBadges';
 import { DeleteIntentModal } from './DeleteIntentModal';
+import { IntentFormModal } from './IntentFormModal';
 
 const DETAIL_POLL_INTERVAL_MS = 5_000;
 
@@ -55,6 +55,7 @@ export function IntentDetail() {
   const [fetched, setFetched] = useState<Intent | null | undefined>(undefined); // null = 404
   const [error, setError] = useState<string | null>(null);
   const [showDelete, setShowDelete] = useState(false);
+  const [showEdit, setShowEdit] = useState(false);
 
   const fetchIntent = useCallback(async () => {
     if (!id) return;
@@ -176,12 +177,20 @@ export function IntentDetail() {
               </span>
             </div>
           </div>
-          <button
-            onClick={() => setShowDelete(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-nord-3 text-nord-6 rounded-lg hover:bg-nord-11 hover:bg-opacity-20 hover:text-nord-11 transition-colors"
-          >
-            <Trash2 size={16} /> Delete
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowEdit(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-nord-3 text-nord-6 rounded-lg hover:bg-nord-2 transition-colors"
+            >
+              <Pencil size={16} /> Edit
+            </button>
+            <button
+              onClick={() => setShowDelete(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-nord-3 text-nord-6 rounded-lg hover:bg-nord-11 hover:bg-opacity-20 hover:text-nord-11 transition-colors"
+            >
+              <Trash2 size={16} /> Delete
+            </button>
+          </div>
         </div>
 
         {error && (
@@ -420,6 +429,16 @@ export function IntentDetail() {
         </dl>
       </main>
 
+      {showEdit && (
+        <IntentFormModal
+          intent={intent}
+          onClose={() => setShowEdit(false)}
+          onSaved={(updated) => {
+            setShowEdit(false);
+            setFetched(updated);
+          }}
+        />
+      )}
       {showDelete && (
         <DeleteIntentModal
           intent={intent}

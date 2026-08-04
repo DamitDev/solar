@@ -13,6 +13,18 @@ class HostStatus(str, Enum):
     ERROR = "error"
 
 
+class DrainState(str, Enum):
+    """Drain lifecycle of a solar-host (S-043).
+
+    Orthogonal to :class:`HostStatus`, which reports reachability: a
+    draining host is still online and still serving. Absence of a drain
+    state (``None``) means normal operation.
+    """
+
+    DRAINING = "draining"
+    DRAINED = "drained"
+
+
 class MemoryInfo(BaseModel):
     """Memory usage information"""
 
@@ -43,6 +55,14 @@ class Host(BaseModel):
     disk_available_gb: float | None = None
     memory_available_gb: float | None = None
     version: str | None = None
+    drain_state: DrainState | None = Field(
+        default=None,
+        description=(
+            "Drain lifecycle: 'draining' while managed replicas are being "
+            "evacuated, 'drained' once the host is empty, null otherwise"
+        ),
+    )
+    drain_requested_at: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -147,6 +167,16 @@ class HostInstanceSummary(BaseModel):
     backend_type: str | None = None
     port: int | None = None
     supported_endpoints: list[str] = Field(default_factory=list)
+    managed_by: str | None = Field(
+        default=None,
+        description=(
+            "'intent' when the instance is reconciler-managed (S-043/U-005 "
+            "need this to tell managed replicas from manual instances)"
+        ),
+    )
+    intent_id: str | None = Field(
+        default=None, description="Owning intent id when managed_by == 'intent'"
+    )
 
 
 class HostReservationSummary(BaseModel):
@@ -194,6 +224,7 @@ class HostResourceSnapshot(BaseModel):
     host_name: str
     url: str
     status: HostStatus
+    drain_state: DrainState | None = None
     roles: list[str] = Field(default_factory=list)
     gpu_type: str | None = None
     version: str | None = None
@@ -265,3 +296,48 @@ class AggregatedResourceResponse(BaseModel):
     total_hosts: int
     reachable_hosts: int
     unreachable_hosts: int
+
+
+class DrainBlocker(BaseModel):
+    """Something that prevents a host from being drained (S-043 §3)."""
+
+    kind: str = Field(..., description="'manual_instance' or 'active_job'")
+    id: str
+    name: str | None = None
+    detail: str
+
+
+class DrainReplica(BaseModel):
+    """An intent-managed instance still running on a draining host."""
+
+    instance_id: str
+    alias: str | None = None
+    intent_id: str | None = None
+    status: str | None = None
+    blocked_reason: str | None = Field(
+        default=None,
+        description=(
+            "Why this replica cannot currently be moved. None while it is "
+            "still movable or already being migrated"
+        ),
+    )
+
+
+class HostDrainStatus(BaseModel):
+    """Drain progress for one host (S-043 §5.4)."""
+
+    host_id: str
+    host_name: str
+    drain_state: DrainState | None = None
+    drain_requested_at: datetime | None = None
+    stalled: bool = Field(
+        default=False,
+        description=(
+            "True when the host is draining and every remaining managed "
+            "replica is blocked — the drain needs operator attention"
+        ),
+    )
+    managed_remaining: int = 0
+    manual_running: int = 0
+    replicas: list[DrainReplica] = Field(default_factory=list)
+    blockers: list[DrainBlocker] = Field(default_factory=list)

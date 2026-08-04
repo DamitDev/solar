@@ -1,7 +1,7 @@
 """intent_path: deployment strategies + delete semantics (marker: intent_path).
 
-Version changes (via direct intents-row UPDATE — no PUT endpoint exists,
-spec §12.5) trigger REPLACE; delete stops managed instances; delete with
+Version changes (via PUT /api/intents/{id}, spec §12.5) trigger REPLACE
+under the intent's strategy; delete stops managed instances; delete with
 ?orphan=true keeps them running with markers cleared.
 """
 
@@ -17,9 +17,10 @@ from fixtures.intents import (
     create_intent,
     get_intent,
     replica_states,
+    update_intent,
     wait_intent_ready,
 )
-from fixtures.seed import read_test_model_files, update_intent_in_db
+from fixtures.seed import read_test_model_files
 
 pytestmark = pytest.mark.intent_path
 
@@ -86,7 +87,7 @@ async def _wait_model_source(http_control, intent_id: str, source: str) -> dict:
 
 
 async def test_rolling_version_change(http_control, http_data_repo, stack, clean_state):
-    """DB model_source change -> old replica replaced by new, intent ready again."""
+    """PUT model_source -> old replica replaced by new, intent ready again."""
     v2_source = await _register_v2(stack, http_data_repo)
     intent = await create_intent(http_control, alias=_alias())
     await wait_intent_ready(http_control, intent["id"])
@@ -94,9 +95,9 @@ async def test_rolling_version_change(http_control, http_data_repo, stack, clean
     assert ready is not None
     old_instance_id = next(iter(replica_states(ready)))
 
-    update_intent_in_db(
-        stack.db_env["control_db"], intent["id"], model_source=v2_source
-    )
+    updated = await update_intent(http_control, ready, model_source=v2_source)
+    assert updated["model_source"] == v2_source
+    assert updated["status"]["strategy_progress"] is None
 
     final = await _wait_model_source(http_control, intent["id"], v2_source)
     status = final["status"]
@@ -125,11 +126,9 @@ async def test_immediate_version_change(
     """Same via strategy=immediate: converges to the new version, ready."""
     v2_source = await _register_v2(stack, http_data_repo)
     intent = await create_intent(http_control, alias=_alias(), strategy="immediate")
-    await wait_intent_ready(http_control, intent["id"])
+    ready = await wait_intent_ready(http_control, intent["id"])
 
-    update_intent_in_db(
-        stack.db_env["control_db"], intent["id"], model_source=v2_source
-    )
+    await update_intent(http_control, ready, model_source=v2_source)
 
     final = await _wait_model_source(http_control, intent["id"], v2_source)
     assert final["status"]["phase"] == "ready"

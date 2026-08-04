@@ -75,6 +75,37 @@ describe('SolarClient', () => {
     await expect(client.getInstanceState('host-1', 'i1')).resolves.toEqual(state);
   });
 
+  it('updates an intent via PUT (S-044 full replace)', async () => {
+    const spec = { alias: 'iris:v1', model_source: 'repo://iris:v2', backend: { backend_type: 'llamacpp' } };
+    mock.onPut('/api/intents/intent-1', spec).reply(200, { id: 'intent-1', ...spec });
+    await expect(client.updateIntent('intent-1', spec as any)).resolves.toMatchObject({
+      model_source: 'repo://iris:v2',
+    });
+  });
+
+  it('drains, resumes and reads drain status of a host', async () => {
+    const status = { host_id: 'host-1', drain_state: 'draining', managed_remaining: 2 };
+    mock.onPost('/api/hosts/host-1/drain').reply(202, status);
+    mock.onDelete('/api/hosts/host-1/drain').reply(200, { ...status, drain_state: null });
+    mock.onGet('/api/hosts/host-1/drain').reply(200, status);
+
+    await expect(client.drainHost('host-1')).resolves.toEqual(status);
+    await expect(client.resumeHost('host-1')).resolves.toMatchObject({ drain_state: null });
+    await expect(client.getDrainStatus('host-1')).resolves.toEqual(status);
+  });
+
+  it('keeps the blockers payload on a rejected drain (409)', async () => {
+    mock.onPost('/api/hosts/host-1/drain').reply(409, {
+      detail: {
+        detail: 'Host cannot be drained yet',
+        blockers: [{ kind: 'manual_instance', id: 'i-2', detail: 'still running' }],
+      },
+    });
+    await expect(client.drainHost('host-1')).rejects.toMatchObject({
+      response: { status: 409, data: { detail: { blockers: [{ id: 'i-2' }] } } },
+    });
+  });
+
   it('rejects on 401 (interceptor keeps the rejection)', async () => {
     mock.onGet('/api/hosts').reply(401, { detail: 'Authentication required' });
     await expect(client.getHosts()).rejects.toMatchObject({ response: { status: 401 } });

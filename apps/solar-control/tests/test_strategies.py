@@ -38,6 +38,7 @@ class _HostStub:
     api_key: str = "test-key"
     roles: list | None = None
     gpu_type: str | None = None
+    drain_state: str | None = None
 
     def __post_init__(self):
         if self.roles is None:

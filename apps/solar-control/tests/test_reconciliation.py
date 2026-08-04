@@ -34,6 +34,7 @@ class _HostStub:
     api_key: str = "test-key"
     roles: list | None = None
     gpu_type: str | None = None
+    drain_state: str | None = None
 
     def __post_init__(self):
         if self.roles is None:
@@ -425,6 +426,165 @@ class TestDiff:
         creates = [a for a in actions if a.type == ActionType.CREATE]
         assert len(creates) == 1  # 1 candidate used
         assert len(migrates) == 1  # 1 displacement needed for remaining shortfall
+
+
+# ── Drain diff tests (S-043) ───────────────────────────────────
+
+
+class TestDrainDiff:
+    """Test evacuation planning for replicas on draining hosts."""
+
+    def _draining_observed(self, *, candidates=None, managed=None, **kwargs):
+        return _make_observed(
+            managed=managed
+            or [
+                _make_managed_instance("inst-1", host_id="h1", host_name="h1"),
+                _make_managed_instance("inst-2", host_id="h2", host_name="h2"),
+            ],
+            hosts=[
+                _HostStub(id="h1", name="h1", drain_state="draining"),
+                _HostStub(id="h2", name="h2"),
+            ],
+            candidates=candidates or [],
+            **kwargs,
+        )
+
+    def test_evacuates_replica_to_best_candidate(self):
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=2)
+        observed = self._draining_observed(
+            candidates=[(_HostStub(id="h3", name="h3"), _SnapshotStub("h3"))]
+        )
+
+        actions = reconciler._diff(intent, observed)
+        evacuations = [a for a in actions if a.type == ActionType.EVACUATE]
+
+        assert len(evacuations) == 1
+        assert evacuations[0].instance_id == "inst-1"
+        assert evacuations[0].host_id == "h1"
+        assert evacuations[0].target_host_id == "h3"
+
+    def test_evacuation_without_target_carries_the_stall_reason(self):
+        """No candidate still emits the action so the stall is reported (§4.3)."""
+        reconciler = Reconciler()
+        intent = _make_intent(
+            replicas=2,
+            placement=PlacementConstraints(roles=["inference"], gpu_type="nvidia_cuda"),
+            resources=ResourceRequirements(vram_gb=48.0),
+        )
+        observed = self._draining_observed()
+
+        actions = reconciler._diff(intent, observed)
+        evacuations = [a for a in actions if a.type == ActionType.EVACUATE]
+
+        assert len(evacuations) == 1
+        assert evacuations[0].target_host_id is None
+        assert "No eligible host" in evacuations[0].reason
+        assert "nvidia_cuda" in evacuations[0].reason
+        assert "48.0 GB" in evacuations[0].reason
+
+    def test_evacuation_runs_last(self):
+        """Evacuation must not starve the intent's own convergence."""
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=3)
+        observed = self._draining_observed(
+            candidates=[(_HostStub(id="h3", name="h3"), _SnapshotStub("h3"))]
+        )
+
+        actions = reconciler._diff(intent, observed)
+
+        assert actions[-1].type == ActionType.EVACUATE
+
+    def test_replicas_on_healthy_hosts_are_left_alone(self):
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=2)
+        observed = self._draining_observed(
+            candidates=[(_HostStub(id="h3", name="h3"), _SnapshotStub("h3"))]
+        )
+
+        actions = reconciler._diff(intent, observed)
+
+        assert [a.instance_id for a in actions if a.type == ActionType.EVACUATE] == [
+            "inst-1"
+        ]
+
+    def test_stopped_replica_is_stopped_instead_of_recreated(self):
+        """RECREATE would rebuild it on the host being emptied (§4.2)."""
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=2)
+        observed = self._draining_observed(
+            managed=[
+                _make_managed_instance(
+                    "inst-1", host_id="h1", host_name="h1", status="failed"
+                ),
+                _make_managed_instance("inst-2", host_id="h2", host_name="h2"),
+            ],
+            candidates=[(_HostStub(id="h3", name="h3"), _SnapshotStub("h3"))],
+        )
+
+        actions = reconciler._diff(intent, observed)
+
+        assert [a.type for a in actions if a.instance_id == "inst-1"] == [
+            ActionType.STOP
+        ]
+
+    def test_surplus_replica_is_taken_from_the_draining_host(self):
+        """Dropping it as surplus is cheaper than migrating it (§4.2)."""
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=1)
+        observed = self._draining_observed()
+
+        actions = reconciler._diff(intent, observed)
+        stops = [a for a in actions if a.type == ActionType.STOP]
+
+        assert [a.instance_id for a in stops] == ["inst-1"]
+        # Already leaving; no need to also plan a migration for it
+        assert not [a for a in actions if a.type == ActionType.EVACUATE]
+
+    def test_drift_replacement_takes_precedence(self):
+        """A REPLACE already relocates the replica through placement, which
+        excludes the draining host, so the drain progresses without an
+        evacuation."""
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=2, model_source="repo://test:v2")
+        observed = self._draining_observed(
+            managed=[
+                _make_managed_instance(
+                    "inst-1",
+                    host_id="h1",
+                    host_name="h1",
+                    model_source="repo://test:v1",
+                ),
+                _make_managed_instance(
+                    "inst-2",
+                    host_id="h2",
+                    host_name="h2",
+                    model_source="repo://test:v2",
+                ),
+            ],
+            candidates=[(_HostStub(id="h3", name="h3"), _SnapshotStub("h3"))],
+        )
+
+        actions = reconciler._diff(intent, observed)
+        by_instance = [a.type for a in actions if a.instance_id == "inst-1"]
+
+        assert ActionType.EVACUATE not in by_instance
+        assert ActionType.REPLACE in by_instance
+
+    def test_no_evacuation_without_draining_hosts(self):
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=2)
+        observed = _make_observed(
+            managed=[
+                _make_managed_instance("inst-1", host_id="h1"),
+                _make_managed_instance("inst-2", host_id="h2"),
+            ],
+            hosts=[_HostStub(id="h1"), _HostStub(id="h2")],
+        )
+
+        actions = reconciler._diff(intent, observed)
+
+        assert not [a for a in actions if a.type == ActionType.EVACUATE]
 
 
 # ── Build instance config test ──────────────────────────────────

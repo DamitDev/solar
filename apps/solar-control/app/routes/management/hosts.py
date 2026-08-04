@@ -1,6 +1,7 @@
 """Host management API routes (under /api/hosts)."""
 
 import asyncio
+import logging
 import uuid
 from typing import Any
 
@@ -9,9 +10,19 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from app.database.hosts import host_db
-from app.models import Host, HostCreate, HostResponse, HostStatus
+from app.models import (
+    DrainState,
+    Host,
+    HostCreate,
+    HostDrainStatus,
+    HostResponse,
+    HostStatus,
+)
+from app.services import drain
 from app.services.migration import create_instance_on_host
 from app.validation import validate_priority
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/hosts", tags=["hosts"])
 
@@ -172,6 +183,72 @@ async def refresh_all_hosts():
     return {"message": f"Refreshed {len(hosts)} hosts", "results": results}
 
 
+@router.post("/{host_id}/drain", response_model=HostDrainStatus, status_code=202)
+async def drain_host(host_id: str):
+    """Start draining a host (S-043 §5.1).
+
+    Marks the host ``draining`` after a preflight; the reconciler evacuates
+    the intent-managed replicas from there. Idempotent: a host that is
+    already draining or drained is returned unchanged.
+    """
+    host = _require_host(await host_db.get_host(host_id))
+
+    if host.drain_state is not None:
+        return await drain.build_drain_status(host)
+
+    blockers = await drain.collect_blockers(host)
+    if blockers:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "detail": f"Host '{host.name}' cannot be drained yet",
+                "blockers": [b.model_dump() for b in blockers],
+            },
+        )
+
+    updated = await host_db.set_drain_state(host_id, DrainState.DRAINING)
+    host = updated or host
+    logger.info("Host '%s' draining requested", host.name)
+    await drain.broadcast_drain_state(host)
+
+    # Wake the reconciler so evacuation starts now instead of on the tick.
+    from app.services.reconciliation import reconciler
+
+    reconciler.wake()
+
+    return await drain.build_drain_status(host, blockers=[])
+
+
+@router.delete("/{host_id}/drain", response_model=HostDrainStatus)
+async def resume_host(host_id: str):
+    """Cancel a drain or return a drained host to service (S-043 §5.2)."""
+    host = _require_host(await host_db.get_host(host_id))
+
+    if host.drain_state is None:
+        return await drain.build_drain_status(host)
+
+    previous = host.drain_state
+    updated = await host_db.set_drain_state(host_id, None)
+    host = updated or host
+    logger.info("Host '%s' resumed (was %s)", host.name, previous.value)
+    await drain.broadcast_drain_state(host)
+
+    # Wake the reconciler: the host is eligible for placement again, which
+    # may resolve a shortfall that was waiting for capacity.
+    from app.services.reconciliation import reconciler
+
+    reconciler.wake()
+
+    return await drain.build_drain_status(host)
+
+
+@router.get("/{host_id}/drain", response_model=HostDrainStatus)
+async def get_drain_status(host_id: str):
+    """Report drain progress and blockers for a host (S-043 §5.3)."""
+    host = _require_host(await host_db.get_host(host_id))
+    return await drain.build_drain_status(host)
+
+
 async def _proxy_instance_action(
     host_id: str,
     instance_id: str,
@@ -279,6 +356,16 @@ async def create_instance(host_id: str, instance_data: dict[str, Any]):
     ``model_source`` (S-019), and POSTs to the host.
     """
     host = _require_host(await host_db.get_host(host_id))
+    # Manual creation targets a host explicitly and so bypasses placement,
+    # which is what keeps new work off a draining host (S-043 §3).
+    if host.drain_state is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Host '{host.name}' is {host.drain_state.value} and does not "
+                f"accept new instances. Resume the host first."
+            ),
+        )
     return await create_instance_on_host(host, instance_data)
 
 

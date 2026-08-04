@@ -50,6 +50,7 @@ class IntentDB:
                 conditions=status.get("conditions", []),
                 strategy_progress=status.get("strategy_progress"),
                 last_error=status.get("last_error"),
+                spec_changed_at=status.get("spec_changed_at"),
                 created_at=row.created_at.isoformat() if row.created_at else None,
                 updated_at=row.updated_at.isoformat() if row.updated_at else None,
                 last_reconciled_at=(
@@ -108,6 +109,72 @@ class IntentDB:
                 updated_at=now,
             )
             session.add(row)
+            await session.commit()
+            await session.refresh(row)
+            return self._row_to_response(row)
+
+    async def update_intent(
+        self,
+        intent_id: str,
+        *,
+        model_source: str,
+        replicas: int,
+        priority: str,
+        strategy: str,
+        backend: dict[str, Any],
+        placement: dict[str, Any],
+        resources: dict[str, Any],
+        metadata: dict[str, str],
+    ) -> IntentResponse | None:
+        """Replace an intent's spec (S-044, §12.5 full-replace semantics).
+
+        Returns None when the intent is unknown, already soft-deleted, or
+        being deleted — a spec write must not resurrect a deleting intent.
+
+        ``alias`` is immutable and therefore not a parameter.
+
+        When the spec actually changes, the in-flight ``strategy_progress``
+        is dropped so the next tick re-plans the rollout against the new
+        spec instead of continuing toward the superseded target (§11.5.1),
+        and ``spec_changed_at`` is stamped so the reconciler compares the
+        full instance configuration until the replicas match again.
+        """
+        now = datetime.now(timezone.utc)
+        async with self._session() as session:
+            row = await session.get(IntentRow, intent_id)
+            if row is None or row.deleted_at is not None or row.phase == "deleting":
+                return None
+
+            spec_changed = (
+                row.model_source != model_source
+                or row.replicas != replicas
+                or row.priority != priority
+                or row.strategy != strategy
+                or (row.backend or {}) != backend
+                or (row.placement or {}) != placement
+                or (row.resources or {}) != resources
+                or (row.metadata_ or {}) != metadata
+            )
+
+            row.model_source = model_source
+            row.replicas = replicas
+            row.priority = priority
+            row.strategy = strategy
+            row.backend = backend
+            row.placement = placement
+            row.resources = resources
+            row.metadata_ = metadata
+            row.updated_at = now
+
+            if spec_changed:
+                status = dict(row.status_json or {})
+                status["strategy_progress"] = None
+                status["spec_changed_at"] = now.isoformat()
+                # The recorded error belongs to the previous spec; the next
+                # pass reports whatever the new one runs into.
+                status["last_error"] = None
+                row.status_json = status
+
             await session.commit()
             await session.refresh(row)
             return self._row_to_response(row)

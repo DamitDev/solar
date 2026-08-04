@@ -16,9 +16,10 @@ from fixtures.intents import (
     get_intent,
     replica_hosts,
     replica_states,
+    update_intent,
     wait_intent_ready,
 )
-from fixtures.seed import count_host_requests, update_intent_in_db
+from fixtures.seed import count_host_requests
 
 pytestmark = pytest.mark.intent_path
 
@@ -89,13 +90,13 @@ async def _replica_running(http_control, intent_id: str, instance_id: str) -> bo
 
 
 async def test_scale_down_surplus_stop(http_control, stack, clean_state):
-    """replicas 2 -> 1 via DB update: surplus instance stopped+deleted."""
+    """replicas 2 -> 1 via PUT: surplus instance stopped+deleted."""
     intent = await create_intent(http_control, alias=_alias(), replicas=2)
     ready = await wait_intent_ready(http_control, intent["id"], ready_replicas=2)
     states = replica_states(ready)
     assert len(states) == 2
 
-    update_intent_in_db(stack.db_env["control_db"], intent["id"], replicas=1)
+    await update_intent(http_control, ready, replicas=1)
 
     # Converges to a single managed replica, still ready.
     await wait_for(

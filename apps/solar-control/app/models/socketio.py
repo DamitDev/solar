@@ -90,6 +90,10 @@ class HostStatusPayload(BaseModel):
     host_id: str
     name: str | None
     status: str
+    drain_state: str | None = Field(
+        default=None,
+        description="'draining' / 'drained' while the host is out of service (S-043)",
+    )
     url: str | None
     last_seen: str | None = None
     memory: dict[str, Any] | None = None
@@ -127,6 +131,7 @@ class HostStatusPayload(BaseModel):
             host_id=host.id,
             name=host.name,
             status=host.status.value,
+            drain_state=host.drain_state.value if host.drain_state else None,
             url=host.url,
             last_seen=host.last_seen.isoformat() if host.last_seen else None,
             memory=host.memory.model_dump() if host.memory else None,

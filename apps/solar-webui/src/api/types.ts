@@ -4,6 +4,12 @@ export type InstanceStatus = 'stopped' | 'starting' | 'running' | 'failed' | 'st
 
 export type HostStatus = 'online' | 'offline' | 'error';
 
+/**
+ * Drain lifecycle of a host (S-043). Independent of HostStatus: a draining
+ * host is still online and still serving. Null/absent means normal operation.
+ */
+export type DrainState = 'draining' | 'drained';
+
 export type BackendType =
   'llamacpp' | 'huggingface_causal' | 'huggingface_classification' | 'huggingface_embedding' | 'huggingface_vision';
 
@@ -274,6 +280,8 @@ export interface Host {
   disk_available_gb?: number;
   memory_available_gb?: number;
   version?: string;
+  drain_state?: DrainState | null;
+  drain_requested_at?: string | null;
   created_at: string;
 }
 
@@ -517,6 +525,13 @@ export interface IntentCreateRequest {
   metadata?: Record<string, string>;
 }
 
+/**
+ * PUT /api/intents/{id} body (S-044). Same shape as create with
+ * full-replace semantics: anything omitted is reset to its default, so the
+ * form always sends a complete spec. `alias` must equal the stored alias.
+ */
+export type IntentUpdateRequest = IntentCreateRequest;
+
 export interface ReplicaEntry {
   host_id?: string | null;
   host_name?: string | null;
@@ -573,6 +588,8 @@ export interface IntentStatus {
   conditions: IntentCondition[];
   strategy_progress: StrategyProgress | null;
   last_error: IntentLastError | null;
+  /** Set while an edited spec is still rolling out (S-044). */
+  spec_changed_at?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
   last_reconciled_at?: string | null;
@@ -625,6 +642,9 @@ export interface HostInstanceSummary {
   backend_type?: string | null;
   port?: number | null;
   supported_endpoints?: string[];
+  /** 'intent' for reconciler-managed replicas, absent for manual instances (S-043) */
+  managed_by?: string | null;
+  intent_id?: string | null;
 }
 
 export interface HostReservationSummary {
@@ -646,6 +666,7 @@ export interface HostResourceSnapshot {
   host_name: string;
   url: string;
   status: HostStatus;
+  drain_state?: DrainState | null;
   roles: string[];
   gpu_type?: string | null;
   version?: string | null;
@@ -693,4 +714,37 @@ export interface ResourcesQueryParams {
   gpu_type?: string;
   min_available_vram_gb?: number;
   min_available_ram_gb?: number;
+}
+
+// ─── Host draining (U-005, S-043 §5) ───
+
+/** Something that prevents a drain from starting. */
+export interface DrainBlocker {
+  kind: 'manual_instance' | 'active_job' | string;
+  id: string;
+  name?: string | null;
+  detail: string;
+}
+
+/** An intent-managed replica still on a draining host. */
+export interface DrainReplica {
+  instance_id: string;
+  alias?: string | null;
+  intent_id?: string | null;
+  status?: string | null;
+  /** Why this replica cannot be moved right now; null while it is movable. */
+  blocked_reason?: string | null;
+}
+
+export interface HostDrainStatus {
+  host_id: string;
+  host_name: string;
+  drain_state?: DrainState | null;
+  drain_requested_at?: string | null;
+  /** Draining, but every remaining replica is blocked — needs an operator. */
+  stalled: boolean;
+  managed_remaining: number;
+  manual_running: number;
+  replicas: DrainReplica[];
+  blockers: DrainBlocker[];
 }

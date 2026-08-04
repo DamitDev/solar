@@ -36,12 +36,27 @@ def truncate_intents(database_url: str) -> None:
         )
 
 
-def update_intent_in_db(database_url: str, intent_id: str, **fields: Any) -> None:
-    """Directly UPDATE the ``intents`` row (no PUT endpoint exists — spec §12.5).
+def clear_host_drain_state(database_url: str) -> None:
+    """Return every host to service (S-043).
 
-    Used by strategy/scale tests to mutate desired state and then observe
-    reconciliation. Only the given columns are touched; ``updated_at`` is
-    bumped so the reconciler's ordering stays sane.
+    Drain state is durable and lives on the hosts table, which the per-test
+    slate deliberately does not truncate — a test that fails mid-drain would
+    otherwise leave a host excluded from placement for the rest of the run.
+    """
+    with control_db_conn(database_url) as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE hosts SET drain_state = NULL, drain_requested_at = NULL "
+            "WHERE drain_state IS NOT NULL"
+        )
+
+
+def update_intent_in_db(database_url: str, intent_id: str, **fields: Any) -> None:
+    """Directly UPDATE the ``intents`` row, bypassing PUT /api/intents/{id}.
+
+    Prefer ``fixtures.intents.update_intent`` (the real endpoint). This
+    remains for the cases an update must not go through validation, such as
+    writing a phase the API refuses to set. Only the given columns are
+    touched; ``updated_at`` is bumped so the reconciler's ordering stays sane.
     """
     if not fields:
         return

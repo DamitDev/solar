@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 from fixtures.constants import MODEL_SOURCE_URI
-from fixtures.intents import create_intent, intent_payload
+from fixtures.intents import create_intent, intent_payload, update_intent
 
 pytestmark = pytest.mark.intent_path
 
@@ -90,6 +90,79 @@ async def test_list_filters_and_get_404(http_control, clean_state):
 
     resp = await http_control.get(f"/api/intents/{uuid.uuid4()}")
     assert resp.status_code == 404
+
+
+async def test_update_replaces_spec(http_control, clean_state):
+    """PUT /api/intents/{id} -> 200 with the new spec (S-044 §12.5)."""
+    intent = await create_intent(http_control, alias=_alias(), replicas=1)
+
+    updated = await update_intent(
+        http_control,
+        intent,
+        replicas=2,
+        priority="staging",
+        strategy="immediate",
+        metadata={"owner": "integration"},
+    )
+
+    assert updated["id"] == intent["id"]
+    assert updated["replicas"] == 2
+    assert updated["priority"] == "staging"
+    assert updated["strategy"] == "immediate"
+    assert updated["metadata"] == {"owner": "integration"}
+    assert updated["status"]["desired_replicas"] == 2
+
+    # The change is durable, not just echoed back
+    resp = await http_control.get(f"/api/intents/{intent['id']}")
+    assert resp.status_code == 200
+    assert resp.json()["replicas"] == 2
+
+
+async def test_update_omitted_fields_reset_to_defaults(http_control, clean_state):
+    """Full-replace semantics: an omitted field is not a partial patch."""
+    intent = await create_intent(
+        http_control, alias=_alias(), replicas=2, metadata={"owner": "integration"}
+    )
+
+    payload = intent_payload(intent["alias"])
+    resp = await http_control.put(f"/api/intents/{intent['id']}", json=payload)
+    assert resp.status_code == 200, resp.text
+
+    body = resp.json()
+    assert body["replicas"] == 1
+    assert body["metadata"] == {}
+
+
+async def test_update_alias_is_immutable(http_control, clean_state):
+    """The alias is the served name and the deployment identity -> 422."""
+    intent = await create_intent(http_control, alias=_alias())
+
+    payload = intent_payload(_alias("renamed"))
+    resp = await http_control.put(f"/api/intents/{intent['id']}", json=payload)
+
+    assert resp.status_code == 422, resp.text
+    errors = resp.json()["detail"]["errors"]
+    assert [e["field"] for e in errors] == ["alias"]
+
+    resp = await http_control.get(f"/api/intents/{intent['id']}")
+    assert resp.json()["alias"] == intent["alias"]
+
+
+async def test_update_validation_and_404(http_control, clean_state):
+    """An update cannot write a spec creation would reject; unknown id 404s."""
+    intent = await create_intent(http_control, alias=_alias())
+
+    resp = await http_control.put(
+        f"/api/intents/{intent['id']}",
+        json=intent_payload(intent["alias"], model_source="http://not-a-uri"),
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"]["detail"] == "Invalid intent"
+
+    resp = await http_control.put(
+        f"/api/intents/{uuid.uuid4()}", json=intent_payload(_alias())
+    )
+    assert resp.status_code == 404, resp.text
 
 
 async def test_delete_202_deleting(http_control, clean_state):

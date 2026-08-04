@@ -81,6 +81,16 @@ class IntentCreate(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
+class IntentUpdate(IntentCreate):
+    """Request body for PUT /api/intents/{id} (S-039 §12.5, S-044).
+
+    Same schema as create, with full-replace semantics: an omitted field is
+    reset to its default, so clients send the complete spec rather than a
+    diff. ``alias`` must match the stored one — it is the served name and
+    the deployment's identity, not an editable field.
+    """
+
+
 # ── Response models ────────────────────────────────────────────
 
 
@@ -157,6 +167,14 @@ class IntentStatus(BaseModel):
     conditions: list[Condition] = Field(default_factory=list)
     strategy_progress: StrategyProgress | None = None
     last_error: LastError | None = None
+    spec_changed_at: str | None = Field(
+        default=None,
+        description=(
+            "Set when the spec was updated (S-044) and cleared once the "
+            "replicas match it again. While set, the reconciler compares the "
+            "full instance configuration so backend-only edits roll out"
+        ),
+    )
     created_at: str | None = None
     updated_at: str | None = None
     last_reconciled_at: str | None = None

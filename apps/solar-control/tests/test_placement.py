@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.models import Host, HostResourceSnapshot, HostStatus
+from app.models import DrainState, Host, HostResourceSnapshot, HostStatus
 from app.services.placement import (
     can_displace,
     find_candidates,
@@ -314,6 +314,31 @@ async def test_find_candidates_offline_excluded(host_a100, host_offline):
 
         assert len(candidates) == 1
         assert candidates[0][0].id == "h-a100"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("drain_state", [DrainState.DRAINING, DrainState.DRAINED])
+async def test_find_candidates_draining_excluded(host_a100, host_mps, drain_state):
+    """A host under drain must never receive new placements (S-043)."""
+    host_mps.drain_state = drain_state
+    hosts = [host_a100, host_mps]
+    snapshots = {
+        # The draining host looks the most attractive on resources alone
+        host_a100.id: _make_snap(host_a100, vram_available=20.0),
+        host_mps.id: _make_snap(host_mps, vram_available=999.0),
+    }
+
+    with patch("app.services.placement.host_store") as mock_store:
+        mock_store.get_host_instances = AsyncMock(return_value=[])
+
+        candidates = await find_candidates(
+            hosts,
+            snapshots,
+            roles=["inference"],
+            vram_gb=6.0,
+        )
+
+        assert [c[0].id for c in candidates] == ["h-a100"]
 
 
 @pytest.mark.anyio

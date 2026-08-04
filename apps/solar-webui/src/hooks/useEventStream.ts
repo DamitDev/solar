@@ -15,7 +15,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
 import solarClient from '@/api/client';
-import { MemoryInfo, LogMessage, PendingHost, Intent, ActiveJobSummary } from '@/api/types';
+import { MemoryInfo, LogMessage, PendingHost, Intent, ActiveJobSummary, DrainState } from '@/api/types';
 
 // Event type definitions
 export type WSMessageType =
@@ -51,6 +51,8 @@ export interface HostStatusData {
   host_id: string;
   name?: string;
   status: 'online' | 'offline' | 'error';
+  /** Drain lifecycle (S-043) — orthogonal to status, which is reachability. */
+  drain_state?: DrainState | null;
   url?: string;
   memory?: MemoryInfo;
   gpu_type?: string;

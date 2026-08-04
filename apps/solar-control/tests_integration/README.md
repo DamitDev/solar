@@ -7,24 +7,24 @@ Harbor speaking the OCI Distribution protocol.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│                      pytest process (tests_integration)               │
+│                      pytest process (tests_integration)              │
 │                                                                      │
-│  ┌───────────────┐  ┌──────────────┐  ┌──────────────────────────┐   │
-│  │ testcontainers │  │  Stub Harbor │  │ httpx clients            │   │
-│  │ Postgres (2 DB)│  │ (TLS :rand)  │  └───────────┬──────────────┘   │
-│  │ Redis (:rand)  │  │              │              │                  │
-│  └───────┬───────┘  └──────┬───────┘              │                  │
-│  ┌───────┴─────────────────┴───────────────────────┴──────────────┐   │
-│  │                     Subprocesses (module scope)                 │   │
-│  │  Data Repository   Solar Control        Solar Host A           │   │
-│  │  uvicorn :rand      uvicorn :rand       uvicorn :rand          │   │
-│  │  (PG data_repo)     (PG solar_gateway,  (MODELS_DIR tmp)       │   │
-│  │                     Redis, reconciler)                          │   │
-│  │                                          Solar Host B           │   │
-│  │                                          uvicorn :rand          │   │
-│  └──────────────────────────────────────────────────────────────────┘   │
+│  ┌────────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
+│  │ testcontainers │  │  Stub Harbor │  │ httpx clients            │  │
+│  │ Postgres (2 DB)│  │ (TLS :rand)  │  └───────────┬──────────────┘  │
+│  │ Redis (:rand)  │  │              │              │                 │
+│  └───────┬────────┘  └──────┬───────┘              │                 │
+│  ┌───────┴──────────────────┴──────────────────────┴──────────────┐  │
+│  │                     Subprocesses (module scope)                │  │
+│  │  Data Repository   Solar Control        Solar Host A           │  │
+│  │  uvicorn :rand      uvicorn :rand       uvicorn :rand          │  │
+│  │  (PG data_repo)     (PG solar_gateway,  (MODELS_DIR tmp)       │  |
+│  │                     Redis, reconciler)                         │  │
+│  │                                          Solar Host B          │  │
+│  │                                          uvicorn :rand         │  │
+│  └────────────────────────────────────────────────────────────────┘  │
 │  Hosts ──WS /ws/host-channel──▶ Control   (health, instances_update) │
-│  Control ──HTTP──▶ Hosts / Data Repo      Control ──never──▶ Harbor │
+│  Control ──HTTP──▶ Hosts / Data Repo      Control ──never──▶ Harbor  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -67,7 +67,7 @@ Markers (applied automatically by folder):
 ```bash
 -m repo_path        # minimal repo path (registration, resolve, distribute, inference)
 -m intent_path      # declarative intents (API, reconcile, scaling, strategies)
--m migration_path   # S-037 migration (explicit, reconciler, guards)
+-m migration_path   # S-037 migration (explicit, reconciler, guards) + S-043 host drain
 -m infrastructure   # WS seam, gateway registry, model cache, reconciler wake
 ```
 
@@ -99,8 +99,8 @@ tests_integration/
 │   ├── smoke_stub_harbor.py     # Phase-1 smoke: real OrasHelper + HarborClient
 │   └── test_model/        # COMMITTED tiny HF classification model (~230 KB)
 ├── repo_path/             # minimal repo path (9 tests)
-├── intent_path/           # declarative path (15 tests)
-├── migration_path/        # S-037 (9 tests)
+├── intent_path/           # declarative path (19 tests)
+├── migration_path/        # S-037 + S-043 drain (13 tests)
 └── infrastructure/        # WS seam, registry, cache, wake (6 tests)
 ```
 
@@ -158,9 +158,16 @@ env -u PYTHONPATH ../solar-host/.venv/bin/python \
   instances) and management routes reflect the *host* view. Marker
   assertions read the cache directly (`redis_cache_instances` in
   `fixtures/seed.py`).
-- **No PUT `/api/intents/{id}`** (spec §12.5): strategy/scale tests mutate
-  the `intents` row directly via `update_intent_in_db` (documented,
-  intentional).
+- **Spec changes go through PUT `/api/intents/{id}`** (spec §12.5). The
+  endpoint is full-replace, so `update_intent` in `fixtures/intents.py`
+  rebuilds the body from the current spec — sending only the changed field
+  would reset the rest to defaults. `update_intent_in_db` remains for the
+  cases an update must bypass validation (writing a phase the API refuses).
+- **Drain state survives `clean_state`'s truncations.** It lives on the
+  `hosts` table, which the per-test slate deliberately keeps, so
+  `clear_host_drain_state` returns every host to service around each test —
+  otherwise a test failing mid-drain would leave a host out of placement for
+  the rest of the run.
 - **One session-scoped stack; the wake test runs last.** The stack fixture
   is session-scoped (per-module stacks cost ~10-13s each — 16 sequential
   4-process spawns dominated the runtime). `clean_state` already resets

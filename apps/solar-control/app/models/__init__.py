@@ -8,10 +8,22 @@ from .host import (
     AggregatedResourceResponse as AggregatedResourceResponse,
 )
 from .host import (
+    DrainBlocker as DrainBlocker,
+)
+from .host import (
+    DrainReplica as DrainReplica,
+)
+from .host import (
+    DrainState as DrainState,
+)
+from .host import (
     Host as Host,
 )
 from .host import (
     HostCreate as HostCreate,
+)
+from .host import (
+    HostDrainStatus as HostDrainStatus,
 )
 from .host import (
     HostInstanceSummary as HostInstanceSummary,
