@@ -68,3 +68,12 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #5e81ac; /* nord10 */
 }
+
+/* Hide scrollbar on horizontally scrollable strips (e.g. top navigation) */
+.no-scrollbar {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE/Edge */
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

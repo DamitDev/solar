@@ -18,6 +18,8 @@ import {
   Intent,
   IntentCreateRequest,
   IntentDeletedResponse,
+  AggregatedResourceResponse,
+  ResourcesQueryParams,
 } from './types';
 
 const DEFAULT_RELATIVE_CONTROL_BASE = '/api/control';
@@ -295,6 +297,12 @@ class SolarClient {
   async deleteIntent(id: string, orphan = false): Promise<IntentDeletedResponse> {
     const response = await this.client.delete(`/api/intents/${id}`, { params: { orphan } });
     return response.data as IntentDeletedResponse;
+  }
+
+  // Resource utilization (U-004, S-035)
+  async getResources(params?: ResourcesQueryParams): Promise<AggregatedResourceResponse> {
+    const response = await this.client.get('/api/resources', { params });
+    return response.data as AggregatedResourceResponse;
   }
 
   // OpenAI Gateway

@@ -602,3 +602,98 @@ export interface IntentDeletedResponse {
   phase: IntentPhase;
   message: string;
 }
+
+// ─── Resource utilization (U-004, GET /api/resources — S-035 + PR #62) ───
+
+export interface ActiveJobSummary {
+  job_id: string;
+  submission_id?: string | null;
+  name?: string | null;
+  status: string;
+  current_step_name?: string | null;
+  current_step_index?: number | null;
+  last_step_name?: string | null;
+  last_step_index?: number | null;
+  pipeline?: string[];
+  resource_hints?: Record<string, unknown>;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+}
+
+export interface HostInstanceSummary {
+  id: string;
+  alias?: string | null;
+  status?: string | null;
+  backend_type?: string | null;
+  port?: number | null;
+  supported_endpoints?: string[];
+}
+
+export interface HostReservationSummary {
+  id: string;
+  job_id: string; // owner — attribution for the reserved segment
+  workload_type: string;
+  status: string; // 'pending' | 'running'
+  vram_gb?: number;
+  ram_gb?: number;
+  disk_gb?: number | null;
+  actual_vram_gb?: number | null; // set only for running reservations
+  actual_ram_gb?: number | null;
+  actual_disk_gb?: number | null;
+  expires_at?: string | null;
+}
+
+export interface HostResourceSnapshot {
+  host_id: string;
+  host_name: string;
+  url: string;
+  status: HostStatus;
+  roles: string[];
+  gpu_type?: string | null;
+  version?: string | null;
+  reachable: boolean;
+  error?: string | null;
+  vram_total_gb?: number | null;
+  vram_system_used_gb?: number | null;
+  vram_reserved_headroom_gb?: number | null;
+  vram_reported_used_gb?: number | null;
+  vram_available_gb?: number | null;
+  ram_total_gb?: number | null;
+  ram_system_used_gb?: number | null;
+  ram_reserved_headroom_gb?: number | null;
+  ram_reported_used_gb?: number | null;
+  ram_available_gb?: number | null;
+  disk_total_gb?: number | null;
+  disk_system_used_gb?: number | null;
+  disk_reserved_headroom_gb?: number | null;
+  disk_reported_used_gb?: number | null;
+  disk_available_gb?: number | null;
+  instance_count: number;
+  running_instance_count: number;
+  instances: HostInstanceSummary[]; // PR #62 — aliases included
+  active_jobs: ActiveJobSummary[];
+  reservation_count: number;
+  reservation_vram_total_gb: number;
+  reservation_ram_total_gb: number;
+  reservation_disk_total_gb: number;
+  reservations: HostReservationSummary[]; // PR #62 — per-reservation details
+  vram_training_used_gb: number; // PR #62 — Σ actuals of running reservations
+  ram_training_used_gb: number;
+  disk_training_used_gb: number;
+  snapshot_timestamp?: string | null;
+}
+
+export interface AggregatedResourceResponse {
+  hosts: HostResourceSnapshot[];
+  total_hosts: number;
+  reachable_hosts: number;
+  unreachable_hosts: number;
+}
+
+export interface ResourcesQueryParams {
+  role?: string;
+  gpu_type?: string;
+  min_available_vram_gb?: number;
+  min_available_ram_gb?: number;
+}

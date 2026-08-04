@@ -15,7 +15,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
 import solarClient from '@/api/client';
-import { MemoryInfo, LogMessage, PendingHost, Intent } from '@/api/types';
+import { MemoryInfo, LogMessage, PendingHost, Intent, ActiveJobSummary } from '@/api/types';
 
 // Event type definitions
 export type WSMessageType =
@@ -63,6 +63,7 @@ export interface HostStatusData {
   connected?: boolean;
   last_seen?: string;
   timestamp?: string;
+  active_jobs?: ActiveJobSummary[];
 }
 
 export interface LogEventData {

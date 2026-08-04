@@ -1,6 +1,16 @@
 import { useState, useMemo, useCallback } from 'react';
 import { Instance, InstanceConfig, MemoryInfo, getModelCategory, ModelCategory } from '@/api/types';
-import { cn, getStatusColor, formatDate, getMemoryColor, formatMemoryUsage, formatDiskUsage } from '@/lib/utils';
+import {
+  cn,
+  getStatusColor,
+  formatDate,
+  getMemoryColor,
+  formatMemoryUsage,
+  formatDiskUsage,
+  getGpuTypeLabel,
+  getGpuTypeBadgeClass,
+  getRoleBadgeClass,
+} from '@/lib/utils';
 import { InstanceCard } from './InstanceCard';
 import { AddInstanceModal } from './AddInstanceModal';
 import {
@@ -71,43 +81,6 @@ const CategoryIcon = ({ category, size = 14 }: { category: ModelCategory; size?:
       return <Search size={size} />;
     default:
       return <Brain size={size} />;
-  }
-};
-
-const getGpuTypeLabel = (gpuType: string): string => {
-  switch (gpuType) {
-    case 'nvidia_cuda':
-      return 'NVIDIA CUDA';
-    case 'apple_mps':
-      return 'Apple MPS';
-    case 'cpu':
-      return 'CPU';
-    default:
-      return gpuType;
-  }
-};
-
-const getGpuTypeBadgeClass = (gpuType: string): string => {
-  switch (gpuType) {
-    case 'nvidia_cuda':
-      return 'bg-nord-14 text-nord-6';
-    case 'apple_mps':
-      return 'bg-nord-15 text-nord-6';
-    case 'cpu':
-      return 'bg-nord-3 text-nord-6';
-    default:
-      return 'bg-nord-3 text-nord-6';
-  }
-};
-
-const getRoleBadgeClass = (role: string): string => {
-  switch (role) {
-    case 'inference':
-      return 'bg-nord-6 bg-opacity-20 text-nord-6';
-    case 'training':
-      return 'bg-nord-15 text-nord-6';
-    default:
-      return 'bg-nord-6 bg-opacity-15 text-nord-6';
   }
 };
 

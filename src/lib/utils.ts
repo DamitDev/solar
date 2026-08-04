@@ -62,6 +62,46 @@ export function formatUptime(startedAt: string | undefined): string {
   return `${seconds}s`;
 }
 
+/** Human-readable GPU type label (host cards, resource dashboard). */
+export function getGpuTypeLabel(gpuType: string): string {
+  switch (gpuType) {
+    case 'nvidia_cuda':
+      return 'NVIDIA CUDA';
+    case 'apple_mps':
+      return 'Apple MPS';
+    case 'cpu':
+      return 'CPU';
+    default:
+      return gpuType;
+  }
+}
+
+/** Badge classes for GPU type (host cards, resource dashboard). */
+export function getGpuTypeBadgeClass(gpuType: string): string {
+  switch (gpuType) {
+    case 'nvidia_cuda':
+      return 'bg-nord-14 text-nord-6';
+    case 'apple_mps':
+      return 'bg-nord-15 text-nord-6';
+    case 'cpu':
+      return 'bg-nord-3 text-nord-6';
+    default:
+      return 'bg-nord-3 text-nord-6';
+  }
+}
+
+/** Badge classes for host role (host cards, resource dashboard). */
+export function getRoleBadgeClass(role: string): string {
+  switch (role) {
+    case 'inference':
+      return 'bg-nord-6 bg-opacity-20 text-nord-6';
+    case 'training':
+      return 'bg-nord-15 text-nord-6';
+    default:
+      return 'bg-nord-6 bg-opacity-15 text-nord-6';
+  }
+}
+
 export function getStatusColor(status: string): string {
   switch (status) {
     case 'running':
