@@ -86,9 +86,13 @@ async def test_migrated_target_auto_started(http_control, stack, clean_state):
 
     # (4) The reconciler auto-starts the managed target (RECREATE) and it
     # lands in the gateway registry.
+    # Window is generous on purpose: this is a COLD start of a new instance
+    # on the destination host (model pull + torch import + health gate).
+    # Self-hosted runners share the machine with Docker builds and other
+    # jobs — under that load the warm-up has exceeded 30s three times.
     await wait_for(
         lambda: _instance_running(http_control, dst_id, target_instance_id),
-        timeout=30.0,
+        timeout=60.0,
         interval=0.5,
         description="migration target auto-started by reconciler",
     )
