@@ -1,5 +1,8 @@
 name: Release
 
+# Manual release: pick version + components, builds Harbor images via the
+# unified release manifest (per-component registry_ns / secret_scope).
+
 on:
   workflow_dispatch:
     inputs:

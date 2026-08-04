@@ -1,5 +1,8 @@
 name: Build test images
 
+# Manual: build any component set with a test-* Harbor tag (PEP 440-mapped
+# APP_VERSION for the Python/JS apps), via the unified release manifest.
+
 on:
   workflow_dispatch:
     inputs:
