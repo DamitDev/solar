@@ -112,7 +112,7 @@ Migration files are in `app/database/migrations/versions/` and follow a `NNNN_de
 - `DELETE /api/hosts/{host_id}/drain` - Cancel a drain or return a drained host to service
 - `GET /api/hosts/{host_id}/drain` - Drain progress: `drain_state`, `managed_remaining`, `manual_running`, per-replica `blocked_reason`, and the preflight `blockers`
 
-A drain marks the host `draining` in the database, which excludes it from placement and from new manual instances (`409`). The reconciler then evacuates the intent-managed replicas, one migration per tick, and the host becomes `drained` once nothing managed and nothing running remains. A replica with no eligible target keeps serving and the drain waits — serving capacity is never dropped to finish a drain. See `training-platform-project/docs/specs/host-draining.md`.
+A drain marks the host `draining` in the database, which excludes it from placement and from new manual instances (`409`). The reconciler then evacuates the intent-managed replicas, one migration per tick, deleting each source instance once its replacement is up, and the host becomes `drained` once nothing managed and nothing running remains. A replica with no eligible target keeps serving and the drain waits — serving capacity is never dropped to finish a drain. See `training-platform-project/docs/specs/host-draining.md`.
 
 ### Declarative Intents
 

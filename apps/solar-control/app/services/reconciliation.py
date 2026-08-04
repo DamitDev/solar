@@ -1409,6 +1409,19 @@ class Reconciler:
                 )
                 raise RuntimeError(f"Evacuation failed: {message}")
             await drain_service.clear_stall(action.host_id, action.instance_id)
+
+            # S-037 leaves the source stopped and disowned, which is right for
+            # an operator's one-off move but wrong for a drain: the leftover
+            # still serves the alias in the host's instance list, so placement
+            # excludes this host for the intent from then on (exclude_alias).
+            # The replica could never come back, a later drain of its new host
+            # would stall with "no existing replica of <alias>", and the intent
+            # would carry a permanent ManualInstanceConflict condition. The
+            # drain contract is that the host ends up empty, so remove it.
+            source_host = await host_db.get_host(action.host_id)
+            if source_host is not None:
+                await self._delete_instance(source_host, action.instance_id)
+
             return {"migration_id": result.migration_id, "status": result.status}
 
         if action.type == ActionType.MIGRATE:

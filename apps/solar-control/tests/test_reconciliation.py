@@ -1,6 +1,7 @@
 """Tests for reconciliation engine (S-041)."""
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -950,6 +951,111 @@ class TestActMigrate:
             assert result is None
             mock_stop.assert_not_called()
             mock_delete.assert_not_called()
+
+
+class TestActEvacuate:
+    """_act EVACUATE: drain evacuation must leave the source host empty."""
+
+    def _action(self, target_host_id: str | None = "h2") -> Action:
+        return Action(
+            type=ActionType.EVACUATE,
+            intent_id="intent-001",
+            alias="test-model",
+            host_id="h1",
+            host_name="h1",
+            instance_id="inst-1",
+            target_host_id=target_host_id,
+            target_host_name="h2" if target_host_id else None,
+            reason="host draining → migrate to h2",
+        )
+
+    @pytest.mark.anyio
+    async def test_deletes_the_disowned_source_instance(self):
+        """S-037 leaves the source stopped; a drain must remove it.
+
+        The leftover keeps serving the alias in the host's instance list, so
+        placement would exclude this host for the intent from then on — the
+        replica could never return and the next drain would stall on it.
+        """
+        reconciler = Reconciler()
+        host = _HostStub(id="h1", name="h1")
+        migration = SimpleNamespace(
+            migration_id="mig-1", status="completed", error=None
+        )
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch(
+                "app.services.migration.execute_migration",
+                new=AsyncMock(return_value=migration),
+            ) as mock_migrate,
+            patch("app.services.drain.clear_stall", new=AsyncMock()) as mock_clear,
+            patch("app.services.drain.record_stall", new=AsyncMock()) as mock_stall,
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+
+            result = await reconciler._act(_make_intent(), self._action())
+
+        assert result == {"migration_id": "mig-1", "status": "completed"}
+        assert mock_migrate.await_args.kwargs["target_host_id"] == "h2"
+        mock_delete.assert_awaited_once_with(host, "inst-1")
+        mock_clear.assert_awaited_once_with("h1", "inst-1")
+        mock_stall.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_no_target_records_stall_without_touching_the_replica(self):
+        """A stall is not a failure: the replica keeps serving (§4.3)."""
+        reconciler = Reconciler()
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch(
+                "app.services.migration.execute_migration", new=AsyncMock()
+            ) as mock_migrate,
+            patch("app.services.drain.record_stall", new=AsyncMock()) as mock_stall,
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=_HostStub(id="h1"))
+
+            result = await reconciler._act(
+                _make_intent(), self._action(target_host_id=None)
+            )
+
+        assert result is None
+        mock_migrate.assert_not_called()
+        mock_delete.assert_not_called()
+        mock_stall.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_incomplete_migration_stalls_and_keeps_the_source(self):
+        reconciler = Reconciler()
+        migration = SimpleNamespace(
+            migration_id="mig-1", status="failed", error="pull failed"
+        )
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch(
+                "app.services.migration.execute_migration",
+                new=AsyncMock(return_value=migration),
+            ),
+            patch("app.services.drain.record_stall", new=AsyncMock()) as mock_stall,
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=_HostStub(id="h1"))
+
+            with pytest.raises(RuntimeError, match="pull failed"):
+                await reconciler._act(_make_intent(), self._action())
+
+        mock_delete.assert_not_called()
+        assert "pull failed" in mock_stall.await_args.args[2]
 
 
 class TestUpdateStatusConditions:

@@ -3,7 +3,8 @@
 S-043 end to end: the preflight refuses a host with a running manual
 instance, a drain evacuates the intent-managed replica to the other host
 and completes, a draining host accepts no new instances, and resuming
-returns it to service.
+returns it to service — including for a second drain that moves the
+replica back, which only works if the first drain left nothing behind.
 
 Specification: training-platform-project/docs/specs/host-draining.md
 """
@@ -114,9 +115,44 @@ async def test_drain_evacuates_replica_and_completes(http_control, stack, clean_
     assert replica["instance_id"] != source_instance_id
     assert replica["state"] == "running"
 
+    # The evacuated source is gone, not merely stopped: a leftover would keep
+    # serving the alias on this host, so placement would exclude it for the
+    # intent and the replica could never come back.
+    resp = await http_control.get(f"/api/hosts/{source_host_id}/instances")
+    assert resp.status_code == 200, resp.text
+    left_behind = [i for i in resp.json() if i.get("alias") == alias]
+    assert left_behind == [], f"drain left instances behind: {left_behind}"
+
     # Back to service: the drain state clears and placement may use it again.
     resumed = await _resume(http_control, source_host_id)
     assert resumed["drain_state"] is None
+
+    # Proof the host is reusable: draining the target moves the replica back.
+    resp = await http_control.post(f"/api/hosts/{target_host_id}/drain")
+    assert resp.status_code == 202, resp.text
+    try:
+        await wait_for(
+            lambda: _replica_on(http_control, intent["id"], source_host_id),
+            timeout=120.0,
+            interval=0.5,
+            description="replica evacuated back to the resumed host",
+        )
+    except AssertionError as exc:
+        status = await _drain_status(http_control, target_host_id)
+        raise AssertionError(
+            f"replica could not return to the resumed host; drain={status}\n"
+            f"{stack.tail()}"
+        ) from exc
+    finally:
+        await _resume(http_control, target_host_id)
+
+
+async def _replica_on(http_control, intent_id: str, host_id: str) -> bool:
+    state = await get_intent(http_control, intent_id)
+    if state is None:
+        return False
+    replicas = state["status"].get("replica_set", [])
+    return bool(replicas) and all(r.get("host_id") == host_id for r in replicas)
 
 
 async def _drained(http_control, host_id: str) -> bool:
