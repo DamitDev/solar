@@ -464,8 +464,11 @@ class Reconciler:
         """Check if a deployment strategy should be initiated.
 
         A strategy is needed when:
-        - There are REPLACE actions (model_source drift)
+        - There are REPLACE actions (model_source or backend config drift)
         - The intent specifies a known strategy (rolling / immediate)
+
+        The REPLACE actions name the replicas to replace, so the rollout
+        covers an edited backend config (S-044) as well as a version change.
 
         Returns strategy_progress dict if initiated, None otherwise.
         """
@@ -482,6 +485,7 @@ class Reconciler:
             intent=intent,
             managed_instances=managed,
             candidates=candidates,
+            drifted_instance_ids=[a.instance_id for a in replaces if a.instance_id],
         )
         return progress
 
@@ -1298,16 +1302,24 @@ class Reconciler:
             return result
 
         if action.type == ActionType.REPLACE:
-            # Replace = stop old + create new on next tick
+            # Replace = retire the drifted replica; the next tick's CREATE
+            # places its replacement per placement policy. Reached only when
+            # no strategy took the rollout over (deployment-intent.md §11).
+            #
+            # Retiring means stop *and* delete: a stopped replica still counts
+            # towards observed_replicas, so leaving it would hold the intent at
+            # its desired count with nothing serving — no CREATE for the
+            # replacement, and a RECREATE suppressed by this very REPLACE.
             if action.instance_id and action.host_id:
                 host = await host_db.get_host(action.host_id)
                 if host:
                     logger.info(
-                        "Stopping drifted instance %s on %s for replacement",
+                        "Retiring drifted instance %s on %s for replacement",
                         action.instance_id,
                         host.name,
                     )
                     await stop_source_instance(host, action.instance_id)
+                    await self._delete_instance(host, action.instance_id)
             return None
 
         if action.type == ActionType.RECREATE:

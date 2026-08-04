@@ -953,6 +953,67 @@ class TestActMigrate:
             mock_delete.assert_not_called()
 
 
+class TestSpecEditRollout:
+    """An edited spec (S-044) rolls out under the intent's strategy."""
+
+    def test_backend_drift_initiates_a_rollout(self):
+        """A config-only edit is a rollout, not a no-op.
+
+        The replica still carries the intent's model_source, so the strategy
+        can only recognise it from the REPLACE the diff planned.
+        """
+        reconciler = Reconciler()
+        intent = _make_intent(
+            replicas=1,
+            strategy="rolling",
+            backend={"backend_type": "hf", "max_length": 1024},
+        )
+        observed = _make_observed(
+            managed=[_make_managed_instance("inst-1", max_length=512)]
+        )
+        actions = reconciler._diff(intent, observed)
+
+        progress = reconciler._maybe_initiate_strategy(intent, observed, actions)
+
+        assert progress is not None
+        assert progress["strategy"] == "rolling"
+        assert progress["drifted_instance_ids"] == ["inst-1"]
+
+    @pytest.mark.anyio
+    async def test_replace_retires_the_replica_it_stops(self):
+        """A stopped replica still counts, so REPLACE has to delete it too.
+
+        Otherwise observed_replicas stays at the desired count with nothing
+        serving: no CREATE for the replacement, and the RECREATE that would
+        restart it is suppressed by this REPLACE.
+        """
+        reconciler = Reconciler()
+        host = _HostStub(id="h1", name="h1")
+        action = Action(
+            type=ActionType.REPLACE,
+            intent_id="intent-001",
+            alias="test-model",
+            host_id="h1",
+            instance_id="inst-1",
+            reason="backend config drift",
+        )
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch(
+                "app.services.migration.stop_source_instance", new=AsyncMock()
+            ) as mock_stop,
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+            await reconciler._act(_make_intent(), action)
+
+        mock_stop.assert_awaited_once_with(host, "inst-1")
+        mock_delete.assert_awaited_once_with(host, "inst-1")
+
+
 class TestActEvacuate:
     """_act EVACUATE: drain evacuation must leave the source host empty."""
 

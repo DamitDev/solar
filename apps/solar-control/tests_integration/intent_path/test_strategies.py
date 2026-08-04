@@ -1,8 +1,9 @@
 """intent_path: deployment strategies + delete semantics (marker: intent_path).
 
-Version changes (via PUT /api/intents/{id}, spec §12.5) trigger REPLACE
-under the intent's strategy; delete stops managed instances; delete with
-?orphan=true keeps them running with markers cleared.
+Spec changes (via PUT /api/intents/{id}, spec §12.5) trigger REPLACE under
+the intent's strategy — a new model_source or an edited backend config
+alone; delete stops managed instances; delete with ?orphan=true keeps them
+running with markers cleared.
 """
 
 from __future__ import annotations
@@ -141,6 +142,67 @@ async def test_immediate_version_change(
     )
     assert body["model"] == final["alias"]
     assert body["choices"][0]["score"] > 0.0
+
+
+async def test_rolling_backend_config_change(http_control, stack, clean_state):
+    """PUT backend config only -> replica replaced under the strategy.
+
+    The spec keeps its model_source, so nothing about the version changed.
+    A rollout that recognised drift by comparing model_source found nothing
+    to replace here, and the replica was left stopped with the alias down.
+    """
+    intent = await create_intent(http_control, alias=_alias("cfg"))
+    ready = await wait_intent_ready(http_control, intent["id"])
+    old_instance_id = next(iter(replica_states(ready)))
+
+    backend = dict(ready["backend"])
+    backend["max_length"] = 256
+    updated = await update_intent(http_control, ready, backend=backend)
+    assert updated["backend"]["max_length"] == 256
+    assert updated["model_source"] == ready["model_source"]
+
+    async def replaced() -> bool:
+        state = await get_intent(http_control, intent["id"])
+        if state is None or state["status"]["phase"] != "ready":
+            return False
+        replicas = replica_states(state)
+        return bool(replicas) and old_instance_id not in replicas
+
+    try:
+        await wait_for(
+            replaced,
+            timeout=180.0,
+            interval=0.5,
+            description="replica replaced for the edited backend config",
+        )
+    except AssertionError as exc:
+        state = await get_intent(http_control, intent["id"])
+        raise AssertionError(
+            f"config change never rolled out; intent={state}\n{stack.tail()}"
+        ) from exc
+
+    # spec_changed_at clears only when the reconciler compares the live
+    # instance config against the new spec and finds no drift left — that is
+    # the proof the replacement actually carries the edited config.
+    await wait_for(
+        lambda: _spec_settled(http_control, intent["id"]),
+        timeout=60.0,
+        interval=0.5,
+        description="edited spec settled on the replicas",
+    )
+
+    final = await wait_intent_ready(http_control, intent["id"], timeout=60.0)
+    assert final["status"]["updated_replicas"] == 1
+
+    body = await classify_until_ok(
+        http_control, final["alias"], stack=stack, timeout=30.0
+    )
+    assert body["choices"][0]["score"] > 0.0
+
+
+async def _spec_settled(http_control, intent_id: str) -> bool:
+    state = await get_intent(http_control, intent_id)
+    return state is not None and state["status"]["spec_changed_at"] is None
 
 
 async def test_delete_intent_cleans_up(http_control, clean_state):

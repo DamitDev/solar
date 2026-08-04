@@ -18,6 +18,7 @@ Health gate (shared, per §11.1):
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from datetime import datetime, timezone
 from typing import Any
 
@@ -107,18 +108,62 @@ def _find_instance_on_host(
     return None
 
 
+def _instance_id(inst: dict[str, Any]) -> str | None:
+    return inst.get("instance_id") or inst.get("id")
+
+
+def _drifted_instances(
+    managed: list[dict[str, Any]],
+    target_source: str,
+    drifted_ids: Collection[str] | None,
+) -> list[dict[str, Any]]:
+    """The managed instances this rollout has to replace.
+
+    *drifted_ids* is the reconciler's verdict: the instances whose REPLACE
+    actions started this rollout. It is the authority, because drift is more
+    than a version change — an edited spec (S-044) can change backend config
+    while keeping ``model_source``, and comparing sources would then find
+    nothing to replace. Identity also survives an in-place replacement, where
+    old and new replica share a host *and* a source and only the id tells
+    them apart.
+
+    ``None`` means the caller did not say (a rollout persisted before drift
+    was tracked by id), and the only drift that could have started it was a
+    ``model_source`` change.
+    """
+    if drifted_ids is not None:
+        ids = set(drifted_ids)
+        return [inst for inst in managed if _instance_id(inst) in ids]
+    return [
+        inst
+        for inst in managed
+        if inst.get("config", inst).get("model_source") != target_source
+    ]
+
+
+def _progress_drifted_ids(
+    progress_data: dict[str, Any],
+    managed: list[dict[str, Any]],
+) -> list[str]:
+    """Ids of the replicas *this* rollout is replacing, from its progress."""
+    ids = progress_data.get("drifted_instance_ids")
+    if ids is not None:
+        return list(ids)
+    drifted = _drifted_instances(
+        managed, progress_data.get("target_model_source", ""), None
+    )
+    return [iid for inst in drifted if (iid := _instance_id(inst))]
+
+
 def _find_old_instance(
     managed: list[dict[str, Any]],
     host_id: str | None,
     target_source: str,
+    drifted_ids: Collection[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Find an instance on *host_id* whose model_source != target_source."""
-    for inst in managed:
-        hid = inst.get("_host_id")
-        if hid != host_id:
-            continue
-        cfg = inst.get("config", inst)
-        if cfg.get("model_source") != target_source:
+    """Find the replica on *host_id* that this rollout is replacing."""
+    for inst in _drifted_instances(managed, target_source, drifted_ids):
+        if inst.get("_host_id") == host_id:
             return inst
     return None
 
@@ -126,14 +171,10 @@ def _find_old_instance(
 def _count_updated(
     managed: list[dict[str, Any]],
     target_source: str,
+    drifted_ids: Collection[str] | None = None,
 ) -> int:
-    """Count managed instances already on the target model_source."""
-    count = 0
-    for inst in managed:
-        cfg = inst.get("config", inst)
-        if cfg.get("model_source") == target_source:
-            count += 1
-    return count
+    """Count managed instances that already match the intent spec."""
+    return len(managed) - len(_drifted_instances(managed, target_source, drifted_ids))
 
 
 # ── Rolling Strategy (§11.2) ────────────────────────────────────
@@ -159,35 +200,34 @@ class RollingStrategy:
         desired_replicas: int,
         managed_instances: list[dict[str, Any]],
         candidates: list[tuple[Any, Any]],
+        drifted_instance_ids: Collection[str] | None = None,
     ) -> dict[str, Any] | None:
         """Initialize a rolling strategy from current observed state.
 
         Returns strategy_progress dict, or None if nothing to do (already
-        on target source at desired replicas).
+        matching the spec at desired replicas).
         """
         now = datetime.now(timezone.utc).isoformat()
 
-        updated = _count_updated(managed_instances, target_model_source)
+        drifted = _drifted_instances(
+            managed_instances, target_model_source, drifted_instance_ids
+        )
+        updated = len(managed_instances) - len(drifted)
 
-        # How many replicas still need to be on the target source?
+        # How many replicas still need to match the spec?
         needed = desired_replicas - updated
         if needed <= 0:
             return None  # Already at desired state
 
         # Only initiate strategy when there are drifted instances that
-        # need replacing.  Pure scale-up (same source, more replicas)
+        # need replacing.  Pure scale-up (same spec, more replicas)
         # and initial deployment (0→N) are handled by normal diff.
-        if updated == len(managed_instances) and needed > 0:
-            # All existing instances are already on target source —
-            # this is a pure scale-up, not a version change.
+        if not drifted:
             return None
 
-        # Hosts of managed instances that are NOT yet on the target source
+        # Hosts of managed instances that no longer match the spec
         drifted_host_ids = {
-            inst.get("_host_id")
-            for inst in managed_instances
-            if (inst.get("config", inst).get("model_source") != target_model_source)
-            and inst.get("_host_id") is not None
+            inst.get("_host_id") for inst in drifted if inst.get("_host_id") is not None
         }
 
         # Replacement hosts: from candidates, exclude hosts already hosting
@@ -227,6 +267,9 @@ class RollingStrategy:
         return {
             "strategy": "rolling",
             "target_model_source": target_model_source,
+            "drifted_instance_ids": [
+                iid for inst in drifted if (iid := _instance_id(inst))
+            ],
             "phase": StrategyPhase.CREATING_REPLACEMENT,
             "step": f"1/{total_steps}",
             "updated": updated,
@@ -263,6 +306,7 @@ class RollingStrategy:
         current_host_id = progress_data.get("current_host_id")
         current_instance_id = progress_data.get("current_instance_id")
         target_source = progress_data.get("target_model_source", "")
+        drifted_ids = _progress_drifted_ids(progress_data, managed_instances)
 
         # ── PHASE: creating_replacement ──────────────────────────
         if phase == StrategyPhase.CREATING_REPLACEMENT:
@@ -312,7 +356,7 @@ class RollingStrategy:
             if is_healthy:
                 # Find old instance to retire on this host
                 old_instance = _find_old_instance(
-                    managed_instances, current_host_id, target_source
+                    managed_instances, current_host_id, target_source, drifted_ids
                 )
                 if old_instance:
                     old_id = old_instance.get("instance_id") or old_instance.get("id")
@@ -340,6 +384,7 @@ class RollingStrategy:
                         desired_replicas,
                         alias,
                         target_source,
+                        drifted_ids,
                     )
 
             # Check timeout
@@ -365,7 +410,7 @@ class RollingStrategy:
         if phase == StrategyPhase.RETIRING_OLD:
             # Check if old instance has been stopped (gone from managed)
             old_still_exists = _find_old_instance(
-                managed_instances, current_host_id, target_source
+                managed_instances, current_host_id, target_source, drifted_ids
             )
             if old_still_exists:
                 # Keep waiting for the stop to take effect
@@ -383,6 +428,7 @@ class RollingStrategy:
                 desired_replicas,
                 alias,
                 target_source,
+                drifted_ids,
             )
 
         # ── Unknown phase ────────────────────────────────────────
@@ -397,9 +443,10 @@ def _advance_to_next_rolling(
     desired_replicas: int,
     alias: str,
     target_source: str,
+    drifted_ids: Collection[str] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Advance to the next replacement host, or complete the strategy."""
-    updated = _count_updated(managed_instances, target_source)
+    updated = _count_updated(managed_instances, target_source, drifted_ids)
 
     # Determine total steps from the step string
     step_str = progress_data.get("step", "0/1")
@@ -471,26 +518,24 @@ class ImmediateStrategy:
         desired_replicas: int,
         managed_instances: list[dict[str, Any]],
         candidates: list[tuple[Any, Any]],
+        drifted_instance_ids: Collection[str] | None = None,
     ) -> dict[str, Any] | None:
         """Initialize an immediate strategy from current observed state."""
         now = datetime.now(timezone.utc).isoformat()
 
-        updated = _count_updated(managed_instances, target_model_source)
+        # Every replica that no longer matches the spec needs stopping.
+        drifted = _drifted_instances(
+            managed_instances, target_model_source, drifted_instance_ids
+        )
+        updated = len(managed_instances) - len(drifted)
         needed = desired_replicas - updated
         if needed <= 0:
             return None  # Already at desired state
 
         # Only initiate strategy when there are drifted instances that
         # need replacing.  Pure scale-up is handled by normal diff.
-        if updated == len(managed_instances) and needed > 0:
+        if not drifted:
             return None
-
-        # All managed instances with old source need stopping
-        drifted = [
-            inst
-            for inst in managed_instances
-            if (inst.get("config", inst).get("model_source") != target_model_source)
-        ]
 
         # Replacement host candidates
         current_host_ids = {inst.get("_host_id") for inst in managed_instances}
@@ -503,6 +548,9 @@ class ImmediateStrategy:
         return {
             "strategy": "immediate",
             "target_model_source": target_model_source,
+            "drifted_instance_ids": [
+                iid for inst in drifted if (iid := _instance_id(inst))
+            ],
             "phase": StrategyPhase.STOPPING_OLD,
             "step": f"0/{total_steps}",
             "updated": updated,
@@ -532,36 +580,34 @@ class ImmediateStrategy:
         """Continue an immediate strategy from its current phase."""
         phase = progress_data.get("phase", "")
         target_source = progress_data.get("target_model_source", "")
+        drifted_ids = _progress_drifted_ids(progress_data, managed_instances)
 
         # ── PHASE: stopping_old ──────────────────────────────────
         if phase == StrategyPhase.STOPPING_OLD:
             # Find first old instance still running
-            for inst in managed_instances:
-                cfg = inst.get("config", inst)
-                if cfg.get("model_source") != target_source:
-                    inst_id = inst.get("instance_id") or inst.get("id")
-                    host_id = inst.get("_host_id")
-                    remaining = sum(
-                        1
-                        for m in managed_instances
-                        if (m.get("config", m).get("model_source") != target_source)
-                    )
-                    new_progress = dict(progress_data)
-                    new_progress["message"] = (
-                        f"Stopping old replica on {host_id} " f"({remaining} remaining)"
-                    )
-                    return (
-                        {
-                            "type": "stop",
-                            "host_id": host_id,
-                            "instance_id": inst_id,
-                            "reason": "Immediate: stopping old replica",
-                        },
-                        new_progress,
-                    )
+            remaining_old = _drifted_instances(
+                managed_instances, target_source, drifted_ids
+            )
+            if remaining_old:
+                inst = remaining_old[0]
+                host_id = inst.get("_host_id")
+                new_progress = dict(progress_data)
+                new_progress["message"] = (
+                    f"Stopping old replica on {host_id} "
+                    f"({len(remaining_old)} remaining)"
+                )
+                return (
+                    {
+                        "type": "stop",
+                        "host_id": host_id,
+                        "instance_id": _instance_id(inst),
+                        "reason": "Immediate: stopping old replica",
+                    },
+                    new_progress,
+                )
 
             # All old instances stopped → transition to creating
-            updated = _count_updated(managed_instances, target_source)
+            updated = _count_updated(managed_instances, target_source, drifted_ids)
             needed = desired_replicas - updated
             if needed <= 0:
                 return None, None  # Nothing left to do
@@ -691,8 +737,13 @@ def initiate_strategy(
     intent: Any,
     managed_instances: list[dict[str, Any]],
     candidates: list[tuple[Any, Any]],
+    drifted_instance_ids: Collection[str],
 ) -> dict[str, Any] | None:
     """Create initial strategy_progress for the intent's strategy.
+
+    *drifted_instance_ids* are the replicas the reconciler decided no longer
+    match the spec — a version change, an edited backend config, or both.
+    The rollout replaces exactly those.
 
     Returns strategy_progress dict or None if no strategy needed.
     """
@@ -710,6 +761,7 @@ def initiate_strategy(
             desired_replicas=desired,
             managed_instances=managed_instances,
             candidates=candidates,
+            drifted_instance_ids=drifted_instance_ids,
         )
     elif strategy_name == "immediate":
         return ImmediateStrategy.init(
@@ -719,6 +771,7 @@ def initiate_strategy(
             desired_replicas=desired,
             managed_instances=managed_instances,
             candidates=candidates,
+            drifted_instance_ids=drifted_instance_ids,
         )
 
     return None

@@ -554,6 +554,8 @@ export interface IntentCondition {
 export interface StrategyProgress {
   strategy: string;
   target_model_source?: string | null;
+  /** Replicas this rollout is replacing, as identified by the reconciler. */
+  drifted_instance_ids?: string[] | null;
   phase?: string | null;
   step?: string | null;
   updated: number;

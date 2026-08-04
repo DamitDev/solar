@@ -129,6 +129,16 @@ class StrategyProgress(BaseModel):
 
     strategy: str
     target_model_source: str | None = None
+    drifted_instance_ids: list[str] | None = Field(
+        default=None,
+        description=(
+            "Replicas this rollout is replacing. Identifies them by id rather "
+            "than by model_source, because an edited spec (S-044) can change "
+            "backend config alone, and an in-place replacement shares both "
+            "host and source with the replica it replaces. None means the "
+            "rollout predates the field and only model_source drift applies."
+        ),
+    )
     phase: str | None = None
     step: str | None = None
     updated: int = 0

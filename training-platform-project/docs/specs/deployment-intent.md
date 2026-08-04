@@ -431,6 +431,10 @@ Let `desired = I.replicas`, `observed = |managed(I)|`, and let `current[h]` be t
 
 Drift detection compares the intent's `model_source` and backend fields against the observed instance configuration. Since a spec can change under a running deployment (Section 12.5), a backend-only edit must be detected even for fields the cached instance view does not carry: while a spec change is pending, the comparison uses the instance's full configuration rather than the cached summary.
 
+The reconciler is the only component that decides what has drifted, and it hands the drifted replicas to the strategy that replaces them (Section 11.4). Nothing downstream may re-derive drift by comparing `model_source` alone: that misses a backend-only edit entirely, and it cannot tell an in-place replacement from the replica it replaces, since the two share a host *and* a source.
+
+A `replace` that runs outside a strategy retires the drifted replica with **stop + delete**, not stop alone. A stopped replica still counts towards `observed`, so leaving it holds the intent at its desired count with nothing serving: no `create` for the replacement, and the `recreate` that would restart it is suppressed by the pending `replace`.
+
 ### 8.3 Idempotency and safety
 
 - Actions are keyed by `(intent_id, host_id)`. The reconciler never creates two managed replicas of the same alias on one host.
@@ -684,6 +688,7 @@ While a `rolling`/`immediate` update is in flight, `status.strategy_progress` is
 "strategy_progress": {
   "strategy": "rolling",
   "target_model_source": "repo://iris-osl:v4",
+  "drifted_instance_ids": ["c1f0…"],
   "step": "2/2",
   "updated": 1,
   "in_progress": 1,
@@ -691,6 +696,8 @@ While a `rolling`/`immediate` update is in flight, `status.strategy_progress` is
   "message": "Replacing replica on damcpaiops02"
 }
 ```
+
+`drifted_instance_ids` are the replicas this rollout was planned to replace, as identified by the reconciler (Section 8.2). They are recorded by id because that is the only durable way to name them: a rollout may be replacing replicas that differ from the spec only in backend config, and an in-place replacement shares its host and `model_source` with the replica it retires. `updated` is therefore "managed replicas not in this set", and each step retires the drifted replica on the host it just brought a replacement up on. Progress written before this field existed carries no ids; such a rollout can only have been a `model_source` change and is completed by comparing sources.
 
 ### 11.5 Failure behavior
 
