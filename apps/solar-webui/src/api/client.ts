@@ -297,24 +297,18 @@ class SolarClient {
 
   /** Versions of one catalog model, each with its per-version runtime block. */
   async getCatalogModelVersions(name: string): Promise<CatalogVersionsResponse> {
-    const response = await this.client.get(
-      `/api/catalog/models/${encodeURIComponent(name)}/versions`,
-    );
+    const response = await this.client.get(`/api/catalog/models/${encodeURIComponent(name)}/versions`);
     return response.data as CatalogVersionsResponse;
   }
 
   /** Delete one version — Harbor first, then unregister. 409 = running instance. */
   async deleteCatalogModelVersion(name: string, version: string): Promise<void> {
-    await this.client.delete(
-      `/api/catalog/models/${encodeURIComponent(name)}/versions/${encodeURIComponent(version)}`,
-    );
+    await this.client.delete(`/api/catalog/models/${encodeURIComponent(name)}/versions/${encodeURIComponent(version)}`);
   }
 
   /** Delete a whole model repository; resolves with per-version results. */
   async deleteCatalogModel(name: string): Promise<CatalogDeleteResult> {
-    const response = await this.client.delete(
-      `/api/catalog/models/${encodeURIComponent(name)}`,
-    );
+    const response = await this.client.delete(`/api/catalog/models/${encodeURIComponent(name)}`);
     return response.data as CatalogDeleteResult;
   }
 
