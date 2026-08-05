@@ -54,6 +54,16 @@ _SERVICE = "harbor-registry"
 _PATH_RE = re.compile(
     r"^/v2/(?P<repo>[^/]+(?:/[^/]+)*)/(?P<kind>manifests|blobs)/(?P<ref>[^/]+)$"
 )
+# blob upload session paths (S-047 write path)
+_UPLOAD_POST_RE = re.compile(r"^/v2/(?P<repo>[^/]+(?:/[^/]+)*)/blobs/uploads/$")
+_UPLOAD_PATH_RE = re.compile(
+    r"^/v2/(?P<repo>[^/]+(?:/[^/]+)*)/blobs/uploads/(?P<uuid>[^/?]+)$"
+)
+# Harbor v2.0 REST API artifact delete (rollback path)
+_V2_DELETE_RE = re.compile(
+    r"^/api/v2\.0/projects/(?P<project>[^/]+)/repositories/"
+    r"(?P<repo>[^/]+)/artifacts/(?P<ref>[^/]+)$"
+)
 
 
 def sha256_digest(data: bytes) -> str:
@@ -69,6 +79,8 @@ class _StubHarborState:
         self.manifests: dict[str, dict[str, dict[str, Any]]] = {}
         # digest -> bytes
         self.blobs: dict[str, bytes] = {}
+        # upload uuid -> {repo, buffer} for in-flight blob upload sessions
+        self.uploads: dict[str, dict[str, Any]] = {}
         # (method, path, headers-dict) log
         self.requests: list[tuple[str, str, dict[str, str]]] = []
         self.base_url = ""
@@ -226,6 +238,10 @@ class StubHarborHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def _has_sid_cookie(self) -> bool:
+        """Behaviour 1 trap: a replayed ``sid`` cookie must fail with 403."""
+        return "sid=" in self.headers.get("Cookie", "")
+
     # ------------------------------------------------------------------
     # dispatch
     # ------------------------------------------------------------------
@@ -239,9 +255,23 @@ class StubHarborHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._dispatch("POST")
 
+    def do_PATCH(self) -> None:
+        self._dispatch("PATCH")
+
+    def do_PUT(self) -> None:
+        self._dispatch("PUT")
+
+    def do_DELETE(self) -> None:
+        self._dispatch("DELETE")
+
+    def _read_body(self) -> bytes:
+        length = int(self.headers.get("Content-Length", 0))
+        return self.rfile.read(length) if length else b""
+
     def _dispatch(self, method: str) -> None:
         self.state.record(method, self.path, dict(self.headers))
         path = self.path.split("?", 1)[0]
+        query = self.path.split("?", 1)[1] if "?" in self.path else ""
 
         if path == "/service/token":
             self._handle_token()
@@ -250,6 +280,22 @@ class StubHarborHandler(BaseHTTPRequestHandler):
         if path == "/v2/":
             # Capability probe — challenge like a real registry.
             self._challenge("registry:catalog:*")
+            return
+
+        # Harbor v2.0 REST API (rollback deletes)
+        m = _V2_DELETE_RE.match(path)
+        if m:
+            self._handle_v2_delete(m)
+            return
+
+        # Blob upload session: open (POST) / PATCH / close (PUT)
+        m = _UPLOAD_POST_RE.match(path)
+        if m:
+            self._handle_upload_open(m)
+            return
+        m = _UPLOAD_PATH_RE.match(path)
+        if m:
+            self._handle_upload_patch_or_close(m, method, query)
             return
 
         m = _PATH_RE.match(path)
@@ -268,6 +314,9 @@ class StubHarborHandler(BaseHTTPRequestHandler):
         repo, kind, ref = m.group("repo"), m.group("kind"), m.group("ref")
 
         if kind == "manifests":
+            if method == "PUT":
+                self._handle_manifest_put(repo, ref)
+                return
             manifest = self.state.get_manifest(repo, ref)
             if manifest is None:
                 self._send(
@@ -297,6 +346,156 @@ class StubHarborHandler(BaseHTTPRequestHandler):
             return
 
         self._send(404, b"", {})
+
+    # ------------------------------------------------------------------
+    # blob upload session (S-047 write path)
+    # ------------------------------------------------------------------
+
+    def _handle_upload_open(self, m: re.Match[str]) -> None:
+        if self._has_sid_cookie():
+            self._send(
+                403,
+                b'{"errors":[{"code":"DENIED","message":"CSRF token invalid"}]}',
+                {"Content-Type": "application/json"},
+            )
+            return
+        if not self._has_bearer():
+            self._challenge(f"repository:{m.group('repo')}:push")
+            return
+        upload_id = f"up-{len(self.state.uploads) + 1}"
+        with self.state._lock:
+            self.state.uploads[upload_id] = {
+                "repo": m.group("repo"),
+                "buffer": bytearray(),
+            }
+        location = f"/v2/{m.group('repo')}/blobs/uploads/{upload_id}?_state={upload_id}"
+        self._send(
+            202,
+            b"",
+            {"Location": location, "Content-Type": "application/octet-stream"},
+        )
+
+    def _handle_upload_patch_or_close(
+        self, m: re.Match[str], method: str, query: str
+    ) -> None:
+        if self._has_sid_cookie():
+            self._send(
+                403,
+                b'{"errors":[{"code":"DENIED","message":"CSRF token invalid"}]}',
+                {"Content-Type": "application/json"},
+            )
+            return
+        if not self._has_bearer():
+            self._challenge(f"repository:{m.group('repo')}:push")
+            return
+
+        upload_id = m.group("uuid")
+        with self.state._lock:
+            upload = self.state.uploads.get(upload_id)
+        if upload is None:
+            self._send(
+                404,
+                b'{"errors":[{"code":"BLOB_UPLOAD_UNKNOWN","message":"upload unknown"}]}',
+                {"Content-Type": "application/json"},
+            )
+            return
+
+        if method == "PATCH":
+            upload["buffer"].extend(self._read_body())
+            location = (
+                f"/v2/{m.group('repo')}/blobs/uploads/{upload_id}?_state={upload_id}"
+            )
+            self._send(
+                202,
+                b"",
+                {"Location": location, "Content-Type": "application/octet-stream"},
+            )
+            return
+
+        if method == "PUT":
+            # Behaviour 2 trap: closing without the _state query fails.
+            if "_state=" not in query:
+                self._send(
+                    404,
+                    b'{"errors":[{"code":"BLOB_UPLOAD_INVALID",'
+                    b'"message":"blob upload invalid"}]}',
+                    {"Content-Type": "application/json"},
+                )
+                return
+            data = bytes(upload["buffer"])
+            computed = sha256_digest(data)
+            # Accept digest=sha256:<hex> (with or without the prefix).
+            digest_param = query.split("digest=", 1)[1].split("&", 1)[0]
+            if digest_param != computed:
+                self._send(
+                    400,
+                    b'{"errors":[{"code":"DIGEST_INVALID","message":"digest invalid"}]}',
+                    {"Content-Type": "application/json"},
+                )
+                return
+            with self.state._lock:
+                self.state.blobs[computed] = data
+                self.state.uploads.pop(upload_id, None)
+            self._send(201, b"", {"Content-Type": "application/octet-stream"})
+            return
+
+        self._send(405, b"", {})
+
+    def _handle_manifest_put(self, repo: str, ref: str) -> None:
+        if self._has_sid_cookie():
+            self._send(
+                403,
+                b'{"errors":[{"code":"DENIED","message":"CSRF token invalid"}]}',
+                {"Content-Type": "application/json"},
+            )
+            return
+        body = self._read_body()
+        try:
+            manifest = json.loads(body)
+        except ValueError:
+            self._send(
+                400,
+                b'{"errors":[{"code":"MANIFEST_INVALID","message":"bad json"}]}',
+                {"Content-Type": "application/json"},
+            )
+            return
+        with self.state._lock:
+            self.state.manifests.setdefault(repo, {})[ref] = manifest
+            config = manifest.get("config") or {}
+            config_digest = config.get("digest")
+            if config_digest and config_digest not in self.state.blobs:
+                self.state.blobs[config_digest] = b"{}"
+        self._send(
+            201,
+            b"",
+            {
+                "Content-Type": MANIFEST_MEDIA_TYPE,
+                "Docker-Content-Digest": sha256_digest(body),
+            },
+        )
+
+    def _handle_v2_delete(self, m: re.Match[str]) -> None:
+        if not self._has_basic():
+            self._send(
+                401,
+                b'{"errors":[{"code":"UNAUTHORIZED","message":"auth required"}]}',
+                {"Content-Type": "application/json"},
+            )
+            return
+        # The v2.0 API path splits project/repo; manifests are keyed by the
+        # full "project/repo" path used on the /v2/ Distribution API.
+        full_repo = f"{m.group('project')}/{m.group('repo')}"
+        ref = m.group("ref")
+        with self.state._lock:
+            removed = self.state.manifests.get(full_repo, {}).pop(ref, None)
+        if removed is None:
+            self._send(
+                404,
+                b'{"errors":[{"code":"NOT_FOUND","message":"artifact not found"}]}',
+                {"Content-Type": "application/json"},
+            )
+            return
+        self._send(200, b"", {"Content-Type": "application/json"})
 
     def _handle_token(self) -> None:
         if not self._has_basic():

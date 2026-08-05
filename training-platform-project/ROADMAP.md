@@ -107,6 +107,18 @@ Enables Solar to autonomously manage resources, migrate instances, and fulfill d
 
 ---
 
+### Milestone 0.6: Artifact Upload
+
+Establishes the flat file-per-layer artifact layout as the platform contract and adds an ingestion path for models that cannot be published to HuggingFace. See [docs/specs/artifact-upload.md](docs/specs/artifact-upload.md).
+
+| ID | Issue | Repo | Size | Depends on |
+|----|-------|------|------|------------|
+| S-045 | Fix the `upload_model` artifact layout. Push one OCI layer per file instead of a single `model.tar.gz`, so pipeline-produced models are pullable and servable by Solar Host. | supernova-steps | S | S-030 |
+| S-046 | Fix nested-path digest verification after a Harbor pull. Walk the pull target recursively, key on relative paths, and reject traversal titles. | solar-host | S | S-015 |
+| S-047 | Add an artifact upload relay to Solar Control. Session API, chunked streaming into Harbor with no disk staging, Redis session state, manifest assembly, and Data Repository registration with rollback. Includes the `aiops-k8s` ingress and secret changes. | solar-control, aiops-k8s | L | S-045, D-007 |
+
+---
+
 ## Phase 1: Data Repository
 
 > Centralized storage for models and training datasets. Can start in parallel with Phase 0.
@@ -264,6 +276,7 @@ Enables Solar to autonomously manage resources, migrate instances, and fulfill d
 | U-004 | Implement resource utilization dashboard. Visual breakdown of each host's resource allocation: inference instances, training jobs, reserved, free. | solar-webui | M | S-035 |
 | U-005 | Add host draining controls to the Resources page. Drain/resume actions, drain state badges, blocker list before confirming, and stalled-drain reporting. | solar-webui | M | S-043 |
 | U-006 | Add intent editing UI. Generalise the intent form into create/edit modes with full hydration, read-only alias, and a warning when an edit restarts an in-flight rollout. | solar-webui | M | S-044 |
+| U-007 | Add model and dataset upload. Category-specific requirements and metadata, directory picker with junk filtering and per-file review, streamed upload with per-file progress. | solar-webui | M | S-047 |
 
 ---
 

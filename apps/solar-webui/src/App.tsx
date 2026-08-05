@@ -7,6 +7,7 @@ import { ModelCatalog } from './components/ModelCatalog';
 import { IntentsPage } from './components/IntentsPage';
 import { IntentDetail } from './components/IntentDetail';
 import { StoragePage } from './components/StoragePage';
+import { ArtifactUpload } from './components/ArtifactUpload';
 import { Navigation } from './components/Navigation';
 import { ResourcesPage } from './components/ResourcesPage';
 import { RoutingEventsProvider } from './context/RoutingEventsContext';
@@ -36,6 +37,7 @@ const router = createBrowserRouter([
       { path: '/endpoints', element: <EndpointsDashboard /> },
       { path: '/catalog', element: <ModelCatalog /> },
       { path: '/storage', element: <StoragePage /> },
+      { path: '/upload', element: <ArtifactUpload /> },
     ],
   },
 ]);

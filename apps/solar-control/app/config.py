@@ -1,11 +1,20 @@
+import sys
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Under pytest, never read the developer-local .env — the test suite must
+# be hermetic and unaffected by local overrides (a real MANAGEMENT_API_KEY
+# in .env used to turn hardcoded-key route tests into 401s locally while
+# CI stayed green). Env vars still take precedence, so spawned processes
+# (integration suite) are unaffected.
+_TESTING = "pytest" in sys.modules
 
 
 class Settings(BaseSettings):
     """Application settings"""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=None if _TESTING else ".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -36,6 +45,16 @@ class Settings(BaseSettings):
     data_repository_url: str = ""
     data_repository_api_key: str = ""
     data_repository_timeout_s: float = 10.0
+
+    # Artifact upload relay (S-047)
+    harbor_url: str = ""
+    harbor_username: str = ""
+    harbor_password: str = ""
+    # Chunk size for the streaming OCI blob upload. 8 MiB is above the 5 MiB
+    # minimum that object-storage registry drivers impose (spec §4.4).
+    upload_chunk_size_bytes: int = 8 * 1024 * 1024
+    # Redis TTL for an upload session; refreshed on each file completion.
+    upload_session_ttl_s: int = 86400
 
     db_pool_size: int = 20
     db_max_overflow: int = 10

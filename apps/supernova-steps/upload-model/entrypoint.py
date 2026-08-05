@@ -14,17 +14,22 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import sys
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
+import oras.defaults
+import oras.oci
 import requests
 from harbor_oci_client import HarborError, OrasHelper
+from harbor_oci_client.media_types import DATASET_CONFIG, MODEL_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +44,9 @@ DEFAULT_REGISTRATION_TIMEOUT_SECONDS = 60
 
 # Categories supported by the Data Repository registration endpoints.
 SUPPORTED_CATEGORIES = ("model", "dataset")
+
+# OCI config media types per category (spec §2.1).
+_CONFIG_MEDIA_TYPES = {"model": MODEL_CONFIG, "dataset": DATASET_CONFIG}
 
 
 # ---------------------------------------------------------------------------
@@ -329,24 +337,87 @@ def bounded_harbor_operation(timeout_seconds: int):
             signal.setitimer(signal.ITIMER_REAL, *previous_timer)
 
 
-def prepare_content_dir(source_path: Path) -> tuple[Path, bool]:
-    """Return a directory to tar as the artifact content layer.
+def validate_layer_title(title: str) -> None:
+    """Validate a layer title against the artifact layout contract (spec §2.3).
 
-    push_custom tars a directory. If the source is already a directory it is
-    used directly. If it is a single file, the file is copied into a temporary
-    sibling directory so it can be tared. Returns (content_dir, is_temp).
+    Titles must be relative POSIX paths, free of ``.`` and ``..`` segments,
+    a leading slash, or a drive letter. Raises PushError otherwise.
     """
-    if source_path.is_dir():
-        return source_path, False
-
-    staging = Path(
-        tempfile.mkdtemp(
-            dir=source_path.parent,
-            prefix=f".{source_path.name}.upload-",
+    if not title:
+        raise PushError("Layer title must not be empty")
+    if title.startswith("/") or re.match(r"^[A-Za-z]:", title):
+        raise PushError(f"Layer title must be a relative path, got {title!r}")
+    segments = title.split("/")
+    if any(segment in (".", "..") for segment in segments):
+        raise PushError(
+            f"Layer title must not contain '.' or '..' segments, got {title!r}"
         )
-    )
-    shutil.copy2(source_path, staging / source_path.name)
-    return staging, True
+
+
+def collect_artifact_files(source_path: Path) -> list[tuple[Path, str]]:
+    """Return ``(absolute path, artifact-relative title)`` pairs for a source.
+
+    A directory source is walked recursively; symlinks are skipped (matching
+    ``compute_dir_size``). A single-file source yields one entry titled
+    after the file. Titles are validated by :func:`build_flat_manifest`
+    before anything is pushed.
+    """
+    if source_path.is_file():
+        return [(source_path, source_path.name)]
+
+    entries: list[tuple[Path, str]] = []
+    for entry in sorted(source_path.rglob("*")):
+        if entry.is_symlink() or not entry.is_file():
+            continue
+        entries.append((entry, entry.relative_to(source_path).as_posix()))
+    return entries
+
+
+def build_flat_manifest(
+    config_path: Path,
+    files: list[tuple[Path, str]],
+    category: str,
+) -> dict:
+    """Assemble the OCI manifest for a flat artifact (spec §2.1).
+
+    One layer per file; the layer digest is the sha256 of the exact file
+    bytes and the artifact-relative POSIX path is carried in
+    ``org.opencontainers.image.title``. The config blob keeps the
+    SuperNova media type for the category.
+
+    Every title is validated against spec §2.3 (relative, no ``.``/``..``
+    segments, unique) before the manifest is built — the same checks Solar
+    Control's relay and Solar Host's digest verification enforce.
+    """
+    if category not in _CONFIG_MEDIA_TYPES:
+        raise PushError(
+            f"Unknown category {category!r}; expected one of "
+            f"{sorted(_CONFIG_MEDIA_TYPES)}"
+        )
+
+    seen: set[str] = set()
+    for _path, title in files:
+        validate_layer_title(title)
+        if title in seen:
+            raise PushError(f"Duplicate layer title: {title!r}")
+        seen.add(title)
+
+    manifest = oras.oci.NewManifest()
+    conf, _ = oras.oci.ManifestConfig(str(config_path))
+    conf["mediaType"] = _CONFIG_MEDIA_TYPES[category]
+    created = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    for path, title in files:
+        layer = oras.oci.NewLayer(str(path))
+        layer["annotations"] = {
+            oras.defaults.annotation_title: title,
+            "org.opencontainers.image.created": created,
+        }
+        manifest["layers"].append(layer)
+
+    manifest["config"] = conf
+    manifest["annotations"] = {"org.opencontainers.image.created": created}
+    return manifest
 
 
 def push_to_harbor(
@@ -359,17 +430,21 @@ def push_to_harbor(
     password: str,
     timeout_seconds: int = DEFAULT_HARBOR_OPERATION_TIMEOUT_SECONDS,
 ) -> str:
-    """Push the source artifact to Harbor via ORAS and return the digest.
+    """Push the source artifact to Harbor as a flat OCI artifact (spec §2.1).
 
-    Uses OrasHelper.push_custom, which tars the content directory into a
-    single layer with the SuperNova media types for the given category.
+    One OCI layer per file (digest = sha256 of the raw file bytes, title =
+    the artifact-relative POSIX path) plus a config blob carrying the
+    SuperNova media type for the category. ``OrasHelper.push`` cannot be
+    used here: it basenames layer titles (losing nested paths) and emits a
+    default OCI config, so the manifest is assembled explicitly with
+    ``oras.oci`` — the same structure ``push_custom`` used, minus the tar.
     Raises PushError on any failure.
     """
     hostname = harbor_hostname(harbor_url)
+    files = collect_artifact_files(source_path)
+    manifest = build_flat_manifest(config_path, files, category)
+    logger.info("Pushing %d files → %s (host=%s)", len(files), harbor_ref, hostname)
 
-    logger.info("Pushing %s → %s (host=%s)", source_path, harbor_ref, hostname)
-
-    content_dir, is_temp = prepare_content_dir(source_path)
     try:
         with bounded_harbor_operation(timeout_seconds):
             oras = OrasHelper(
@@ -377,17 +452,25 @@ def push_to_harbor(
                 username=username,
                 password=password,
             )
-            result = oras.push_custom(
-                harbor_ref=harbor_ref,
-                config_path=str(config_path),
-                content_path=str(content_dir),
-                category=category,
+            # OrasHelper wraps oras-py's OrasClient but does not re-export
+            # its upload methods; the underlying client is reached directly
+            # for the config/blob/manifest upload sequence.
+            client = oras._client  # type: ignore[attr-defined]
+            container = client.get_container(harbor_ref)
+            client._check_200_response(  # type: ignore[attr-defined]
+                client.upload_blob(str(config_path), container, manifest["config"])
             )
+            for (path, _title), layer in zip(files, manifest["layers"]):
+                client._check_200_response(  # type: ignore[attr-defined]
+                    client.upload_blob(str(path), container, layer)
+                )
+            response = client.upload_manifest(manifest, container)
+            client._check_200_response(response)  # type: ignore[attr-defined]
 
-        digest = result.digest
+        digest = response.headers.get("Docker-Content-Digest", "")
         if not digest:
             raise PushError(f"ORAS push returned no digest for {harbor_ref}")
-        logger.info("Push complete: digest=%s", digest)
+        logger.info("Push complete: %d files, digest=%s", len(files), digest)
         return digest
     except HarborOperationTimeoutError as exc:
         raise PushError(
@@ -405,9 +488,6 @@ def push_to_harbor(
             f"ORAS push failed for {harbor_ref}: {exc}",
             detail=str(exc),
         ) from exc
-    finally:
-        if is_temp and content_dir.exists():
-            shutil.rmtree(content_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +510,7 @@ def register_version(
     version: str | None,
     digest: str,
     metadata: dict,
+    size_bytes: int | None = None,
 ) -> dict:
     """Register the pushed artifact version with the Data Repository.
 
@@ -437,10 +518,11 @@ def register_version(
     JSON response. Raises RegistrationError on HTTP errors, connection
     failures, or non-JSON responses.
 
-    size_bytes is deliberately omitted: the pushed artifact is a gzipped tar,
-    so the local source size would not describe what Harbor stores. The Data
-    Repository resolves the authoritative size from Harbor when the field is
-    absent.
+    ``size_bytes`` is the sum of the pushed file sizes. It is sent
+    explicitly because the artifact is now stored flat (spec §2.1), so the
+    stored bytes equal the source bytes; without it the Data Repository
+    would fall back to the manifest HEAD content length, which is the size
+    of the manifest JSON, not the artifact.
     """
     url = registration_endpoint(data_repo_url, artifact_name, category)
     payload: dict = {
@@ -450,6 +532,8 @@ def register_version(
     }
     if version:
         payload["version"] = version
+    if size_bytes is not None:
+        payload["size_bytes"] = size_bytes
 
     logger.info("Registering %s version via %s", artifact_name, url)
 
@@ -713,7 +797,7 @@ def main() -> None:
         shutil.rmtree(oci_dir, ignore_errors=True)
 
     size_bytes = compute_dir_size(source_path)
-    logger.info("Artifact size: %d bytes (uncompressed source)", size_bytes)
+    logger.info("Artifact size: %d bytes (sum of pushed files)", size_bytes)
 
     # --- Register the version with the Data Repository ---
     registration = register_version(
@@ -724,6 +808,7 @@ def main() -> None:
         version=version,
         digest=digest,
         metadata=metadata,
+        size_bytes=size_bytes,
     )
     logger.info(
         "Registered %s version %s (harbor_ref=%s)",

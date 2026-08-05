@@ -77,6 +77,13 @@ async def lifespan(app: FastAPI):
         await gateway.close()
 
     try:
+        from app.services.uploads import close_oci_client
+
+        await close_oci_client()
+    except Exception as e:  # noqa: BLE001
+        logger.error("Error closing OCI push client: %s", e)
+
+    try:
         await gateway_logger.stop()
     except Exception as e:  # noqa: BLE001
         logger.error("Error stopping gateway logger: %s", e)
@@ -176,6 +183,8 @@ async def root():
                 "/api/intents/{id}",
                 "/api/catalog/models",
                 "/api/storage/hosts",
+                "/api/uploads",
+                "/api/uploads/{id}",
             ],
             "realtime": [
                 "Socket.IO /hosts (host connections)",

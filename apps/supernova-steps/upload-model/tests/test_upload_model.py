@@ -62,6 +62,18 @@ def _mock_push_result(digest="sha256:abc123"):
     return result
 
 
+def _mock_oras_client(digest="sha256:abc123"):
+    """Return (mock_oras, mock_client) wired for the flat push sequence."""
+    mock_oras = MagicMock()
+    mock_client = MagicMock()
+    mock_client.upload_blob.return_value = MagicMock()
+    mock_client.upload_manifest.return_value = MagicMock(
+        headers={"Docker-Content-Digest": digest}
+    )
+    mock_oras._client = mock_client
+    return mock_oras, mock_client
+
+
 def _mock_registration_response(**overrides):
     resp = MagicMock()
     resp.ok = True
@@ -439,6 +451,37 @@ class TestRegisterVersion:
         payload = mock_post.call_args.kwargs["json"]
         assert "version" not in payload
 
+    def test_registration_sends_size_bytes(self):
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_registration_response()
+            entrypoint.register_version(
+                "http://repo:8000",
+                "iris-osl",
+                "model",
+                harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v4",
+                version="v4",
+                digest="sha256:abc123",
+                metadata={},
+                size_bytes=1048576,
+            )
+        payload = mock_post.call_args.kwargs["json"]
+        assert payload["size_bytes"] == 1048576
+
+    def test_registration_omits_size_bytes_when_none(self):
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_registration_response()
+            entrypoint.register_version(
+                "http://repo:8000",
+                "iris-osl",
+                "model",
+                harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v4",
+                version="v4",
+                digest="sha256:abc123",
+                metadata={},
+            )
+        payload = mock_post.call_args.kwargs["json"]
+        assert "size_bytes" not in payload
+
     def test_conflict_raises(self):
         resp = MagicMock()
         resp.status_code = 409
@@ -493,15 +536,18 @@ class TestRegisterVersion:
 
 
 class TestPushToHarbor:
-    def test_successful_push_returns_digest(self, tmp_path, monkeypatch):
-        source = tmp_path / "model.gguf"
-        source.write_bytes(b"\x00" * 64)
-        config = tmp_path / "config.json"
+    def test_push_emits_one_layer_per_file(self, tmp_path):
+        source = tmp_path / "checkpoint"
+        source.mkdir()
+        (source / "config.json").write_bytes(b"{}")
+        (source / "model.gguf").write_bytes(b"\x00" * 64)
+        (source / "tokenizer.json").write_bytes(b"{}")
+        config = tmp_path / "oci-config.json"
         config.write_text("{}")
 
         with patch("entrypoint.OrasHelper") as mock_oras_cls:
-            mock_oras = mock_oras_cls.return_value
-            mock_oras.push_custom.return_value = _mock_push_result()
+            mock_oras, mock_client = _mock_oras_client()
+            mock_oras_cls.return_value = mock_oras
 
             digest = entrypoint.push_to_harbor(
                 "imgrepo.damit.hu/supernova/iris-osl:v4",
@@ -514,20 +560,187 @@ class TestPushToHarbor:
             )
 
         assert digest == "sha256:abc123"
-        mock_oras.push_custom.assert_called_once()
-        call_kwargs = mock_oras.push_custom.call_args.kwargs
-        assert call_kwargs["category"] == "model"
-        assert call_kwargs["harbor_ref"] == "imgrepo.damit.hu/supernova/iris-osl:v4"
+        # config blob + one layer per file
+        assert mock_client.upload_blob.call_count == 4
+        manifest = mock_client.upload_manifest.call_args.args[0]
+        assert len(manifest["layers"]) == 3
+        for layer in manifest["layers"]:
+            assert "org.opencontainers.image.title" in layer["annotations"]
+
+    def test_push_layer_titles_are_relative_posix_paths(self, tmp_path):
+        source = tmp_path / "checkpoint"
+        (source / "sub" / "dir").mkdir(parents=True)
+        (source / "sub" / "dir" / "file.bin").write_bytes(b"x" * 16)
+        (source / "config.json").write_bytes(b"{}")
+        config = tmp_path / "oci-config.json"
+        config.write_text("{}")
+
+        with patch("entrypoint.OrasHelper") as mock_oras_cls:
+            mock_oras, mock_client = _mock_oras_client()
+            mock_oras_cls.return_value = mock_oras
+
+            entrypoint.push_to_harbor(
+                "imgrepo.damit.hu/supernova/iris-osl:v4",
+                source,
+                config,
+                "model",
+                "https://harbor.example.com",
+                "user",
+                "pass",
+            )
+
+        manifest = mock_client.upload_manifest.call_args.args[0]
+        titles = {
+            layer["annotations"]["org.opencontainers.image.title"]
+            for layer in manifest["layers"]
+        }
+        assert titles == {"sub/dir/file.bin", "config.json"}
+
+    def test_push_single_file_source_titles_the_file(self, tmp_path):
+        source = tmp_path / "model.gguf"
+        source.write_bytes(b"\x00" * 64)
+        config = tmp_path / "oci-config.json"
+        config.write_text("{}")
+
+        with patch("entrypoint.OrasHelper") as mock_oras_cls:
+            mock_oras, mock_client = _mock_oras_client()
+            mock_oras_cls.return_value = mock_oras
+
+            entrypoint.push_to_harbor(
+                "imgrepo.damit.hu/supernova/iris-osl:v4",
+                source,
+                config,
+                "model",
+                "https://harbor.example.com",
+                "user",
+                "pass",
+            )
+
+        # No temp directory was created next to the source.
+        assert sorted(p.name for p in tmp_path.iterdir()) == [
+            "model.gguf",
+            "oci-config.json",
+        ]
+        manifest = mock_client.upload_manifest.call_args.args[0]
+        assert len(manifest["layers"]) == 1
+        assert (
+            manifest["layers"][0]["annotations"]["org.opencontainers.image.title"]
+            == "model.gguf"
+        )
+
+    def test_push_rejects_path_traversal_title(self, tmp_path, monkeypatch):
+        source = tmp_path / "model.gguf"
+        source.write_bytes(b"\x00" * 64)
+        config = tmp_path / "oci-config.json"
+        config.write_text("{}")
+
+        crafted = [(source, "../../etc/passwd")]
+        with (
+            patch("entrypoint.collect_artifact_files", return_value=crafted),
+            pytest.raises(entrypoint.PushError, match=r"\.\."),
+        ):
+            entrypoint.push_to_harbor(
+                "imgrepo.damit.hu/supernova/iris-osl:v4",
+                source,
+                config,
+                "model",
+                "https://harbor.example.com",
+                "user",
+                "pass",
+            )
+
+    def test_push_rejects_duplicate_titles(self, tmp_path, monkeypatch):
+        source = tmp_path / "model.gguf"
+        source.write_bytes(b"\x00" * 64)
+        config = tmp_path / "oci-config.json"
+        config.write_text("{}")
+
+        dupes = [(source, "model.gguf"), (source, "model.gguf")]
+        with (
+            patch("entrypoint.collect_artifact_files", return_value=dupes),
+            pytest.raises(entrypoint.PushError, match="[Dd]uplicate"),
+        ):
+            entrypoint.push_to_harbor(
+                "imgrepo.damit.hu/supernova/iris-osl:v4",
+                source,
+                config,
+                "model",
+                "https://harbor.example.com",
+                "user",
+                "pass",
+            )
+
+    def test_push_skips_symlinks(self, tmp_path, monkeypatch):
+        source = tmp_path / "checkpoint"
+        source.mkdir()
+        (source / "model.gguf").write_bytes(b"\x00" * 64)
+        real = tmp_path / "real.bin"
+        real.write_bytes(b"\x00" * 32)
+        (source / "link.bin").symlink_to(real)
+        config = tmp_path / "oci-config.json"
+        config.write_text("{}")
+
+        with patch("entrypoint.OrasHelper") as mock_oras_cls:
+            mock_oras, mock_client = _mock_oras_client()
+            mock_oras_cls.return_value = mock_oras
+
+            entrypoint.push_to_harbor(
+                "imgrepo.damit.hu/supernova/iris-osl:v4",
+                source,
+                config,
+                "model",
+                "https://harbor.example.com",
+                "user",
+                "pass",
+            )
+
+        manifest = mock_client.upload_manifest.call_args.args[0]
+        titles = [
+            layer["annotations"]["org.opencontainers.image.title"]
+            for layer in manifest["layers"]
+        ]
+        assert titles == ["model.gguf"]
+
+    def test_config_blob_uses_supernova_media_type(self, tmp_path):
+        source = tmp_path / "model.gguf"
+        source.write_bytes(b"\x00" * 64)
+        config = tmp_path / "oci-config.json"
+        config.write_text("{}")
+
+        for category, expected in (
+            ("model", "application/vnd.supernova.model.config.v1+json"),
+            ("dataset", "application/vnd.supernova.dataset.config.v1+json"),
+        ):
+            with patch("entrypoint.OrasHelper") as mock_oras_cls:
+                mock_oras, mock_client = _mock_oras_client()
+                mock_oras_cls.return_value = mock_oras
+
+                entrypoint.push_to_harbor(
+                    "imgrepo.damit.hu/supernova/iris-osl:v4",
+                    source,
+                    config,
+                    category,
+                    "https://harbor.example.com",
+                    "user",
+                    "pass",
+                )
+
+            manifest = mock_client.upload_manifest.call_args.args[0]
+            assert manifest["config"]["mediaType"] == expected
+            # The config blob was uploaded first, with the same media type.
+            first_call = mock_client.upload_blob.call_args_list[0]
+            assert first_call.args[0] == str(config)
+            assert first_call.args[2]["mediaType"] == expected
 
     def test_push_with_empty_digest_raises(self, tmp_path):
         source = tmp_path / "model.gguf"
         source.write_bytes(b"\x00" * 64)
-        config = tmp_path / "config.json"
+        config = tmp_path / "oci-config.json"
         config.write_text("{}")
 
         with patch("entrypoint.OrasHelper") as mock_oras_cls:
-            mock_oras = mock_oras_cls.return_value
-            mock_oras.push_custom.return_value = _mock_push_result(digest="")
+            mock_oras, _client = _mock_oras_client(digest="")
+            mock_oras_cls.return_value = mock_oras
 
             with pytest.raises(entrypoint.PushError, match="no digest"):
                 entrypoint.push_to_harbor(
@@ -543,12 +756,12 @@ class TestPushToHarbor:
     def test_push_harbor_error_raises(self, tmp_path):
         source = tmp_path / "model.gguf"
         source.write_bytes(b"\x00" * 64)
-        config = tmp_path / "config.json"
+        config = tmp_path / "oci-config.json"
         config.write_text("{}")
 
         with patch("entrypoint.OrasHelper") as mock_oras_cls:
             mock_oras = mock_oras_cls.return_value
-            mock_oras.push_custom.side_effect = entrypoint.HarborError(
+            mock_oras._client.upload_blob.side_effect = entrypoint.HarborError(
                 "auth failed", status_code=401
             )
 
@@ -562,30 +775,6 @@ class TestPushToHarbor:
                     "user",
                     "pass",
                 )
-
-    def test_push_directory_source_uses_dir_directly(self, tmp_path):
-        source = tmp_path / "checkpoint"
-        source.mkdir()
-        (source / "model.safetensors").write_bytes(b"\x00" * 64)
-        config = tmp_path / "config.json"
-        config.write_text("{}")
-
-        with patch("entrypoint.OrasHelper") as mock_oras_cls:
-            mock_oras = mock_oras_cls.return_value
-            mock_oras.push_custom.return_value = _mock_push_result()
-
-            entrypoint.push_to_harbor(
-                "imgrepo.damit.hu/supernova/iris-osl:v4",
-                source,
-                config,
-                "model",
-                "https://harbor.example.com",
-                "user",
-                "pass",
-            )
-
-        call_kwargs = mock_oras.push_custom.call_args.kwargs
-        assert call_kwargs["content_path"] == str(source)
 
 
 # ---------------------------------------------------------------------------
@@ -681,8 +870,8 @@ class TestMainFlow:
             patch("entrypoint.OrasHelper") as mock_oras_cls,
             patch("requests.post") as mock_post,
         ):
-            mock_oras = mock_oras_cls.return_value
-            mock_oras.push_custom.return_value = _mock_push_result()
+            mock_oras, _mock_client = _mock_oras_client()
+            mock_oras_cls.return_value = mock_oras
             mock_post.return_value = _mock_registration_response()
 
             entrypoint.main()
@@ -693,9 +882,9 @@ class TestMainFlow:
         assert payload["checksum"] == "sha256:abc123"
         assert payload["metadata"]["training_config"] == {"epochs": 3}
         assert payload["metadata"]["lineage"]["source_trainer"] == "supernova-job-12345"
-        # size_bytes is omitted so the Data Repository resolves the stored
-        # artifact size from Harbor rather than the uncompressed source size.
-        assert "size_bytes" not in payload
+        # The flat layout stores the source bytes verbatim, so the summed
+        # source size is the truthful artifact size.
+        assert payload["size_bytes"] == 128
 
         # Verify job.json update
         job = json.loads((config / "job.json").read_text())
@@ -736,8 +925,8 @@ class TestMainFlow:
             patch("entrypoint.OrasHelper") as mock_oras_cls,
             patch("requests.post") as mock_post,
         ):
-            mock_oras = mock_oras_cls.return_value
-            mock_oras.push_custom.return_value = _mock_push_result()
+            mock_oras, _mock_client = _mock_oras_client()
+            mock_oras_cls.return_value = mock_oras
             mock_post.return_value = _mock_registration_response()
 
             entrypoint.main()
@@ -765,7 +954,9 @@ class TestMainFlow:
         )
 
         with patch("entrypoint.OrasHelper") as mock_oras_cls:
-            mock_oras_cls.return_value.push_custom.side_effect = RuntimeError("boom")
+            mock_oras_cls.return_value._client.upload_blob.side_effect = RuntimeError(
+                "boom"
+            )
             with pytest.raises(entrypoint.PushError):
                 entrypoint.main()
 
@@ -799,8 +990,8 @@ class TestMainFlow:
             patch("entrypoint.OrasHelper") as mock_oras_cls,
             patch("requests.post", return_value=resp),
         ):
-            mock_oras = mock_oras_cls.return_value
-            mock_oras.push_custom.return_value = _mock_push_result()
+            mock_oras, _mock_client = _mock_oras_client()
+            mock_oras_cls.return_value = mock_oras
 
             with pytest.raises(entrypoint.RegistrationError):
                 entrypoint.main()
@@ -842,15 +1033,16 @@ class TestMainFlow:
             patch("entrypoint.OrasHelper") as mock_oras_cls,
             patch("requests.post") as mock_post,
         ):
-            mock_oras = mock_oras_cls.return_value
-            mock_oras.push_custom.return_value = _mock_push_result()
+            mock_oras, mock_client = _mock_oras_client()
+            mock_oras_cls.return_value = mock_oras
             mock_post.return_value = _mock_registration_response()
 
             entrypoint.main()
 
-        # The source resolved from job.json was pushed.
-        call_kwargs = mock_oras.push_custom.call_args.kwargs
-        assert call_kwargs["content_path"] == str(source)
+        # The source resolved from job.json was pushed flat — no tar layer.
+        manifest = mock_client.upload_manifest.call_args.args[0]
+        title = manifest["layers"][0]["annotations"]["org.opencontainers.image.title"]
+        assert title == "model.safetensors"
 
         # eval_metrics came from the train step in job.json.
         payload = mock_post.call_args.kwargs["json"]

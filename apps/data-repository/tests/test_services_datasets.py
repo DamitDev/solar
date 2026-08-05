@@ -19,6 +19,7 @@ from app.repositories.artifacts import ArtifactMetadataRecord
 from app.schemas.datasets import (
     RegisterDatasetVersionRequest,
     UpdateDatasetMetadataRequest,
+    UpdateDatasetVersionRequest,
 )
 from app.services.models import (
     DatasetDeletionService,
@@ -256,3 +257,53 @@ async def test_delete_dataset_version_not_found_propagates(exc):
         repo.delete_dataset_version = AsyncMock(side_effect=exc)
         with pytest.raises(type(exc)):
             await svc.delete_dataset_version("iris-tickets", "v1")
+
+
+# ---------------------------------------------------------------------------
+# Commit-before-return (the DI's post-response commit races the next request)
+# ---------------------------------------------------------------------------
+
+
+async def test_update_dataset_version_commits_before_returning():
+    current = MagicMock()
+    current.name = "iris-tickets"
+    current.version = "v2"
+    current.metadata = {}
+    async with _svc(DatasetUpdateService) as (svc, repo):
+        repo.get_dataset_version = AsyncMock(return_value=current)
+        repo.update_artifact_version_metadata = AsyncMock(return_value=current)
+        await svc.update_dataset_version(
+            "iris-tickets", "v2", UpdateDatasetVersionRequest(metadata={})
+        )
+    svc._session.commit.assert_awaited_once()
+
+
+async def test_update_dataset_metadata_commits_before_returning():
+    current = ArtifactMetadataRecord(
+        name="iris-tickets",
+        category="dataset",
+        description="",
+        metadata={},
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
+        versions_count=1,
+    )
+    async with _svc(DatasetUpdateService) as (svc, repo):
+        repo.get_artifact_metadata = AsyncMock(return_value=current)
+        repo.update_artifact_metadata = AsyncMock(return_value=current)
+        await svc.update_dataset_metadata(
+            "iris-tickets",
+            UpdateDatasetMetadataRequest(
+                description="updated",
+                training_config=None,
+                eval_metrics=None,
+                lineage=None,
+            ),
+        )
+    svc._session.commit.assert_awaited_once()
+
+
+async def test_delete_dataset_version_commits_before_returning():
+    async with _svc(DatasetDeletionService) as (svc, repo):
+        repo.delete_dataset_version = AsyncMock(return_value=None)
+        await svc.delete_dataset_version("iris-tickets", "v2")
+    svc._session.commit.assert_awaited_once()
