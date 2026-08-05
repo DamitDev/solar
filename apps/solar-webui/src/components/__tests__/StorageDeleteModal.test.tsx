@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, MockInstance, vi } from 'vitest';
 import solarClient from '@/api/client';
 import { StorageDeleteModal } from '@/components/StorageDeleteModal';
 import { HostStorage, StorageDeleteItem } from '@/api/types';
@@ -45,7 +45,7 @@ function renderModal(items = singleItem) {
 }
 
 describe('StorageDeleteModal smart delete', () => {
-  let deleteSpy: ReturnType<typeof vi.spyOn> = vi.fn() as any;
+  let deleteSpy: MockInstance<typeof solarClient.deleteStoredModels> = vi.fn() as any;
 
   beforeEach(() => {
     vi.restoreAllMocks();
