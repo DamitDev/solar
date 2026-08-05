@@ -110,4 +110,48 @@ describe('SolarClient', () => {
     mock.onGet('/api/hosts').reply(401, { detail: 'Authentication required' });
     await expect(client.getHosts()).rejects.toMatchObject({ response: { status: 401 } });
   });
+
+  it('fetches the cluster storage inventory', async () => {
+    const payload = {
+      hosts: [{ host_id: 'host-1', host_name: 'a', reachable: true, total_size_bytes: 10, models: [] }],
+      unreachable_hosts: [],
+      generated_at: '2026-08-05T00:00:00Z',
+    };
+    mock.onGet('/api/storage/hosts').reply(200, payload);
+    await expect(client.getStorage()).resolves.toEqual(payload);
+  });
+
+  it('fetches a single host storage view', async () => {
+    const payload = {
+      host_id: 'host-1',
+      host_name: 'a',
+      reachable: true,
+      total_size_bytes: 0,
+      models: [],
+    };
+    mock.onGet('/api/storage/hosts/host-1').reply(200, payload);
+    await expect(client.getHostStorage('host-1')).resolves.toEqual(payload);
+  });
+
+  it('deletes a stored model via DELETE', async () => {
+    mock
+      .onDelete('/api/storage/hosts/host-1/models/repo--x--v1')
+      .reply(200, { detail: 'Model deleted', name: 'repo--x--v1' });
+    await expect(client.deleteStoredModel('host-1', 'repo--x--v1')).resolves.toMatchObject({
+      detail: 'Model deleted',
+    });
+  });
+
+  it('deletes stored models in bulk with per-item results', async () => {
+    const items = [
+      { host_id: 'host-1', slug: 'a' },
+      { host_id: 'host-1', slug: 'b' },
+    ];
+    const results = [
+      { host_id: 'host-1', host_name: 'a', slug: 'a', status: 'deleted', detail: null, freed_bytes: 100 },
+      { host_id: 'host-1', host_name: 'a', slug: 'b', status: 'in_use', detail: 'in use', freed_bytes: 0 },
+    ];
+    mock.onPost('/api/storage/delete', { items }).reply(200, results);
+    await expect(client.deleteStoredModels(items)).resolves.toEqual(results);
+  });
 });

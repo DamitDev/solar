@@ -6,6 +6,7 @@ import { EndpointsDashboard } from './components/EndpointsDashboard';
 import { ModelCatalog } from './components/ModelCatalog';
 import { IntentsPage } from './components/IntentsPage';
 import { IntentDetail } from './components/IntentDetail';
+import { StoragePage } from './components/StoragePage';
 import { Navigation } from './components/Navigation';
 import { ResourcesPage } from './components/ResourcesPage';
 import { RoutingEventsProvider } from './context/RoutingEventsContext';
@@ -34,6 +35,7 @@ const router = createBrowserRouter([
       { path: '/resources', element: <ResourcesPage /> },
       { path: '/endpoints', element: <EndpointsDashboard /> },
       { path: '/catalog', element: <ModelCatalog /> },
+      { path: '/storage', element: <StoragePage /> },
     ],
   },
 ]);

@@ -175,6 +175,7 @@ async def root():
                 "/api/intents",
                 "/api/intents/{id}",
                 "/api/catalog/models",
+                "/api/storage/hosts",
             ],
             "realtime": [
                 "Socket.IO /hosts (host connections)",

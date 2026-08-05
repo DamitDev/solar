@@ -12,6 +12,7 @@ from . import (
     models,
     reservations,
     resources,
+    storage,
 )
 
 router = APIRouter(prefix="/api", tags=["management"])
@@ -25,3 +26,4 @@ router.include_router(instances.router)
 router.include_router(reservations.router)
 router.include_router(intents.router)
 router.include_router(catalog.router)
+router.include_router(storage.router)
