@@ -377,6 +377,23 @@ async def test_response_shape():
     assert result.category == "model"
 
 
+async def test_registration_commits_before_returning():
+    """The version row must be durable before the service returns.
+
+    The ``get_db_session`` dependency commits in its post-response
+    teardown, which races the next request: a client that immediately
+    reads its own write (the upload pre-flight conflict check, solar
+    S-047) can then observe a 404 for a version the API just reported
+    as created — observed as a flaky 201-instead-of-409 in CI.
+    """
+    async with _svc() as (svc, _, __):
+        result = await svc.register_model_version(
+            "mymodel", _make_request(version="v1")
+        )
+        assert result.version == "v1"
+        svc._session.commit.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # Retrieval logic (GET /models/{name}/versions/{version})
 # ---------------------------------------------------------------------------

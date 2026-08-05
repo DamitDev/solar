@@ -283,6 +283,7 @@ class BaseArtifactRegistrationService:
 
     def __init__(self, harbor: HarborClient, session: AsyncSession) -> None:
         self._harbor = harbor
+        self._session = session
         self._repo = ArtifactRepository(session)
 
     async def register_artifact_version(
@@ -338,6 +339,13 @@ class BaseArtifactRegistrationService:
             metadata,
         )
         await self._repo.touch_artifact_updated_at(artifact_id)
+
+        # Commit INSIDE the service, before the response is returned. The
+        # ``get_db_session`` dependency commits in its post-response
+        # teardown, which races the next request: a client that immediately
+        # reads its own write (e.g. the upload pre-flight conflict check)
+        # can observe a 404 for a version the API just reported as created.
+        await self._session.commit()
 
         return RegistrationResult(
             name=name,
