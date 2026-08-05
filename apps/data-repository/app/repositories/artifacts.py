@@ -233,6 +233,20 @@ class ArtifactRepository:
             version_not_found_exc=ModelVersionNotFoundError,
         )
 
+    async def delete_model(self, name: str) -> None:
+        """Delete the model artifact row; version rows cascade.
+
+        Raises
+        ------
+        ModelNotFoundError
+            When a model artifact with *name* does not exist.
+        """
+        await self._delete_artifact(
+            name=name,
+            category="model",
+            not_found_exc=ModelNotFoundError,
+        )
+
     async def get_dataset_version(
         self, name: str, version: str
     ) -> ArtifactVersionRecord:
@@ -283,6 +297,20 @@ class ArtifactRepository:
             category="dataset",
             not_found_exc=DatasetNotFoundError,
             version_not_found_exc=DatasetVersionNotFoundError,
+        )
+
+    async def delete_dataset(self, name: str) -> None:
+        """Delete the dataset artifact row; version rows cascade.
+
+        Raises
+        ------
+        DatasetNotFoundError
+            When a dataset artifact with *name* does not exist.
+        """
+        await self._delete_artifact(
+            name=name,
+            category="dataset",
+            not_found_exc=DatasetNotFoundError,
         )
 
     async def resolve_artifact_version(
@@ -679,8 +707,9 @@ class ArtifactRepository:
 
         Attempts a single DELETE filtered by artifact name and category.  When
         nothing was deleted, a lightweight existence query disambiguates
-        "artifact not found" from "version not found".  Harbor-side deletion
-        is intentionally not performed here — see N-029 for retention policy.
+        "artifact not found" from "version not found".  Harbor-side deletion is
+        not performed here — Solar Control's delete relay (S-048) removes the
+        Harbor artifact before calling this unregister.
         """
         stmt = delete(ArtifactVersion).where(
             ArtifactVersion.version == version,
@@ -703,6 +732,36 @@ class ArtifactRepository:
         raise version_not_found_exc(
             f"Version '{version}' was not found for {category} '{name}'."
         )
+
+    async def _delete_artifact(
+        self,
+        *,
+        name: str,
+        category: ArtifactCategory,
+        not_found_exc: type[Exception],
+    ) -> None:
+        """Delete an artifact row; version rows disappear via ON DELETE CASCADE.
+
+        When nothing was deleted, a lightweight existence query disambiguates
+        "artifact not found" from a category mismatch.  Pure unregister — the
+        caller (Solar Control's delete relay, S-048) removes Harbor artifacts
+        first.
+        """
+        stmt = delete(Artifact).where(
+            Artifact.name == name,
+            Artifact.category == category,
+        )
+        result = await self._session.execute(stmt)
+        if result.rowcount:
+            return
+
+        label = category.capitalize()
+        exists_row = await self._fetch_artifact_identity(name)
+        if exists_row is None or exists_row.category != category:
+            raise not_found_exc(f"{label} '{name}' was not found.")
+
+        # Defensive fallback for a stale read between checks.
+        raise not_found_exc(f"{label} '{name}' was not found.")
 
     async def _fetch_artifact_identity(self, name: str) -> Row[Any] | None:
         exists_result = await self._session.execute(

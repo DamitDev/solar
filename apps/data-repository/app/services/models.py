@@ -766,7 +766,7 @@ class BaseArtifactDeletionService:
 
 
 class ModelDeletionService(BaseArtifactDeletionService):
-    """Remove a single model version row."""
+    """Remove a single model version row or the whole model artifact."""
 
     async def delete_model_version(self, name: str, version: str) -> None:
         """Validate *name* / *version* and delete the matching model version.
@@ -787,9 +787,24 @@ class ModelDeletionService(BaseArtifactDeletionService):
         await self._repo.delete_model_version(name=name, version=version)
         await self._commit()
 
+    async def delete_model(self, name: str) -> None:
+        """Validate *name* and delete the whole model artifact (versions cascade).
+
+        Raises
+        ------
+        InvalidArtifactNameError
+            When *name* fails the length or character-set rules.
+        ModelNotFoundError
+            When the model artifact *name* does not exist.
+        """
+        _validate_artifact_name(name)
+
+        await self._repo.delete_model(name=name)
+        await self._commit()
+
 
 class DatasetDeletionService(BaseArtifactDeletionService):
-    """Remove a single dataset version row."""
+    """Remove a single dataset version row or the whole dataset artifact."""
 
     async def delete_dataset_version(self, name: str, version: str) -> None:
         """Validate *name* / *version* and delete the matching dataset version.
@@ -808,4 +823,19 @@ class DatasetDeletionService(BaseArtifactDeletionService):
         self._reject_latest_alias(version)
 
         await self._repo.delete_dataset_version(name=name, version=version)
+        await self._commit()
+
+    async def delete_dataset(self, name: str) -> None:
+        """Validate *name* and delete the whole dataset artifact (versions cascade).
+
+        Raises
+        ------
+        InvalidArtifactNameError
+            When *name* fails the length or character-set rules.
+        DatasetNotFoundError
+            When the dataset artifact *name* does not exist.
+        """
+        _validate_artifact_name(name)
+
+        await self._repo.delete_dataset(name=name)
         await self._commit()

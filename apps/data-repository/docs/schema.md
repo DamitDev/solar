@@ -206,7 +206,7 @@ Version-level registration still uses `POST /api/{models,datasets}/{name}/versio
 
 **`digest` instead of `checksum`.** Aligns with OCI terminology. Stores the manifest digest (e.g. `sha256:a3ed95...`) for content-addressable lookups.
 
-**`ON DELETE CASCADE` on versions.** Deleting an artifact removes all its versions. This is intentional — an artifact without versions is meaningless, and Harbor repo deletion is handled separately.
+**`ON DELETE CASCADE` on versions.** Deleting an artifact removes all its versions. This is intentional — an artifact without versions is meaningless, and Harbor repo deletion is handled by Solar Control's catalog delete relay (S-048), which removes the Harbor artifacts before calling the unregister endpoint.
 
 ## JSONB Metadata Conventions
 

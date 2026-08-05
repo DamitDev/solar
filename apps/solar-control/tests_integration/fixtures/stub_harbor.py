@@ -64,6 +64,10 @@ _V2_DELETE_RE = re.compile(
     r"^/api/v2\.0/projects/(?P<project>[^/]+)/repositories/"
     r"(?P<repo>[^/]+)/artifacts/(?P<ref>[^/]+)$"
 )
+# Harbor v2.0 REST API repository delete (S-048 best-effort cleanup)
+_V2_REPO_DELETE_RE = re.compile(
+    r"^/api/v2\.0/projects/(?P<project>[^/]+)/repositories/(?P<repo>[^/]+)$"
+)
 
 
 def sha256_digest(data: bytes) -> str:
@@ -84,6 +88,8 @@ class _StubHarborState:
         # (method, path, headers-dict) log
         self.requests: list[tuple[str, str, dict[str, str]]] = []
         self.base_url = ""
+        # When True, artifact deletes return 500 (simulates Harbor failure).
+        self.reject_artifact_delete = False
         # Optional on-disk mirror of the request log (for debugging hangs).
         self.log_file: str = ""
 
@@ -105,6 +111,7 @@ class _StubHarborState:
     def reset(self) -> None:
         with self._lock:
             self.requests = []
+            self.reject_artifact_delete = False
 
     def register_model(
         self, harbor_ref: str, files: dict[str, bytes]
@@ -149,6 +156,11 @@ class _StubHarborState:
     def get_blob(self, digest: str) -> bytes | None:
         with self._lock:
             return self.blobs.get(digest)
+
+    def repo_manifest_count(self, repo: str) -> int:
+        """Number of manifests still registered under *repo*."""
+        with self._lock:
+            return len(self.manifests.get(repo, {}))
 
 
 def split_ref(harbor_ref: str) -> tuple[str, str]:
@@ -282,10 +294,14 @@ class StubHarborHandler(BaseHTTPRequestHandler):
             self._challenge("registry:catalog:*")
             return
 
-        # Harbor v2.0 REST API (rollback deletes)
+        # Harbor v2.0 REST API (rollback deletes + repository cleanup)
         m = _V2_DELETE_RE.match(path)
         if m:
             self._handle_v2_delete(m)
+            return
+        m = _V2_REPO_DELETE_RE.match(path)
+        if m and method == "DELETE":
+            self._handle_v2_repo_delete(m)
             return
 
         # Blob upload session: open (POST) / PATCH / close (PUT)
@@ -482,12 +498,24 @@ class StubHarborHandler(BaseHTTPRequestHandler):
                 {"Content-Type": "application/json"},
             )
             return
+        if self.state.reject_artifact_delete:
+            self._send(
+                500,
+                b'{"errors":[{"code":"INTERNAL","message":"delete rejected"}]}',
+                {"Content-Type": "application/json"},
+            )
+            return
         # The v2.0 API path splits project/repo; manifests are keyed by the
         # full "project/repo" path used on the /v2/ Distribution API.
         full_repo = f"{m.group('project')}/{m.group('repo')}"
         ref = m.group("ref")
         with self.state._lock:
-            removed = self.state.manifests.get(full_repo, {}).pop(ref, None)
+            repo_manifests = self.state.manifests.get(full_repo, {})
+            removed = repo_manifests.pop(ref, None)
+            # Mirror real Harbor: an empty repository disappears after its
+            # last artifact is deleted.
+            if removed is not None and not repo_manifests:
+                self.state.manifests.pop(full_repo, None)
         if removed is None:
             self._send(
                 404,
@@ -495,6 +523,33 @@ class StubHarborHandler(BaseHTTPRequestHandler):
                 {"Content-Type": "application/json"},
             )
             return
+        self._send(200, b"", {"Content-Type": "application/json"})
+
+    def _handle_v2_repo_delete(self, m: re.Match[str]) -> None:
+        """Repository-level DELETE (S-048 best-effort cleanup).
+
+        404 when the repository is absent — real Harbor auto-removes an empty
+        repository after its last artifact is deleted, so the robot account's
+        explicit call normally finds it already gone.
+        """
+        if not self._has_basic():
+            self._send(
+                401,
+                b'{"errors":[{"code":"UNAUTHORIZED","message":"auth required"}]}',
+                {"Content-Type": "application/json"},
+            )
+            return
+        full_repo = f"{m.group('project')}/{m.group('repo')}"
+        with self.state._lock:
+            manifests = self.state.manifests.get(full_repo)
+            if not manifests:
+                self._send(
+                    404,
+                    b'{"errors":[{"code":"NOT_FOUND","message":"repository not found"}]}',
+                    {"Content-Type": "application/json"},
+                )
+                return
+            self.state.manifests.pop(full_repo, None)
         self._send(200, b"", {"Content-Type": "application/json"})
 
     def _handle_token(self) -> None:
@@ -591,3 +646,22 @@ class StubHarbor:
 
     def reset(self) -> None:
         self.state.reset()
+
+    # -- S-048 delete support ----------------------------------------------
+
+    @property
+    def reject_artifact_delete(self) -> bool:
+        """When True, artifact deletes return 500 (simulates Harbor failure)."""
+        return self.state.reject_artifact_delete
+
+    @reject_artifact_delete.setter
+    def reject_artifact_delete(self, value: bool) -> None:
+        self.state.reject_artifact_delete = value
+
+    def repo_manifest_count(self, repo: str) -> int:
+        """Number of manifests still registered under *repo*."""
+        return self.state.repo_manifest_count(repo)
+
+    def get_manifest(self, repo: str, reference: str) -> dict[str, Any] | None:
+        """Fetch a manifest by repository and reference (None when deleted)."""
+        return self.state.get_manifest(repo, reference)

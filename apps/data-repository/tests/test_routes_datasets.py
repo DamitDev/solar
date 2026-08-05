@@ -438,6 +438,52 @@ def test_delete_dataset_version_latest_alias_returns_422():
 
 
 # ---------------------------------------------------------------------------
+# DELETE /api/datasets/{name}
+# ---------------------------------------------------------------------------
+
+
+def _make_artifact_delete_client(side_effect=None) -> TestClient:
+    """Return a TestClient with ``DatasetDeletionService.delete_dataset`` mocked."""
+    app = FastAPI()
+    app.include_router(router)
+
+    mock_service = MagicMock()
+    mock_service.delete_dataset = AsyncMock(
+        return_value=None,
+        side_effect=side_effect,
+    )
+    app.dependency_overrides[get_dataset_deletion_service] = lambda: mock_service
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_delete_dataset_returns_204_on_success():
+    client = _make_artifact_delete_client()
+    resp = client.delete("/api/datasets/iris-tickets")
+
+    assert resp.status_code == 204
+    assert resp.content == b""
+
+
+def test_delete_dataset_not_found_returns_404():
+    client = _make_artifact_delete_client(
+        side_effect=DatasetNotFoundError("missing dataset"),
+    )
+    resp = client.delete("/api/datasets/iris-tickets")
+
+    assert resp.status_code == 404
+
+
+def test_delete_dataset_invalid_name_returns_422():
+    client = _make_artifact_delete_client(
+        side_effect=InvalidArtifactNameError("bad name"),
+    )
+    resp = client.delete("/api/datasets/BAD")
+
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
 # GET /api/datasets  (list datasets)
 # ---------------------------------------------------------------------------
 

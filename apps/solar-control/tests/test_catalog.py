@@ -91,7 +91,7 @@ def mock_host_2():
 async def test_catalog_proxies_pagination_and_search(catalog_settings):
     listing = {"total": 2, "items": REPO_MODELS[:2]}
     with (
-        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.request") as mock_get,
         patch("app.database.hosts.host_db.get_all_hosts", return_value=[]),
     ):
         mock_get.return_value = _cm_response(200, listing)
@@ -99,7 +99,8 @@ async def test_catalog_proxies_pagination_and_search(catalog_settings):
         resp = await get_catalog_models(search="llama", limit=10, offset=20)
 
     call = mock_get.call_args
-    assert call.args[0] == "http://data-repo:8000/api/models"
+    assert call.args[0] == "GET"
+    assert call.args[1] == "http://data-repo:8000/api/models"
     assert call.kwargs["params"] == {"limit": 10, "offset": 20, "search": "llama"}
 
     assert resp.total == 2
@@ -120,7 +121,7 @@ async def test_catalog_proxies_pagination_and_search(catalog_settings):
 async def test_catalog_proxies_default_pagination(catalog_settings):
     listing = {"total": 0, "items": []}
     with (
-        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.request") as mock_get,
         patch("app.database.hosts.host_db.get_all_hosts", return_value=[]),
     ):
         mock_get.return_value = _cm_response(200, listing)
@@ -138,7 +139,7 @@ async def test_catalog_proxies_default_pagination(catalog_settings):
 async def test_catalog_forwards_data_repository_api_key(catalog_settings):
     catalog_settings.data_repository_api_key = "repo-key"
     with (
-        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.request") as mock_get,
         patch("app.database.hosts.host_db.get_all_hosts", return_value=[]),
     ):
         mock_get.return_value = _cm_response(200, {"total": 0, "items": []})
@@ -185,6 +186,7 @@ async def test_catalog_enriches_with_deployment_and_running_instances(
     ]
 
     with (
+        patch("aiohttp.ClientSession.request") as mock_request,
         patch("aiohttp.ClientSession.get") as mock_get,
         patch("app.database.hosts.host_db.get_all_hosts", return_value=hosts),
         patch(
@@ -192,8 +194,8 @@ async def test_catalog_enriches_with_deployment_and_running_instances(
             side_effect=[instances, []],
         ),
     ):
+        mock_request.side_effect = [_cm_response(200, listing)]
         mock_get.side_effect = [
-            _cm_response(200, listing),
             _cm_response(200, host1_models),
             _cm_response(200, host2_models),
         ]
@@ -241,14 +243,13 @@ async def test_catalog_joins_legacy_host_entries_by_name(catalog_settings, mock_
         }
     ]
     with (
+        patch("aiohttp.ClientSession.request") as mock_request,
         patch("aiohttp.ClientSession.get") as mock_get,
         patch("app.database.hosts.host_db.get_all_hosts", return_value=[mock_host]),
         patch("app.socketio_app.host_handlers.get_host_instances", return_value=[]),
     ):
-        mock_get.side_effect = [
-            _cm_response(200, listing),
-            _cm_response(200, host_models),
-        ]
+        mock_request.side_effect = [_cm_response(200, listing)]
+        mock_get.side_effect = [_cm_response(200, host_models)]
 
         resp = await get_catalog_models()
 
@@ -291,7 +292,7 @@ async def test_catalog_counts_running_instances_from_source_variants(
     ]
 
     with (
-        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.request") as mock_get,
         patch("app.database.hosts.host_db.get_all_hosts", return_value=hosts),
         patch(
             "app.socketio_app.host_handlers.get_host_instances",
@@ -325,7 +326,7 @@ async def test_catalog_counts_running_instances_from_source_variants(
 async def test_catalog_data_repository_unreachable(catalog_settings):
     with (
         patch(
-            "aiohttp.ClientSession.get",
+            "aiohttp.ClientSession.request",
             side_effect=aiohttp.ClientConnectionError("Refused"),
         ),
         pytest.raises(HTTPException) as exc,
@@ -346,7 +347,7 @@ async def test_catalog_data_repository_not_configured(catalog_settings):
 
 @pytest.mark.anyio
 async def test_catalog_data_repository_upstream_error(catalog_settings):
-    with patch("aiohttp.ClientSession.get") as mock_get:
+    with patch("aiohttp.ClientSession.request") as mock_get:
         mock_get.return_value = _cm_response(500, {"detail": "boom"})
         with pytest.raises(HTTPException) as exc:
             await get_catalog_models()
@@ -364,7 +365,7 @@ async def test_catalog_availability_source_down_marks_unknown(
     """All hosts unreachable -> no false 'unavailable'; statuses stay unknown."""
     listing = {"total": 1, "items": [REPO_MODELS[0]]}
     with (
-        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.request") as mock_get,
         patch(
             "app.database.hosts.host_db.get_all_hosts",
             return_value=[mock_host, mock_host_2],
@@ -401,6 +402,7 @@ async def test_catalog_availability_partial_failure(
         }
     ]
     with (
+        patch("aiohttp.ClientSession.request") as mock_request,
         patch("aiohttp.ClientSession.get") as mock_get,
         patch(
             "app.database.hosts.host_db.get_all_hosts",
@@ -408,8 +410,8 @@ async def test_catalog_availability_partial_failure(
         ),
         patch("app.socketio_app.host_handlers.get_host_instances", return_value=[]),
     ):
+        mock_request.side_effect = [_cm_response(200, listing)]
         mock_get.side_effect = [
-            _cm_response(200, listing),
             aiohttp.ClientConnectionError("down"),
             _cm_response(200, host2_models),
         ]
@@ -443,7 +445,7 @@ async def test_collect_availability_reports_failures(
             _cm_response(200, []),
             aiohttp.ClientConnectionError("down"),
         ]
-        by_name, status = await _collect_availability()
+        by_name, _by_version, status = await _collect_availability()
     assert by_name == {}
     assert status == "partial"
 

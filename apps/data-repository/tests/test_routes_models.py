@@ -444,6 +444,52 @@ def test_delete_model_version_latest_alias_returns_422():
 
 
 # ---------------------------------------------------------------------------
+# DELETE /api/models/{name}
+# ---------------------------------------------------------------------------
+
+
+def _make_artifact_delete_client(side_effect=None) -> TestClient:
+    """Return a TestClient with ``ModelDeletionService.delete_model`` mocked."""
+    app = FastAPI()
+    app.include_router(router)
+
+    mock_service = MagicMock()
+    mock_service.delete_model = AsyncMock(
+        return_value=None,
+        side_effect=side_effect,
+    )
+    app.dependency_overrides[get_model_deletion_service] = lambda: mock_service
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_delete_model_returns_204_on_success():
+    client = _make_artifact_delete_client()
+    resp = client.delete("/api/models/mymodel")
+
+    assert resp.status_code == 204
+    assert resp.content == b""
+
+
+def test_delete_model_not_found_returns_404():
+    client = _make_artifact_delete_client(
+        side_effect=ModelNotFoundError("missing model"),
+    )
+    resp = client.delete("/api/models/mymodel")
+
+    assert resp.status_code == 404
+
+
+def test_delete_model_invalid_name_returns_422():
+    client = _make_artifact_delete_client(
+        side_effect=InvalidArtifactNameError("bad name"),
+    )
+    resp = client.delete("/api/models/BAD")
+
+    assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
 # GET /api/models  (list models)
 # ---------------------------------------------------------------------------
 

@@ -267,7 +267,7 @@ export function ModelCatalog() {
                               <tr className="border-b border-nord-3">
                                 <td colSpan={8} className="p-0">
                                   <div className="bg-nord-2/50 p-4 sm:p-6">
-                                    <ModelDetail model={model} />
+                                    <ModelDetail model={model} onDeleted={fetchCatalog} />
                                   </div>
                                 </td>
                               </tr>
@@ -353,7 +353,7 @@ export function ModelCatalog() {
       </main>
 
       {/* Detail drawer — cards view opens this instead of expanding in place */}
-      <ModelDrawer model={detailModel} onClose={() => setDetailModel(null)} />
+      <ModelDrawer model={detailModel} onClose={() => setDetailModel(null)} onDeleted={fetchCatalog} />
     </div>
   );
 }

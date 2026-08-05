@@ -431,6 +431,51 @@ class OciPushClient:
             status_code=response.status_code,
         )
 
+    async def delete_repository(self, repo: str) -> bool:
+        """Delete a Harbor repository via the v2.0 API (best-effort, S-048).
+
+        The robot account may delete artifacts but not repositories, and real
+        Harbor auto-removes an empty repository after its last artifact is
+        deleted — so this call is a fallback, never a requirement.
+
+        Returns ``True`` when the repository is gone (200/202, or 404 —
+        already removed), ``False`` when forbidden (403) or on any other
+        failure. Never raises for permission failures; the outcome is
+        reported by the caller.
+        """
+        project, repo_name = split_project_repo(repo)
+        url = (
+            f"{self._base_url}/api/v2.0/projects/{project}" f"/repositories/{repo_name}"
+        )
+        try:
+            response = await self._request(
+                "DELETE", url, auth=httpx.BasicAuth(self._username, self._password)
+            )
+        except OciPushError as exc:
+            logger.warning("Failed to delete Harbor repository %s: %s", repo, exc)
+            return False
+
+        if response.status_code in (200, 202, 404):
+            logger.info(
+                "Deleted Harbor repository %s (status=%d)",
+                repo,
+                response.status_code,
+            )
+            return True
+        if response.status_code == 403:
+            logger.warning(
+                "Robot account may not delete repository %s (403); "
+                "empty repositories are auto-removed by Harbor",
+                repo,
+            )
+            return False
+        logger.warning(
+            "Unexpected status %d deleting repository %s",
+            response.status_code,
+            repo,
+        )
+        return False
+
 
 async def _iter_bytes(data: bytes, chunk_size: int) -> AsyncIterator[bytes]:
     """Yield *data* in fixed-size chunks (for config blob uploads)."""

@@ -173,3 +173,22 @@ async def delete_model_version(
     except (ModelNotFoundError, ModelVersionNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=exc.detail)
     return Response(status_code=204)
+
+
+@router.delete("/{name}", status_code=204)
+async def delete_model(
+    name: str,
+    service: Annotated[ModelDeletionService, Depends(get_model_deletion_service)],
+) -> Response:
+    """Delete the whole model artifact; version rows cascade.
+
+    Pure unregister — Harbor cleanup is orchestrated by Solar Control's
+    catalog delete relay (S-048) before this endpoint is called.
+    """
+    try:
+        await service.delete_model(name=name)
+    except InvalidArtifactNameError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail)
+    except ModelNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=exc.detail)
+    return Response(status_code=204)

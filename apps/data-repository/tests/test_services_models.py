@@ -1001,6 +1001,81 @@ async def test_delete_dataset_version_not_found_propagates(exc):
 
 
 # ---------------------------------------------------------------------------
+# Artifact-level delete (DELETE /models/{name})
+# ---------------------------------------------------------------------------
+
+
+async def test_delete_model_success_delegates_to_repo():
+    delete_mock = AsyncMock(return_value=None)
+    async with _model_delete_svc(repo_overrides={"delete_model": delete_mock}) as (
+        svc,
+        __,
+    ):
+        await svc.delete_model("mymodel")
+
+    delete_mock.assert_awaited_once_with(name="mymodel")
+
+
+async def test_delete_model_invalid_name_raises():
+    async with _model_delete_svc() as (svc, __):
+        with pytest.raises(InvalidArtifactNameError):
+            await svc.delete_model("BAD")
+
+
+async def test_delete_model_not_found_propagates():
+    async with _model_delete_svc(
+        repo_overrides={
+            "delete_model": AsyncMock(side_effect=ModelNotFoundError("nope"))
+        }
+    ) as (svc, __):
+        with pytest.raises(ModelNotFoundError):
+            await svc.delete_model("mymodel")
+
+
+async def test_delete_model_commits_before_returning():
+    async with _model_delete_svc(
+        repo_overrides={"delete_model": AsyncMock(return_value=None)}
+    ) as (svc, _):
+        await svc.delete_model("mymodel")
+    svc._session.commit.assert_awaited_once()
+
+
+async def test_delete_dataset_success_delegates_to_repo():
+    delete_mock = AsyncMock(return_value=None)
+    async with _dataset_delete_svc(repo_overrides={"delete_dataset": delete_mock}) as (
+        svc,
+        __,
+    ):
+        await svc.delete_dataset("iris-tickets")
+
+    delete_mock.assert_awaited_once_with(name="iris-tickets")
+
+
+async def test_delete_dataset_invalid_name_raises():
+    async with _dataset_delete_svc() as (svc, __):
+        with pytest.raises(InvalidArtifactNameError):
+            await svc.delete_dataset("BAD")
+
+
+async def test_delete_dataset_not_found_propagates():
+    async with _dataset_delete_svc(
+        repo_overrides={
+            "delete_dataset": AsyncMock(side_effect=DatasetNotFoundError("nope"))
+        }
+    ) as (svc, __):
+        with pytest.raises(DatasetNotFoundError):
+            await svc.delete_dataset("iris-tickets")
+
+
+async def test_delete_dataset_commits_before_returning():
+    async with _dataset_delete_svc(
+        repo_overrides={"delete_dataset": AsyncMock(return_value=None)}
+    ) as (svc, _):
+        await svc.delete_dataset("iris-tickets")
+    svc._session.commit.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # list_models (ModelQueryService)
 # ---------------------------------------------------------------------------
 

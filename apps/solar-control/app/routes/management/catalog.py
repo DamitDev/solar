@@ -26,13 +26,13 @@ from datetime import datetime
 from typing import Any, Literal
 
 import aiohttp
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.database.hosts import host_db
-from app.model_resolvers.parser import HuggingFaceURI, RepoURI, parse
 from app.models import Host
+from app.services import catalog_delete
 
 logger = logging.getLogger(__name__)
 
@@ -105,13 +105,37 @@ class CatalogResponse(BaseModel):
     meta: CatalogMeta
 
 
-# ── Data Repository proxy (D-013) ─────────────────────────────
+class VersionSolarRuntimeInfo(BaseModel):
+    """Per-version runtime context (S-048) — what blocks a version delete."""
+
+    running_instances: int
+    deployed_hosts: list[DeployedHostInfo] = Field(default_factory=list)
 
 
-async def _list_data_repository_models(
-    search: str | None, limit: int, offset: int
+class CatalogModelVersionItem(BaseModel):
+    """One catalog version: Data Repository metadata + per-version Solar block."""
+
+    version: str
+    harbor_ref: str
+    created_at: datetime
+    size_bytes: int | None = None
+    checksum: str | None = None
+    solar: VersionSolarRuntimeInfo
+
+
+class CatalogModelVersionsResponse(BaseModel):
+    versions: list[CatalogModelVersionItem]
+
+
+# ── Data Repository proxy (D-013 / S-048) ─────────────────────
+
+
+async def _request_data_repository(
+    method: str,
+    path: str,
+    params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Call Data Repository ``GET /api/models`` and return its body.
+    """Call Data Repository and return its JSON body.
 
     Error mapping (mirrors ``app.model_resolvers.repo``):
       * 500 if ``DATA_REPOSITORY_URL`` is unset
@@ -124,19 +148,16 @@ async def _list_data_repository_models(
             detail="DATA_REPOSITORY_URL is not configured",
         )
 
-    url = f"{settings.data_repository_url.rstrip('/')}/api/models"
+    url = f"{settings.data_repository_url.rstrip('/')}{path}"
     headers = {"Content-Type": "application/json"}
     if settings.data_repository_api_key:
         headers["X-API-Key"] = settings.data_repository_api_key
 
-    params: dict[str, Any] = {"limit": limit, "offset": offset}
-    if search:
-        params["search"] = search
-
     try:
         async with (
             aiohttp.ClientSession() as session,
-            session.get(
+            session.request(
+                method,
                 url,
                 params=params,
                 headers=headers,
@@ -155,14 +176,13 @@ async def _list_data_repository_models(
             if response.status in {404, 422}:
                 raise HTTPException(
                     status_code=response.status,
-                    detail=detail or "Data Repository model list failed",
+                    detail=detail or f"Data Repository {path} failed",
                 )
 
             raise HTTPException(
                 status_code=502,
                 detail=(
-                    "Data Repository model list failed "
-                    f"[{response.status}]: {detail}"
+                    f"Data Repository {path} failed " f"[{response.status}]: {detail}"
                 ),
             )
     except HTTPException:
@@ -179,8 +199,23 @@ async def _list_data_repository_models(
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=502,
-            detail=f"Unexpected error during Data Repository model list: {exc}",
+            detail=f"Unexpected error during Data Repository {path}: {exc}",
         )
+
+
+async def _list_data_repository_models(
+    search: str | None, limit: int, offset: int
+) -> dict[str, Any]:
+    """Call Data Repository ``GET /api/models`` and return its body."""
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
+    if search:
+        params["search"] = search
+    return await _request_data_repository("GET", "/api/models", params=params)
+
+
+async def _list_data_repository_model_versions(name: str) -> dict[str, Any]:
+    """Call Data Repository ``GET /api/models/{name}/versions`` (S-048)."""
+    return await _request_data_repository("GET", f"/api/models/{name}/versions")
 
 
 # ── Solar enrichment ──────────────────────────────────────────
@@ -214,20 +249,25 @@ async def _fetch_models_from_host(host: Host) -> tuple[list[dict], bool]:
     return [], False
 
 
-async def _collect_availability() -> (
-    tuple[dict[str, list[DeployedHostInfo]], Literal["ok", "partial", "unavailable"]]
-):
+async def _collect_availability() -> tuple[
+    dict[str, list[DeployedHostInfo]],
+    dict[str, list[DeployedHostInfo]],
+    Literal["ok", "partial", "unavailable"],
+]:
     """Aggregate host-level model availability (same mechanism as S-020).
 
-    Returns ``(model_name -> [DeployedHostInfo], enrichment_status)``.
-    Host entries are keyed by the authoritative ``model_name`` recorded
-    at pull time (D-016), falling back to the manifest ``name`` for
-    legacy entries.
+    Returns ``(model_name -> [DeployedHostInfo], name:version -> [DeployedHostInfo],
+    enrichment_status)``. Host entries are keyed by the authoritative
+    ``model_name`` recorded at pull time (D-016), falling back to the
+    manifest ``name`` for legacy entries. The version-level map (S-048)
+    keys on ``name:version`` from the manifest ``version`` field; legacy
+    entries without a version contribute only to the model-level map.
     """
     hosts = await host_db.get_all_hosts()
     results = await asyncio.gather(*[_fetch_models_from_host(h) for h in hosts])
 
     by_name: dict[str, list[DeployedHostInfo]] = {}
+    by_version: dict[str, list[DeployedHostInfo]] = {}
     failed = 0
     for host, (models, ok) in zip(hosts, results):
         if not ok:
@@ -237,14 +277,16 @@ async def _collect_availability() -> (
             key = m.get("model_name") or m.get("name")
             if not key:
                 continue
-            by_name.setdefault(key, []).append(
-                DeployedHostInfo(
-                    host_id=host.id,
-                    host_name=host.name,
-                    size_bytes=m.get("size_bytes", 0),
-                    path=m.get("path", ""),
-                )
+            info = DeployedHostInfo(
+                host_id=host.id,
+                host_name=host.name,
+                size_bytes=m.get("size_bytes", 0),
+                path=m.get("path", ""),
             )
+            by_name.setdefault(key, []).append(info)
+            version = m.get("version")
+            if version:
+                by_version.setdefault(f"{key}:{version}", []).append(info)
 
     status: Literal["ok", "partial", "unavailable"]
     if failed == 0:
@@ -253,7 +295,7 @@ async def _collect_availability() -> (
         status = "unavailable"
     else:
         status = "partial"
-    return by_name, status
+    return by_name, by_version, status
 
 
 def _model_name_from_source(source_uri: str | None) -> str | None:
@@ -261,18 +303,11 @@ def _model_name_from_source(source_uri: str | None) -> str | None:
 
     ``repo://name:version/...`` -> ``name``; ``huggingface://org/model``
     -> ``org/model``; anything unparsable -> None.
+    Shared implementation lives in the delete service module (S-048).
     """
     if not source_uri:
         return None
-    try:
-        parsed = parse(source_uri)
-    except HTTPException:
-        return None
-    if isinstance(parsed, RepoURI):
-        return parsed.name
-    if isinstance(parsed, HuggingFaceURI):
-        return parsed.model_id
-    return None
+    return catalog_delete._model_name_from_source(source_uri)
 
 
 async def _collect_running_instances() -> dict[str, list[RunningInstanceInfo]]:
@@ -282,27 +317,18 @@ async def _collect_running_instances() -> dict[str, list[RunningInstanceInfo]]:
     The cache is best-effort: hosts that never connected contribute
     nothing, and a missing cache is indistinguishable from "no instances".
     """
-    from app.socketio_app.host_handlers import get_host_instances
-
-    hosts = await host_db.get_all_hosts()
+    instances = await catalog_delete.collect_running_instances()
     by_name: dict[str, list[RunningInstanceInfo]] = {}
-    for host in hosts:
-        instances = await get_host_instances(host.id)
-        for inst in instances:
-            if inst.get("status") != "running":
-                continue
-            config = inst.get("config") or {}
-            source = config.get("model_source") or inst.get("model_source")
-            name = _model_name_from_source(source)
-            if not name:
-                continue
-            by_name.setdefault(name, []).append(
-                RunningInstanceInfo(
-                    host_id=host.id,
-                    host_name=host.name,
-                    instance_id=str(inst.get("id", "")),
-                )
+    for inst in instances:
+        if inst.name is None:
+            continue
+        by_name.setdefault(inst.name, []).append(
+            RunningInstanceInfo(
+                host_id=inst.host_id,
+                host_name=inst.host_name,
+                instance_id=inst.instance_id,
             )
+        )
     return by_name
 
 
@@ -348,7 +374,7 @@ async def get_catalog_models(
     total = repo_listing.get("total", len(raw_items))
 
     # Enrichment is best-effort; failures degrade metadata, never the response.
-    availability, enrichment_status = await _collect_availability()
+    availability, _by_version, enrichment_status = await _collect_availability()
     running = await _collect_running_instances()
     availability_ok = enrichment_status == "ok"
 
@@ -381,3 +407,69 @@ async def get_catalog_models(
         items=items,
         meta=CatalogMeta(enrichment=enrichment_status),
     )
+
+
+# ── Version listing and deletion (S-048) ──────────────────────
+
+
+@router.get("/models/{name}/versions", response_model=CatalogModelVersionsResponse)
+async def get_catalog_model_versions(name: str) -> CatalogModelVersionsResponse:
+    """List Data Repository versions enriched with per-version Solar context.
+
+    Each version carries a ``solar`` block with the running instances and
+    deployed hosts that would block its deletion, so the WebUI can show
+    blockers before the user attempts a delete.
+    """
+    listing = await _list_data_repository_model_versions(name)
+    raw_versions = listing.get("versions", [])
+
+    _by_name, by_version, _status = await _collect_availability()
+    running = await catalog_delete.collect_running_instances()
+    newest = raw_versions[0].get("version") if raw_versions else None
+
+    items: list[CatalogModelVersionItem] = []
+    for raw in raw_versions:
+        version = raw.get("version")
+        if not version:
+            continue
+        blockers = [
+            i
+            for i in running
+            if catalog_delete._instance_serves_version(i, name, version, newest)
+        ]
+        items.append(
+            CatalogModelVersionItem(
+                version=version,
+                harbor_ref=raw.get("harbor_ref", ""),
+                created_at=raw.get("created_at"),
+                size_bytes=raw.get("size_bytes"),
+                checksum=raw.get("checksum"),
+                solar=VersionSolarRuntimeInfo(
+                    running_instances=len(blockers),
+                    deployed_hosts=by_version.get(f"{name}:{version}", []),
+                ),
+            )
+        )
+
+    return CatalogModelVersionsResponse(versions=items)
+
+
+@router.delete("/models/{name}/versions/{version}", status_code=204)
+async def delete_catalog_model_version(
+    name: str,
+    version: str,
+) -> Response:
+    """Delete one model version: Harbor first, then unregister (S-048)."""
+    await catalog_delete.build_catalog_delete_service().delete_version(name, version)
+    return Response(status_code=204)
+
+
+@router.delete("/models/{name}", response_model=catalog_delete.DeleteArtifactResult)
+async def delete_catalog_model(name: str) -> catalog_delete.DeleteArtifactResult:
+    """Delete every version of a model, then the artifact row (S-048).
+
+    Returns per-version results: versions whose Harbor delete succeeded are
+    unregistered; when every version is clean the artifact row is removed
+    and a best-effort repository delete is attempted.
+    """
+    return await catalog_delete.build_catalog_delete_service().delete_artifact(name)

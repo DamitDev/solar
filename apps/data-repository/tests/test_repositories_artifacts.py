@@ -453,6 +453,79 @@ async def test_delete_model_version_raises_when_name_belongs_to_dataset(mock_ses
         await repo.delete_model_version(name="iris-tickets", version="v1")
 
 
+# ---------------------------------------------------------------------------
+# delete_model / delete_dataset (artifact-level delete)
+# ---------------------------------------------------------------------------
+
+
+async def test_delete_model_success(mock_session):
+    """DELETE affects one artifact row — no existence probe is issued."""
+    mock_session.execute = AsyncMock(return_value=_delete_result(1))
+    repo = ArtifactRepository(mock_session)
+
+    await repo.delete_model(name="mymodel")
+
+    mock_session.execute.assert_awaited_once()
+
+
+async def test_delete_model_raises_when_model_missing(mock_session):
+    """DELETE affected zero rows and artifact row is absent — model 404."""
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = None
+
+    mock_session.execute = AsyncMock(side_effect=[_delete_result(0), exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(ModelNotFoundError, match="mymodel"):
+        await repo.delete_model(name="mymodel")
+
+
+async def test_delete_model_raises_when_name_belongs_to_dataset(mock_session):
+    """DELETE affected zero rows (category filter) and exists row is dataset."""
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="dataset")
+
+    mock_session.execute = AsyncMock(side_effect=[_delete_result(0), exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(ModelNotFoundError):
+        await repo.delete_model(name="iris-tickets")
+
+
+async def test_delete_dataset_success(mock_session):
+    """DELETE affects one artifact row — no existence probe is issued."""
+    mock_session.execute = AsyncMock(return_value=_delete_result(1))
+    repo = ArtifactRepository(mock_session)
+
+    await repo.delete_dataset(name="iris-tickets")
+
+    mock_session.execute.assert_awaited_once()
+
+
+async def test_delete_dataset_raises_when_dataset_missing(mock_session):
+    """DELETE affected zero rows and artifact row is absent — dataset 404."""
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = None
+
+    mock_session.execute = AsyncMock(side_effect=[_delete_result(0), exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(DatasetNotFoundError, match="iris-tickets"):
+        await repo.delete_dataset(name="iris-tickets")
+
+
+async def test_delete_dataset_raises_when_name_belongs_to_model(mock_session):
+    """DELETE affected zero rows (category filter) and exists row is model."""
+    exists_result = MagicMock()
+    exists_result.fetchone.return_value = _make_row(category="model")
+
+    mock_session.execute = AsyncMock(side_effect=[_delete_result(0), exists_result])
+    repo = ArtifactRepository(mock_session)
+
+    with pytest.raises(DatasetNotFoundError):
+        await repo.delete_dataset(name="mymodel")
+
+
 async def test_get_dataset_version_exact_returns_record(mock_session):
     """JOIN query hits — single execute call returns the dataset version row."""
     version_row = _make_version_row(

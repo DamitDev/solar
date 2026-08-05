@@ -494,6 +494,38 @@ export interface CatalogResponse {
   meta: { enrichment: CatalogEnrichmentStatus };
 }
 
+// ─── Catalog version listing and deletion (S-048 / U-008) ───
+
+export interface CatalogModelVersion {
+  version: string;
+  harbor_ref: string;
+  created_at: string;
+  size_bytes: number | null;
+  checksum: string | null;
+  /** Per-version Solar runtime context — what blocks a version delete. */
+  solar: {
+    running_instances: number;
+    deployed_hosts: CatalogDeployedHost[];
+  };
+}
+
+export interface CatalogVersionsResponse {
+  versions: CatalogModelVersion[];
+}
+
+export interface CatalogDeleteFailure {
+  version: string;
+  detail: string;
+}
+
+export interface CatalogDeleteResult {
+  name: string;
+  deleted: string[];
+  failed: CatalogDeleteFailure[];
+  artifact_removed: boolean;
+  harbor_repository_removed: boolean;
+}
+
 // ─── Declarative deployment intents (U-003, spec deployment-intent.md §4/§10) ───
 
 export type IntentPhase = 'pending' | 'reconciling' | 'ready' | 'degraded' | 'failed' | 'deleting' | 'deleted';
