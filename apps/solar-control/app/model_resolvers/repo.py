@@ -21,7 +21,7 @@ from app.config import settings
 _PROPAGATED_HOST_CODES = {404, 507}
 
 # Long timeout for the host pull leg: a full Harbor download can take minutes.
-_HOST_PULL_TIMEOUT_S = 300
+# Value comes from settings.model_pull_timeout_s (see app/config.py).
 
 
 def to_local_uri(path: str) -> str:
@@ -181,7 +181,7 @@ async def post_harbor_pull(
                 url,
                 json=payload,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=_HOST_PULL_TIMEOUT_S),
+                timeout=aiohttp.ClientTimeout(total=settings.model_pull_timeout_s),
             ) as response,
         ):
             if response.status == 200:

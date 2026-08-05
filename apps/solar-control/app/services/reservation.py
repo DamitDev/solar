@@ -426,3 +426,96 @@ async def release_reservation(
         # (the host will expire it via TTL)
         await _remove_reservation(reservation_id)
         raise
+
+
+# ── Reconciler cold-start reservations ──────────────────────────
+#
+# The intent reconciler holds capacity on a host while a cold start (model
+# pull + load) is in flight — the host has no running instance yet, so
+# without a reservation placement would treat it as free and could
+# oversubscribe it. The reservation is created directly on the already
+# selected host (unlike the S-038 coordinator flow above, which selects the
+# host itself) and tracked in a per-intent Redis hash so the reconciler can
+# find and release its own reservations idempotently. Separate namespace
+# from RESERVATION_MAP so the two lifecycles never collide.
+
+RECONCILE_RESERVATION_PREFIX = "solar:reconcile:reservations"
+
+
+def _reconcile_reservation_key(intent_id: str) -> str:
+    """Redis hash key holding all reservations of one intent."""
+    return f"{RECONCILE_RESERVATION_PREFIX}:{intent_id}"
+
+
+async def reserve_host_capacity(
+    host: Host,
+    *,
+    vram_gb: float,
+    ram_gb: float | None = None,
+    ttl_seconds: float | None = None,
+    requester: str = "reconciler",
+    job_id: str,
+) -> str:
+    """Create a reservation directly on *host*; returns the host reservation id.
+
+    The host's capacity check doubles as an early gate: a 409 means the
+    host cannot fit the estimate, so the caller can abort before any model
+    download starts.
+    """
+    request = ReservationRequest(
+        vram_gb=vram_gb,
+        ram_gb=ram_gb,
+        job_id=job_id,
+        workload_type="inference",
+        requester=requester,
+    )
+    if ttl_seconds is not None:
+        request.ttl_seconds = int(ttl_seconds)
+    result = await _call_host_reserve(host, request)
+    return result.get("reservation_id") or result.get("id", "")
+
+
+async def release_host_capacity(host: Host, host_reservation_id: str) -> None:
+    """Release a reservation directly on *host* (404-tolerant)."""
+    try:
+        await _call_host_release(host, host_reservation_id)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+
+
+async def store_reconcile_reservation(
+    intent_id: str,
+    host_id: str,
+    host_reservation_id: str,
+    vram_gb: float,
+    ram_gb: float,
+) -> None:
+    """Record a reconciler reservation for ``(intent_id, host_id)`` in Redis."""
+    r = redis_client()
+    data = {
+        "host_reservation_id": host_reservation_id,
+        "vram_gb": vram_gb,
+        "ram_gb": ram_gb,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await r.hset(_reconcile_reservation_key(intent_id), host_id, json.dumps(data))
+
+
+async def get_reconcile_reservations(intent_id: str) -> dict[str, dict[str, Any]]:
+    """Return all reconciler reservations of *intent_id*: host_id → tracking dict."""
+    r = redis_client()
+    raw = await r.hgetall(_reconcile_reservation_key(intent_id))
+    out: dict[str, dict[str, Any]] = {}
+    for host_id, payload in raw.items():
+        try:
+            out[host_id] = json.loads(payload)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+async def remove_reconcile_reservation(intent_id: str, host_id: str) -> None:
+    """Drop the reconciler reservation for ``(intent_id, host_id)`` from Redis."""
+    r = redis_client()
+    await r.hdel(_reconcile_reservation_key(intent_id), host_id)

@@ -43,6 +43,16 @@ def fits_resources(
     if snapshot.vram_available_gb is not None and snapshot.vram_available_gb < vram_gb:
         return False
 
+    # Unified-memory fallback: a host without a VRAM dimension (Mac, or a
+    # CPU-only box) runs the model in system RAM. The VRAM estimate consumes
+    # the same unified memory there, so check it against RAM available.
+    if (
+        snapshot.vram_available_gb is None
+        and snapshot.ram_available_gb is not None
+        and snapshot.ram_available_gb < (ram_gb or 0.0) + vram_gb
+    ):
+        return False
+
     if (
         ram_gb is not None
         and snapshot.ram_available_gb is not None

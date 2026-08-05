@@ -91,6 +91,28 @@ class StartOutcomeUnknown(HTTPException):
 # turns such stalls into a recorded failure + paced backoff instead (§8.3).
 _ACTION_TIMEOUT_S = 60
 
+# Cold-start-capable actions (CREATE / EVACUATE / MIGRATE) may pull a
+# multi-GB model and block on the host's start until the backend reports
+# readiness — minutes, legitimately. Their bound covers the whole window
+# (pull + start + margin) so a cold start completes in one attempt instead
+# of recording a premature TimeoutError. Quick ops keep the short bound so
+# a stalled host never freezes the loop.
+_COLD_START_ACTIONS = frozenset(
+    {ActionType.CREATE, ActionType.EVACUATE, ActionType.MIGRATE}
+)
+
+
+def _action_timeout_s(action: Action) -> float:
+    """Return the timeout bound for *action* (see _ACTION_TIMEOUT_S)."""
+    if action.type in _COLD_START_ACTIONS:
+        return (
+            settings.model_pull_timeout_s
+            + settings.host_start_timeout_s
+            + _ACTION_TIMEOUT_S
+        )
+    return _ACTION_TIMEOUT_S
+
+
 # How long the *displaced* intent is left alone after a displacement
 # MIGRATE/stop so it does not race-recreate the instance the migration is
 # moving (§8.5: coordinated displacement, not a fight).
@@ -291,6 +313,9 @@ class Reconciler:
         diff/act path (S-042 §11).
         """
         # An edit voids the failure backoff earned by the previous spec.
+        # The reservation sweep runs first so releases happen even while
+        # the intent is in backoff or settle.
+        await self._release_finished_reservations(intent)
         self._backoff_void_on_spec_change(intent)
         if self._backoff_active(intent.id):
             logger.debug("Intent %s in backoff, skipping", intent.id)
@@ -334,7 +359,7 @@ class Reconciler:
             try:
                 t_act = time.monotonic()
                 result = await asyncio.wait_for(
-                    self._act(intent, action), timeout=_ACTION_TIMEOUT_S
+                    self._act(intent, action), timeout=_action_timeout_s(action)
                 )
                 logger.debug(
                     "act %s for %s took %.1fs",
@@ -1323,6 +1348,11 @@ class Reconciler:
 
             instance_config = self._build_instance_config(intent, host)
 
+            # Hold the intent's estimated VRAM on this host while the pull +
+            # start run: without a running instance yet, placement would
+            # otherwise see the host as free and oversubscribe it.
+            await self._reserve_cold_start(intent, action.host_id)
+
             logger.info(
                 "Creating instance for alias=%s on %s (reason: %s)",
                 intent.alias,
@@ -1462,6 +1492,10 @@ class Reconciler:
                 action.host_name or action.host_id,
                 action.target_host_name or action.target_host_id,
             )
+            # Hold the intent's estimated VRAM on the target while the
+            # migration's pull + start run there.
+            if action.target_host_id:
+                await self._reserve_cold_start(intent, action.target_host_id)
             # Leave this intent alone while the migration disowns the source
             # and brings the target up — otherwise the next diff sees neither
             # and races a duplicate CREATE.
@@ -1617,6 +1651,16 @@ class Reconciler:
                 self._settle_until[displaced_intent_id] = (
                     time.monotonic() + _MIGRATE_SETTLE_S
                 )
+            if displaced_intent_id:
+                # Hold capacity on the target while the migration's pull +
+                # start runs. Keyed by the DISPLACED intent — the instance
+                # arriving there is its replica, and its own sweep releases
+                # the reservation once the instance is observed running.
+                from app.database.intents import intent_db
+
+                displaced = await intent_db.get_intent(displaced_intent_id)
+                if displaced is not None:
+                    await self._reserve_cold_start(displaced, target_host.id)
             try:
                 result = await execute_migration(
                     instance_id=action.instance_id,
@@ -1677,6 +1721,146 @@ class Reconciler:
                 "Could not read priority for instance %s", instance_id, exc_info=True
             )
         return priority, intent_id
+
+    # ── Cold-start reservations ─────────────────────────────────
+
+    async def _reserve_cold_start(self, intent: Any, host_id: str) -> None:
+        """Reserve the intent's estimated VRAM on *host_id* before a cold start.
+
+        The host has no running instance while the model downloads/loads,
+        so without a reservation placement would treat it as free and could
+        oversubscribe it. Idempotent per ``(intent, host)``: a retry after a
+        timeout finds the existing reservation and does not stack a second
+        one. The host's capacity check doubles as an early gate — a 409
+        aborts the action before any download starts.
+        """
+        from app.database.hosts import host_db
+        from app.services.reservation import (
+            get_reconcile_reservations,
+            reserve_host_capacity,
+            store_reconcile_reservation,
+        )
+
+        resources = intent.resources
+        vram_gb = float(getattr(resources, "vram_gb", 0) or 0)
+        ram_gb = float(getattr(resources, "ram_gb", 0) or 0)
+        if vram_gb <= 0:
+            return
+
+        existing = await get_reconcile_reservations(intent.id)
+        if host_id in existing:
+            return
+
+        host = await host_db.get_host(host_id)
+        if host is None:
+            logger.warning("Host %s not found for cold-start reservation", host_id)
+            return
+
+        ttl = settings.model_pull_timeout_s + settings.host_start_timeout_s + 600
+        try:
+            host_reservation_id = await reserve_host_capacity(
+                host,
+                vram_gb=vram_gb,
+                ram_gb=ram_gb if ram_gb > 0 else None,
+                ttl_seconds=ttl,
+                requester=f"intent:{intent.alias}",
+                job_id=f"intent:{intent.id}",
+            )
+        except HTTPException:
+            logger.warning(
+                "Cold-start reservation failed for intent %s on host %s — "
+                "aborting action before download",
+                intent.id,
+                host_id,
+                exc_info=True,
+            )
+            raise
+        await store_reconcile_reservation(
+            intent.id, host_id, host_reservation_id, vram_gb, ram_gb
+        )
+        logger.info(
+            "Cold-start reservation %s for intent %s on host %s "
+            "(vram=%.1f GB, ram=%.1f GB)",
+            host_reservation_id,
+            intent.id,
+            host_id,
+            vram_gb,
+            ram_gb,
+        )
+
+    async def _release_finished_reservations(self, intent: Any) -> None:
+        """Release cold-start reservations whose instance is running or gone.
+
+        A reservation is held from action start until the instance it
+        protects is observed ``running`` (the host then reports its real
+        VRAM usage, so holding further would double-count) or no longer
+        exists on the host (definitive failure, delete, or scale-to-zero).
+        An instance still starting/stopped/failed keeps its reservation —
+        the recreate/restart it is heading for needs the capacity — and the
+        host-side TTL reaper is the backstop for a crashed control plane.
+        """
+        from app.database.hosts import host_db
+        from app.redis_state import host_store as _hs
+        from app.services.reservation import (
+            get_reconcile_reservations,
+            release_host_capacity,
+            remove_reconcile_reservation,
+        )
+
+        try:
+            reservations = await get_reconcile_reservations(intent.id)
+        except Exception:
+            logger.warning(
+                "Could not read reservations for intent %s",
+                intent.id,
+                exc_info=True,
+            )
+            return
+        if not reservations:
+            return
+
+        for host_id, data in reservations.items():
+            try:
+                instances = await _hs.get_host_instances(host_id)
+            except Exception:
+                logger.warning(
+                    "Could not read instances for host %s", host_id, exc_info=True
+                )
+                continue
+            inst = next(
+                (
+                    i
+                    for i in instances
+                    if (i.get("intent_id") or i.get("config", {}).get("intent_id"))
+                    == intent.id
+                ),
+                None,
+            )
+            if (
+                inst is not None
+                and (inst.get("status") or inst.get("state", "")) != "running"
+            ):
+                continue  # still starting / stopped / failed — keep holding
+
+            host = await host_db.get_host(host_id)
+            host_reservation_id = data.get("host_reservation_id") or ""
+            if host is not None and host_reservation_id:
+                try:
+                    await release_host_capacity(host, host_reservation_id)
+                except HTTPException as exc:
+                    logger.warning(
+                        "Failed to release reservation %s for intent %s on " "%s: %s",
+                        host_reservation_id,
+                        intent.id,
+                        host_id,
+                        exc.detail,
+                    )
+            await remove_reconcile_reservation(intent.id, host_id)
+            logger.info(
+                "Released cold-start reservation for intent %s on host %s",
+                intent.id,
+                host_id,
+            )
 
     async def _start_instance(self, host: Any, instance_id: str) -> None:
         """Start a stopped instance on *host* via POST /instances/{id}/start.

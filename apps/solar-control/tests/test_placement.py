@@ -131,6 +131,58 @@ def test_fits_resources_none_optional():
     assert fits_resources(snap, 20.0, None, None) is True
 
 
+# ── Unified-memory fallback (Mac / CPU-only hosts) ──────────────
+
+
+def test_fits_resources_vram_checked_against_ram_when_no_vram_dimension():
+    """A host without a VRAM dimension (unified memory) runs the model in
+    RAM — the VRAM estimate must fit in the RAM that is available."""
+    snap = HostResourceSnapshot(
+        host_id="h1",
+        host_name="test",
+        url="http://h:8000",
+        status=HostStatus.ONLINE,
+        reachable=True,
+        vram_available_gb=None,  # no dedicated VRAM (Mac)
+        ram_available_gb=32.0,
+    )
+    # 20 GB VRAM estimate fits in 32 GB unified RAM.
+    assert fits_resources(snap, 20.0, None, None) is True
+    # 40 GB VRAM estimate does not.
+    assert fits_resources(snap, 40.0, None, None) is False
+
+
+def test_fits_resources_vram_and_ram_together_against_ram_on_unified_host():
+    snap = HostResourceSnapshot(
+        host_id="h1",
+        host_name="test",
+        url="http://h:8000",
+        status=HostStatus.ONLINE,
+        reachable=True,
+        vram_available_gb=None,
+        ram_available_gb=32.0,
+    )
+    # 20 GB VRAM + 8 GB explicit RAM = 28 GB — fits.
+    assert fits_resources(snap, 20.0, 8.0, None) is True
+    # 20 GB VRAM + 16 GB explicit RAM = 36 GB — does not fit.
+    assert fits_resources(snap, 20.0, 16.0, None) is False
+
+
+def test_fits_resources_vram_dimension_still_authoritative_on_gpu_host():
+    """On a VRAM host the estimate is checked against VRAM, not RAM."""
+    snap = HostResourceSnapshot(
+        host_id="h1",
+        host_name="test",
+        url="http://h:8000",
+        status=HostStatus.ONLINE,
+        reachable=True,
+        vram_available_gb=24.0,
+        ram_available_gb=64.0,
+    )
+    # Plenty of RAM, not enough VRAM → no fit.
+    assert fits_resources(snap, 40.0, None, None) is False
+
+
 # ── find_candidates ─────────────────────────────────────────────
 
 
