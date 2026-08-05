@@ -139,3 +139,11 @@ class BackendRunner(ABC):
             GenerationMetrics if available, None otherwise.
         """
         return None
+
+    def is_ready_line(self, line: str) -> bool:
+        """True when *line* proves the backend is accepting requests.
+
+        The lifecycle status only moves starting -> running on this signal;
+        a live process is not evidence that the model is loaded.
+        """
+        return False

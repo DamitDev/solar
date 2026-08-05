@@ -94,6 +94,11 @@ class ProcessManager:
         self._flush_task: asyncio.Task | None = None
         self._child_exit_lock = threading.Lock()
 
+        # Readiness signalling: a start attempt parks on an asyncio.Event
+        # that the log thread sets when the backend logs its ready line.
+        self.ready_events: dict[str, asyncio.Event] = {}
+        self._ready_loop: asyncio.AbstractEventLoop | None = None
+
     def _is_port_available(self, port: int) -> bool:
         """Check if a port is available (not bound by any process)."""
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -105,10 +110,18 @@ class ProcessManager:
                 return False
 
     def _get_assigned_ports(self) -> set:
-        """Get ports assigned to currently running instances only."""
+        """Get ports assigned to currently active instances.
+
+        Counts both RUNNING and STARTING instances: with log-gated
+        readiness an instance can stay ``starting`` for minutes while the
+        model loads, and its port is already reserved for it.
+        """
         assigned = set()
         for instance in config_manager.get_all_instances():
-            if instance.port is not None and instance.status == InstanceStatus.RUNNING:
+            if instance.port is not None and instance.status in (
+                InstanceStatus.RUNNING,
+                InstanceStatus.STARTING,
+            ):
                 assigned.add(instance.port)
         return assigned
 
@@ -142,6 +155,7 @@ class ProcessManager:
         self.log_threads.pop(instance_id, None)
         self.state_buffers.pop(instance_id, None)
         self.state_sequences.pop(instance_id, None)
+        self.ready_events.pop(instance_id, None)
 
     def _handle_child_exit(self, instance_id: str, process: subprocess.Popen) -> None:
         """Mark instance FAILED when the child process exits unexpectedly.
@@ -152,6 +166,9 @@ class ProcessManager:
             instance = config_manager.get_instance(instance_id)
             if not instance:
                 self.processes.pop(instance_id, None)
+                # A concurrent delete removed the instance: wake any
+                # parked awaiter so it re-reads instead of timing out.
+                self._signal_ready(instance_id)
                 return
 
             if instance.status not in (
@@ -159,6 +176,10 @@ class ProcessManager:
                 InstanceStatus.STARTING,
             ):
                 self.processes.pop(instance_id, None)
+                # Intentional stop (STOPPING/STOPPED) while a start is
+                # parked: wake the awaiter so it re-reads the stopped
+                # status instead of burning the whole ready timeout.
+                self._signal_ready(instance_id)
                 return
 
             tracked = self.processes.get(instance_id)
@@ -181,6 +202,59 @@ class ProcessManager:
 
             self._purge_instance_resources(instance_id, call_runner_on_stop=True)
             self._push_instances_update()
+
+            # Wake an awaiter parked in _try_start_instance so it re-reads
+            # the failed status instead of burning the whole ready timeout.
+            self._signal_ready(instance_id)
+
+    def _signal_ready(self, instance_id: str) -> None:
+        """Wake an awaiter parked in _try_start_instance (thread-safe)."""
+        event = self.ready_events.get(instance_id)
+        if event is None:
+            return
+        loop = self._ready_loop
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(event.set)
+        else:
+            event.set()
+
+    def _mark_instance_ready(self, instance_id: str, process: subprocess.Popen) -> None:
+        """Promote an instance from ``starting`` to ``running`` (thread-safe).
+
+        Called from the log-reader thread when the backend logs its ready
+        line; the log thread is the single authority for this transition.
+        Guarded by the child-exit lock so it cannot race a concurrent exit
+        handling. Signals the ready event either way so an awaiter parked
+        in ``_try_start_instance`` wakes with the current status.
+        """
+        with self._child_exit_lock:
+            instance = config_manager.get_instance(instance_id)
+            if instance and instance.status == InstanceStatus.STARTING:
+                tracked = self.processes.get(instance_id)
+                if tracked is process:
+                    instance.status = InstanceStatus.RUNNING
+                    instance.pid = process.pid
+                    instance.started_at = datetime.now(UTC)
+                    instance.retry_count = 0
+                    config_manager.update_instance(instance_id, instance)
+
+                    self.state_buffers[instance_id] = deque(
+                        maxlen=settings.log_buffer_size
+                    )
+                    self.state_sequences[instance_id] = 0
+                    config_manager.update_instance_runtime(
+                        instance_id, busy=False, prefill_progress=None, active_slots=0
+                    )
+
+                    runner = self.instance_runners.get(instance_id)
+                    if runner is not None:
+                        runner.on_process_started(
+                            instance_id, self.instance_contexts.get(instance_id, {})
+                        )
+
+                    self._push_instances_update()
+
+        self._signal_ready(instance_id)
 
     def _read_logs(
         self,
@@ -223,6 +297,18 @@ class ProcessManager:
 
                     # Push log to solar-control via WebSocket
                     self._push_log_event(instance_id, seq, decoded_line, timestamp)
+
+                    # Promote starting -> running once the backend logs that
+                    # it is accepting requests. The log thread is the single
+                    # authority for this transition; a live process is not
+                    # proof that the model is loaded.
+                    instance = config_manager.get_instance(instance_id)
+                    if (
+                        instance is not None
+                        and instance.status == InstanceStatus.STARTING
+                        and runner.is_ready_line(decoded_line)
+                    ):
+                        self._mark_instance_ready(instance_id, process)
 
                     # Parse log line using backend runner
                     try:
@@ -462,6 +548,16 @@ class ProcessManager:
 
         config_manager.update_instance(instance_id, instance)
 
+        # Park on the ready event. The log thread promotes
+        # starting -> running when the backend logs its ready line and
+        # wakes us; a dying process also wakes us (via _handle_child_exit)
+        # so the failure is re-read immediately instead of burning the
+        # whole timeout. Registered before the spawn so a fast exit cannot
+        # signal a not-yet-registered event.
+        self._ready_loop = asyncio.get_running_loop()
+        ready_event = asyncio.Event()
+        self.ready_events[instance_id] = ready_event
+
         try:
             cmd = runner.build_command(instance)
 
@@ -490,48 +586,60 @@ class ProcessManager:
             log_thread.start()
             self.log_threads[instance_id] = log_thread
 
-            await asyncio.sleep(2)
-
-            instance = config_manager.get_instance(instance_id)
-            if not instance or instance.status not in (
-                InstanceStatus.STARTING,
-                InstanceStatus.RUNNING,
-            ):
-                return (
-                    instance is not None and instance.status == InstanceStatus.RUNNING
+            try:
+                await asyncio.wait_for(
+                    ready_event.wait(),
+                    timeout=settings.instance_ready_timeout_s,
                 )
+            except TimeoutError:
+                # The backend never reported readiness — kill it and fail.
+                proc = self.processes.pop(instance_id, None)
+                if proc is not None:
+                    try:
+                        proc.terminate()
+                    except OSError:
+                        pass
+                    try:
+                        await asyncio.to_thread(proc.wait, 10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        await asyncio.to_thread(proc.wait)
 
-            if process.poll() is None:
-                instance.status = InstanceStatus.RUNNING
-                instance.pid = process.pid
-                instance.started_at = datetime.now(UTC)
-                instance.retry_count = 0
-                config_manager.update_instance(instance_id, instance)
-
-                self.state_buffers[instance_id] = deque(maxlen=settings.log_buffer_size)
-                self.state_sequences[instance_id] = 0
-                config_manager.update_instance_runtime(
-                    instance_id, busy=False, prefill_progress=None, active_slots=0
-                )
-
-                runner.on_process_started(
-                    instance_id, self.instance_contexts[instance_id]
-                )
-
-                self._push_instances_update()
-
-                return True
-            else:
+                instance = config_manager.get_instance(instance_id)
+                if instance is None:
+                    return False
                 instance.status = InstanceStatus.FAILED
-                instance.error_message = "Process exited immediately"
+                instance.error_message = (
+                    f"Backend did not report readiness within "
+                    f"{settings.instance_ready_timeout_s:.0f}s"
+                )
                 instance.retry_count = attempt + 1
                 config_manager.update_instance(instance_id, instance)
 
                 if instance.retry_count < settings.max_retries:
                     return None  # signal retry
                 return False
+            finally:
+                self.ready_events.pop(instance_id, None)
+
+            # Re-read: the log thread may have promoted us to running, or
+            # the child may have died while we waited.
+            instance = config_manager.get_instance(instance_id)
+            if not instance:
+                return False
+            if instance.status == InstanceStatus.RUNNING:
+                return True
+            if instance.status == InstanceStatus.FAILED:
+                instance.retry_count = attempt + 1
+                config_manager.update_instance(instance_id, instance)
+                if instance.retry_count < settings.max_retries:
+                    return None  # signal retry
+                return False
+            # Stopped/stopping from a concurrent stop, or any other state.
+            return False
 
         except Exception as e:  # noqa: BLE001
+            self.ready_events.pop(instance_id, None)
             instance = config_manager.get_instance(instance_id)
             if instance:
                 instance.status = InstanceStatus.FAILED

@@ -109,17 +109,16 @@ async def wait_intent_ready(
     intent_id: str,
     *,
     ready_replicas: int = 1,
-    timeout: float = 30.0,
+    timeout: float = 180.0,
 ) -> dict[str, Any]:
     """Poll until the intent is fully ready (phase, replicas, conditions).
 
-    The 30s default is a *convergence* budget, not a fast-path assertion:
-    a replica can crash ~2-5s after spawn (host reports RUNNING before
-    torch/transformers finish loading) and the reconciler's §8.2 Recreate
-    converges in ~10-20s (first retry at the next 0.5s tick + spawn ~2s +
-    torch load ~5-15s).  All gates here are registry-derived
-    (ready_replicas, Available condition), so they can regress mid-run —
-    the caller's classify retry absorbs the flip-back.
+    Starts are log-gated: an instance is RUNNING only once its backend
+    logged that it is listening, so the budget is a *cold-start* budget —
+    torch/transformers must finish loading before the reconciler can mark
+    the intent ready. 180s covers a slow load on a shared machine
+    (concurrent CI runs can triple a solo load); the reconciler's health
+    gate (HOST_START_TIMEOUT_S, default 900s) is the outer bound.
     """
 
     async def ready() -> bool:
@@ -174,10 +173,11 @@ async def classify_until_ok(
     stack: Any = None,
     input_text: str = "hello integration world",
 ) -> dict[str, Any]:
-    """POST /v1/classify, retrying while the backend warms up / is recreated.
+    """POST /v1/classify, retrying while a crashed replica is recreated.
 
-    The host flips instances to RUNNING ~2s after spawn, before
-    torch/transformers finish loading (documented startup race). When a
+    Instance starts are log-gated (an instance is RUNNING only once its
+    backend logged that it is listening), so this retry no longer absorbs
+    a startup race. It exists for transient-crash convergence: when a
     replica crashes outright, the reconciler's §8.2 Recreate converges in
     ~10-20s — the 30s budget rides that convergence (transient-crash case
     only: a failed first recreate backs off >=10s and will not converge

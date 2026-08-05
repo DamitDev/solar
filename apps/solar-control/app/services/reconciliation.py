@@ -1685,6 +1685,8 @@ class Reconciler:
         """
         import aiohttp
 
+        from app.config import settings
+
         try:
             async with aiohttp.ClientSession() as session:
                 url = f"{host.url.rstrip('/')}/instances/{instance_id}/start"
@@ -1692,7 +1694,7 @@ class Reconciler:
                 async with session.post(
                     url,
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30),
+                    timeout=aiohttp.ClientTimeout(total=settings.host_start_timeout_s),
                 ) as resp:
                     if resp.status == 200:
                         return

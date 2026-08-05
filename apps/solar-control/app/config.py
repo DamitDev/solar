@@ -54,8 +54,15 @@ class Settings(BaseSettings):
 
     # Strategy health gate timeout (S-042)
     # Maximum seconds to wait for a replacement instance to become healthy
-    # before the rolling strategy holds and reports failure.
-    reconcile_health_gate_timeout_s: float = 120.0
+    # before the rolling strategy holds and reports failure. Raised now that
+    # an instance is only ``running`` when its backend genuinely serves
+    # requests: a cold large model legitimately needs longer than 2 minutes.
+    reconcile_health_gate_timeout_s: float = 600.0
+
+    # Host instance start timeout: POST /instances/{id}/start blocks until
+    # the backend reports readiness (log-gated), so a cold model load must
+    # fit inside this window on every hop of the call chain.
+    host_start_timeout_s: float = 900.0
 
 
 settings = Settings()

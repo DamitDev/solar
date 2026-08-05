@@ -825,10 +825,13 @@ async def http_host(stack: Stack):
     """Client for host A (direct host API — only where the test is about the host)."""
     import httpx
 
+    # 30s cap: the host's DELETE /jobs route legitimately waits up to 20s
+    # for a cancelled Docker job (10s SIGTERM grace + kill); a 15s client
+    # cap would time out before the route's own budget.
     async with httpx.AsyncClient(
         base_url=stack.host_a_url,
         headers={"X-API-Key": stack.secrets["host_a"]},
-        timeout=15.0,
+        timeout=30.0,
     ) as client:
         yield client
 
@@ -840,7 +843,7 @@ async def http_host_b(stack: Stack):
     async with httpx.AsyncClient(
         base_url=stack.host_b_url,
         headers={"X-API-Key": stack.secrets["host_b"]},
-        timeout=15.0,
+        timeout=30.0,
     ) as client:
         yield client
 

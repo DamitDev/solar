@@ -109,7 +109,9 @@ async def test_drain_evacuates_replica_and_completes(http_control, stack, clean_
     assert status["managed_remaining"] == 0
     assert status["stalled"] is False
 
-    final = await wait_intent_ready(http_control, intent["id"], timeout=60.0)
+    # The replacement replica on the target went through a cold start —
+    # log-gated readiness means the load time counts against this budget.
+    final = await wait_intent_ready(http_control, intent["id"], timeout=180.0)
     replica = final["status"]["replica_set"][0]
     assert replica["host_id"] == target_host_id
     assert replica["instance_id"] != source_instance_id

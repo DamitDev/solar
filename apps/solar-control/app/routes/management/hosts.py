@@ -9,6 +9,7 @@ import aiohttp
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from app.config import settings
 from app.database.hosts import host_db
 from app.models import (
     DrainState,
@@ -254,7 +255,7 @@ async def _proxy_instance_action(
     instance_id: str,
     action: str,
     method: str = "POST",
-    timeout: int = 30,
+    timeout: float = 30,
     json_data: dict[str, Any] | None = None,
 ) -> Any:
     host = await host_db.get_host(host_id)
@@ -334,7 +335,11 @@ def _require_host(host: Host | None) -> Host:
 
 @router.post("/{host_id}/instances/{instance_id}/start")
 async def start_instance(host_id: str, instance_id: str):
-    return await _proxy_instance_action(host_id, instance_id, "start")
+    # Blocking start: the host answers once the backend reports readiness,
+    # which can take minutes for a cold model load.
+    return await _proxy_instance_action(
+        host_id, instance_id, "start", timeout=settings.host_start_timeout_s
+    )
 
 
 @router.post("/{host_id}/instances/{instance_id}/stop")
@@ -344,7 +349,9 @@ async def stop_instance(host_id: str, instance_id: str):
 
 @router.post("/{host_id}/instances/{instance_id}/restart")
 async def restart_instance(host_id: str, instance_id: str):
-    return await _proxy_instance_action(host_id, instance_id, "restart", timeout=60)
+    return await _proxy_instance_action(
+        host_id, instance_id, "restart", timeout=settings.host_start_timeout_s
+    )
 
 
 @router.post("/{host_id}/instances")

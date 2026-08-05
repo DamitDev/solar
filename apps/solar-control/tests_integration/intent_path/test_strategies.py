@@ -192,7 +192,7 @@ async def test_rolling_backend_config_change(http_control, stack, clean_state):
         description="edited spec settled on the replicas",
     )
 
-    final = await wait_intent_ready(http_control, intent["id"], timeout=60.0)
+    final = await wait_intent_ready(http_control, intent["id"], timeout=180.0)
     assert final["status"]["updated_replicas"] == 1
 
     body = await classify_until_ok(

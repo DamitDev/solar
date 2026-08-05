@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     log_dir: str = "logs"
     start_port: int = 3500
     max_retries: int = 2
+    # Maximum seconds to wait for a backend to log that it is listening
+    # before the start attempt is killed and marked failed.
+    instance_ready_timeout_s: float = 600.0
     log_buffer_size: int = 1000
     models_dir: str = "./models"
     min_free_disk_gb: float = 2.0
