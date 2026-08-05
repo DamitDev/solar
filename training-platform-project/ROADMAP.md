@@ -117,6 +117,14 @@ Establishes the flat file-per-layer artifact layout as the platform contract and
 | S-046 | Fix nested-path digest verification after a Harbor pull. Walk the pull target recursively, key on relative paths, and reject traversal titles. | solar-host | S | S-015 |
 | S-047 | Add an artifact upload relay to Solar Control. Session API, chunked streaming into Harbor with no disk staging, Redis session state, manifest assembly, and Data Repository registration with rollback. Includes the `aiops-k8s` ingress and secret changes. | solar-control, aiops-k8s | L | S-045, D-007 |
 
+### Milestone 0.7: Artifact Deletion
+
+Adds the destructive counterpart to the upload path: models and versions can be removed from the catalog, with Harbor blobs deleted first and metadata unregistered second, orchestrated by Solar Control. See [docs/specs/artifact-delete.md](docs/specs/artifact-delete.md).
+
+| ID | Issue | Repo | Size | Depends on |
+|----|-------|------|------|------------|
+| S-048 | Add a catalog delete relay to Solar Control. `CatalogDeleteService` deletes the Harbor artifact first (reusing `OciPushClient.delete_tag`), then unregisters in the Data Repository; version-aware running-instance guard returns 409; whole-repo delete reports per-version results and best-effort repository cleanup. | solar-control | M | D-019 |
+
 ---
 
 ## Phase 1: Data Repository
@@ -159,6 +167,7 @@ Establishes the flat file-per-layer artifact layout as the platform contract and
 | D-016 | Complete `repo://` resolver in solar-control. Connect to Data Repository's resolve endpoint, obtain harbor_ref, send pull command to Solar Host via `POST /models/pull`. Host pulls from Harbor (ORAS) directly. Cache by version. | solar-control | M | S-013, D-014 |
 | D-017 | End-to-end integration test. Upload model to Data Repository → create intent with `repo://` URI in Solar Control → model pulled to host → instance started → inference served. | test | M | D-016, S-040 |
 | D-018 | Add model catalog endpoint to solar-control for Solar WebUI. `GET /api/catalog/models` - proxy to Data Repository's model list with deployment status enrichment. | solar-control | S | D-013 |
+| D-019 | Add artifact-level delete to the Data Repository. `DELETE /api/models/{name}` and `DELETE /api/datasets/{name}` remove the artifact row and cascade its versions; pure unregister, no Harbor side effects. | data-repository | S | - |
 
 ---
 
@@ -277,6 +286,7 @@ Establishes the flat file-per-layer artifact layout as the platform contract and
 | U-005 | Add host draining controls to the Resources page. Drain/resume actions, drain state badges, blocker list before confirming, and stalled-drain reporting. | solar-webui | M | S-043 |
 | U-006 | Add intent editing UI. Generalise the intent form into create/edit modes with full hydration, read-only alias, and a warning when an edit restarts an in-flight rollout. | solar-webui | M | S-044 |
 | U-007 | Add model and dataset upload. Category-specific requirements and metadata, directory picker with junk filtering and per-file review, streamed upload with per-file progress. | solar-webui | M | S-047 |
+| U-008 | Add catalog delete UI. Version list in the model detail panel, repository and version delete with a confirmation modal (blocked state for running instances, host-cache warning, typed confirmation for repo delete, per-version results). | solar-webui | M | S-048 |
 
 ---
 
