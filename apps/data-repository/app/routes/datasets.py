@@ -173,3 +173,22 @@ async def delete_dataset_version(
     except (DatasetNotFoundError, DatasetVersionNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=exc.detail)
     return Response(status_code=204)
+
+
+@router.delete("/{name}", status_code=204)
+async def delete_dataset(
+    name: str,
+    service: Annotated[DatasetDeletionService, Depends(get_dataset_deletion_service)],
+) -> Response:
+    """Delete the whole dataset artifact; version rows cascade.
+
+    Pure unregister — Harbor cleanup is orchestrated by Solar Control's
+    catalog delete relay (S-048) before this endpoint is called.
+    """
+    try:
+        await service.delete_dataset(name=name)
+    except InvalidArtifactNameError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail)
+    except DatasetNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=exc.detail)
+    return Response(status_code=204)
