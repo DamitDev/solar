@@ -5,13 +5,22 @@
 import { getIntentPhaseColor } from '@/lib/utils';
 
 const PHASE_TOOLTIPS: Record<string, string> = {
-  pending: 'Stored and validated — reconciliation not yet running (S-041)',
-  reconciling: 'Reconciler is actively working toward the desired state',
-  ready: 'All desired replicas ready',
-  degraded: 'Partial fulfillment — some but not all replicas ready',
-  failed: 'Reconciliation cannot make progress, zero replicas ready',
+  pending: 'Stored and validated. No instances have been created yet.',
+  reconciling: 'Solar Control is actively working toward the requested configuration',
+  ready: 'All requested instances are ready',
+  degraded: 'Running with fewer instances than requested',
+  failed: 'Cannot continue, zero instances ready',
   deleting: 'Delete received — stopping managed instances',
   deleted: 'All managed instances removed',
+};
+
+// Display-only labels; the API contract is untouched.
+const PHASE_LABELS: Record<string, string> = {
+  pending: 'queued',
+  reconciling: 'updating',
+  ready: 'ready',
+  degraded: 'degraded',
+  failed: 'failed',
 };
 
 export function IntentPhaseBadge({ phase, reconcile }: { phase: string; reconcile?: string | null }) {
@@ -21,9 +30,9 @@ export function IntentPhaseBadge({ phase, reconcile }: { phase: string; reconcil
         title={PHASE_TOOLTIPS[phase] ?? phase}
         className={`px-2 py-0.5 rounded text-xs font-medium ${getIntentPhaseColor(phase)}`}
       >
-        {phase}
+        {PHASE_LABELS[phase] ?? phase}
       </span>
-      {reconcile && <span className="text-xs text-nord-4">· {reconcile}</span>}
+      {reconcile && reconcile !== 'idle' && <span className="text-xs text-nord-4">· updating</span>}
     </span>
   );
 }

@@ -86,7 +86,7 @@ describe('IntentFormModal in edit mode', () => {
     expect(screen.getByText(/one replica at a time/i)).toBeInTheDocument();
   });
 
-  it('warns that saving restarts a rollout that is in flight', () => {
+  it('warns that saving restarts an update that is in flight', () => {
     renderEdit({
       status: {
         ...intent.status,
@@ -94,13 +94,13 @@ describe('IntentFormModal in edit mode', () => {
       },
     });
 
-    expect(screen.getByText(/rollout is in progress/i)).toBeInTheDocument();
+    expect(screen.getByText(/update is in progress/i)).toBeInTheDocument();
   });
 
-  it('omits the rollout warning when nothing is rolling out', () => {
+  it('omits the update warning when nothing is updating', () => {
     renderEdit();
 
-    expect(screen.queryByText(/rollout is in progress/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/update is in progress/i)).not.toBeInTheDocument();
   });
 
   it('PUTs the complete spec and reports the saved intent', async () => {

@@ -58,12 +58,12 @@ describe('HostResourceCard drain controls', () => {
 
     render(<HostResourceCard snapshot={snapshot('draining')} />);
 
-    expect(await screen.findByText(/1 managed replica left to move/)).toBeInTheDocument();
+    expect(await screen.findByText(/1 managed instance left to move/)).toBeInTheDocument();
     expect(screen.getByText('draining')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Resume' })).toBeInTheDocument();
   });
 
-  it('calls out a stalled drain and why the replica cannot move', async () => {
+  it('calls out a blocked drain and why the instance cannot move', async () => {
     vi.spyOn(solarClient, 'getDrainStatus').mockResolvedValue(
       drainStatus({
         stalled: true,
@@ -81,7 +81,7 @@ describe('HostResourceCard drain controls', () => {
 
     render(<HostResourceCard snapshot={snapshot('draining')} />);
 
-    expect(await screen.findByText('draining (stalled)')).toBeInTheDocument();
+    expect(await screen.findByText('draining (blocked)')).toBeInTheDocument();
     expect(screen.getByText(/cannot be moved/)).toBeInTheDocument();
     expect(screen.getByText(/needs vram >= 48.0 GB/)).toBeInTheDocument();
   });

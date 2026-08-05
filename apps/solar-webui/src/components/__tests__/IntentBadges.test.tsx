@@ -3,23 +3,33 @@ import { describe, expect, it } from 'vitest';
 import { IntentPhaseBadge } from '@/components/IntentBadges';
 
 describe('IntentPhaseBadge', () => {
-  it('renders the phase text', () => {
+  it('renders the phase label', () => {
     render(<IntentPhaseBadge phase="ready" />);
     expect(screen.getByText('ready')).toBeInTheDocument();
   });
 
+  it('labels pending as queued and reconciling as updating', () => {
+    const { rerender } = render(<IntentPhaseBadge phase="pending" />);
+    expect(screen.getByText('queued')).toBeInTheDocument();
+    rerender(<IntentPhaseBadge phase="reconciling" />);
+    expect(screen.getByText('updating')).toBeInTheDocument();
+  });
+
   it('exposes the phase tooltip', () => {
     render(<IntentPhaseBadge phase="degraded" />);
-    expect(screen.getByTitle(/partial fulfillment/i)).toBeInTheDocument();
+    expect(screen.getByTitle(/fewer instances than requested/i)).toBeInTheDocument();
   });
 
-  it('renders the reconcile hint when provided', () => {
-    render(<IntentPhaseBadge phase="reconciling" reconcile="2/3 replicas" />);
-    expect(screen.getByText('· 2/3 replicas')).toBeInTheDocument();
+  it('renders a plain updating hint when the reconcile state is active', () => {
+    render(<IntentPhaseBadge phase="reconciling" reconcile="in_progress" />);
+    expect(screen.getByText('· updating')).toBeInTheDocument();
+    expect(screen.queryByText(/in_progress/)).not.toBeInTheDocument();
   });
 
-  it('omits the reconcile hint when absent', () => {
-    render(<IntentPhaseBadge phase="ready" />);
+  it('omits the hint when idle or absent', () => {
+    const { rerender } = render(<IntentPhaseBadge phase="ready" />);
+    expect(screen.queryByText(/·/)).not.toBeInTheDocument();
+    rerender(<IntentPhaseBadge phase="ready" reconcile="idle" />);
     expect(screen.queryByText(/·/)).not.toBeInTheDocument();
   });
 });

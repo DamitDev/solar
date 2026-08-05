@@ -103,13 +103,13 @@ export function Dashboard() {
     [hosts],
   );
 
-  // Intent-managed instances are recreated by the reconciler — warn first
+  // Managed instances are recreated by Solar Control — warn first
   const warnIfManaged = useCallback((instance?: Instance): boolean => {
     if (!instance) return true;
-    const { managed, intentId } = getIntentOwnership(instance);
+    const { managed } = getIntentOwnership(instance);
     if (!managed) return true;
     return window.confirm(
-      `This instance is managed by an intent (${intentId ?? 'unknown'}). Stopping it is temporary — the reconciler will recreate it. Delete it?`,
+      `This instance is managed by Solar Control. Stopping it is temporary — it will be started again automatically. Delete it instead?`,
     );
   }, []);
 

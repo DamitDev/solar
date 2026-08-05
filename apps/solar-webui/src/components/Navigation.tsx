@@ -84,7 +84,7 @@ export function Navigation() {
         <div className="ml-auto flex items-center gap-3 sm:gap-4 text-xs shrink-0">
           <div className="flex items-center gap-2">
             <span className={isConnected ? 'text-nord-14' : 'text-nord-11'}>●</span>
-            <span className="text-nord-4 hidden sm:inline">Event Stream</span>
+            <span className="text-nord-4 hidden sm:inline">Live updates</span>
           </div>
           <form method="post" action="/auth/logout">
             <button

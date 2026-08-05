@@ -51,7 +51,7 @@ export function DeleteIntentModal({ intent, onClose, onDeleted }: DeleteIntentMo
             Delete <code className="text-nord-6">{intent.alias}</code>?
           </p>
           <p className="text-sm text-nord-4">
-            All instances managed by this intent will be stopped and the alias leaves the gateway registry.
+            All instances managed by this intent will be stopped and the model name stops being served.
           </p>
 
           <label className="flex items-start gap-3 text-sm text-nord-4 cursor-pointer">
@@ -62,8 +62,8 @@ export function DeleteIntentModal({ intent, onClose, onDeleted }: DeleteIntentMo
               className="h-4 w-4 mt-0.5 rounded border-nord-3 bg-nord-1 text-nord-10 focus:ring-nord-10"
             />
             <span>
-              <span className="font-medium text-nord-6">Orphan instances</span> — keep them running, unmanaged (clears{' '}
-              <code>managed_by</code>/<code>intent_id</code>).
+              <span className="font-medium text-nord-6">Keep instances running</span> — leave the instances running and
+              stop managing them.
             </span>
           </label>
 
@@ -84,7 +84,7 @@ export function DeleteIntentModal({ intent, onClose, onDeleted }: DeleteIntentMo
               disabled={loading}
               className="flex-1 px-4 py-2 bg-nord-11 text-nord-6 rounded-md hover:bg-nord-10 transition-colors disabled:opacity-50 font-medium"
             >
-              {loading ? 'Deleting...' : orphan ? 'Delete (orphan)' : 'Delete'}
+              {loading ? 'Deleting...' : orphan ? 'Delete, keep instances' : 'Delete'}
             </button>
           </div>
         </div>

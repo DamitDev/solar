@@ -191,7 +191,7 @@ export function ModelCatalog() {
                   <TriangleAlert size={16} className="flex-shrink-0 mt-0.5" />
                   <span>
                     {data.meta.enrichment === 'partial'
-                      ? 'Availability data is partial (some hosts unreachable). Models without deployment evidence show as unknown.'
+                      ? 'Availability data is partial (some hosts unreachable). Models that could not be checked show as unknown.'
                       : 'Host availability could not be checked. Models without running instances show as unknown.'}
                   </span>
                 </div>

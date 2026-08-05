@@ -75,7 +75,7 @@ describe('SolarClient', () => {
     await expect(client.getInstanceState('host-1', 'i1')).resolves.toEqual(state);
   });
 
-  it('updates an intent via PUT (S-044 full replace)', async () => {
+  it('updates an intent via PUT (full replace)', async () => {
     const spec = { alias: 'iris:v1', model_source: 'repo://iris:v2', backend: { backend_type: 'llamacpp' } };
     mock.onPut('/api/intents/intent-1', spec).reply(200, { id: 'intent-1', ...spec });
     await expect(client.updateIntent('intent-1', spec as any)).resolves.toMatchObject({
