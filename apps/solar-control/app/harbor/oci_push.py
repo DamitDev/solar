@@ -445,8 +445,7 @@ class OciPushClient:
         """
         project, repo_name = split_project_repo(repo)
         url = (
-            f"{self._base_url}/api/v2.0/projects/{project}"
-            f"/repositories/{repo_name}"
+            f"{self._base_url}/api/v2.0/projects/{project}" f"/repositories/{repo_name}"
         )
         try:
             response = await self._request(
