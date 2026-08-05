@@ -643,7 +643,14 @@ class BaseArtifactUpdateService:
     """Shared metadata-update wiring for model and dataset services."""
 
     def __init__(self, session: AsyncSession) -> None:
+        self._session = session
         self._repo = ArtifactRepository(session)
+
+    async def _commit(self) -> None:
+        # The ``get_db_session`` dependency commits in its post-response
+        # teardown, which races the next request — mutations must be durable
+        # before the response is returned (see register_artifact_version).
+        await self._session.commit()
 
 
 class ModelUpdateService(BaseArtifactUpdateService):
@@ -658,6 +665,7 @@ class ModelUpdateService(BaseArtifactUpdateService):
             name=name,
             request=request,
         )
+        await self._commit()
         return _to_model_metadata_response(record)
 
     async def update_model_version(
@@ -678,6 +686,7 @@ class ModelUpdateService(BaseArtifactUpdateService):
             version=current.version,
             metadata=merged_metadata,
         )
+        await self._commit()
         return UpdateModelVersionResponse(
             name=updated.name,
             version=updated.version,
@@ -698,6 +707,7 @@ class DatasetUpdateService(BaseArtifactUpdateService):
             name=name,
             request=request,
         )
+        await self._commit()
         return _to_dataset_metadata_response(record)
 
     async def update_dataset_version(
@@ -718,6 +728,7 @@ class DatasetUpdateService(BaseArtifactUpdateService):
             version=current.version,
             metadata=merged_metadata,
         )
+        await self._commit()
         return UpdateDatasetVersionResponse(
             name=updated.name,
             version=updated.version,
@@ -736,7 +747,14 @@ class BaseArtifactDeletionService:
     """
 
     def __init__(self, session: AsyncSession) -> None:
+        self._session = session
         self._repo = ArtifactRepository(session)
+
+    async def _commit(self) -> None:
+        # The ``get_db_session`` dependency commits in its post-response
+        # teardown, which races the next request — mutations must be durable
+        # before the response is returned (see register_artifact_version).
+        await self._session.commit()
 
     @staticmethod
     def _reject_latest_alias(version: str) -> None:
@@ -767,6 +785,7 @@ class ModelDeletionService(BaseArtifactDeletionService):
         self._reject_latest_alias(version)
 
         await self._repo.delete_model_version(name=name, version=version)
+        await self._commit()
 
 
 class DatasetDeletionService(BaseArtifactDeletionService):
@@ -789,3 +808,4 @@ class DatasetDeletionService(BaseArtifactDeletionService):
         self._reject_latest_alias(version)
 
         await self._repo.delete_dataset_version(name=name, version=version)
+        await self._commit()

@@ -41,6 +41,7 @@ from app.schemas.models import (
     LineageMetadata,
     RegisterModelVersionRequest,
     UpdateModelMetadataRequest,
+    UpdateModelVersionRequest,
 )
 from app.services.models import (
     DatasetDeletionService,
@@ -392,6 +393,58 @@ async def test_registration_commits_before_returning():
         )
         assert result.version == "v1"
         svc._session.commit.assert_awaited_once()
+
+
+async def test_update_model_version_commits_before_returning():
+    current = MagicMock()
+    current.name = "mymodel"
+    current.version = "v1"
+    current.metadata = {}
+    async with _model_update_svc(
+        repo_overrides={
+            "get_model_version": AsyncMock(return_value=current),
+            "update_artifact_version_metadata": AsyncMock(return_value=current),
+        }
+    ) as (svc, _):
+        await svc.update_model_version(
+            "mymodel", "v1", UpdateModelVersionRequest(metadata={})
+        )
+    svc._session.commit.assert_awaited_once()
+
+
+async def test_update_model_metadata_commits_before_returning():
+    current = ArtifactMetadataRecord(
+        name="mymodel",
+        category="model",
+        description="",
+        metadata={},
+        created_at=datetime(2026, 4, 2, 10, 0, tzinfo=UTC),
+        versions_count=1,
+    )
+    async with _model_update_svc(
+        repo_overrides={
+            "get_artifact_metadata": AsyncMock(return_value=current),
+            "update_artifact_metadata": AsyncMock(return_value=current),
+        }
+    ) as (svc, _):
+        await svc.update_model_metadata(
+            "mymodel",
+            UpdateModelMetadataRequest(
+                description="updated",
+                training_config=None,
+                eval_metrics=None,
+                lineage=None,
+            ),
+        )
+    svc._session.commit.assert_awaited_once()
+
+
+async def test_delete_model_version_commits_before_returning():
+    async with _model_delete_svc(
+        repo_overrides={"delete_model_version": AsyncMock(return_value=None)}
+    ) as (svc, _):
+        await svc.delete_model_version("mymodel", "v1")
+    svc._session.commit.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
