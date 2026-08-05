@@ -813,3 +813,60 @@ export interface StorageDeleteResult {
   detail: string | null;
   freed_bytes: number;
 }
+
+// ─── Artifact upload (S-047 / U-007) ───
+
+export type UploadCategory = 'model' | 'dataset';
+
+export type UploadSessionState = 'pending' | 'uploading' | 'completing' | 'completed' | 'failed' | 'aborted';
+
+export interface UploadFileDeclaration {
+  path: string;
+  size: number;
+}
+
+export interface CreateUploadRequest {
+  category: UploadCategory;
+  name: string;
+  version?: string;
+  files: UploadFileDeclaration[];
+  metadata?: Record<string, any>;
+}
+
+export interface CreateUploadResponse {
+  upload_id: string;
+  harbor_ref: string;
+  name: string;
+  version: string;
+  expires_at: string;
+}
+
+export interface UploadFileResult {
+  path: string;
+  digest: string;
+  size: number;
+}
+
+export interface UploadFileStatus {
+  path: string;
+  size: number;
+  digest: string | null;
+  uploaded: boolean;
+}
+
+export interface UploadStatusResponse {
+  upload_id: string;
+  state: UploadSessionState;
+  files: UploadFileStatus[];
+  bytes_total: number;
+  bytes_done: number;
+}
+
+export interface CompleteUploadResponse {
+  name: string;
+  version: string;
+  category: UploadCategory;
+  harbor_ref: string;
+  size_bytes: number;
+  registration: Record<string, any>;
+}

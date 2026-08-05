@@ -13,6 +13,7 @@ from . import (
     reservations,
     resources,
     storage,
+    uploads,
 )
 
 router = APIRouter(prefix="/api", tags=["management"])
@@ -27,3 +28,4 @@ router.include_router(reservations.router)
 router.include_router(intents.router)
 router.include_router(catalog.router)
 router.include_router(storage.router)
+router.include_router(uploads.router)

@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -21,12 +22,19 @@ from solar_host.models.llamacpp import LlamaCppConfig
 
 logger = logging.getLogger(__name__)
 
+# Under pytest, never read the developer-local .env — the test suite must
+# be hermetic and unaffected by local overrides. Env vars still take
+# precedence, so spawned processes are unaffected.
+_TESTING = "pytest" in sys.modules
+
 
 class Settings(BaseSettings):
     """Application settings."""
 
     model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+        env_file=None if _TESTING else ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
     api_key: str = "change-me-please"

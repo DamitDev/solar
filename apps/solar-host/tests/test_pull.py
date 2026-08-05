@@ -594,6 +594,101 @@ class TestDigestVerification:
         )
         assert digests is None
 
+    def test_verify_pulled_digests_accepts_nested_paths(self, _isolated_env: Path):
+        from solar_host.models_manager import _verify_pulled_digests
+
+        slug_dir = self._artifact_dir(_isolated_env)
+        (slug_dir / "nested").mkdir()
+        data = b"x" * 1024
+        (slug_dir / "nested" / "extra.txt").write_bytes(data)
+        want = hashlib.sha256(data).hexdigest()
+
+        digests = _verify_pulled_digests(
+            _FakeOras({"nested/extra.txt": want}),
+            "imgrepo.damit.hu/supernova/iris-osl:v3",
+            slug_dir,
+            "repo://iris-osl:v3",
+        )
+        assert digests == {"nested/extra.txt": want}
+
+    def test_verify_pulled_digests_flat_unchanged(self, _isolated_env: Path):
+        # A flat artifact keeps the same {filename: digest} mapping as before.
+        from solar_host.models_manager import _verify_pulled_digests
+
+        slug_dir = self._artifact_dir(_isolated_env)
+        data = b"x" * 1024
+        (slug_dir / "model.gguf").write_bytes(data)
+        want = hashlib.sha256(data).hexdigest()
+
+        digests = _verify_pulled_digests(
+            _FakeOras({"model.gguf": want}),
+            "imgrepo.damit.hu/supernova/iris-osl:v3",
+            slug_dir,
+            "repo://iris-osl:v3",
+        )
+        assert digests == {"model.gguf": want}
+
+    def test_verify_pulled_digests_detects_nested_mismatch(self, _isolated_env: Path):
+        from solar_host.models_manager import ModelPullError, _verify_pulled_digests
+
+        slug_dir = self._artifact_dir(_isolated_env)
+        (slug_dir / "nested").mkdir()
+        (slug_dir / "nested" / "extra.txt").write_bytes(b"y" * 1024)  # tampered
+        want = hashlib.sha256(b"x" * 1024).hexdigest()
+
+        with pytest.raises(ModelPullError) as ei:
+            _verify_pulled_digests(
+                _FakeOras({"nested/extra.txt": want}),
+                "imgrepo.damit.hu/supernova/iris-osl:v3",
+                slug_dir,
+                "repo://iris-osl:v3",
+            )
+        assert "nested/extra.txt" in str(ei.value)
+
+    def test_verify_pulled_digests_detects_missing_nested_file(
+        self, _isolated_env: Path
+    ):
+        from solar_host.models_manager import ModelPullError, _verify_pulled_digests
+
+        slug_dir = self._artifact_dir(_isolated_env)  # no nested/ directory
+        want = hashlib.sha256(b"x" * 1024).hexdigest()
+
+        with pytest.raises(ModelPullError) as ei:
+            _verify_pulled_digests(
+                _FakeOras({"nested/extra.txt": want}),
+                "imgrepo.damit.hu/supernova/iris-osl:v3",
+                slug_dir,
+                "repo://iris-osl:v3",
+            )
+        assert "nested/extra.txt: missing on disk" in str(ei.value)
+
+    def test_verify_pulled_digests_rejects_traversal_title(self, _isolated_env: Path):
+        from solar_host.models_manager import ModelPullError, _verify_pulled_digests
+
+        slug_dir = self._artifact_dir(_isolated_env)
+        (slug_dir / "model.gguf").write_bytes(b"x" * 1024)
+
+        with pytest.raises(ModelPullError) as ei:
+            _verify_pulled_digests(
+                _FakeOras({"../escape": "abc"}),
+                "imgrepo.damit.hu/supernova/iris-osl:v3",
+                slug_dir,
+                "repo://iris-osl:v3",
+            )
+        assert ".." in str(ei.value)
+
+    def test_verify_cached_digests_nested(self, _isolated_env: Path):
+        from solar_host.models_manager import _verify_cached_digests
+
+        slug_dir = self._artifact_dir(_isolated_env)
+        (slug_dir / "nested").mkdir()
+        data = b"x" * 1024
+        (slug_dir / "nested" / "extra.txt").write_bytes(data)
+        entry = _make_manifest_entry(path=str(slug_dir.resolve()))
+        entry.file_digests = {"nested/extra.txt": hashlib.sha256(data).hexdigest()}
+
+        assert _verify_cached_digests(entry) is True
+
     def test_cache_hit_with_matching_digests_returns_cached(
         self, client: TestClient, _isolated_env: Path
     ):

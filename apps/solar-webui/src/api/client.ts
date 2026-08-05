@@ -26,6 +26,11 @@ import {
   HostStorage,
   StorageDeleteItem,
   StorageDeleteResult,
+  CreateUploadRequest,
+  CreateUploadResponse,
+  UploadFileResult,
+  UploadStatusResponse,
+  CompleteUploadResponse,
 } from './types';
 
 const DEFAULT_RELATIVE_CONTROL_BASE = '/api/control';
@@ -50,6 +55,7 @@ class SolarClient {
   private client: AxiosInstance;
   private httpBase: string;
   private _managementApiKey: string | null = null;
+  private _directApiKey: string = '';
 
   constructor(baseURL?: string) {
     const overrideBase =
@@ -75,6 +81,7 @@ class SolarClient {
 
     const directApiKey = import.meta.env.VITE_SOLAR_CONTROL_API_KEY;
     if (isAbsoluteUrl(this.httpBase) && directApiKey) {
+      this._directApiKey = directApiKey;
       this.client.defaults.headers.common['X-API-Key'] = directApiKey;
       this.client.defaults.headers.common['Authorization'] = `Bearer ${directApiKey}`;
     }
@@ -420,6 +427,84 @@ class SolarClient {
     const response = await this.client.get(`/api/endpoints/${id}/usage`, { params: { hours } });
     return response.data;
   }
+
+  // Artifact upload (S-047 / U-007)
+
+  async createUpload(data: CreateUploadRequest): Promise<CreateUploadResponse> {
+    const response = await this.client.post('/api/uploads', data);
+    return response.data as CreateUploadResponse;
+  }
+
+  /**
+   * Stream one file into an upload session via XMLHttpRequest.
+   *
+   * XHR is used (not fetch) because `upload.onprogress` is the only
+   * reliable source of upload progress events (spec §5.3).
+   */
+  uploadFile(
+    uploadId: string,
+    path: string,
+    file: File,
+    onProgress?: (sentBytes: number, totalBytes: number) => void,
+  ): Promise<UploadFileResult> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const url = `${this.httpBase}/api/uploads/${encodeURIComponent(uploadId)}/files?path=${encodeURIComponent(path)}`;
+      xhr.open('PUT', url);
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      // Direct-API mode mirrors the axios client's injected headers; in
+      // proxied mode the Express proxy injects the management key.
+      if (this._directApiKey) {
+        xhr.setRequestHeader('X-API-Key', this._directApiKey);
+        xhr.setRequestHeader('Authorization', `Bearer ${this._directApiKey}`);
+      }
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && onProgress) {
+          onProgress(event.loaded, event.total);
+        }
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText) as UploadFileResult);
+          } catch {
+            reject(new Error('Invalid upload response from server'));
+          }
+          return;
+        }
+        reject(new Error(extractUploadError(xhr)));
+      };
+      xhr.onerror = () => reject(new Error('Network error during upload'));
+      xhr.send(file);
+    });
+  }
+
+  async getUploadStatus(uploadId: string): Promise<UploadStatusResponse> {
+    const response = await this.client.get(`/api/uploads/${uploadId}`);
+    return response.data as UploadStatusResponse;
+  }
+
+  async completeUpload(uploadId: string): Promise<CompleteUploadResponse> {
+    const response = await this.client.post(`/api/uploads/${uploadId}/complete`);
+    return response.data as CompleteUploadResponse;
+  }
+
+  async abortUpload(uploadId: string): Promise<void> {
+    await this.client.delete(`/api/uploads/${uploadId}`);
+  }
+}
+
+function extractUploadError(xhr: XMLHttpRequest): string {
+  try {
+    const data = JSON.parse(xhr.responseText);
+    if (typeof data?.detail === 'string' && data.detail) return data.detail;
+    if (typeof data?.error?.message === 'string' && data.error.message) {
+      return data.error.message;
+    }
+  } catch {
+    /* non-JSON error body */
+  }
+  return `Upload failed with status ${xhr.status}`;
 }
 
 // Export a default instance

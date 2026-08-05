@@ -1,4 +1,11 @@
+import sys
+
 from pydantic_settings import BaseSettings
+
+# Under pytest, never read the developer-local .env — the test suite must
+# be hermetic and unaffected by local overrides. Env vars still take
+# precedence, so spawned processes are unaffected.
+_TESTING = "pytest" in sys.modules
 
 
 class Settings(BaseSettings):
@@ -30,7 +37,9 @@ class Settings(BaseSettings):
         )
 
     class Config:
-        env_file = ".env"
+        # Under pytest, never read the developer-local .env — the test
+        # suite must be hermetic and unaffected by local overrides.
+        env_file = None if _TESTING else ".env"
         env_file_encoding = "utf-8"
         extra = "ignore"
 

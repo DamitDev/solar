@@ -526,6 +526,10 @@ async def _build_stack(
         DATA_REPOSITORY_URL=stack.data_repo_url,
         DATA_REPOSITORY_API_KEY=run_secrets["data_repository"],
         MANAGEMENT_API_KEY=run_secrets["management"],
+        # Artifact upload relay (S-047): control pushes to the stub Harbor.
+        HARBOR_URL=stub_harbor.base_url,
+        HARBOR_USERNAME=HARBOR_USERNAME,
+        HARBOR_PASSWORD=HARBOR_PASSWORD,
         RECONCILE_INTERVAL_S=str(reconcile_interval_s),
         RECONCILE_HEALTH_GATE_TIMEOUT_S="5",
         # Fast pacing for the test env: the settle/cooldown windows exist to

@@ -418,6 +418,30 @@ def _pull_harbor(
     return _verify_pulled_digests(oras, harbor_ref, target_dir, source_uri)
 
 
+def _validate_manifest_title(title: str, source_uri: str) -> None:
+    """Reject a manifest layer title that violates the artifact layout contract.
+
+    Titles must be relative POSIX paths free of ``.``/``..`` segments, a
+    leading slash, or a drive letter (spec §2.3). A crafted title such as
+    ``../../etc/passwd`` would otherwise let a malicious artifact verify a
+    file written outside the pull target directory.
+    """
+    if not title or title.startswith("/") or re.match(r"^[A-Za-z]:", title):
+        raise ModelPullError(
+            502,
+            "model_pull_failed",
+            f"Manifest layer title {title!r} is not a relative path",
+            source_uri,
+        )
+    if any(segment in (".", "..") for segment in title.split("/")):
+        raise ModelPullError(
+            502,
+            "model_pull_failed",
+            f"Manifest layer title {title!r} contains '.' or '..' segments",
+            source_uri,
+        )
+
+
 def _verify_pulled_digests(
     oras: Any,
     harbor_ref: str,
@@ -432,8 +456,17 @@ def _verify_pulled_digests(
     cannot be fetched or carries no per-file digests, verification is
     skipped (log warning) rather than failing the pull.
 
-    Returns ``{filename: sha256-hex}`` of verified files, or None when
-    verification was not possible.
+    Files are walked recursively and keyed on the path relative to
+    *target_dir* (POSIX separators), matching the
+    ``org.opencontainers.image.title`` values in the manifest — nested
+    paths are restored by ``oras`` and must verify. Manifest titles that
+    violate the layout contract (spec §2.3) are rejected before any file
+    is compared.
+
+    Returns ``{relative_posix_path: sha256-hex}`` of verified files, or
+    None when verification was not possible. Manifest entries written
+    before this change hold bare filenames; for a flat artifact those are
+    identical to the relative paths, so no migration is needed.
     """
     try:
         manifest = oras._client.get_manifest(harbor_ref)  # type: ignore[attr-defined]
@@ -450,6 +483,7 @@ def _verify_pulled_digests(
         title = (layer.get("annotations") or {}).get("org.opencontainers.image.title")
         digest = layer.get("digest", "")
         if title and digest.startswith("sha256:"):
+            _validate_manifest_title(title, source_uri)
             expected[title] = digest[len("sha256:") :]
 
     if not expected:
@@ -462,20 +496,21 @@ def _verify_pulled_digests(
 
     problems: list[str] = []
     actual: dict[str, str] = {}
-    for path in target_dir.iterdir():
+    for path in target_dir.rglob("*"):
         if not path.is_file():
             continue
+        rel = path.relative_to(target_dir).as_posix()
         h = hashlib.sha256(path.read_bytes()).hexdigest()
-        actual[path.name] = h
-        want = expected.get(path.name)
+        actual[rel] = h
+        want = expected.get(rel)
         if want is None:
             logger.warning(
                 "Pulled file %s is not covered by the manifest for %s",
-                path.name,
+                rel,
                 harbor_ref,
             )
         elif h != want:
-            problems.append(f"{path.name}: digest mismatch (got {h}, want {want})")
+            problems.append(f"{rel}: digest mismatch (got {h}, want {want})")
     for name in expected:
         if name not in actual:
             problems.append(f"{name}: missing on disk after pull")
