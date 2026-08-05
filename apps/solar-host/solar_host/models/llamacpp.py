@@ -1,8 +1,33 @@
 """LlamaCpp backend configuration models."""
 
+import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+def _coerce_template_kwargs(value: Any) -> Any:
+    """Recursively turn boolean-looking strings into real booleans.
+
+    The webui stores ``chat_template_kwargs`` as free text, so users can
+    accidentally quote booleans (``{"enable_thinking": "true"}``). llama.cpp
+    validates the kwargs against the model's chat-template JSON schema per
+    request and answers 400 ``invalid type for ... (expected boolean, got
+    string)``. Normalizing at the config boundary keeps the CLI flag (and any
+    API consumer) free of string-typed booleans.
+    """
+    if isinstance(value, dict):
+        return {k: _coerce_template_kwargs(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_coerce_template_kwargs(v) for v in value]
+    if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+        return value.strip().lower() == "true"
+    return value
+
+
+def _serialize_template_kwargs(value: Any) -> str:
+    """Compact, canonical JSON serialization for chat template kwargs."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 class LlamaCppConfig(BaseModel):
@@ -78,6 +103,31 @@ class LlamaCppConfig(BaseModel):
         default=None,
         description="JSON string of chat template kwargs (e.g. '{\"enable_thinking\":true}')",
     )
+
+    @field_validator("chat_template_kwargs", mode="before")
+    @classmethod
+    def normalize_chat_template_kwargs(cls, raw: Any) -> Any:
+        """Parse, normalize, and re-serialize chat template kwargs.
+
+        Accepts a JSON string (webui form value) or a dict (programmatic
+        use). Boolean-looking strings are coerced to real booleans and the
+        result is stored as compact canonical JSON, so the value handed to
+        llama-server can never carry string-typed booleans. Invalid JSON
+        raises immediately instead of surfacing as a runtime 400 per request.
+        """
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return None
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"chat_template_kwargs is not valid JSON: {exc}"
+                ) from exc
+        else:
+            parsed = raw
+        return _serialize_template_kwargs(_coerce_template_kwargs(parsed))
+
     reasoning: Literal["on", "off", "auto"] | None = Field(
         default=None,
         description="Reasoning/thinking mode: 'on', 'off', or 'auto' (passed as --reasoning to llama-server)",

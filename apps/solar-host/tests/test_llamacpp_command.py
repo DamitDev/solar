@@ -38,3 +38,39 @@ def test_speculative_decoding_flags_are_ignored_for_non_generation_models() -> N
 
     assert "--spec-type" not in command
     assert "--spec-draft-n-max" not in command
+
+
+def test_chat_template_kwargs_are_omitted_when_empty() -> None:
+    command = build_command(chat_template_kwargs="")
+
+    assert "--chat-template-kwargs" not in command
+
+
+def test_chat_template_kwargs_normalize_quoted_booleans() -> None:
+    command = build_command(chat_template_kwargs='{"enable_thinking": "false"}')
+
+    index = command.index("--chat-template-kwargs")
+    assert command[index + 1] == '{"enable_thinking":false}'
+
+
+def test_chat_template_kwargs_normalize_nested_quoted_booleans() -> None:
+    command = build_command(
+        chat_template_kwargs='{"outer": {"enable_thinking": "True"}, "list": ["false"]}'
+    )
+
+    index = command.index("--chat-template-kwargs")
+    assert command[index + 1] == '{"outer":{"enable_thinking":true},"list":[false]}'
+
+
+def test_chat_template_kwargs_keep_real_booleans_untouched() -> None:
+    command = build_command(chat_template_kwargs='{"enable_thinking": true}')
+
+    index = command.index("--chat-template-kwargs")
+    assert command[index + 1] == '{"enable_thinking":true}'
+
+
+def test_chat_template_kwargs_invalid_json_raises() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="not valid JSON"):
+        build_command(chat_template_kwargs="{enable_thinking: true}")
