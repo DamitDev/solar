@@ -398,7 +398,11 @@ if (fs.existsSync(DIST_DIR)) {
   });
 }
 
-const server = http.createServer(app);
+// Node's default requestTimeout (300 s) destroys any request whose body is
+// still streaming after five minutes — fatal for multi-GB artifact uploads
+// at WAN speeds, which arrive far slower than the backend can consume them.
+// Raise it to match the proxy chain's ceiling (the ingress already allows 1 h).
+const server = http.createServer({ requestTimeout: PROXY_TIMEOUT_MS }, app);
 
 server.on('upgrade', (req, socket, head) => {
   if (!req.url?.startsWith('/api/control')) {
