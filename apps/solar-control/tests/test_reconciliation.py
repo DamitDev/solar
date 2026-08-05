@@ -197,6 +197,50 @@ class TestHelpers:
         }
         assert _detect_backend_drift(intent, instance_config) is False
 
+    def test_detect_backend_drift_resolved_path_is_not_drift(self):
+        """A bare filename in the spec that is the tail of the instance's
+        resolved path is a match — the host stores resolve-time artifacts
+        (e.g. mmproj) as absolute paths while the spec keeps the filename.
+        Treating that as drift flags every replacement and traps the intent
+        in a REPLACE-stop churn while the spec edit stays pending."""
+        intent = _make_intent(
+            backend={
+                "backend_type": "llamacpp",
+                "model_file": "*UD-Q8_K_XL*.gguf",
+                "mmproj": "mmproj-BF16.gguf",
+            }
+        )
+        instance_config = {
+            "backend_type": "llamacpp",
+            "model_file": "*UD-Q8_K_XL*.gguf",
+            "mmproj": (
+                "/opt/projects/models/hf--unsloth--Qwen3.6-35B-A3B-GGUF/"
+                "mmproj-BF16.gguf"
+            ),
+        }
+        assert _detect_backend_drift(intent, instance_config) is False
+
+    def test_detect_backend_drift_resolved_path_real_change(self):
+        """A genuinely different resolved file still counts as drift."""
+        intent = _make_intent(
+            backend={"backend_type": "llamacpp", "mmproj": "mmproj-BF16.gguf"}
+        )
+        instance_config = {
+            "backend_type": "llamacpp",
+            "mmproj": (
+                "/opt/projects/models/hf--unsloth--Qwen3.6-35B-A3B-GGUF/"
+                "mmproj-Q4_K.gguf"
+            ),
+        }
+        assert _detect_backend_drift(intent, instance_config) is True
+
+    def test_detect_backend_drift_non_path_mismatch_still_drift(self):
+        """The path-tail normalization only applies to bare filenames —
+        other field mismatches still read as drift."""
+        intent = _make_intent(backend={"backend_type": "llamacpp", "ctx_size": 262144})
+        instance_config = {"backend_type": "llamacpp", "ctx_size": 131072}
+        assert _detect_backend_drift(intent, instance_config) is True
+
 
 # ── Diff tests ─────────────────────────────────────────────────
 
