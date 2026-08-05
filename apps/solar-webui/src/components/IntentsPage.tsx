@@ -15,6 +15,7 @@ import solarClient from '@/api/client';
 import { Intent, IntentCreateRequest } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
 import { formatRelativeTime } from '@/lib/utils';
+import { sortIntents } from '@/lib/intents';
 import { IntentPhaseBadge } from './IntentBadges';
 import { IntentFormModal } from './IntentFormModal';
 import { DeleteIntentModal } from './DeleteIntentModal';
@@ -111,15 +112,9 @@ export function IntentsPage() {
     setDeleteTarget(null);
   };
 
-  const sorted = useMemo(
-    () =>
-      [...intents.values()].sort((a, b) =>
-        (b.status?.updated_at ?? b.status?.created_at ?? '').localeCompare(
-          a.status?.updated_at ?? a.status?.created_at ?? '',
-        ),
-      ),
-    [intents],
-  );
+  // Stable order: phase, then alias. Sorting by updated_at (the previous
+  // behaviour) reordered rows on every status update and caused misclicks.
+  const sorted = useMemo(() => sortIntents([...intents.values()]), [intents]);
 
   return (
     <div className="bg-nord-0">

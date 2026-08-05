@@ -794,6 +794,12 @@ export interface StoredInstanceRef {
   status: string;
 }
 
+/** One file inside a stored model directory (relative name + size). */
+export interface StoredModelFile {
+  name: string;
+  size_bytes: number;
+}
+
 /** One model stored on one host (manifest entry + usage). */
 export interface StoredModel {
   slug: string;
@@ -807,6 +813,8 @@ export interface StoredModel {
   size_bytes: number;
   downloaded_at: string | null;
   in_use_by: StoredInstanceRef[];
+  /** Per-file inventory — enables filter-aware (smart) deletion. */
+  files: StoredModelFile[];
 }
 
 /** Storage inventory for one host. */
@@ -832,6 +840,8 @@ export interface StorageResponse {
 export interface StorageDeleteItem {
   host_id: string;
   slug: string;
+  /** Exact file names to delete within the model (smart delete). Omitted = whole model. */
+  filters?: string[] | null;
 }
 
 export type StorageDeleteStatus = 'deleted' | 'in_use' | 'not_found' | 'unreachable' | 'error';

@@ -327,11 +327,18 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
                     });
                   }}
                   placeholder="repo://model-name:v1"
-                  className={inputClass}
+                  disabled={editing}
+                  className={cn(inputClass, editing && 'opacity-60 cursor-not-allowed')}
                 />
                 <p className="text-xs text-nord-4 mt-1">
-                  URI scheme: <code>repo://</code> (Harbor), <code>huggingface://</code> (Hub), <code>local://</code>{' '}
-                  (already on host).
+                  {editing ? (
+                    'The model identity is fixed on an existing intent — the hosts cache files by it, so changing it would orphan them. Create a new intent to serve a different source.'
+                  ) : (
+                    <>
+                      URI scheme: <code>repo://</code> (Harbor), <code>huggingface://</code> (Hub),{' '}
+                      <code>local://</code> (already on host).
+                    </>
+                  )}
                 </p>
                 {fieldError('model_source')}
               </div>
@@ -340,32 +347,41 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
                 <div className="md:col-span-2">
                   <div className="flex items-center justify-between mb-1">
                     <label className="block text-sm font-medium text-nord-4">Download filters (optional)</label>
-                    <button
-                      type="button"
-                      onClick={() => handleFilterAdd()}
-                      className="flex items-center gap-1 px-2 py-1 rounded text-xs text-nord-10 hover:bg-nord-2 transition-colors"
-                    >
-                      <Plus size={14} /> Add filter
-                    </button>
+                    {!editing && (
+                      <button
+                        type="button"
+                        onClick={() => handleFilterAdd()}
+                        className="flex items-center gap-1 px-2 py-1 rounded text-xs text-nord-10 hover:bg-nord-2 transition-colors"
+                      >
+                        <Plus size={14} /> Add filter
+                      </button>
+                    )}
                   </div>
                   <p className="text-xs text-nord-4 mb-2">
-                    Download only the matching files instead of the whole repository — useful for repos that ship many
-                    quantizations. One pattern per row, <code>*</code> allowed.
+                    {editing
+                      ? 'Part of the model identity — changing which files an existing intent downloads would orphan the host cache. Create a new intent for different filters.'
+                      : 'Download only the matching files instead of the whole repository — useful for repos that ship many quantizations. One pattern per row, <code>*</code> allowed.'}
                   </p>
                   {fileFilters.length === 0 ? (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-xs text-nord-4">No filters — the full repository is downloaded. Try:</span>
-                      {FILTER_SUGGESTIONS.map((suggestion) => (
-                        <button
-                          key={suggestion}
-                          type="button"
-                          onClick={() => handleFilterAdd(suggestion)}
-                          className="px-2 py-1 rounded-full text-xs font-mono border border-nord-3 bg-nord-2 text-nord-4 hover:border-nord-10 hover:text-nord-10 transition-colors"
-                        >
-                          + {suggestion}
-                        </button>
-                      ))}
-                    </div>
+                    !editing ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-xs text-nord-4">
+                          No filters — the full repository is downloaded. Try:
+                        </span>
+                        {FILTER_SUGGESTIONS.map((suggestion) => (
+                          <button
+                            key={suggestion}
+                            type="button"
+                            onClick={() => handleFilterAdd(suggestion)}
+                            className="px-2 py-1 rounded-full text-xs font-mono border border-nord-3 bg-nord-2 text-nord-4 hover:border-nord-10 hover:text-nord-10 transition-colors"
+                          >
+                            + {suggestion}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-xs text-nord-4">No filters — the full repository is downloaded.</span>
+                    )
                   ) : (
                     <div className="space-y-2">
                       {fileFilters.map((pattern, index) => (
@@ -375,16 +391,19 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
                             value={pattern}
                             onChange={(e) => handleFilterChange(index, e.target.value)}
                             placeholder="*UD-Q4_K_XL*"
-                            className={`${inputClass} font-mono text-sm`}
+                            disabled={editing}
+                            className={`${inputClass} font-mono text-sm ${editing ? 'opacity-60 cursor-not-allowed' : ''}`}
                           />
-                          <button
-                            type="button"
-                            onClick={() => handleFilterRemove(index)}
-                            className="p-2 rounded hover:bg-nord-2 text-nord-4 hover:text-nord-11 transition-colors"
-                            title="Remove filter"
-                          >
-                            <Trash2 size={16} />
-                          </button>
+                          {!editing && (
+                            <button
+                              type="button"
+                              onClick={() => handleFilterRemove(index)}
+                              className="p-2 rounded hover:bg-nord-2 text-nord-4 hover:text-nord-11 transition-colors"
+                              title="Remove filter"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          )}
                         </div>
                       ))}
                     </div>

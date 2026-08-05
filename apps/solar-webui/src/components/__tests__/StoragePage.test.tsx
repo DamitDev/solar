@@ -20,6 +20,7 @@ function model(slug: string, overrides: Partial<StoredModel> = {}): StoredModel 
     size_bytes: 1000,
     downloaded_at: null,
     in_use_by: [],
+    files: [],
     ...overrides,
   };
 }
