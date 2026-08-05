@@ -15,6 +15,7 @@ from solar_host.models_manager import (
     ManifestEntry,
     add_manifest_entry,
     ensure_models_dir,
+    read_manifest,
     write_manifest,
 )
 
@@ -47,6 +48,20 @@ def client():
 
 def _headers() -> dict:
     return {"X-API-Key": API_KEY}
+
+
+def _filtered_delete(client: TestClient, slug: str, filters: list[str]):
+    """DELETE /models/{slug} with a filters body.
+
+    TestClient.delete cannot carry a body, so go through request().
+    """
+
+    return client.request(
+        "DELETE",
+        f"/models/{slug}",
+        headers=_headers(),
+        json={"filters": filters},
+    )
 
 
 def _make_entry(**overrides) -> ManifestEntry:
@@ -431,3 +446,230 @@ class TestDeleteModel:
         assert resp1.status_code == 200
         resp2 = client.delete(f"/models/{_SLUG}", headers=_headers())
         assert resp2.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Smart delete: DELETE /models/{name} with a filters body
+# ---------------------------------------------------------------------------
+
+
+def _make_multi_quant_entry(
+    model_dir: Path, slug: str = "hf--org--qwen"
+) -> ManifestEntry:
+    """A shared HF dir with two quants, pulled with two filter sets."""
+    return _make_entry(
+        slug=slug,
+        source_uri="huggingface://org/qwen",
+        path=str(model_dir.resolve()),
+        size_bytes=400,
+        digest=None,
+        file_filters=["*Q4_K_M*", "*Q8_0*"],
+    )
+
+
+def _populate_multi_quant_dir(model_dir: Path) -> list[str]:
+    model_dir.mkdir()
+    names = ["model-Q4_K_M.gguf", "model-Q8_0.gguf", "config.json"]
+    for i, name in enumerate(names):
+        (model_dir / name).write_bytes(b"x" * (100 + i))
+    return names
+
+
+class TestDeleteModelFiltered:
+    def test_filtered_delete_removes_only_matching_files(
+        self, client: TestClient, _isolated_env: Path
+    ):
+        """Deleting one quant leaves the other quant and shared files intact."""
+        ensure_models_dir()
+        model_dir = _isolated_env / "hf--org--qwen"
+        _populate_multi_quant_dir(model_dir)
+        add_manifest_entry(_make_multi_quant_entry(model_dir))
+
+        resp = _filtered_delete(client, "hf--org--qwen", ["*Q4_K_M*"])
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["removed"] == ["model-Q4_K_M.gguf"]
+        assert body["freed_bytes"] == 100
+        assert body["remaining"] == 2
+        assert not (model_dir / "model-Q4_K_M.gguf").exists()
+        assert (model_dir / "model-Q8_0.gguf").exists()
+        assert (model_dir / "config.json").exists()
+
+    def test_filtered_delete_narrows_manifest_for_cache_honesty(
+        self, client: TestClient, _isolated_env: Path
+    ):
+        """The entry's filter set becomes the exact remaining file list, so a
+        later pull of the deleted quant re-downloads instead of a stale hit."""
+        ensure_models_dir()
+        model_dir = _isolated_env / "hf--org--qwen"
+        _populate_multi_quant_dir(model_dir)
+        add_manifest_entry(_make_multi_quant_entry(model_dir))
+
+        _filtered_delete(client, "hf--org--qwen", ["*Q4_K_M*"])
+        entries = read_manifest().models
+        assert len(entries) == 1
+        entry = entries[0]
+        assert set(entry.file_filters or []) == {"model-Q8_0.gguf", "config.json"}
+        assert entry.size_bytes == 101 + 102  # Q8 (101) + config.json (102)
+        assert "*Q4_K_M*" not in (entry.file_filters or [])
+
+    def test_filtered_delete_all_files_removes_entry_and_dir(
+        self, client: TestClient, _isolated_env: Path
+    ):
+        ensure_models_dir()
+        model_dir = _isolated_env / "hf--org--qwen"
+        _populate_multi_quant_dir(model_dir)
+        add_manifest_entry(_make_multi_quant_entry(model_dir))
+
+        resp = _filtered_delete(client, "hf--org--qwen", ["*.gguf", "config.json"])
+        assert resp.status_code == 200
+        assert resp.json()["remaining"] == 0
+        assert read_manifest().models == []
+        assert not model_dir.exists()
+
+    def test_filtered_delete_no_match_removes_nothing(
+        self, client: TestClient, _isolated_env: Path
+    ):
+        ensure_models_dir()
+        model_dir = _isolated_env / "hf--org--qwen"
+        _populate_multi_quant_dir(model_dir)
+        add_manifest_entry(_make_multi_quant_entry(model_dir))
+
+        resp = _filtered_delete(client, "hf--org--qwen", ["*Q3_K_S*"])
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["removed"] == []
+        assert body["freed_bytes"] == 0
+        assert body["remaining"] == 3
+        assert len(list(model_dir.iterdir())) == 3
+
+    def test_filtered_delete_blocked_by_instance_with_overlapping_filters(
+        self, client: TestClient, _isolated_env: Path, monkeypatch
+    ):
+        """A running instance whose filters match the deleted files → 409."""
+        ensure_models_dir()
+        model_dir = _isolated_env / "hf--org--qwen"
+        _populate_multi_quant_dir(model_dir)
+        add_manifest_entry(_make_multi_quant_entry(model_dir))
+
+        instance = _make_llamacpp_instance(
+            "inst-q4",
+            str(model_dir / "model-Q4_K_M.gguf"),
+            InstanceStatus.RUNNING,
+        )
+        instance.config.file_filters = ["*Q4_K_M*"]
+        monkeypatch.setattr(config_manager, "instances", {"inst-q4": instance})
+
+        resp = _filtered_delete(client, "hf--org--qwen", ["*Q4_K_M*"])
+        assert resp.status_code == 409
+        assert "inst-q4" in resp.json()["detail"]
+        # Nothing was deleted.
+        assert (model_dir / "model-Q4_K_M.gguf").exists()
+
+    def test_filtered_delete_allowed_for_non_overlapping_instance(
+        self, client: TestClient, _isolated_env: Path, monkeypatch
+    ):
+        """A running instance using only Q8 does not block deleting Q4 files."""
+        ensure_models_dir()
+        model_dir = _isolated_env / "hf--org--qwen"
+        _populate_multi_quant_dir(model_dir)
+        add_manifest_entry(_make_multi_quant_entry(model_dir))
+
+        instance = _make_llamacpp_instance(
+            "inst-q8",
+            str(model_dir / "model-Q8_0.gguf"),
+            InstanceStatus.RUNNING,
+        )
+        instance.config.file_filters = ["*Q8_0*"]
+        monkeypatch.setattr(config_manager, "instances", {"inst-q8": instance})
+
+        resp = _filtered_delete(client, "hf--org--qwen", ["*Q4_K_M*"])
+        assert resp.status_code == 200
+        assert resp.json()["removed"] == ["model-Q4_K_M.gguf"]
+        assert (model_dir / "model-Q8_0.gguf").exists()
+
+    def test_filtered_delete_blocked_by_instance_without_filters(
+        self, client: TestClient, _isolated_env: Path, monkeypatch
+    ):
+        """An active instance without recorded filters is conservative: 409."""
+        ensure_models_dir()
+        model_dir = _isolated_env / "hf--org--qwen"
+        _populate_multi_quant_dir(model_dir)
+        add_manifest_entry(_make_multi_quant_entry(model_dir))
+
+        instance = _make_llamacpp_instance(
+            "inst-nofilters",
+            str(model_dir / "model-Q8_0.gguf"),
+            InstanceStatus.RUNNING,
+        )
+        monkeypatch.setattr(config_manager, "instances", {"inst-nofilters": instance})
+
+        resp = _filtered_delete(client, "hf--org--qwen", ["*Q4_K_M*"])
+        assert resp.status_code == 409
+
+    def test_filtered_delete_ignores_stopped_instance(
+        self, client: TestClient, _isolated_env: Path, monkeypatch
+    ):
+        ensure_models_dir()
+        model_dir = _isolated_env / "hf--org--qwen"
+        _populate_multi_quant_dir(model_dir)
+        add_manifest_entry(_make_multi_quant_entry(model_dir))
+
+        instance = _make_llamacpp_instance(
+            "inst-stopped",
+            str(model_dir / "model-Q8_0.gguf"),
+            InstanceStatus.STOPPED,
+        )
+        instance.config.file_filters = ["*Q8_0*"]
+        monkeypatch.setattr(config_manager, "instances", {"inst-stopped": instance})
+
+        resp = _filtered_delete(client, "hf--org--qwen", ["*Q4_K_M*"])
+        assert resp.status_code == 200
+
+    def test_filtered_delete_broad_pattern_removes_all_matching(
+        self, client: TestClient, _isolated_env: Path
+    ):
+        """A broad pattern deletes everything it matches — filters are the
+        caller's intent, and the in-use guard protects running instances."""
+        ensure_models_dir()
+        model_dir = _isolated_env / "hf--org--qwen"
+        model_dir.mkdir()
+        (model_dir / "model-Q4_K_M.gguf").write_bytes(b"q" * 64)
+        (model_dir / "config.json").write_bytes(b"c" * 32)
+        add_manifest_entry(
+            _make_multi_quant_entry(model_dir).model_copy(
+                update={"file_filters": ["*Q4*", "*.gguf"]}
+            )
+        )
+
+        resp = _filtered_delete(client, "hf--org--qwen", ["*.gguf"])
+        assert resp.status_code == 200
+        assert resp.json()["removed"] == ["model-Q4_K_M.gguf"]
+        assert (model_dir / "config.json").exists()
+
+
+class TestGetModelsFiles:
+    def test_files_inventory_lists_directory_contents(
+        self, client: TestClient, _isolated_env: Path
+    ):
+        ensure_models_dir()
+        model_dir = _isolated_env / "hf--org--qwen"
+        model_dir.mkdir()
+        (model_dir / "model-Q4_K_M.gguf").write_bytes(b"x" * 100)
+        (model_dir / "sub").mkdir()
+        (model_dir / "sub" / "tokenizer.json").write_bytes(b"y" * 50)
+        add_manifest_entry(_make_multi_quant_entry(model_dir))
+
+        resp = client.get("/models", headers=_headers())
+        data = resp.json()
+        assert len(data) == 1
+        files = {f["name"]: f["size_bytes"] for f in data[0]["files"]}
+        assert files == {"model-Q4_K_M.gguf": 100, "sub/tokenizer.json": 50}
+
+    def test_files_inventory_empty_for_missing_directory(
+        self, client: TestClient, _isolated_env: Path
+    ):
+        ensure_models_dir()
+        add_manifest_entry(_make_entry())
+        resp = client.get("/models", headers=_headers())
+        assert resp.json()[0]["files"] == []
