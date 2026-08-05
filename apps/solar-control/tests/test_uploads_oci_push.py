@@ -341,3 +341,77 @@ async def test_push_blob_small_body_single_chunk():
     patches = [r for r in stub.requests if r.method == "PATCH"]
     assert len(patches) == 1
     assert patches[0].headers["Content-Range"] == f"0-{len(data) - 1}"
+
+
+# ---------------------------------------------------------------------------
+# delete_repository (best-effort repository cleanup, S-048)
+# ---------------------------------------------------------------------------
+
+
+class _RepoDeleteStub:
+    """MockTransport handler for the v2.0 repository DELETE endpoint."""
+
+    def __init__(self, status: int):
+        self.status = status
+        self.requests: list[httpx.Request] = []
+
+    async def handler(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        return httpx.Response(self.status, json={})
+
+    def make_client(self) -> OciPushClient:
+        return OciPushClient(
+            "https://harbor.test",
+            "robot",
+            "secret",
+            transport=httpx.MockTransport(self.handler),
+        )
+
+
+async def _delete_repo_with(status: int) -> tuple[bool, list[httpx.Request]]:
+    stub = _RepoDeleteStub(status)
+    client = stub.make_client()
+    try:
+        result = await client.delete_repository("supernova/iris-osl")
+    finally:
+        await client.close()
+    return result, stub.requests
+
+
+@pytest.mark.anyio
+async def test_delete_repository_success_returns_true():
+    result, requests = await _delete_repo_with(200)
+
+    assert result is True
+    assert len(requests) == 1
+    assert requests[0].method == "DELETE"
+    assert requests[0].url.path == (
+        "/api/v2.0/projects/supernova/repositories/iris-osl"
+    )
+    assert "Authorization" in requests[0].headers
+
+
+@pytest.mark.anyio
+async def test_delete_repository_202_returns_true():
+    result, _ = await _delete_repo_with(202)
+    assert result is True
+
+
+@pytest.mark.anyio
+async def test_delete_repository_404_already_gone_returns_true():
+    """Harbor auto-removes an empty repo — 404 means it is already gone."""
+    result, _ = await _delete_repo_with(404)
+    assert result is True
+
+
+@pytest.mark.anyio
+async def test_delete_repository_403_forbidden_returns_false():
+    """Robot account lacks repository-delete permission — reported, no raise."""
+    result, _ = await _delete_repo_with(403)
+    assert result is False
+
+
+@pytest.mark.anyio
+async def test_delete_repository_500_returns_false():
+    result, _ = await _delete_repo_with(500)
+    assert result is False

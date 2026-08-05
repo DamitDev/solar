@@ -67,6 +67,9 @@ class DataRepoClient:
     async def post(self, path: str, json: Any) -> tuple[int, Any]:
         raise NotImplementedError
 
+    async def delete(self, path: str) -> tuple[int, Any]:
+        raise NotImplementedError
+
 
 class AioHttpDataRepo(DataRepoClient):
     """aiohttp implementation wired to ``settings.data_repository_*``."""
@@ -118,6 +121,9 @@ class AioHttpDataRepo(DataRepoClient):
 
     async def post(self, path: str, json: Any) -> tuple[int, Any]:
         return await self._request("POST", path, json=json)
+
+    async def delete(self, path: str) -> tuple[int, Any]:
+        return await self._request("DELETE", path)
 
 
 def _validate_file_path(path: str) -> None:
