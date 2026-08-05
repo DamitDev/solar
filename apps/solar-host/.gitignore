@@ -48,4 +48,4 @@ logs/
 
 
 # Test suite runtime artifact
-models/
+/models/
