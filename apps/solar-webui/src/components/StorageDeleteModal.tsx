@@ -6,12 +6,17 @@
  * warns that files must be re-downloaded, and the result phase reports
  * per-item outcomes — a bulk operation with mixed results cannot be
  * reported through a native dialog.
+ *
+ * Smart delete: a model whose directory holds several files (e.g. multiple
+ * quants of one HuggingFace repo pulled with different filters) shows a
+ * per-file checkbox list, defaulting to all selected. Deleting a subset
+ * sends the exact file names as filters so the host removes only those.
  */
 
 import { useMemo, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Info, Loader2, Trash2, WifiOff, X, XCircle } from 'lucide-react';
 import solarClient from '@/api/client';
-import { HostStorage, StorageDeleteItem, StorageDeleteResult, StorageDeleteStatus } from '@/api/types';
+import { HostStorage, StorageDeleteItem, StorageDeleteResult, StorageDeleteStatus, StoredModelFile } from '@/api/types';
 import { formatBytes } from '@/lib/utils';
 
 interface StorageDeleteModalProps {
@@ -38,7 +43,10 @@ interface GroupedItem {
   name: string;
   size: number;
   inUse: boolean;
+  files: StoredModelFile[];
 }
+
+const itemKey = (hostId: string, slug: string) => `${hostId}::${slug}`;
 
 export function StorageDeleteModal({ items, hosts, onClose, onDone }: StorageDeleteModalProps) {
   const [results, setResults] = useState<StorageDeleteResult[] | null>(null);
@@ -58,21 +66,82 @@ export function StorageDeleteModal({ items, hosts, onClose, onDone }: StorageDel
         name: model?.model_name ?? model?.slug ?? item.slug,
         size: model?.size_bytes ?? 0,
         inUse: (model?.in_use_by.length ?? 0) > 0,
+        files: model?.files ?? [],
       });
     }
     return [...byHost.entries()].map(([hostName, models]) => ({ hostName, models }));
   }, [items, hosts]);
 
+  // Per-model file selection, keyed by `${hostId}::${slug}`. Defaults to all
+  // files selected so single-file models and the untouched multi-file case
+  // behave exactly like the old whole-model delete.
+  const [selectedFiles, setSelectedFiles] = useState<Record<string, Set<string>>>(() => {
+    const init: Record<string, Set<string>> = {};
+    for (const item of items) {
+      const host = hosts.find((h) => h.host_id === item.host_id);
+      const model = host?.models.find((m) => m.slug === item.slug);
+      const files = model?.files ?? [];
+      if (files.length > 1) {
+        init[itemKey(item.host_id, item.slug)] = new Set(files.map((f) => f.name));
+      }
+    }
+    return init;
+  });
+
+  const toggleFile = (key: string, fileName: string) => {
+    setSelectedFiles((prev) => {
+      const next = { ...prev };
+      const set = new Set(next[key] ?? []);
+      if (set.has(fileName)) {
+        set.delete(fileName);
+      } else {
+        set.add(fileName);
+      }
+      next[key] = set;
+      return next;
+    });
+  };
+
+  const selectedSizeFor = (m: GroupedItem): number => {
+    if (m.files.length <= 1) return m.size;
+    const sel = selectedFiles[itemKey(m.hostId, m.slug)] ?? new Set<string>();
+    return m.files.filter((f) => sel.has(f.name)).reduce((s, f) => s + f.size_bytes, 0);
+  };
+
   const totalBytes = useMemo(
-    () => grouped.reduce((s, g) => s + g.models.reduce((x, m) => x + m.size, 0), 0),
-    [grouped],
+    () => grouped.reduce((s, g) => s + g.models.reduce((x, m) => x + selectedSizeFor(m), 0), 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [grouped, selectedFiles],
   );
   const inUseCount = useMemo(() => grouped.reduce((s, g) => s + g.models.filter((m) => m.inUse).length, 0), [grouped]);
 
+  // The request items carry filters only for a partial file selection; an
+  // all-files selection stays a plain whole-model delete, and an empty
+  // selection drops the model from the request entirely.
+  const buildRequestItems = (): StorageDeleteItem[] => {
+    const out: StorageDeleteItem[] = [];
+    for (const g of grouped) {
+      for (const m of g.models) {
+        if (m.files.length > 1) {
+          const sel = selectedFiles[itemKey(m.hostId, m.slug)] ?? new Set<string>();
+          if (sel.size === 0) continue;
+          if (sel.size < m.files.length) {
+            out.push({ host_id: m.hostId, slug: m.slug, filters: [...sel] });
+            continue;
+          }
+        }
+        out.push({ host_id: m.hostId, slug: m.slug });
+      }
+    }
+    return out;
+  };
+
   const handleDelete = async () => {
+    const requestItems = buildRequestItems();
+    if (requestItems.length === 0) return;
     setDeleting(true);
     try {
-      const res = await solarClient.deleteStoredModels(items);
+      const res = await solarClient.deleteStoredModels(requestItems);
       setResults(res);
     } catch (err: any) {
       console.error('Bulk delete failed:', err);
@@ -136,12 +205,42 @@ export function StorageDeleteModal({ items, hosts, onClose, onDone }: StorageDel
               {grouped.map((g) => (
                 <div key={g.hostName}>
                   <div className="bg-nord-2 px-3 py-1.5 text-xs text-nord-4">{g.hostName}</div>
-                  {g.models.map((m) => (
-                    <div key={m.slug} className="flex items-center justify-between px-3 py-2 text-sm">
-                      <span className="text-nord-6 break-all pr-4">{m.name}</span>
-                      <span className="text-nord-4 tabular-nums flex-shrink-0">{formatBytes(m.size)}</span>
-                    </div>
-                  ))}
+                  {g.models.map((m) => {
+                    const sel = selectedFiles[itemKey(m.hostId, m.slug)] ?? new Set<string>();
+                    const multi = m.files.length > 1;
+                    return (
+                      <div key={m.slug} className="px-3 py-2 text-sm">
+                        <div className="flex items-center justify-between">
+                          <span className="text-nord-6 break-all pr-4">{m.name}</span>
+                          <span className="text-nord-4 tabular-nums flex-shrink-0">
+                            {multi ? `${sel.size}/${m.files.length} files · ` : ''}
+                            {formatBytes(selectedSizeFor(m))}
+                          </span>
+                        </div>
+                        {multi && (
+                          <div className="mt-1.5 space-y-1 pl-1">
+                            {m.files.map((f) => (
+                              <label
+                                key={f.name}
+                                className="flex items-center gap-2 text-xs text-nord-4 cursor-pointer hover:text-nord-6 transition-colors"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={sel.has(f.name)}
+                                  onChange={() => toggleFile(itemKey(m.hostId, m.slug), f.name)}
+                                  className="accent-nord-10"
+                                />
+                                <span className="font-mono flex-1 truncate" title={f.name}>
+                                  {f.name}
+                                </span>
+                                <span className="tabular-nums flex-shrink-0">{formatBytes(f.size_bytes)}</span>
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               ))}
             </div>
@@ -166,7 +265,7 @@ export function StorageDeleteModal({ items, hosts, onClose, onDone }: StorageDel
               </button>
               <button
                 onClick={handleDelete}
-                disabled={deleting}
+                disabled={deleting || totalBytes === 0}
                 className="bg-nord-11 text-nord-6 rounded-md px-4 py-2 flex items-center gap-2 hover:bg-opacity-90 transition-colors disabled:opacity-60"
               >
                 {deleting ? (

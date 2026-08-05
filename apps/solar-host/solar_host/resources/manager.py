@@ -102,6 +102,16 @@ class ResourceManager:
             now = datetime.now(UTC)
             snap = self._snapshot_unlocked(now)
 
+            # Unified-memory hosts (Mac, CPU-only) report no VRAM dimension:
+            # a VRAM request consumes the same unified RAM there. Fold it
+            # into the RAM request BEFORE the capacity check so the
+            # reservation protects what the host actually has, and the
+            # snapshot headroom accounts for it without special-casing.
+            if snap.vram is None and req.vram_gb > 0:
+                req = req.model_copy(
+                    update={"ram_gb": req.ram_gb + req.vram_gb, "vram_gb": 0.0}
+                )
+
             if snap.vram is not None and req.vram_gb > snap.vram.available_gb:
                 raise CapacityExceededError("vram", req.vram_gb, snap.vram.available_gb)
             if snap.ram is not None and req.ram_gb > snap.ram.available_gb:

@@ -83,5 +83,10 @@ class Settings(BaseSettings):
     # fit inside this window on every hop of the call chain.
     host_start_timeout_s: float = 900.0
 
+    # Model pull timeout: the resolver's POST /models/pull hop on the host.
+    # A multi-GB HuggingFace/Harbor download can legitimately take minutes;
+    # the reconciler's cold-start action bound derives from this value.
+    model_pull_timeout_s: float = 1800.0
+
 
 settings = Settings()

@@ -401,3 +401,47 @@ class TestExpiryCleanup:
         assert mgr.cleanup_expired(far_future) == 0
         snap = mgr.snapshot()
         assert any(v.id == res.id for v in snap.reservations)
+
+
+# ---------------------------------------------------------------------------
+# Unified-memory hosts (Mac / CPU-only): VRAM requests fold into RAM
+# ---------------------------------------------------------------------------
+
+
+class TestUnifiedMemoryFold:
+    def test_vram_request_folded_into_ram_on_ram_host(self, monkeypatch):
+        """On a host without a VRAM dimension the reserved VRAM counts as RAM."""
+        monkeypatch.setattr(
+            "solar_host.resources.manager.get_memory_info", lambda: _MEM_RAM
+        )
+        mgr = _make_manager()
+        res = mgr.create(_make_request(vram_gb=4.0, ram_gb=1.0))
+
+        stored = mgr._reservations[res.id]
+        assert stored.vram_gb == 0.0
+        assert stored.ram_gb == pytest.approx(5.0)
+
+        snap = mgr.snapshot()
+        assert snap.vram is None
+        assert snap.ram is not None
+        # RAM: system 4 + headroom 5 → 16 - 4 - 5 = 7 available.
+        assert snap.ram.reserved_headroom_gb == pytest.approx(5.0)
+        assert snap.ram.available_gb == pytest.approx(7.0)
+
+    def test_vram_capacity_check_applies_to_ram_on_ram_host(self, monkeypatch):
+        """A VRAM request exceeding unified RAM is rejected (capacity gate)."""
+        monkeypatch.setattr(
+            "solar_host.resources.manager.get_memory_info", lambda: _MEM_RAM
+        )
+        mgr = _make_manager()
+        with pytest.raises(CapacityExceededError) as exc:
+            mgr.create(_make_request(vram_gb=20.0, ram_gb=0.0))
+        assert exc.value.dimension == "ram"
+
+    def test_vram_request_unchanged_on_vram_host(self):
+        """On a VRAM host the request is stored as requested (no fold)."""
+        mgr = _make_manager()
+        res = mgr.create(_make_request(vram_gb=4.0, ram_gb=1.0))
+        stored = mgr._reservations[res.id]
+        assert stored.vram_gb == 4.0
+        assert stored.ram_gb == 1.0

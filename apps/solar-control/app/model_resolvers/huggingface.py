@@ -3,6 +3,8 @@ import asyncio
 import aiohttp
 from fastapi import HTTPException
 
+from app.config import settings
+
 from .parser import HuggingFaceURI
 
 
@@ -38,7 +40,7 @@ async def resolve_huggingface(
                 url,
                 json=payload,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=300),
+                timeout=aiohttp.ClientTimeout(total=settings.model_pull_timeout_s),
             ) as response,
         ):
             if response.status == 200:

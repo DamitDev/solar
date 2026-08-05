@@ -40,6 +40,13 @@ class InstanceRef(BaseModel):
     status: str
 
 
+class StoredFile(BaseModel):
+    """One file inside a stored model directory (relative name + size)."""
+
+    name: str
+    size_bytes: int
+
+
 class StoredModel(BaseModel):
     """One model stored on one host (manifest entry + usage)."""
 
@@ -54,6 +61,11 @@ class StoredModel(BaseModel):
     size_bytes: int
     downloaded_at: str | None = None
     in_use_by: list[InstanceRef] = Field(default_factory=list)
+    # Per-file inventory for filter-aware ("smart") deletion: a shared
+    # directory can hold files from several download filters (e.g. two
+    # quants of one HuggingFace repo), and deleting one must not take the
+    # other's files with it.
+    files: list[StoredFile] = Field(default_factory=list)
 
 
 class HostStorage(BaseModel):
@@ -184,6 +196,14 @@ async def _build_host_storage(host: Host) -> HostStorage:
                 size_bytes=int(raw.get("size_bytes") or 0),
                 downloaded_at=raw.get("downloaded_at"),
                 in_use_by=in_use_by,
+                files=[
+                    StoredFile(
+                        name=f.get("name", ""),
+                        size_bytes=int(f.get("size_bytes") or 0),
+                    )
+                    for f in (raw.get("files") or [])
+                    if f.get("name")
+                ],
             )
         )
 
@@ -221,12 +241,26 @@ async def get_host_storage(host_id: str) -> HostStorage:
     return await _build_host_storage(host)
 
 
+class DeleteModelRequest(BaseModel):
+    """Optional body for DELETE /api/storage/hosts/{id}/models/{slug}.
+
+    ``filters`` restricts the deletion to files matching those patterns
+    (HuggingFace allow_patterns semantics); omitted = delete the whole
+    model. The host is the authoritative in-use guard either way.
+    """
+
+    filters: list[str] | None = None
+
+
 @router.delete("/hosts/{host_id}/models/{slug}")
-async def delete_host_model(host_id: str, slug: str):
+async def delete_host_model(
+    host_id: str, slug: str, req: DeleteModelRequest | None = None
+):
     """Proxy DELETE to the host, propagating 404/409 verbatim.
 
     404 means the model is already gone; 409 means an active instance is
-    using it — the UI must be able to distinguish the two.
+    using it — the UI must be able to distinguish the two. An optional
+    ``filters`` body restricts the delete to matching files (smart delete).
     """
     host = await host_db.get_host(host_id)
     if not host:
@@ -238,17 +272,23 @@ async def delete_host_model(host_id: str, slug: str):
         )
     url = f"{host.url.rstrip('/')}/models/{quote(slug, safe='')}"
     headers = {"X-API-Key": host.api_key}
+    body = None
+    if req is not None and req.filters:
+        body = {"filters": req.filters}
     try:
         async with (
             aiohttp.ClientSession() as session,
             session.delete(
-                url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
+                url,
+                headers=headers,
+                json=body,
+                timeout=aiohttp.ClientTimeout(total=30),
             ) as resp,
         ):
             text = await resp.text()
             if resp.status in (200, 404, 409):
-                body = json.loads(text) if text else {"detail": ""}
-                return JSONResponse(status_code=resp.status, content=body)
+                parsed = json.loads(text) if text else {"detail": ""}
+                return JSONResponse(status_code=resp.status, content=parsed)
             raise HTTPException(status_code=resp.status, detail=text)
     except HTTPException:
         raise
@@ -267,10 +307,15 @@ async def delete_host_model(host_id: str, slug: str):
 
 
 class DeleteItem(BaseModel):
-    """One host + model slug to delete in bulk."""
+    """One host + model slug to delete in bulk.
+
+    ``filters`` restricts the delete to matching files within the model
+    (smart delete); omitted = delete the whole model.
+    """
 
     host_id: str
     slug: str
+    filters: list[str] | None = None
 
 
 class DeleteRequest(BaseModel):
@@ -332,21 +377,36 @@ async def bulk_delete_models(req: DeleteRequest) -> list[DeleteResult]:
             )
         url = f"{host.url.rstrip('/')}/models/{quote(item.slug, safe='')}"
         headers = {"X-API-Key": host.api_key}
+        body = None
+        if item.filters:
+            body = {"filters": item.filters}
         try:
             async with (
                 aiohttp.ClientSession() as session,
                 session.delete(
-                    url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
+                    url,
+                    headers=headers,
+                    json=body,
+                    timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp,
             ):
                 text = await resp.text()
                 if resp.status == 200:
+                    # The host reports the actually freed bytes (a filtered
+                    # delete frees less than the whole entry); fall back to
+                    # the prefetched entry size for legacy hosts.
+                    freed = size_by_host_slug.get((item.host_id, item.slug), 0)
+                    try:
+                        parsed = json.loads(text) if text else {}
+                        freed = int(parsed.get("freed_bytes") or freed)
+                    except (ValueError, TypeError):
+                        pass
                     return DeleteResult(
                         host_id=item.host_id,
                         host_name=host.name,
                         slug=item.slug,
                         status="deleted",
-                        freed_bytes=size_by_host_slug.get((item.host_id, item.slug), 0),
+                        freed_bytes=freed,
                     )
                 if resp.status == 404:
                     return DeleteResult(

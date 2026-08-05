@@ -76,6 +76,32 @@ describe('IntentFormModal in edit mode', () => {
     expect(screen.getByText(/cannot be changed/i)).toBeInTheDocument();
   });
 
+  it('locks the model source and download filters — the model identity', () => {
+    renderEdit();
+
+    expect(screen.getByDisplayValue('huggingface://org/iris')).toBeDisabled();
+    expect(screen.getByDisplayValue('*Q8_0*')).toBeDisabled();
+    expect(screen.getByText(/model identity is fixed/i)).toBeInTheDocument();
+    expect(screen.getByText(/part of the model identity/i)).toBeInTheDocument();
+    // No way to add or remove filter rows in edit mode.
+    expect(screen.queryByRole('button', { name: 'Add filter' })).not.toBeInTheDocument();
+    expect(screen.queryByTitle('Remove filter')).not.toBeInTheDocument();
+  });
+
+  it('still submits the locked model identity unchanged', async () => {
+    const updateIntent = vi.spyOn(solarClient, 'updateIntent').mockResolvedValue(intent);
+    const onSaved = renderEdit();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => expect(updateIntent).toHaveBeenCalled());
+    const [id, payload] = updateIntent.mock.calls[0];
+    expect(id).toBe('intent-1');
+    expect(payload.model_source).toBe('huggingface://org/iris');
+    expect(payload.backend.file_filters).toEqual(['*Q8_0*']);
+    expect(onSaved).toHaveBeenCalled();
+  });
+
   it('explains what the selected strategy will do to the replicas', async () => {
     renderEdit();
 
