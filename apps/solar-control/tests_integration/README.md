@@ -137,11 +137,16 @@ env -u PYTHONPATH ../solar-host/.venv/bin/python \
   module-scoped `stack` fixture is deliberately **sync** (wraps the async
   spawn in `asyncio.run`). Async module-scoped generator fixtures get
   re-created per test loop otherwise (one full stack per test).
-- **Startup race:** the host marks instances RUNNING ~2s after spawn, before
-  torch/transformers finish loading. Inference tests gate on the gateway
-  registry listing the alias, then retry `/v1/classify` with a bounded
-  budget (`classify_until_ok` in `fixtures/intents.py`) — see "The
-  classify-404 flake" below.
+- **Startup readiness is log-gated:** an instance is RUNNING only once
+  its backend logged that it is listening (solar-host's
+  `is_ready_line`), and `POST /instances/{id}/start` blocks until then.
+  Inference tests still gate on the gateway registry listing the alias
+  (the gateway registers it only after its own health probe accepts the
+  instance), then classify — with no retry in the imperative flow, since
+  the start call already proved the backend servable. The bounded
+  `classify_until_ok` retry (in `fixtures/intents.py`) remains for the
+  intent path, where a *crashed* replica must be recreated by the
+  reconciler — see "The classify-404 flake" below.
 - **`GET /v1/models` does NOT prove liveness.** The gateway fabricates a
   fallback entry for an alias whenever the upstream query fails
   (`app/gateway.py get_available_models`), so a crashed server keeps the

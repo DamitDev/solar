@@ -210,22 +210,22 @@ The two are independent: the filters decide what lands on disk, the model file a
 
 ## Editing Intents
 
-The **Edit** button on the Intents list and on an intent's detail page reopens the same form, filled in with the current spec. Saving replaces the whole spec, so the form always submits every field — including the collapsed Placement and Resources sections, which open automatically when they hold anything.
+The **Edit** button on the Intents list and on an intent's detail page reopens the same form, filled in with the current configuration. Saving replaces the whole configuration, so the form always submits every field — including the collapsed Host selection and Resources sections, which open automatically when they hold anything.
 
 - The **alias** cannot be changed: it is the served model name and the deployment's identity. Serving a different name means a new intent.
-- The **strategy** in the saved spec decides how the replicas are converted: `rolling` replaces them one at a time and the alias keeps serving; `immediate` stops them all before the replacements start, so the alias briefly serves nothing.
-- If a rollout is already running, the form says so. Saving abandons it and re-plans against the new spec.
+- The **strategy** in the saved configuration decides how the replicas are converted: `rolling` replaces them one at a time and the alias keeps serving; `immediate` stops them all before the replacements start, so the alias briefly serves nothing.
+- If an update is already running, the form says so. Saving abandons it and re-plans against the new configuration.
 
 ## Draining a Host
 
-The Resources page's host cards have a **Drain** action for taking a host out of service (maintenance, reboot, decommission). Draining migrates the intent-managed replicas to other hosts and stops new instances from landing there.
+The Resources page's host cards have a **Drain** action for taking a host out of service (maintenance, reboot, decommission). Draining moves the managed instances to other hosts and stops new instances from landing there.
 
-The confirmation modal lists what blocks the drain, because draining never touches those:
+The confirmation modal lists what blocks the drain, because draining leaves those alone:
 
-- **Manual instances** — an instance nobody declared has no desired state to reconcile, so it is never moved. Stop it first.
+- **Manual instances** — an instance nobody declared has no requested configuration to reconcile, so it is never moved. Stop it first.
 - **Active job steps** — an instance cannot be migrated off a host that is running one.
 
-Once started, the card shows a `draining` badge and what remains. A replica with nowhere to go keeps serving here and the card shows why (its `stalled` reason); the drain simply waits, since Solar does not drop serving capacity to finish a drain. Freeing capacity elsewhere — or **Resume** — resolves it. The badge becomes `drained` when the host is empty, and it stays out of placement until you resume it.
+Once started, the card shows a `draining` badge and what remains. An instance with nowhere to go keeps serving here and the card shows why (its `stalled` reason); the drain simply waits, since Solar does not drop serving capacity to finish a drain. Freeing capacity elsewhere — or **Resume** — resolves it. The badge becomes `drained` when the host is empty, and it stays out of placement until you resume it.
 
 ## Technology Stack
 

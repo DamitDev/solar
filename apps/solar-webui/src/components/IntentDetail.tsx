@@ -42,10 +42,17 @@ function ConditionChip({ condition }: { condition: IntentCondition }) {
       title={`${condition.reason} — ${condition.message}`}
       className={cn('px-2 py-0.5 rounded text-xs font-medium', color)}
     >
-      {condition.type}
+      {CONDITION_LABELS[condition.type] ?? condition.type}
     </span>
   );
 }
+
+// Display-only condition labels; the API contract is untouched.
+const CONDITION_LABELS: Record<string, string> = {
+  Available: 'Serving',
+  Progressing: 'Updating',
+  Conflict: 'Conflict',
+};
 
 export function IntentDetail() {
   const { id } = useParams();
@@ -212,7 +219,7 @@ export function IntentDetail() {
         {pendingStored && (
           <div className="p-3 bg-nord-13 bg-opacity-15 border border-nord-13 rounded text-sm text-nord-6 flex items-start gap-2">
             <TriangleAlert size={16} className="flex-shrink-0 mt-0.5" />
-            <span>Stored and validated — reconciliation not yet running (S-041). No instances have been created.</span>
+            <span>Stored and validated. No instances have been created yet.</span>
           </div>
         )}
 
@@ -221,20 +228,20 @@ export function IntentDetail() {
           <div className="p-3 bg-nord-13 bg-opacity-15 border border-nord-13 rounded text-sm text-nord-6 flex items-start gap-2">
             <TriangleAlert size={16} className="flex-shrink-0 mt-0.5" />
             <span>
-              Serving with {status.ready_replicas} of {status.desired_replicas} requested replicas — capacity shortfall.
-              Will fill automatically when hosts become eligible.
+              Serving with {status.ready_replicas} of {status.desired_replicas} requested instances — not enough
+              capacity right now. Missing instances start automatically as capacity frees up.
             </span>
           </div>
         )}
 
         {/* Stat strip */}
         <dl className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3 lg:grid-cols-6">
-          <StatBlock label="Desired">{status.desired_replicas}</StatBlock>
-          <StatBlock label="Observed">{status.observed_replicas}</StatBlock>
+          <StatBlock label="Requested">{status.desired_replicas}</StatBlock>
+          <StatBlock label="Running">{status.observed_replicas}</StatBlock>
           <StatBlock label="Ready">{status.ready_replicas}</StatBlock>
-          <StatBlock label="Updated">{status.updated_replicas}</StatBlock>
+          <StatBlock label="Up to date">{status.updated_replicas}</StatBlock>
           <StatBlock label="Available">{status.available ? 'yes' : 'no'}</StatBlock>
-          <StatBlock label="Shortfall">{status.shortfall}</StatBlock>
+          <StatBlock label="Missing">{status.shortfall}</StatBlock>
         </dl>
 
         {/* Replica set */}
@@ -308,8 +315,7 @@ export function IntentDetail() {
             </div>
             {hasConflict && (
               <p className="mt-2 text-xs text-nord-4">
-                A manual instance occupies this alias on a candidate host (spec §5.3) — stop it on the Hosts page to let
-                reconciliation proceed.
+                A manual instance is using this name on a candidate host — stop it on the Hosts page to continue.
               </p>
             )}
           </section>
@@ -318,7 +324,7 @@ export function IntentDetail() {
         {/* Strategy progress */}
         {status.strategy_progress && (
           <section>
-            <h4 className="text-sm font-semibold text-nord-6 uppercase tracking-wide">Strategy progress</h4>
+            <h4 className="text-sm font-semibold text-nord-6 uppercase tracking-wide">Update progress</h4>
             <div className="mt-3 rounded-md border border-nord-3 bg-nord-2 p-4 text-sm">
               <div className="flex flex-wrap gap-x-6 gap-y-2 text-nord-4">
                 <span>
@@ -369,7 +375,7 @@ export function IntentDetail() {
         {/* Intent spec */}
         <details className="group border border-nord-3 rounded-md">
           <summary className="flex items-center justify-between px-4 py-3 cursor-pointer select-none list-none">
-            <span className="text-sm font-medium text-nord-4">Intent spec</span>
+            <span className="text-sm font-medium text-nord-4">Configuration</span>
             <ChevronDown size={16} className="text-nord-4 transition-transform group-open:rotate-180" />
           </summary>
           <div className="px-4 pb-4 space-y-4">
@@ -410,16 +416,13 @@ export function IntentDetail() {
                 )}
               </div>
             </div>
-            <p className="text-xs text-nord-4">
-              Changing a deployment requires delete + recreate — update endpoint pending (S-040).
-            </p>
           </div>
         </details>
 
         {/* Footer timestamps */}
         <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs text-nord-4 sm:grid-cols-4">
           <div>
-            <dt className="uppercase tracking-wide">Last reconciled</dt>
+            <dt className="uppercase tracking-wide">Last checked</dt>
             <dd className="mt-0.5">{status.last_reconciled_at ? formatDateTime(status.last_reconciled_at) : '—'}</dd>
           </div>
           <div>

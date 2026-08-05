@@ -250,7 +250,7 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
           {editing && (
             <div className="rounded-md border border-nord-3 bg-nord-2 p-3 space-y-1">
               <p className="text-sm text-nord-4">
-                Saving replaces the whole spec. Replicas are converted using the{' '}
+                Saving replaces the whole configuration. Replicas are converted using the{' '}
                 <span className="font-medium text-nord-6">{strategy}</span> strategy below —{' '}
                 {strategy === 'rolling'
                   ? 'one replica at a time, so the alias keeps serving.'
@@ -258,8 +258,8 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
               </p>
               {rolloutInFlight && (
                 <p className="flex items-center gap-2 text-sm text-nord-13">
-                  <AlertTriangle size={14} className="shrink-0" />A rollout is in progress. Saving restarts it against
-                  the new spec.
+                  <AlertTriangle size={14} className="shrink-0" />
+                  An update is in progress. Saving restarts it with the new configuration.
                 </p>
               )}
             </div>
@@ -459,7 +459,7 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
             className="group border border-nord-3 rounded-md"
           >
             <summary className="flex items-center justify-between px-4 py-3 cursor-pointer select-none list-none">
-              <span className="text-sm font-medium text-nord-4">Placement (optional)</span>
+              <span className="text-sm font-medium text-nord-4">Host selection (optional)</span>
               <ChevronDown size={16} className="text-nord-4 transition-transform group-open:rotate-180" />
             </summary>
             <div className="px-4 pb-4 space-y-4">

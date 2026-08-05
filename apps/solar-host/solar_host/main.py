@@ -150,7 +150,13 @@ async def lifespan(app: FastAPI):
 
     watchdog_task = asyncio.create_task(process_manager.watchdog_loop())
 
-    await process_manager.auto_restart_running_instances()
+    # Auto-restart off the startup path: a blocking start waits for the
+    # backend to report readiness, so a slow model must not delay host
+    # startup. Restarts stay sequential inside the task so they do not
+    # thrash the GPU.
+    auto_restart_task = asyncio.create_task(
+        process_manager.auto_restart_running_instances()
+    )
     logger.info("Solar Host started successfully")
 
     yield
@@ -210,6 +216,13 @@ async def lifespan(app: FastAPI):
         watchdog_task.cancel()
         try:
             await watchdog_task
+        except asyncio.CancelledError:
+            pass
+
+    if auto_restart_task:
+        auto_restart_task.cancel()
+        try:
+            await auto_restart_task
         except asyncio.CancelledError:
             pass
 

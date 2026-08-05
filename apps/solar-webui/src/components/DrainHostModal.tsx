@@ -88,10 +88,10 @@ export function DrainHostModal({ hostId, hostName, onClose, onDraining }: DrainH
             Drain <code className="text-nord-6">{hostName}</code> for maintenance?
           </p>
           <ul className="space-y-1.5 text-sm text-nord-4 list-disc pl-5">
-            <li>Instances managed by an intent are migrated to other hosts, one at a time.</li>
+            <li>Managed instances are moved to other hosts, one at a time.</li>
             <li>The host accepts no new instances until you resume it.</li>
             <li>
-              If a replica has nowhere to go it keeps serving here and the drain waits — Solar never drops serving
+              If an instance has nowhere to go it keeps serving here and the drain waits — Solar never drops serving
               capacity to finish a drain.
             </li>
           </ul>
@@ -107,7 +107,7 @@ export function DrainHostModal({ hostId, hostName, onClose, onDraining }: DrainH
             <div className="bg-nord-12 bg-opacity-10 border border-nord-12 rounded-md p-3 space-y-2">
               <p className="flex items-center gap-2 text-sm font-medium text-nord-13">
                 <AlertTriangle size={14} className="shrink-0" />
-                Stop these first — draining never touches them
+                Stop these first — draining leaves them alone
               </p>
               <ul className="space-y-1.5">
                 {blockers!.map((b) => (

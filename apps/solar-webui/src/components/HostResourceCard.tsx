@@ -129,12 +129,12 @@ function DrainPanel({ status }: { status: HostDrainStatus }) {
           <span>Drained — nothing is running here. Safe to take offline.</span>
         ) : status.stalled ? (
           <span>
-            Drain stalled — {status.managed_remaining} managed replica{status.managed_remaining === 1 ? '' : 's'} cannot
-            be moved
+            Drain blocked — {status.managed_remaining} managed instance{status.managed_remaining === 1 ? '' : 's'}{' '}
+            cannot be moved
           </span>
         ) : (
           <span>
-            Draining — {status.managed_remaining} managed replica{status.managed_remaining === 1 ? '' : 's'} left to
+            Draining — {status.managed_remaining} managed instance{status.managed_remaining === 1 ? '' : 's'} left to
             move
           </span>
         )}
@@ -252,10 +252,10 @@ export function HostResourceCard({
                   ? 'bg-nord-11 bg-opacity-30 text-nord-11'
                   : 'bg-nord-13 bg-opacity-30 text-nord-13',
               )}
-              title={drainStatus?.stalled ? 'No host can accept a remaining replica' : 'Evacuating managed replicas'}
+              title={drainStatus?.stalled ? 'No host has room for the remaining instances' : 'Moving managed instances'}
             >
               {drainStatus?.stalled && <AlertTriangle size={12} />}
-              {drainStatus?.stalled ? 'draining (stalled)' : 'draining'}
+              {drainStatus?.stalled ? 'draining (blocked)' : 'draining'}
             </span>
           )}
           {snapshot.drain_state === 'drained' && (
@@ -376,7 +376,7 @@ export function HostResourceCard({
                               {inst.status}
                             </span>
                           )}
-                          {/* Whether an instance is intent-managed decides
+                          {/* Whether an instance is managed decides
                               whether a drain can move it (S-043 §3). */}
                           <span
                             className={cn(
@@ -385,11 +385,11 @@ export function HostResourceCard({
                             )}
                             title={
                               inst.managed_by === 'intent'
-                                ? `Managed by intent ${inst.intent_id ?? ''} — moved automatically when draining`
+                                ? 'Managed automatically — moved to another host when this one is drained.'
                                 : 'Created manually — never moved by a drain'
                             }
                           >
-                            {inst.managed_by === 'intent' ? 'intent' : 'manual'}
+                            {inst.managed_by === 'intent' ? 'managed' : 'manual'}
                           </span>
                           {inst.backend_type && <span className="text-xs text-nord-4">{inst.backend_type}</span>}
                           {inst.port != null && <span className="font-mono text-xs text-nord-4">:{inst.port}</span>}

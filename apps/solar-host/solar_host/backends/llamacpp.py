@@ -8,6 +8,14 @@ from solar_host.backends.base import BackendRunner, RuntimeStateUpdate
 from solar_host.config import settings
 from solar_host.models.base import GenerationMetrics, InstancePhase
 
+# Tolerant matcher covering both the `llama_server:` and the newer
+# `main: server is listening` forms, any host/port. This is the readiness
+# contract: the lifecycle status only moves starting -> running on it.
+_RE_READY = re.compile(
+    r"(?:llama[_ ]server|main)\s*:\s*(?:server is )?listening on https?://",
+    re.IGNORECASE,
+)
+
 
 class LlamaCppRunner(BackendRunner):
     """Backend runner for llama.cpp server instances."""
@@ -40,6 +48,10 @@ class LlamaCppRunner(BackendRunner):
 
     def get_backend_type(self) -> str:
         return "llamacpp"
+
+    def is_ready_line(self, line: str) -> bool:
+        """True when the line proves llama-server is listening."""
+        return _RE_READY.search(line) is not None
 
     def build_command(self, instance: Any) -> list[str]:
         """Build llama-server command from instance config."""

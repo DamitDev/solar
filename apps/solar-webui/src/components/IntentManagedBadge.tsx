@@ -13,10 +13,10 @@ export function IntentManagedBadge({ instance }: { instance: any }) {
   return (
     <Link
       to={`/intents/${intentId}`}
-      title="Managed by an intent — the reconciler owns this instance"
+      title="Managed automatically — Solar Control keeps this instance running."
       className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-nord-15/20 text-nord-15 hover:underline whitespace-nowrap"
     >
-      intent-managed
+      managed
     </Link>
   );
 }

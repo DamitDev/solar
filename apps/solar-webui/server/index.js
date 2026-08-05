@@ -17,6 +17,10 @@ const CONTROL_API_KEY = process.env.SOLAR_CONTROL_API_KEY || '';
 const WEBUI_AUTH_KEY = process.env.SOLAR_WEBUI_AUTH_KEY || '';
 const LOG_LEVEL = process.env.NODE_ENV === 'production' ? 'warn' : 'info';
 const DEBUG_PROXY = process.env.SOLAR_WEBUI_DEBUG === 'true';
+// A blocking instance start answers only once the backend reports
+// readiness, which can take minutes for a cold model load. Every hop of
+// the call chain must fit inside this window.
+const PROXY_TIMEOUT_MS = Number.parseInt(process.env.PROXY_TIMEOUT_MS || '900000', 10);
 const AUTH_COOKIE_NAME = 'solar_webui_auth';
 const AUTH_COOKIE_MAX_AGE_SECONDS = 12 * 60 * 60;
 
@@ -288,7 +292,7 @@ const httpAgent = new http.Agent({
   keepAliveMsecs: 30000,
   maxSockets: 50,
   maxFreeSockets: 10,
-  timeout: 30000
+  timeout: PROXY_TIMEOUT_MS
 });
 
 const httpsAgent = new https.Agent({
@@ -296,7 +300,7 @@ const httpsAgent = new https.Agent({
   keepAliveMsecs: 30000,
   maxSockets: 50,
   maxFreeSockets: 10,
-  timeout: 30000
+  timeout: PROXY_TIMEOUT_MS
 });
 
 const controlProxy = createProxyMiddleware({
@@ -311,8 +315,8 @@ const controlProxy = createProxyMiddleware({
   // Performance optimizations
   followRedirects: false,
   xfwd: true,
-  proxyTimeout: 30000,
-  timeout: 30000,
+  proxyTimeout: PROXY_TIMEOUT_MS,
+  timeout: PROXY_TIMEOUT_MS,
   headers: CONTROL_API_KEY
     ? {
         'X-API-Key': CONTROL_API_KEY,

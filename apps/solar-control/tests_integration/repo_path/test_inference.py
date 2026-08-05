@@ -15,7 +15,6 @@ from fixtures.constants import (
     MODEL_SOURCE_URI,
 )
 from fixtures.helpers import wait_for
-from fixtures.intents import classify_until_ok
 
 pytestmark = pytest.mark.repo_path
 
@@ -79,14 +78,15 @@ async def test_create_instance_via_control_and_classify(
         description=f"instance {instance_id} running",
     )
 
-    # The host flips the instance to RUNNING as soon as the process is
-    # alive, but the HF backend takes a few seconds to import torch and
-    # bind its port. Gate on the alias appearing in the gateway registry
-    # first. NOTE: /v1/models through control does NOT prove the upstream
-    # is alive — the gateway fabricates a fallback entry for the alias
-    # whenever the upstream query fails (gateway.py get_available_models),
-    # so a dead server keeps the alias listed. The classify retry below
-    # is what actually absorbs the remaining startup window.
+    # The start call above is log-gated: it returned only once hf_server
+    # logged "Uvicorn running on ...", so the backend is genuinely
+    # servable now. The registry gate below is still required — the
+    # gateway lists the alias only after its health probe accepts the
+    # instance. NOTE: /v1/models through control does NOT prove the
+    # upstream is alive — the gateway fabricates a fallback entry for
+    # the alias whenever the upstream query fails (gateway.py
+    # get_available_models), so the registry listing alone is not a
+    # liveness signal; the classify below is.
     await wait_for(
         lambda: _registry_has_alias(http_control, MODEL_ALIAS),
         timeout=30.0,
@@ -95,12 +95,15 @@ async def test_create_instance_via_control_and_classify(
     )
 
     # ── Inference through the normal Solar route ──
-    # The registry gate above only proves the alias is listed; the
-    # hf_server can still be importing torch when the first request
-    # lands — retry the classify (the backend binds within a few
-    # seconds solo; concurrent CI runs on a shared machine can
-    # double that window).
-    body = await classify_until_ok(http_control, MODEL_ALIAS, timeout=45.0)
+    # No retry: with log-gated readiness the backend was listening when
+    # the start call returned, so the first classify must succeed.
+    resp = await http_control.post(
+        "/v1/classify",
+        json={"model": MODEL_ALIAS, "input": "hello integration world"},
+        headers={"X-API-Key": stack.secrets["management"]},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
     assert body["model"] == MODEL_ALIAS
     assert len(body["choices"]) == 1
     assert body["choices"][0]["score"] > 0.0

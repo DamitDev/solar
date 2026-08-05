@@ -11,6 +11,7 @@ import {
   Binary,
   Search,
   GripVertical,
+  Loader2,
 } from 'lucide-react';
 import {
   Instance,
@@ -84,6 +85,10 @@ export function InstanceCard({
   dragListeners,
 }: InstanceCardProps) {
   const [loading, setLoading] = useState(false);
+  // Start/restart block until the backend reports readiness, which can
+  // take minutes — the button must show the request is in flight instead
+  // of letting a re-click launch a second process.
+  const [pendingAction, setPendingAction] = useState<'start' | 'restart' | null>(null);
   const actionsDisabled = loading || !hostReachable;
   const [showLogs, setShowLogs] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
@@ -125,14 +130,16 @@ export function InstanceCard({
     };
   }, [prefillActive]);
 
-  const handleAction = async (action: () => Promise<void>) => {
+  const handleAction = async (kind: 'start' | 'restart' | 'stop' | 'delete', action: () => Promise<void>) => {
     setLoading(true);
+    setPendingAction(kind === 'start' || kind === 'restart' ? kind : null);
     try {
       await action();
     } catch (error) {
       console.error('Action failed:', error);
     } finally {
       setLoading(false);
+      setPendingAction(null);
     }
   };
 
@@ -309,7 +316,7 @@ export function InstanceCard({
                   <Edit size={16} />
                 </button>
                 <button
-                  onClick={() => handleAction(() => onDelete(hostId, instance.id))}
+                  onClick={() => handleAction('delete', () => onDelete(hostId, instance.id))}
                   disabled={actionsDisabled}
                   className="p-1 hover:bg-nord-11 hover:bg-opacity-20 text-nord-11 rounded transition-colors disabled:opacity-50"
                   title={hostReachable ? 'Delete instance' : 'Host is offline'}
@@ -394,9 +401,18 @@ export function InstanceCard({
 
         {/* Actions */}
         <div className="flex gap-2">
-          {instance.status === 'stopped' || instance.status === 'failed' ? (
+          {pendingAction === 'start' || pendingAction === 'restart' ? (
             <button
-              onClick={() => handleAction(() => onStart(hostId, instance.id))}
+              disabled
+              className="flex-1 flex items-center justify-center gap-1 px-3 py-2 bg-nord-3 text-nord-4 rounded cursor-not-allowed font-medium"
+              title="Waiting for the backend to report readiness"
+            >
+              <Loader2 size={16} className="animate-spin" />
+              {pendingAction === 'start' ? 'Starting…' : 'Restarting…'}
+            </button>
+          ) : instance.status === 'stopped' || instance.status === 'failed' ? (
+            <button
+              onClick={() => handleAction('start', () => onStart(hostId, instance.id))}
               disabled={actionsDisabled}
               className="flex-1 flex items-center justify-center gap-1 px-3 py-2 bg-nord-14 text-nord-0 rounded hover:bg-opacity-90 transition-colors disabled:opacity-50 font-medium"
               title={hostReachable ? 'Start instance' : 'Host is offline'}
@@ -407,7 +423,7 @@ export function InstanceCard({
           ) : instance.status === 'running' ? (
             <>
               <button
-                onClick={() => handleAction(() => onStop(hostId, instance.id))}
+                onClick={() => handleAction('stop', () => onStop(hostId, instance.id))}
                 disabled={actionsDisabled}
                 className="flex-1 flex items-center justify-center gap-1 px-3 py-2 bg-nord-11 text-nord-6 rounded hover:bg-opacity-90 transition-colors disabled:opacity-50 font-medium"
                 title={hostReachable ? 'Stop instance' : 'Host is offline'}
@@ -416,7 +432,7 @@ export function InstanceCard({
                 Stop
               </button>
               <button
-                onClick={() => handleAction(() => onRestart(hostId, instance.id))}
+                onClick={() => handleAction('restart', () => onRestart(hostId, instance.id))}
                 disabled={actionsDisabled}
                 className="flex-1 flex items-center justify-center gap-1 px-3 py-2 bg-nord-10 text-nord-6 rounded hover:bg-nord-9 transition-colors disabled:opacity-50 font-medium"
                 title={hostReachable ? 'Restart instance' : 'Host is offline'}

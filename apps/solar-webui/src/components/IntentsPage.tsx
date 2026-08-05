@@ -129,7 +129,7 @@ export function IntentsPage() {
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-3xl font-bold text-nord-6">Intents</h1>
-              <p className="text-sm text-nord-4 mt-1">Declarative deployments — Solar Control decides placement</p>
+              <p className="text-sm text-nord-4 mt-1">Deployments — Solar Control chooses which hosts run them.</p>
             </div>
             <div className="flex gap-2 items-center">
               <button
@@ -178,7 +178,7 @@ export function IntentsPage() {
           <div className="text-center py-16">
             <Target size={64} className="mx-auto text-nord-3 mb-4" />
             <h2 className="text-2xl font-semibold text-nord-6 mb-2">No intents yet</h2>
-            <p className="text-nord-4 mb-6">Declare a desired deployment and let Solar Control arrange it.</p>
+            <p className="text-nord-4 mb-6">Describe a deployment and Solar Control will run it.</p>
             <button
               onClick={openNewIntent}
               className="inline-flex items-center gap-2 px-6 py-3 bg-nord-10 text-nord-6 rounded-lg hover:bg-nord-9 transition-colors"

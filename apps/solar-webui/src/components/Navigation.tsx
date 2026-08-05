@@ -1,6 +1,6 @@
 import { Link, useLocation } from 'react-router-dom';
 import { ReactNode, useEffect, useRef, useState } from 'react';
-import { Activity, Server, Target, Gauge, Key, Database, LogOut, Menu, X } from 'lucide-react';
+import { Activity, Server, Target, Gauge, Key, Database, HardDrive, LogOut, Menu, X } from 'lucide-react';
 import { useRoutingEventsContext } from '@/context/RoutingEventsContext';
 
 type NavItemDef = {
@@ -18,6 +18,7 @@ const NAV_ITEMS: NavItemDef[] = [
   { to: '/resources', icon: <Gauge size={18} />, label: 'Resources', isActive: (p) => p === '/resources' },
   { to: '/endpoints', icon: <Key size={18} />, label: 'Endpoints', isActive: (p) => p === '/endpoints' },
   { to: '/catalog', icon: <Database size={18} />, label: 'Catalog', isActive: (p) => p === '/catalog' },
+  { to: '/storage', icon: <HardDrive size={18} />, label: 'Storage', isActive: (p) => p === '/storage' },
 ];
 
 function NavLink({ item, onNavigate, fullWidth }: { item: NavItemDef; onNavigate?: () => void; fullWidth?: boolean }) {
@@ -83,7 +84,7 @@ export function Navigation() {
         <div className="ml-auto flex items-center gap-3 sm:gap-4 text-xs shrink-0">
           <div className="flex items-center gap-2">
             <span className={isConnected ? 'text-nord-14' : 'text-nord-11'}>●</span>
-            <span className="text-nord-4 hidden sm:inline">Event Stream</span>
+            <span className="text-nord-4 hidden sm:inline">Live updates</span>
           </div>
           <form method="post" action="/auth/logout">
             <button

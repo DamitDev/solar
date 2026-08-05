@@ -22,6 +22,10 @@ import {
   AggregatedResourceResponse,
   ResourcesQueryParams,
   HostDrainStatus,
+  StorageResponse,
+  HostStorage,
+  StorageDeleteItem,
+  StorageDeleteResult,
 } from './types';
 
 const DEFAULT_RELATIVE_CONTROL_BASE = '/api/control';
@@ -337,6 +341,32 @@ class SolarClient {
   async getDrainStatus(hostId: string): Promise<HostDrainStatus> {
     const response = await this.client.get(`/api/hosts/${hostId}/drain`);
     return response.data as HostDrainStatus;
+  }
+
+  // Host storage management (per-host model inventory + guarded deletion)
+
+  /** Cluster-wide storage view: per-host manifests joined with usage. */
+  async getStorage(): Promise<StorageResponse> {
+    const response = await this.client.get('/api/storage/hosts');
+    return response.data as StorageResponse;
+  }
+
+  /** Fresh storage view for a single host. */
+  async getHostStorage(hostId: string): Promise<HostStorage> {
+    const response = await this.client.get(`/api/storage/hosts/${hostId}`);
+    return response.data as HostStorage;
+  }
+
+  /** Delete one model on one host. 404 = already gone, 409 = in use. */
+  async deleteStoredModel(hostId: string, slug: string): Promise<{ detail: string; name: string }> {
+    const response = await this.client.delete(`/api/storage/hosts/${hostId}/models/${encodeURIComponent(slug)}`);
+    return response.data as { detail: string; name: string };
+  }
+
+  /** Bulk delete across hosts; always resolves with per-item outcomes. */
+  async deleteStoredModels(items: StorageDeleteItem[]): Promise<StorageDeleteResult[]> {
+    const response = await this.client.post('/api/storage/delete', { items });
+    return response.data as StorageDeleteResult[];
   }
 
   // OpenAI Gateway

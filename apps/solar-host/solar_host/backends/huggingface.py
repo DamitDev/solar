@@ -8,6 +8,12 @@ from solar_host.backends.base import BackendRunner, RuntimeStateUpdate
 from solar_host.config import settings
 from solar_host.models.base import BackendType, GenerationMetrics, InstancePhase
 
+# Readiness contract for the lifecycle status (starting -> running): the
+# uvicorn banner, narrower than the runtime-phase `_re_ready` below (which
+# also fires on "Application startup complete" and is used for the runtime
+# phase event — leave that one untouched).
+_RE_READY = re.compile(r"Uvicorn running on https?://", re.IGNORECASE)
+
 
 class HuggingFaceRunner(BackendRunner):
     """Backend runner for HuggingFace model instances.
@@ -28,6 +34,10 @@ class HuggingFaceRunner(BackendRunner):
     def get_backend_type(self) -> str:
         # This will be overridden based on the actual config type
         return "huggingface"
+
+    def is_ready_line(self, line: str) -> bool:
+        """True when the line proves the uvicorn server is listening."""
+        return _RE_READY.search(line) is not None
 
     @staticmethod
     def check_dependencies() -> None:

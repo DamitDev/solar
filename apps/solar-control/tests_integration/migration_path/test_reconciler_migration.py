@@ -193,7 +193,8 @@ async def test_recreate_failure_records_backoff_and_recovers(
 
     # Restore the key; the next RECREATE restarts the instance in place.
     update_host_api_key(stack.db_env["control_db"], host_id, real_key)
-    final = await wait_intent_ready(http_control, intent["id"], timeout=30.0)
+    # Cold start counts against this budget (log-gated readiness).
+    final = await wait_intent_ready(http_control, intent["id"], timeout=180.0)
     replicas = final["status"]["replica_set"]
     assert len(replicas) == 1
     assert replicas[0]["instance_id"] == instance_id, "restart-in-place expected"

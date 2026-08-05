@@ -750,3 +750,66 @@ export interface HostDrainStatus {
   replicas: DrainReplica[];
   blockers: DrainBlocker[];
 }
+
+// ─── Host storage management (GET /api/storage/hosts etc.) ───
+
+export type StoredModelOrigin = 'repository' | 'huggingface' | 'local' | 'unknown';
+
+/** An instance currently using a stored model. */
+export interface StoredInstanceRef {
+  instance_id: string;
+  alias: string;
+  status: string;
+}
+
+/** One model stored on one host (manifest entry + usage). */
+export interface StoredModel {
+  slug: string;
+  model_name: string | null;
+  version: string | null;
+  category: string | null;
+  source_uri: string | null;
+  origin: StoredModelOrigin;
+  harbor_ref: string | null;
+  path: string;
+  size_bytes: number;
+  downloaded_at: string | null;
+  in_use_by: StoredInstanceRef[];
+}
+
+/** Storage inventory for one host. */
+export interface HostStorage {
+  host_id: string;
+  host_name: string;
+  reachable: boolean;
+  error: string | null;
+  disk_total_gb: number | null;
+  disk_used_gb: number | null;
+  disk_available_gb: number | null;
+  total_size_bytes: number;
+  models: StoredModel[];
+}
+
+/** Cluster-wide storage inventory. */
+export interface StorageResponse {
+  hosts: HostStorage[];
+  unreachable_hosts: string[];
+  generated_at: string;
+}
+
+export interface StorageDeleteItem {
+  host_id: string;
+  slug: string;
+}
+
+export type StorageDeleteStatus = 'deleted' | 'in_use' | 'not_found' | 'unreachable' | 'error';
+
+/** Per-item outcome of a bulk delete. */
+export interface StorageDeleteResult {
+  host_id: string;
+  host_name: string;
+  slug: string;
+  status: StorageDeleteStatus;
+  detail: string | null;
+  freed_bytes: number;
+}
