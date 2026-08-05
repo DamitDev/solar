@@ -34,6 +34,40 @@ describe('SolarClient', () => {
     await expect(client.deleteHost('host-9')).resolves.toMatchObject({ message: 'deleted' });
   });
 
+  it('lists catalog model versions', async () => {
+    const body = {
+      versions: [
+        {
+          version: 'v2',
+          harbor_ref: 'imgrepo.damit.hu/supernova/mymodel:v2',
+          created_at: '2026-08-01T00:00:00Z',
+          size_bytes: 2048,
+          checksum: 'sha256:b',
+          solar: { running_instances: 0, deployed_hosts: [] },
+        },
+      ],
+    };
+    mock.onGet('/api/catalog/models/mymodel/versions').reply(200, body);
+    await expect(client.getCatalogModelVersions('mymodel')).resolves.toEqual(body);
+  });
+
+  it('deletes a catalog model version', async () => {
+    mock.onDelete('/api/catalog/models/mymodel/versions/v1').reply(204);
+    await expect(client.deleteCatalogModelVersion('mymodel', 'v1')).resolves.toBeUndefined();
+  });
+
+  it('deletes a catalog model repository', async () => {
+    const body = {
+      name: 'mymodel',
+      deleted: ['v1'],
+      failed: [],
+      artifact_removed: true,
+      harbor_repository_removed: true,
+    };
+    mock.onDelete('/api/catalog/models/mymodel').reply(200, body);
+    await expect(client.deleteCatalogModel('mymodel')).resolves.toEqual(body);
+  });
+
   it('lists pending hosts', async () => {
     mock.onGet('/api/hosts/pending').reply(200, [{ id: 'p1' }]);
     await expect(client.getPendingHosts()).resolves.toEqual([{ id: 'p1' }]);
