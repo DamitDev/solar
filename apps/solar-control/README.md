@@ -16,7 +16,11 @@ A coordinator for multiple solar-host instances with OpenAI-compatible API gatew
 - **WebUI Socket.IO namespace** - `/webui` for dashboard: real-time host/instance status, gateway events, pending host approval
 - **Pending host approval** - Hosts register first; management API lists and approves/rejects before they join the pool
 - Transparent authentication handling (endpoint API keys for gateway; management API key for WebUI and admin routes)
-- WebSocket log aggregation
+- **WebSocket log aggregation**
+- **WS-first host telemetry (S-050)** — hosts push the full resource snapshot with `host_health`; control serves it cache-first from Redis (`solar:hosts:snapshots`) with HTTP proxying as the degraded fallback (`snapshot_source: ws | http | none`)
+- **Model pull progress (S-051)** — `GET /api/pulls` exposes the latest pull progress per (host, source_uri); the reconciler's cold-start actions wait with progress-aware bounds instead of a raw timeout
+- **Drift-safe intents (S-049)** — backend comparison is JSON-structural with host-mirrored coercion; a churn circuit breaker turns an unsettled spec into a recorded `BackendDriftUnsettled` error
+- **Intent validation (S-052)** — accelerator vocabulary with aliases, per-backend field ownership, device contract, and fleet-aware advisory warnings that never block an edit
 - Docker support with automatic database migrations
 
 ## Supported Backend Types

@@ -178,12 +178,12 @@ class TestHelpers:
     def test_detect_backend_drift_no_change(self):
         intent = _make_intent(backend={"backend_type": "hf", "max_length": 512})
         instance_config = {"backend_type": "hf", "max_length": 512}
-        assert _detect_backend_drift(intent, instance_config) is False
+        assert _detect_backend_drift(intent, instance_config) == []
 
     def test_detect_backend_drift_changed(self):
         intent = _make_intent(backend={"backend_type": "hf", "max_length": 1024})
         instance_config = {"backend_type": "hf", "max_length": 512}
-        assert _detect_backend_drift(intent, instance_config) is True
+        assert _detect_backend_drift(intent, instance_config) == ["max_length"]
 
     def test_detect_backend_drift_skips_identity_fields(self):
         """Identity/server fields (alias, model_source, etc.) are ignored."""
@@ -195,7 +195,7 @@ class TestHelpers:
             "alias": "different",
             "model_source": "z",
         }
-        assert _detect_backend_drift(intent, instance_config) is False
+        assert _detect_backend_drift(intent, instance_config) == []
 
     def test_detect_backend_drift_resolved_path_is_not_drift(self):
         """A bare filename in the spec that is the tail of the instance's
@@ -218,7 +218,7 @@ class TestHelpers:
                 "mmproj-BF16.gguf"
             ),
         }
-        assert _detect_backend_drift(intent, instance_config) is False
+        assert _detect_backend_drift(intent, instance_config) == []
 
     def test_detect_backend_drift_resolved_glob_is_not_drift(self):
         """A glob resolves to a path too — the DSpark drafter's exact filename
@@ -237,7 +237,7 @@ class TestHelpers:
                 "/opt/projects/models/hf--org--Qwen3-4B-GGUF/Qwen3-4B-DSpark.gguf"
             ),
         }
-        assert _detect_backend_drift(intent, instance_config) is False
+        assert _detect_backend_drift(intent, instance_config) == []
 
     def test_detect_backend_drift_resolved_glob_real_change(self):
         """A resolved file the new pattern no longer matches is real drift."""
@@ -250,7 +250,7 @@ class TestHelpers:
                 "/opt/projects/models/hf--org--Qwen3-4B-GGUF/Qwen3-4B-DFlash.gguf"
             ),
         }
-        assert _detect_backend_drift(intent, instance_config) is True
+        assert _detect_backend_drift(intent, instance_config) == ["spec_draft_model"]
 
     def test_detect_backend_drift_resolved_path_real_change(self):
         """A genuinely different resolved file still counts as drift."""
@@ -264,14 +264,111 @@ class TestHelpers:
                 "mmproj-Q4_K.gguf"
             ),
         }
-        assert _detect_backend_drift(intent, instance_config) is True
+        assert _detect_backend_drift(intent, instance_config) == ["mmproj"]
 
     def test_detect_backend_drift_non_path_mismatch_still_drift(self):
         """The path-tail normalization only applies to bare filenames —
         other field mismatches still read as drift."""
         intent = _make_intent(backend={"backend_type": "llamacpp", "ctx_size": 262144})
         instance_config = {"backend_type": "llamacpp", "ctx_size": 131072}
-        assert _detect_backend_drift(intent, instance_config) is True
+        assert _detect_backend_drift(intent, instance_config) == ["ctx_size"]
+
+
+class TestBackendValueMatching:
+    """C1 canonicalization-aware comparison.
+
+    The host rewrites chat_template_kwargs into compact canonical JSON with
+    real booleans and resolves mmproj to an absolute path; every
+    representation the webui/API can produce must compare equal, and only a
+    genuinely different value must read as drift.
+    """
+
+    def _detect(self, spec_value, inst_value) -> list[str]:
+        intent = _make_intent(
+            backend={"backend_type": "llamacpp", "chat_template_kwargs": spec_value}
+        )
+        instance_config = {
+            "backend_type": "llamacpp",
+            "chat_template_kwargs": inst_value,
+        }
+        return _detect_backend_drift(intent, instance_config)
+
+    def test_dict_spec_versus_compact_json_instance(self):
+        # spec {"enable_thinking": true} (dict) vs '{"enable_thinking":true}'
+        assert self._detect({"enable_thinking": True}, '{"enable_thinking":true}') == []
+
+    def test_spaced_json_spec_versus_compact_instance(self):
+        assert (
+            self._detect('{"enable_thinking": true}', '{"enable_thinking":true}') == []
+        )
+
+    def test_string_boolean_spec_versus_real_boolean_instance(self):
+        assert (
+            self._detect('{"enable_thinking": "true"}', '{"enable_thinking":true}')
+            == []
+        )
+
+    def test_nested_boolean_coercion(self):
+        spec = '{"thinking": {"enabled": "FALSE", "depth": 3}}'
+        inst = '{"thinking":{"enabled":false,"depth":3}}'
+        assert self._detect(spec, inst) == []
+
+    def test_genuinely_different_kwargs_still_drift(self):
+        assert self._detect(
+            '{"enable_thinking": true}', '{"enable_thinking":false}'
+        ) == ["chat_template_kwargs"]
+
+    def test_malformed_json_falls_back_to_string_comparison(self):
+        # Not JSON on one side -> string comparison -> drift
+        assert self._detect("{not json", '{"enable_thinking":true}') == [
+            "chat_template_kwargs"
+        ]
+
+    def test_mmproj_glob_spec_matches_resolved_path(self):
+        intent = _make_intent(
+            backend={"backend_type": "llamacpp", "mmproj": "*mmproj-BF16*.gguf"}
+        )
+        instance_config = {
+            "backend_type": "llamacpp",
+            "mmproj": "/opt/models/hf--x--y/mmproj-BF16-4bit.gguf",
+        }
+        assert _detect_backend_drift(intent, instance_config) == []
+
+    def test_mmproj_glob_not_matching_resolved_basename_drifts(self):
+        intent = _make_intent(
+            backend={"backend_type": "llamacpp", "mmproj": "*mmproj-Q4*.gguf"}
+        )
+        instance_config = {
+            "backend_type": "llamacpp",
+            "mmproj": "/opt/models/hf--x--y/mmproj-BF16.gguf",
+        }
+        assert _detect_backend_drift(intent, instance_config) == ["mmproj"]
+
+    def test_mmproj_relative_path_matches_resolved_path(self):
+        intent = _make_intent(
+            backend={"backend_type": "llamacpp", "mmproj": "sub/mmproj.gguf"}
+        )
+        instance_config = {
+            "backend_type": "llamacpp",
+            "mmproj": "/opt/models/hf--x--y/sub/mmproj.gguf",
+        }
+        assert _detect_backend_drift(intent, instance_config) == []
+
+    def test_coerce_jsonish_matches_host_semantics(self):
+        """Pins _coerce_jsonish against the documented behaviour of
+        solar_host.models.llamacpp._coerce_template_kwargs (the duplication
+        is intentional — control cannot import solar_host)."""
+        from app.services.reconciliation import _coerce_jsonish
+
+        assert _coerce_jsonish({"a": "true", "b": ["false", "x"]}) == {
+            "a": True,
+            "b": [False, "x"],
+        }
+        assert _coerce_jsonish(" TRUE ") is True
+        assert _coerce_jsonish("False") is False
+        assert _coerce_jsonish("trueish") == "trueish"
+        assert _coerce_jsonish(1) == 1
+        assert _coerce_jsonish(None) is None
 
 
 # ── Diff tests ─────────────────────────────────────────────────

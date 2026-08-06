@@ -18,8 +18,9 @@ import {
   EventHandlers,
   GatewayRequestSummary,
   GatewayFilter,
+  PullProgressEvent,
 } from '@/hooks/useEventStream';
-import { LogMessage, PendingHost, Intent } from '@/api/types';
+import { LogMessage, PendingHost, Intent, ApiEndpoint } from '@/api/types';
 
 interface EventStreamContextValue {
   isConnected: boolean;
@@ -32,8 +33,13 @@ interface EventStreamContextValue {
   gatewayRequests: GatewayRequestSummary[];
   gatewayFilter: GatewayFilter;
   intents: Map<string, Intent>;
+  // C4: latest pull progress per "{host_id}|{source_uri}".
+  pullProgress: Map<string, PullProgressEvent>;
+  // C5: endpoint records, event-driven (endpoints_update).
+  endpoints: ApiEndpoint[];
   getInstanceLogs: (hostId: string, instanceId: string) => LogMessage[];
   getInstanceState: (hostId: string, instanceId: string) => InstanceStateData | undefined;
+  getPullProgress: (sourceUri: string) => PullProgressEvent | undefined;
   clearInstanceLogs: (hostId: string, instanceId: string) => void;
   removeRequest: (requestId: string) => void;
   setFilter: (filter: Partial<GatewayFilter>) => void;

@@ -17,6 +17,7 @@ import re
 import shutil
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -602,6 +603,7 @@ def pull_model(
     metadata: dict | None = None,
     backend_type: str | None = None,
     file_filters: list[str] | None = None,
+    progress_cb: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict:
     """Download a model from Harbor or HuggingFace Hub and record it in the manifest.
 
@@ -623,6 +625,15 @@ def pull_model(
     cached snapshot that already covers the requested patterns is reused; one
     that does not is topped up in place with the union of both pattern sets.
     ORAS (Harbor) pulls cannot be filtered and ignore the argument.
+
+    ``progress_cb``, when supplied, is called with progress dicts
+    ``{source_uri, phase, bytes_done, bytes_total, speed_bps}``. Phases:
+    ``resolving``, ``downloading``, ``verifying``, ``finalizing``,
+    ``completed``, ``failed``. In subprocess mode the callback fires from
+    the parent's disk-poll loop (throttled to
+    ``settings.pull_progress_interval_s``); in-process mode emits the start
+    and terminal events only. The module stays free of asyncio/WS coupling —
+    the callback is plain, which keeps this trivially unit-testable.
     """
     # 1. Validate that source_uri scheme matches the declared source.
     expected_prefix = _SOURCE_URI_PREFIXES.get(source)
@@ -762,6 +773,31 @@ def pull_model(
             logger.warning("Removing stale model directory before pull: %s", target_dir)
             shutil.rmtree(target_dir, ignore_errors=True)
 
+        # C4 progress telemetry. total_bytes is the caller-declared size
+        # (exact for repo:// pulls); it is captured before the size recompute
+        # at step 7 overwrites the local variable.
+        total_bytes = size_bytes
+
+        def _emit_progress(
+            phase: str,
+            *,
+            bytes_done: int | None = None,
+            speed_bps: float | None = None,
+        ) -> None:
+            if progress_cb is None:
+                return
+            progress_cb(
+                {
+                    "source_uri": source_uri,
+                    "phase": phase,
+                    "bytes_done": bytes_done,
+                    "bytes_total": total_bytes,
+                    "speed_bps": speed_bps,
+                }
+            )
+
+        _emit_progress("resolving")
+
         # 6. Download — subprocess + polling allows aborting on low disk (S-018).
         # In-process mode skips the worker (used by unit tests that mock pull funcs).
         file_digests: dict | None = None
@@ -785,8 +821,15 @@ def pull_model(
                             ),
                         )
 
+                    # The parent poll loop doubles as the progress meter:
+                    # neither downloader exposes byte callbacks, but the
+                    # on-disk directory size grows monotonically. Throttled
+                    # to pull_progress_interval_s (C4).
+                    prev_bytes = 0
+                    prev_at = time.monotonic()
                     while not future.done():
                         time.sleep(poll_s)
+                        now = time.monotonic()
                         disk = get_disk_info(str(get_models_dir()))
                         if disk and disk["available_gb"] < settings.min_free_disk_gb:
                             future.cancel()
@@ -795,12 +838,24 @@ def pull_model(
                                 source_uri,
                                 settings.min_free_disk_gb,
                             )
+                            _emit_progress("failed")
                             raise ModelPullError(
                                 507,
                                 "insufficient_storage",
                                 "Insufficient disk space during download.",
                                 source_uri,
                             )
+                        if (
+                            progress_cb is not None
+                            and now - prev_at >= settings.pull_progress_interval_s
+                        ):
+                            done = _compute_dir_size(target_dir)
+                            dt = now - prev_at
+                            speed = (done - prev_bytes) / dt if dt > 0 else 0.0
+                            _emit_progress(
+                                "downloading", bytes_done=done, speed_bps=speed
+                            )
+                            prev_bytes, prev_at = done, now
 
                     file_digests = future.result()
             else:
@@ -814,14 +869,17 @@ def pull_model(
                     )
         except ModelPullError:
             shutil.rmtree(target_dir, ignore_errors=True)
+            _emit_progress("failed")
             raise
         except pebble.ProcessExpired as exc:
             shutil.rmtree(target_dir, ignore_errors=True)
+            _emit_progress("failed")
             raise ModelPullError(
                 500, "model_pull_failed", f"Download process expired: {exc}", source_uri
             ) from exc
         except OSError as exc:
             shutil.rmtree(target_dir, ignore_errors=True)
+            _emit_progress("failed")
             if exc.errno == errno.ENOSPC:
                 raise ModelPullError(
                     507, "insufficient_storage", "Insufficient disk space.", source_uri
@@ -831,7 +889,10 @@ def pull_model(
             _map_download_exception(exc, source_uri)
         except Exception as exc:  # noqa: BLE001
             shutil.rmtree(target_dir, ignore_errors=True)
+            _emit_progress("failed")
             _map_download_exception(exc, source_uri)
+
+        _emit_progress("verifying")
 
         # 7. Compute size of downloaded files.
         size_bytes = _compute_dir_size(target_dir)
@@ -871,6 +932,7 @@ def pull_model(
         #    races between pulls for *different* URIs finishing simultaneously.
         #    The entry is keyed by the base URI (artifact identity), so any
         #    subpath of the same artifact resolves against the same entry.
+        _emit_progress("finalizing")
         entry = ManifestEntry(
             slug=slug,
             source_uri=cache_key,
@@ -890,6 +952,7 @@ def pull_model(
             add_manifest_entry(entry)
 
         logger.info("Model pulled successfully: %s -> %s", source_uri, resolved_path)
+        _emit_progress("completed")
         return {
             "path": str(resolved_path.resolve()),
             "cached": False,

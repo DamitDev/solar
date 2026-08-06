@@ -168,6 +168,15 @@ class LastError(BaseModel):
     host_id: str | None = None
     source_uri: str | None = None
     at: str
+    # C2: which instance failed and what it printed. instance_id links the
+    # error to the process logs endpoint; log_tail is the tail the host
+    # attached to the start failure response.
+    instance_id: str | None = None
+    log_tail: list[str] | None = None
+    # C4: True when the action gave up while the host was still making
+    # progress (e.g. a cold-start pull that outlived the bound) — the webui
+    # renders this as "still working" rather than a hard failure.
+    recoverable: bool = False
 
 
 class IntentStatus(BaseModel):
@@ -193,6 +202,23 @@ class IntentStatus(BaseModel):
             "full instance configuration so backend-only edits roll out"
         ),
     )
+    drift_replace_attempts: int = Field(
+        default=0,
+        description=(
+            "Consecutive drift-driven REPLACE rounds for a pending spec "
+            "change (C1). Reset to 0 when the spec settles or is edited; "
+            "when it reaches max_drift_replace_attempts the reconciler stops "
+            "planning REPLACE and records a BackendDriftUnsettled error"
+        ),
+    )
+    shortfall_reason: str | None = Field(
+        default=None,
+        description=(
+            "C3: why the intent cannot be fully placed, as a specific "
+            "message (e.g. 'no host matches gpu_type=apple_mps'); used as "
+            "the Degraded condition message when a specific cause is known"
+        ),
+    )
     created_at: str | None = None
     updated_at: str | None = None
     last_reconciled_at: str | None = None
@@ -213,6 +239,9 @@ class IntentResponse(BaseModel):
     resources: ResourceRequirements
     metadata: dict[str, str] = Field(default_factory=dict)
     status: IntentStatus
+    # C3: advisory warnings attached to the create/update response only —
+    # never persisted and never emitted on intent_update.
+    warnings: list[dict[str, str]] | None = None
 
 
 class IntentDeletedResponse(BaseModel):

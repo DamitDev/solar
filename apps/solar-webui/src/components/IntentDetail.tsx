@@ -6,14 +6,17 @@
 
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { AlertCircle, ArrowLeft, ChevronDown, Pencil, Trash2, TriangleAlert } from 'lucide-react';
+import { AlertCircle, ArrowLeft, ChevronDown, FileText, Pencil, Trash2, TriangleAlert } from 'lucide-react';
 import solarClient from '@/api/client';
 import { Intent, IntentCondition } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
+import type { PullProgressEvent } from '@/hooks/useEventStream';
+import { useFallbackPolling } from '@/hooks/useFallbackPolling';
 import { cn, formatDateTime, formatRelativeTime } from '@/lib/utils';
 import { IntentPhaseBadge } from './IntentBadges';
 import { DeleteIntentModal } from './DeleteIntentModal';
 import { IntentFormModal } from './IntentFormModal';
+import { LogViewer } from './LogViewer';
 
 const DETAIL_POLL_INTERVAL_MS = 5_000;
 
@@ -24,6 +27,61 @@ function StatBlock({ label, children }: { label: string; children: ReactNode }) 
       <dd className="mt-1 text-sm font-medium text-nord-6">{children}</dd>
     </div>
   );
+}
+
+/** C4: compact pull-progress row — live bar while downloading, terminal
+ * status line once the host finished (or failed) the pull. */
+function pullProgressRow(progress: PullProgressEvent | undefined): ReactNode {
+  if (!progress) return null;
+  const data = progress.data;
+  const total = data.bytes_total ?? 0;
+  const done = data.bytes_done ?? 0;
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  const speed =
+    data.speed_bps != null && data.speed_bps > 0 ? `${(data.speed_bps / 1024 / 1024).toFixed(1)} MB/s` : null;
+  const host = progress.host_name ? ` · ${progress.host_name}` : '';
+
+  if (data.phase === 'downloading') {
+    return (
+      <section>
+        <h4 className="text-sm font-semibold text-nord-6 uppercase tracking-wide">Model pull</h4>
+        <div className="mt-3 rounded-md border border-nord-3 bg-nord-2 p-4 text-sm">
+          <div className="flex items-center justify-between text-xs text-nord-4">
+            <span>
+              {data.source_uri}
+              {host}
+            </span>
+            <span>
+              {total > 0
+                ? `${(done / 1024 / 1024).toFixed(1)} / ${(total / 1024 / 1024).toFixed(1)} MB (${pct}%)`
+                : `${(done / 1024 / 1024).toFixed(1)} MB`}
+              {speed ? ` · ${speed}` : ''}
+            </span>
+          </div>
+          <div className="mt-2 h-1.5 rounded-full bg-nord-3 overflow-hidden">
+            <div className="h-full rounded-full bg-nord-8 transition-all" style={{ width: `${pct}%` }} />
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  if (data.phase === 'completed') {
+    return (
+      <p className="mt-3 text-xs text-nord-4">
+        Model pull completed{host}: {data.source_uri}
+      </p>
+    );
+  }
+  if (data.phase === 'failed') {
+    return (
+      <p className="mt-3 text-xs text-nord-11">
+        Model pull failed{host}: {data.source_uri}
+        {data.error ? ` — ${data.error}` : ''}
+      </p>
+    );
+  }
+  return null;
 }
 
 function ConditionChip({ condition }: { condition: IntentCondition }) {
@@ -57,12 +115,14 @@ const CONDITION_LABELS: Record<string, string> = {
 export function IntentDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { intents } = useEventStreamContext();
+  const { intents, getPullProgress, isConnected } = useEventStreamContext();
 
   const [fetched, setFetched] = useState<Intent | null | undefined>(undefined); // null = 404
   const [error, setError] = useState<string | null>(null);
   const [showDelete, setShowDelete] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
+  // C2: process-log viewer for a failed instance (from last_error).
+  const [logViewer, setLogViewer] = useState<{ hostId: string; instanceId: string } | null>(null);
 
   const fetchIntent = useCallback(async () => {
     if (!id) return;
@@ -85,14 +145,8 @@ export function IntentDetail() {
     fetchIntent();
   }, [fetchIntent]);
 
-  // 5 s polling while visible (events from the socket, when present, are fresher)
-  useEffect(() => {
-    const t = window.setInterval(() => {
-      if (document.hidden) return;
-      fetchIntent();
-    }, DETAIL_POLL_INTERVAL_MS);
-    return () => window.clearInterval(t);
-  }, [fetchIntent]);
+  // C5: fallback polling — REST refreshes only while the socket is down.
+  useFallbackPolling(fetchIntent, { enabled: !isConnected, intervalMs: DETAIL_POLL_INTERVAL_MS });
 
   const intent = (id ? intents.get(id) : undefined) ?? fetched;
 
@@ -157,6 +211,8 @@ export function IntentDetail() {
   const pendingStored = status.phase === 'pending' && status.reconcile === 'idle';
   const partialFulfillment = status.phase === 'degraded' && status.shortfall > 0;
   const hasConflict = status.conditions.some((c) => c.type === 'Conflict');
+  // C3: advisory warnings returned with the last create/update save.
+  const warnings = intent.warnings ?? [];
 
   const metadataEntries = Object.entries(intent.metadata ?? {});
 
@@ -230,7 +286,27 @@ export function IntentDetail() {
             <span>
               Serving with {status.ready_replicas} of {status.desired_replicas} requested instances — not enough
               capacity right now. Missing instances start automatically as capacity frees up.
+              {status.shortfall_reason && (
+                <span className="block mt-1 text-xs text-nord-4">{status.shortfall_reason}</span>
+              )}
             </span>
+          </div>
+        )}
+
+        {/* C3: advisory warnings returned with the last save */}
+        {warnings.length > 0 && (
+          <div className="p-3 bg-nord-13 bg-opacity-15 border border-nord-13 rounded text-sm text-nord-6 flex items-start gap-2">
+            <TriangleAlert size={16} className="flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="font-medium">Saved with warnings</p>
+              <ul className="mt-1 space-y-0.5 text-xs text-nord-4">
+                {warnings.map((w, i) => (
+                  <li key={i}>
+                    {w.field}: {w.message}
+                  </li>
+                ))}
+              </ul>
+            </div>
           </div>
         )}
 
@@ -352,21 +428,49 @@ export function IntentDetail() {
           </section>
         )}
 
-        {/* Last error */}
+        {/* C4: live model pull progress for the intent's model source */}
+        {intent.model_source && pullProgressRow(getPullProgress(intent.model_source))}
+
+        {/* Last error — C2: links to the failed instance's process logs */}
         {status.last_error && (
           <div className="p-4 bg-nord-11 bg-opacity-20 border border-nord-11 rounded-lg flex items-start gap-3">
             <AlertCircle className="text-nord-11 flex-shrink-0" size={20} />
-            <div className="text-sm">
-              <p className="font-semibold text-nord-11">
-                {status.last_error.code}
-                {status.last_error.host_id && (
-                  <span className="font-normal text-nord-4"> · host {status.last_error.host_id}</span>
+            <div className="text-sm flex-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="font-semibold text-nord-11">
+                  {status.last_error.code}
+                  {status.last_error.host_id && (
+                    <span className="font-normal text-nord-4"> · host {status.last_error.host_id}</span>
+                  )}
+                  {status.last_error.source_uri && (
+                    <span className="font-normal text-nord-4"> · {status.last_error.source_uri}</span>
+                  )}
+                </p>
+                {status.last_error.recoverable && (
+                  <span className="px-1.5 py-0.5 rounded bg-nord-13 bg-opacity-30 text-nord-6 text-[10px] uppercase tracking-wide">
+                    host still working
+                  </span>
                 )}
-                {status.last_error.source_uri && (
-                  <span className="font-normal text-nord-4"> · {status.last_error.source_uri}</span>
-                )}
-              </p>
+              </div>
               <p className="text-nord-4 mt-1">{status.last_error.message}</p>
+              {status.last_error.log_tail && status.last_error.log_tail.length > 0 && (
+                <pre className="mt-2 rounded-md bg-nord-1 border border-nord-11 border-opacity-40 p-2 text-[11px] font-mono text-nord-4 overflow-x-auto max-h-40 overflow-y-auto">
+                  {status.last_error.log_tail.join('\n')}
+                </pre>
+              )}
+              {status.last_error.host_id && status.last_error.instance_id && (
+                <button
+                  onClick={() =>
+                    setLogViewer({
+                      hostId: status.last_error!.host_id!,
+                      instanceId: status.last_error!.instance_id!,
+                    })
+                  }
+                  className="mt-2 text-xs text-nord-8 hover:text-nord-6 flex items-center gap-1"
+                >
+                  <FileText size={14} /> View process logs
+                </button>
+              )}
               <p className="text-xs text-nord-4 mt-1">{formatDateTime(status.last_error.at)}</p>
             </div>
           </div>
@@ -447,6 +551,14 @@ export function IntentDetail() {
           intent={intent}
           onClose={() => setShowDelete(false)}
           onDeleted={() => navigate('/intents')}
+        />
+      )}
+      {logViewer && (
+        <LogViewer
+          hostId={logViewer.hostId}
+          instanceId={logViewer.instanceId}
+          alias={intent.alias}
+          onClose={() => setLogViewer(null)}
         />
       )}
     </div>

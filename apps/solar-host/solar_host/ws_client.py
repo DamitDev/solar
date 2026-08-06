@@ -340,6 +340,13 @@ class SolarControlClient:
         """Send a batch of step log lines to solar-control in a single emit."""
         await self._emit("step_log", {"entries": entries})
 
+    async def send_pull_progress(self, payload: dict) -> None:
+        """Send model pull progress to solar-control (C4)."""
+        await self._emit(
+            "pull_progress",
+            {"timestamp": datetime.now(UTC).isoformat(), "data": payload},
+        )
+
     async def send_job_lifecycle(self, event_name: str, data: dict) -> None:
         """Emit a job lifecycle event directly by name (fire-and-forget)."""
         await self._emit(event_name, data)
@@ -395,6 +402,8 @@ class SolarControlClient:
         if resource_manager is not None:
             try:
                 snap = await asyncio.to_thread(resource_manager.snapshot)
+                # Legacy summary block (per-dimension totals + active count):
+                # kept so older control versions keep working.
                 reservations_block: dict[str, Any] = {
                     "active_count": len(snap.reservations),
                 }
@@ -412,6 +421,10 @@ class SolarControlClient:
                             "available_gb": dim.available_gb,
                         }
                 health_data["reservations"] = reservations_block
+                # Full snapshot (C5): byte-identical to what GET /resources
+                # returns, including the per-reservation list and memory_type.
+                # Control stores this in Redis as the WS-first read model.
+                health_data["resources"] = snap.model_dump(mode="json")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("send_health: failed to include reservations: %s", exc)
 
@@ -547,6 +560,13 @@ async def broadcast_step_log_batch(entries: list[dict]) -> None:
     client = get_client()
     if client:
         await client.send_step_log_batch(entries)
+
+
+async def broadcast_pull_progress(payload: dict) -> None:
+    """Send model pull progress to solar-control (C4)."""
+    client = get_client()
+    if client:
+        await client.send_pull_progress(payload)
 
 
 async def broadcast_job_lifecycle(event_name: str, data: dict) -> None:

@@ -104,6 +104,10 @@ Enables Solar to autonomously manage resources, migrate instances, and fulfill d
 | S-042 | Implement deployment strategies in reconciliation. `rolling`: update one host at a time, verify healthy before next. `immediate`: stop all, replace, start. | solar-control | M | S-041 |
 | S-043 | Implement host draining. Durable drain state on the host, drain/resume/progress endpoints, placement excludes draining hosts, reconciler evacuates managed replicas. Manual instances block the drain; a drain never reduces serving capacity. | solar-control | L | S-037, S-041 |
 | S-044 | Implement intent update. `PUT /api/intents/{id}` with full-replace semantics, immutable alias, in-flight rollout reset, and update-safe reconciliation. | solar-control | M | S-040, S-042 |
+| S-049 | Drift-safe backend comparison and the churn circuit breaker. JSON-structural comparison with host-mirrored coercion, API-boundary canonicalization of `chat_template_kwargs`, bounded drift-driven REPLACE rounds (`BackendDriftUnsettled` after `max_drift_replace_attempts`). | solar-control | M | S-044 |
+| S-050 | Host resource snapshot over the WS push plus the Redis read model. `host_health` carries the full snapshot; `solar:hosts:snapshots` cache-first fetch with HTTP fallback (`snapshot_source: ws/http/none`); `endpoints_update` events. | solar-control, solar-host | M | S-041 |
+| S-051 | Model pull progress telemetry and progress-aware cold-start bounds. Host `progress_cb` + `pull_progress` WS events; `solar:hosts:pulls` cache + `GET /api/pulls`; reconciler waits with sliced progress-aware bounds (`recoverable` last_error). | solar-control, solar-host | M | S-041 |
+| S-052 | Intent validation layer. Accelerator vocabulary with aliases, per-backend field ownership, device contract, modality rules, and fleet-aware advisory validation reusing the placement filter chain. | solar-control | M | S-040, S-044 |
 
 ---
 
@@ -287,6 +291,8 @@ Adds the destructive counterpart to the upload path: models and versions can be 
 | U-006 | Add intent editing UI. Generalise the intent form into create/edit modes with full hydration, read-only alias, and a warning when an edit restarts an in-flight rollout. | solar-webui | M | S-044 |
 | U-007 | Add model and dataset upload. Category-specific requirements and metadata, directory picker with junk filtering and per-file review, streamed upload with per-file progress. | solar-webui | M | S-047 |
 | U-008 | Add catalog delete UI. Version list in the model detail panel, repository and version delete with a confirmation modal (blocked state for running instances, host-cache warning, typed confirmation for repo delete, per-version results). | solar-webui | M | S-048 |
+| U-009 | webui: process logs on start failures (log_tail + View process logs), live model pull progress, field-level validation errors and advisory warnings, shortfall_reason and strategy_progress messages. Event-driven endpoint pages with fallback polling. | solar-webui | M | S-049, S-051, S-052 |
+| U-010 | webui: `huggingface_vision` in the backend-mode picker. Recorded, not implemented in the five-case-fixes PR. | solar-webui | S | - |
 
 ---
 

@@ -15,18 +15,20 @@ Design:
 """
 
 import asyncio
+import fnmatch
+import json
 import logging
 import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from fnmatch import fnmatch
 from typing import Any
 
 from fastapi import HTTPException
 
 from app.config import settings
 from app.redis_state.connection import redis_client
+from app.redis_state.hosts import PULLS_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,29 @@ class StartOutcomeUnknown(HTTPException):
         super().__init__(status_code=504, detail=detail)
 
 
+class InstanceStartFailed(HTTPException):
+    """A start call the host answered with a structured failure body (C2).
+
+    Carries the instance id, the child exit code and the log tail the host
+    attached to its error response, so the recorded ``last_error`` can link
+    the failure to its process logs. Keeps the human-readable 502 detail for
+    backwards compatibility.
+    """
+
+    def __init__(
+        self,
+        *,
+        detail: str,
+        instance_id: str | None = None,
+        exit_code: int | None = None,
+        log_tail: list[str] | None = None,
+    ) -> None:
+        super().__init__(status_code=502, detail=detail)
+        self.instance_id = instance_id
+        self.exit_code = exit_code
+        self.log_tail = log_tail
+
+
 # Hard bound on a single reconciliation action. Host calls are individually
 # time-bounded, but a MIGRATE can chain several (pull with ORAS retries,
 # create, start, delete) and stall the whole loop for minutes; the bound
@@ -112,6 +137,101 @@ def _action_timeout_s(action: Action) -> float:
             + _ACTION_TIMEOUT_S
         )
     return _ACTION_TIMEOUT_S
+
+
+# C4: latest pull progress per (host, model source), pushed by the host
+# over the WS channel and rebroadcast by control (see host_handlers). The
+# key constant lives in app.redis_state.hosts (PULLS_MAP).
+
+
+async def _pull_progress_fresh(host_id: str | None, source_uri: str) -> bool:
+    """True when the host recently reported pull progress for the URI (C4).
+
+    Fresh means the entry's ``at`` timestamp is younger than
+    ``settings.pull_progress_stale_after_s``. Any Redis/parse failure reads
+    as stale, which degrades the progress-aware wait to the plain bound.
+    """
+    if not host_id or not source_uri:
+        return False
+    try:
+        r = redis_client()
+        raw = await r.hget(PULLS_MAP, f"{host_id}|{source_uri}")
+    except Exception:  # noqa: BLE001
+        return False
+    if not raw:
+        return False
+    try:
+        entry = json.loads(raw)
+    except (ValueError, TypeError):
+        return False
+    at = entry.get("at") if isinstance(entry, dict) else None
+    if not isinstance(at, str):
+        return False
+    try:
+        at_dt = datetime.fromisoformat(at)
+    except (ValueError, TypeError):
+        return False
+    age = (datetime.now(timezone.utc) - at_dt).total_seconds()
+    return age <= settings.pull_progress_stale_after_s
+
+
+async def _await_action_with_progress(coro: Any, action: Action, intent: Any) -> Any:
+    """Await *coro* with a progress-aware bound (C4, fixes the 60 s trap).
+
+    Cold-start actions (CREATE/EVACUATE/MIGRATE) are bounded by
+    ``_action_timeout_s(action)`` — but that bound can still fire
+    mid-download on a slow link. Instead of one big ``wait_for``, wait in
+    slices of ``settings.action_progress_slice_s``; at each slice boundary
+    the host's pull progress for ``(action.host_id, intent.model_source)``
+    is checked, and the wait continues while that progress is newer than
+    ``settings.pull_progress_stale_after_s``. The hard ceiling remains
+    ``_action_timeout_s(action)``.
+
+    When the ceiling is hit while the host is *still* downloading, the
+    raised ``TimeoutError`` carries ``recoverable=True`` so the recorded
+    ``last_error`` tells the webui the deployment is still working rather
+    than dead. The action coroutine runs in a shielded task, so a slice
+    timeout never cancels a host call mid-flight.
+    """
+    if action.type not in _COLD_START_ACTIONS:
+        return await asyncio.wait_for(coro, timeout=_ACTION_TIMEOUT_S)
+
+    deadline = time.monotonic() + _action_timeout_s(action)
+    task = asyncio.ensure_future(coro)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        slice_s = min(settings.action_progress_slice_s, remaining)
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=slice_s)
+        except asyncio.TimeoutError:
+            if not await _pull_progress_fresh(action.host_id, intent.model_source):
+                break
+
+    if not task.done():
+        task.cancel()
+        try:
+            await task
+        except BaseException:  # noqa: BLE001 — CancelledError and task errors alike
+            logger.debug(
+                "action task %s cancelled after %s timeout",
+                getattr(task, "get_name", lambda: "?")() or "?",
+                deadline,
+            )
+
+    still_working = await _pull_progress_fresh(action.host_id, intent.model_source)
+    exc = asyncio.TimeoutError(
+        f"Action {action.type} for intent {intent.alias} exceeded its bound "
+        f"({_action_timeout_s(action):.0f}s)"
+        + (
+            f" while the host is still downloading {intent.model_source}"
+            if still_working
+            else ""
+        )
+    )
+    exc.recoverable = still_working  # type: ignore[attr-defined]
+    raise exc
 
 
 # How long the *displaced* intent is left alone after a displacement
@@ -152,6 +272,13 @@ class Reconciler:
         # intent's CREATE actions and cannot free capacity it already failed
         # to free (§8.5 partial fulfillment instead of thrash).
         self._displace_cooldown: dict[str, float] = {}
+        # C5/5.7: full instance configs captured during a pending-edit
+        # deep-compare window, keyed (intent_id, instance_id, spec_version).
+        # The real config does not change inside the window, so repeated
+        # ticks must not re-fetch it; a new spec edit changes the key and
+        # drops the intent's stale entries.
+        self._config_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
+        self._config_cache_spec: dict[str, str] = {}
 
     # ── Lifecycle ──────────────────────────────────────────────
 
@@ -333,6 +460,24 @@ class Reconciler:
             logger.debug("Intent %s in backoff, skipping", intent.id)
             return
 
+        # C3 defensive fleet validation: a spec written before these rules
+        # existed shows up in the logs instead of silently churning.
+        try:
+            from app.services.intent_validation import validate_intent_fleet
+
+            hard, _warnings = await validate_intent_fleet(intent.model_dump())
+            if hard:
+                logger.error(
+                    "Intent %s (%s) violates fleet validation: %s",
+                    intent.id,
+                    intent.alias,
+                    hard,
+                )
+        except Exception:
+            logger.debug(
+                "Fleet validation skipped for intent %s", intent.id, exc_info=True
+            )
+
         # Settle window: skip diffing right after a CREATE/MIGRATE so the
         # host's WS push lands before we re-observe (closes the
         # duplicate-create window; still refresh status).
@@ -361,8 +506,12 @@ class Reconciler:
         ):
             # Normal delete/scale-to-zero flow via _diff
             actions = self._diff(intent, observed)
+            drift_replace = any(
+                a.type == ActionType.REPLACE and a.reason == "backend config drift"
+                for a in actions
+            )
             if not actions:
-                await self._update_status(intent, observed)
+                await self._update_status(intent, observed, drift_replace=drift_replace)
                 return
             actions.sort(key=lambda a: a.priority)
             action = actions[0]
@@ -397,6 +546,14 @@ class Reconciler:
                     "host_id": action.host_id,
                     "source_uri": intent.model_source,
                     "at": datetime.now(timezone.utc).isoformat(),
+                    # C2: link the failure to its process logs when the host
+                    # answered with a structured body.
+                    "instance_id": getattr(e, "instance_id", None)
+                    or action.instance_id,
+                    "log_tail": getattr(e, "log_tail", None),
+                    # C4: set when the action gave up while the host was
+                    # still making progress (e.g. a cold-start pull).
+                    "recoverable": bool(getattr(e, "recoverable", False)),
                 }
             if action_succeeded and last_error is None:
                 self._backoff_clear(intent.id)
@@ -405,7 +562,12 @@ class Reconciler:
                     intent.id, spec_version=_spec_version(intent)
                 )
             t_upd = time.monotonic()
-            await self._update_status(intent, observed, last_error=last_error)
+            await self._update_status(
+                intent,
+                observed,
+                last_error=last_error,
+                drift_replace=drift_replace,
+            )
             logger.debug(
                 "update_status for %s took %.1fs",
                 intent.id[:8],
@@ -415,6 +577,10 @@ class Reconciler:
 
         # 2. Diff
         actions = self._diff(intent, observed)
+        drift_replace = any(
+            a.type == ActionType.REPLACE and a.reason == "backend config drift"
+            for a in actions
+        )
 
         # ── S-042: Check if a strategy should be initiated ────────
         strategy_progress_data = self._maybe_initiate_strategy(
@@ -423,7 +589,10 @@ class Reconciler:
         if strategy_progress_data is not None:
             # Persist strategy_progress; next tick will execute it
             await self._update_status(
-                intent, observed, strategy_progress=strategy_progress_data
+                intent,
+                observed,
+                strategy_progress=strategy_progress_data,
+                drift_replace=drift_replace,
             )
             return
 
@@ -433,7 +602,10 @@ class Reconciler:
             # pending spec change is done rolling out (S-044) — unless a
             # replica could not be compared against it at all.
             await self._update_status(
-                intent, observed, spec_settled=_spec_settled(observed, actions)
+                intent,
+                observed,
+                spec_settled=_spec_settled(observed, actions),
+                drift_replace=drift_replace,
             )
             return
 
@@ -452,8 +624,11 @@ class Reconciler:
         last_error = None
         action_succeeded = False
         try:
-            result = await asyncio.wait_for(
-                self._act(intent, action), timeout=_ACTION_TIMEOUT_S
+            # C4: cold-start actions use the progress-aware bound instead of
+            # the raw 60 s — a shortfall CREATE pulls the model and blocks on
+            # the host's start, which legitimately takes minutes.
+            result = await _await_action_with_progress(
+                self._act(intent, action), action, intent
             )
             action_succeeded = True
 
@@ -477,6 +652,13 @@ class Reconciler:
                 "host_id": action.host_id,
                 "source_uri": intent.model_source,
                 "at": datetime.now(timezone.utc).isoformat(),
+                # C2: link the failure to its process logs when the host
+                # answered with a structured body.
+                "instance_id": getattr(e, "instance_id", None) or action.instance_id,
+                "log_tail": getattr(e, "log_tail", None),
+                # C4: set when the action gave up while the host was still
+                # making progress (e.g. a cold-start pull).
+                "recoverable": bool(getattr(e, "recoverable", False)),
             }
 
         # Update backoff state
@@ -493,6 +675,7 @@ class Reconciler:
             # No replica needed replacing, so nothing is left to roll out for
             # a pending spec change (S-044).
             spec_settled=_spec_settled(observed, actions),
+            drift_replace=drift_replace,
         )
 
     # ── S-042: Strategy helpers ──────────────────────────────────
@@ -644,6 +827,10 @@ class Reconciler:
                     "host_id": action_dict.get("host_id"),
                     "source_uri": intent.model_source,
                     "at": datetime.now(timezone.utc).isoformat(),
+                    "instance_id": getattr(e, "instance_id", None)
+                    or action_dict.get("instance_id"),
+                    "log_tail": getattr(e, "log_tail", None),
+                    "recoverable": bool(getattr(e, "recoverable", False)),
                 }
                 if new_progress and isinstance(e, StartOutcomeUnknown):
                     # The replacement may be coming up. Hold the step where it
@@ -761,14 +948,26 @@ class Reconciler:
         # each replica's real configuration so the comparison in _diff sees
         # every field. Bounded to that window: in steady state this would be
         # a host round-trip per replica per tick.
-        if _spec_version(intent) and managed_instances:
+        spec_version = _spec_version(intent)
+        if spec_version and managed_instances:
             from app.services.migration import capture_instance_config
+
+            if self._config_cache_spec.get(intent.id) != spec_version:
+                # New edit: the previous window's captures are stale.
+                self._config_cache_spec[intent.id] = spec_version
+                self._config_cache = {
+                    k: v for k, v in self._config_cache.items() if k[0] != intent.id
+                }
 
             hosts_by_id = {h.id: h for h in hosts}
             for inst in managed_instances:
                 host = hosts_by_id.get(inst.get("_host_id"))
                 iid = inst.get("instance_id") or inst.get("id")
                 if host is None or not iid:
+                    continue
+                cache_key = (intent.id, iid, spec_version)
+                if cache_key in self._config_cache:
+                    inst["_full_config"] = self._config_cache[cache_key]
                     continue
                 try:
                     full = await capture_instance_config(host, iid)
@@ -790,6 +989,7 @@ class Reconciler:
                 cfg = full.get("config", full)
                 if isinstance(cfg, dict):
                     inst["_full_config"] = cfg
+                    self._config_cache[cache_key] = cfg
 
         # 3. Gateway registry — which aliases are registered?
         gateway_aliases: set[str] = set()
@@ -976,9 +1176,10 @@ class Reconciler:
             has_source_drift = inst_source and inst_source != intent.model_source
             # _observe attaches the full config while a spec change is
             # pending; otherwise the flat cache entry is all there is.
-            has_backend_drift = _detect_backend_drift(
+            drifted_keys = _detect_backend_drift(
                 intent, inst.get("_full_config") or cfg
             )
+            has_backend_drift = bool(drifted_keys)
 
             if has_source_drift:
                 actions.append(
@@ -996,17 +1197,36 @@ class Reconciler:
                     )
                 )
             elif has_backend_drift and not has_source_drift:
-                actions.append(
-                    Action(
-                        type=ActionType.REPLACE,
-                        intent_id=intent.id,
-                        alias=intent.alias,
-                        host_id=inst.get("_host_id"),
-                        instance_id=inst_id,
-                        reason="backend config drift",
-                        priority=20,
+                # Churn circuit breaker (C1): a drift vector the host keeps
+                # re-producing would otherwise trap the intent in a
+                # stop/recreate loop forever. After max_drift_replace_attempts
+                # rounds the REPLACE is no longer planned; the intent records
+                # a BackendDriftUnsettled error naming the mismatching keys
+                # instead, and the spec change stays pending so the next edit
+                # resets the counter.
+                attempts = getattr(intent.status, "drift_replace_attempts", 0) or 0
+                if attempts < settings.max_drift_replace_attempts:
+                    actions.append(
+                        Action(
+                            type=ActionType.REPLACE,
+                            intent_id=intent.id,
+                            alias=intent.alias,
+                            host_id=inst.get("_host_id"),
+                            instance_id=inst_id,
+                            reason="backend config drift",
+                            priority=20,
+                        )
                     )
-                )
+                else:
+                    logger.error(
+                        "Intent %s (%s): backend drift unsettled after %d "
+                        "REPLACE attempts (keys: %s); stopping the loop",
+                        intent.id,
+                        intent.alias,
+                        attempts,
+                        ", ".join(sorted(drifted_keys)),
+                    )
+                    observed["_drift_unsettled"] = drifted_keys
 
             # Managed instances in failed/stopped/error are drift (§8.2):
             # RECREATE restarts them; if the restart fails, the replica is
@@ -1895,12 +2115,33 @@ class Reconciler:
                     if resp.status == 200:
                         return
                     text = await resp.text()
-                    raise HTTPException(
-                        status_code=502,
+                    # The host answers start failures with a structured body
+                    # (C2): {"detail", "instance_id", "exit_code", "log_tail"}.
+                    # Parse what we can so last_error links the failure to
+                    # its process logs; older hosts send a plain string.
+                    body_instance_id = None
+                    exit_code = None
+                    log_tail = None
+                    try:
+                        body = json.loads(text)
+                    except (ValueError, TypeError):
+                        body = None
+                    if isinstance(body, dict):
+                        body_instance_id = body.get("instance_id") or None
+                        exit_code = body.get("exit_code")
+                        log_tail = body.get("log_tail")
+                        detail_msg = body.get("detail") or text
+                    else:
+                        detail_msg = text
+                    raise InstanceStartFailed(
                         detail=(
                             f"Host '{host.name}' failed to start instance "
-                            f"{instance_id}: HTTP {resp.status} — {text}"
+                            f"{body_instance_id or instance_id}: HTTP "
+                            f"{resp.status} — {detail_msg}"
                         ),
+                        instance_id=body_instance_id or instance_id,
+                        exit_code=exit_code,
+                        log_tail=log_tail,
                     )
         except HTTPException:
             raise
@@ -1979,6 +2220,7 @@ class Reconciler:
         last_error: dict[str, Any] | None = None,
         strategy_progress: dict[str, Any] | None = None,
         spec_settled: bool = False,
+        drift_replace: bool = False,
     ) -> None:
         """Compute and persist the intent status after reconciliation.
 
@@ -1990,6 +2232,11 @@ class Reconciler:
         no replica drifting from the spec, so the deep-compare window from
         S-044 has served its purpose. Status JSON is rebuilt from scratch on
         every write, so the marker has to be carried forward explicitly.
+
+        *drift_replace* reports whether the pass planned a drift-driven
+        REPLACE; it feeds the C1 churn circuit breaker counter
+        (``drift_replace_attempts``), which is reset when the spec settles
+        or is edited.
         """
         from app.database.intents import intent_db
         from app.models.intent import (
@@ -2038,6 +2285,18 @@ class Reconciler:
                 ).model_dump()
             )
 
+        # Drift circuit breaker bookkeeping (C1): count consecutive
+        # drift-driven REPLACE rounds; reset when the spec settles (or was
+        # edited — the update route resets the counter in status_json).
+        unsettled_keys = observed.get("_drift_unsettled")
+        prev_attempts = getattr(intent.status, "drift_replace_attempts", 0) or 0
+        if drift_replace:
+            drift_attempts = prev_attempts + 1
+        elif spec_settled:
+            drift_attempts = 0
+        else:
+            drift_attempts = prev_attempts
+
         # Determine phase
         current_phase = intent.status.phase.value
         if current_phase == "deleting":
@@ -2060,6 +2319,18 @@ class Reconciler:
             phase = IntentPhase.FAILED
         else:
             phase = IntentPhase.RECONCILING
+
+        # A tripped drift circuit breaker means the replicas provably do not
+        # match the spec — never report the deployment as converged.
+        if unsettled_keys and phase not in (
+            IntentPhase.DELETING,
+            IntentPhase.DELETED,
+        ):
+            phase = IntentPhase.DEGRADED
+
+        # C3: specific reason for partial fulfillment, rendered in the
+        # Degraded condition message when a cause is identifiable.
+        shortfall_reason = _shortfall_reason(intent, observed)
 
         # Build conditions
         conditions: list[dict[str, Any]] = []
@@ -2085,18 +2356,38 @@ class Reconciler:
                 ).model_dump()
             )
         if phase == IntentPhase.DEGRADED:
-            conditions.append(
-                Condition(
-                    type="Degraded",
-                    status=True,
-                    reason="ShortfallOrFailure",
-                    message=(
-                        f"{ready_count}/{desired} ready — "
-                        "desired replicas cannot all be made ready"
-                    ),
-                    last_transition=now_iso,
-                ).model_dump()
-            )
+            if unsettled_keys:
+                conditions.append(
+                    Condition(
+                        type="Degraded",
+                        status=True,
+                        reason="DriftUnsettled",
+                        message=(
+                            f"backend config drift unsettled after "
+                            f"{drift_attempts} REPLACE attempts — mismatching "
+                            f"keys: {', '.join(sorted(unsettled_keys))}. "
+                            f"Edit the spec to reset the counter."
+                        ),
+                        last_transition=now_iso,
+                    ).model_dump()
+                )
+            else:
+                conditions.append(
+                    Condition(
+                        type="Degraded",
+                        status=True,
+                        reason="ShortfallOrFailure",
+                        message=(
+                            f"{ready_count}/{desired} ready — " f"{shortfall_reason}"
+                            if shortfall_reason
+                            else (
+                                f"{ready_count}/{desired} ready — "
+                                "desired replicas cannot all be made ready"
+                            )
+                        ),
+                        last_transition=now_iso,
+                    ).model_dump()
+                )
 
         # Conflict condition for manual instances (§5.3)
         manual_conflicts = observed.get("manual_conflicts", [])
@@ -2130,6 +2421,26 @@ class Reconciler:
                 host_id=last_error.get("host_id"),
                 source_uri=last_error.get("source_uri"),
                 at=last_error.get("at", now_iso),
+                instance_id=last_error.get("instance_id"),
+                log_tail=last_error.get("log_tail"),
+                recoverable=bool(last_error.get("recoverable", False)),
+            )
+        elif unsettled_keys:
+            # The drift circuit breaker tripped: no single host action
+            # failed, but the spec cannot be rolled out. Record the error
+            # naming the mismatching keys so the loop ends in one clear,
+            # actionable state instead of churning forever (C1).
+            first_host = next((inst.get("_host_id") for inst in managed), None)
+            last_error_model = LastError(
+                code="BackendDriftUnsettled",
+                message=(
+                    f"backend config drift unsettled after {drift_attempts} "
+                    f"REPLACE attempts; mismatching keys: "
+                    f"{', '.join(sorted(unsettled_keys))}"
+                ),
+                host_id=first_host,
+                source_uri=intent.model_source,
+                at=now_iso,
             )
 
         # Build status_json
@@ -2150,6 +2461,8 @@ class Reconciler:
             "strategy_progress": strategy_progress,
             "last_error": last_error_model.model_dump() if last_error_model else None,
             "spec_changed_at": None if spec_settled else _spec_version(intent),
+            "drift_replace_attempts": drift_attempts,
+            "shortfall_reason": shortfall_reason,
         }
 
         # Determine reconcile state
@@ -2222,6 +2535,78 @@ def _intent_orphan(intent: Any) -> bool:
         return False
 
 
+def _shortfall_reason(intent: Any, observed: dict[str, Any]) -> str | None:
+    """Explain why the intent cannot be fully placed (C3).
+
+    Produces a specific message for the Degraded condition instead of the
+    generic 'desired replicas cannot all be made ready': a gpu_type with no
+    matching host, an allow-list smaller than the replica count, a fully
+    draining eligible fleet, or a VRAM request above the largest available
+    capacity. Returns None when no specific cause is identifiable and the
+    generic text remains the fallback.
+    """
+    desired = intent.replicas
+    observed_count = len(observed.get("managed_instances", []))
+    if desired <= observed_count:
+        return None
+
+    placement = intent.placement
+    roles = list(placement.roles) if placement.roles else ["inference"]
+    host_allow = list(getattr(placement, "host_allow", None) or [])
+    host_deny = list(getattr(placement, "host_deny", None) or [])
+    gpu_type = getattr(placement, "gpu_type", None)
+
+    # An explicit allow-list smaller than the request can never be satisfied.
+    if host_allow and len(host_allow) < desired:
+        return (
+            f"host_allow names {len(host_allow)} host(s), "
+            f"{desired} replicas requested"
+        )
+
+    hosts = observed.get("hosts", [])
+    snapshots = observed.get("snapshots", {})
+
+    from app.services.placement import filter_durable_hosts
+
+    durable = filter_durable_hosts(
+        hosts,
+        roles=roles,
+        gpu_type=gpu_type,
+        host_allow=host_allow or None,
+        host_deny=host_deny or None,
+    )
+    if not durable:
+        if gpu_type:
+            return f"no host matches gpu_type={gpu_type}"
+        return f"no host matches roles {roles}"
+
+    if all(h.drain_state is not None for h in durable):
+        return f"all {len(durable)} eligible host(s) are draining"
+
+    # Capacity: the largest effective VRAM (unified memory folds into RAM)
+    # among durably eligible hosts, against the requested amount.
+    vram_gb = float(getattr(intent.resources, "vram_gb", None) or 0)
+    if vram_gb > 0:
+        largest_vram = 0.0
+        for h in durable:
+            snap = snapshots.get(h.id)
+            if snap is None:
+                continue
+            eff = (
+                snap.vram_available_gb
+                if snap.vram_available_gb is not None
+                else (snap.ram_available_gb or 0.0)
+            )
+            largest_vram = max(largest_vram, eff or 0.0)
+        if vram_gb > largest_vram:
+            return (
+                f"needs {vram_gb:g} GB VRAM, largest available among "
+                f"eligible hosts is {largest_vram:g} GB"
+            )
+
+    return None
+
+
 def _spec_version(intent: Any) -> str | None:
     """Return a marker that changes when the intent's spec is edited.
 
@@ -2240,16 +2625,24 @@ def _spec_settled(observed: dict[str, Any], actions: list[Action]) -> bool:
     configuration could not be read is not evidence of agreement — treating it
     as settled would clear ``spec_changed_at`` and lose the edit, leaving the
     replica on the old config while the intent reports itself up to date.
+
+    A tripped drift circuit breaker (``_drift_unsettled``) also keeps the
+    edit pending: the replicas provably do not match the spec, and clearing
+    the marker would drop the edit while the drift persists.
     """
     if any(a.type == ActionType.REPLACE for a in actions):
+        return False
+    if observed.get("_drift_unsettled"):
         return False
     return not any(
         inst.get("_full_config_unknown") for inst in observed["managed_instances"]
     )
 
 
-def _detect_backend_drift(intent: Any, instance_config: dict[str, Any]) -> bool:
+def _detect_backend_drift(intent: Any, instance_config: dict[str, Any]) -> list[str]:
     """Check if the instance's backend config has drifted from the intent.
+
+    Returns the list of drifted backend keys (empty means no drift).
 
     Compares the intent's backend fields (excluding identity/server-derived
     fields) against the instance config for the same keys.
@@ -2275,6 +2668,7 @@ def _detect_backend_drift(intent: Any, instance_config: dict[str, Any]) -> bool:
         "model",
         "model_id",
     }
+    drifted: list[str] = []
     for key, value in intent_backend.items():
         if key in _skip_keys:
             continue
@@ -2282,30 +2676,80 @@ def _detect_backend_drift(intent: Any, instance_config: dict[str, Any]) -> bool:
             continue  # flat WS cache does not carry this field
         inst_value = instance_config.get(key)
         if not _backend_value_matches(value, inst_value):
-            return True
-    return False
+            drifted.append(key)
+    return drifted
+
+
+def _jsonish(value: Any) -> Any:
+    """Parse a JSON-looking string; pass dicts/lists through; else None.
+
+    The sentinel is None, so a JSON literal null (which parses to None) is
+    indistinguishable from 'not JSON' — acceptable, since a null spec value
+    equals a None instance value via the exact equality fast path anyway.
+    """
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _coerce_jsonish(value: Any) -> Any:
+    """Recursively turn boolean-looking strings into real booleans.
+
+    Mirrors ``solar_host.models.llamacpp._coerce_template_kwargs``: the host
+    rewrites ``chat_template_kwargs`` at the config boundary, so a spec that
+    carries a dict, a spaced JSON string, or string-typed booleans must
+    compare equal to the host's compact canonical form. Control cannot
+    import ``solar_host``; the duplication is intentional and pinned by a
+    test that asserts both behave identically.
+    """
+    if isinstance(value, dict):
+        return {k: _coerce_jsonish(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_coerce_jsonish(v) for v in value]
+    if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+        return value.strip().lower() == "true"
+    return value
 
 
 def _backend_value_matches(spec_value: Any, inst_value: Any) -> bool:
     """Compare a backend spec value against the instance's reported value.
 
-    The instance's full config carries resolve-time artifacts: paths the
-    host resolved from the spec's patterns. A bare filename or glob in the
-    spec (e.g. ``mmproj: "mmproj-BF16.gguf"``, ``spec_draft_model:
-    "*DSpark*.gguf"``) whose resolution is the instance's path
-    (``/opt/.../mmproj-BF16.gguf``) is a match. Treating it as drift flags
-    every replacement while a spec change is pending, trapping the intent in
-    a REPLACE-stop churn that never lets the edit settle.
+    Three comparison layers, tried in order:
+
+    1. Exact equality (unchanged fast path).
+    2. JSON-structural equality: when either side is a dict/list or a string
+       that parses as JSON, both sides are parsed (where needed) and
+       compared after applying the same recursive boolean coercion the host
+       applies at the config boundary (``_coerce_jsonish``). This tolerates
+       the host re-serializing ``chat_template_kwargs`` as compact canonical
+       JSON with real booleans.
+    3. Path/glob equality: the instance's full config carries resolve-time
+       artifacts — absolute paths the host resolved from the spec's
+       patterns. A bare filename (e.g. mmproj: 'mmproj-BF16.gguf'), a glob
+       ('*mmproj-BF16*.gguf') or a relative path ('sub/mmproj.gguf') in the
+       spec that matches the tail of the instance's resolved path is a
+       match. Treating these as drift flags every replacement while a spec
+       change is pending, trapping the intent in a REPLACE-stop churn that
+       never lets the edit settle.
     """
     if spec_value == inst_value:
         return True
-    if not isinstance(spec_value, str) or not isinstance(inst_value, str):
-        return False
-    # Only a bare filename or glob is a selector; anything with a separator
-    # names a location and has to match verbatim.
-    if "/" in spec_value or "/" not in inst_value:
-        return False
-    return fnmatch(inst_value.rsplit("/", 1)[-1], spec_value)
+
+    parsed_spec = _jsonish(spec_value)
+    parsed_inst = _jsonish(inst_value)
+    if parsed_spec is not None and parsed_inst is not None:
+        return _coerce_jsonish(parsed_spec) == _coerce_jsonish(parsed_inst)
+
+    if isinstance(spec_value, str) and isinstance(inst_value, str):
+        if any(c in spec_value for c in "*?["):
+            return fnmatch.fnmatch(os.path.basename(inst_value), spec_value)
+        return inst_value.endswith("/" + spec_value.lstrip("./"))
+    return False
 
 
 # Singleton

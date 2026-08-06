@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -287,6 +287,10 @@ class HostResourceSnapshot(BaseModel):
 
     # Timestamps
     snapshot_timestamp: str | None = None
+
+    # C5: where the live resource data came from — the WS push (Redis read
+    # model, cache-first), a direct HTTP proxy call, or nowhere (degraded).
+    snapshot_source: Literal["ws", "http", "none"] = "none"
 
 
 class AggregatedResourceResponse(BaseModel):

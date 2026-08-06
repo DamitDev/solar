@@ -14,6 +14,7 @@ import { X, Tags, Server, Binary, Search, MessageSquare, Zap } from 'lucide-reac
 import { useRoutingEventsContext, RequestState } from '@/context/RoutingEventsContext';
 import { useEventStreamContext } from '@/context/EventStreamContext';
 import { useInstances } from '@/hooks/useInstances';
+import { useFallbackPolling } from '@/hooks/useFallbackPolling';
 import {
   Instance,
   ApiEndpoint,
@@ -87,28 +88,28 @@ interface InstanceData {
 
 export function RoutingGraph() {
   const { requests, removeRequest } = useRoutingEventsContext();
-  const { getInstanceState } = useEventStreamContext();
+  const { getInstanceState, endpoints: eventEndpoints, isConnected } = useEventStreamContext();
   const { hosts, loading } = useInstances();
   const [endpoints, setEndpoints] = useState<ApiEndpoint[]>([]);
+
+  // C5: endpoints are event-driven (endpoints_update). The REST fetch is a
+  // fallback only — it runs while the socket is down, then stops.
+  useFallbackPolling(
+    () => {
+      solarClient
+        .getEndpoints()
+        .then(setEndpoints)
+        .catch((err) => console.error('Failed to fetch endpoints:', err));
+    },
+    { enabled: !isConnected, intervalMs: 10000 },
+  );
+  useEffect(() => {
+    if (eventEndpoints.length > 0) setEndpoints(eventEndpoints);
+  }, [eventEndpoints]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const previousEdgeIdsRef = useRef<Set<string>>(new Set());
-
-  // Fetch endpoints on mount and periodically
-  useEffect(() => {
-    const fetchEndpoints = async () => {
-      try {
-        const data = await solarClient.getEndpoints();
-        setEndpoints(data);
-      } catch (err) {
-        console.error('Failed to fetch endpoints:', err);
-      }
-    };
-    fetchEndpoints();
-    const timer = setInterval(fetchEndpoints, 10000);
-    return () => clearInterval(timer);
-  }, []);
 
   useEffect(() => {
     const newNodes: Node[] = [];

@@ -21,6 +21,7 @@ the other quants' files with it.
 
 import asyncio
 import fnmatch
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -34,6 +35,9 @@ from solar_host import models_manager
 from solar_host.config import config_manager
 from solar_host.models.base import InstanceStatus
 from solar_host.models_manager import ModelPullError, read_manifest
+from solar_host.ws_client import broadcast_pull_progress
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/models", tags=["models"])
 
@@ -222,6 +226,19 @@ async def pull_model(req: PullRequest) -> PullResponse | JSONResponse:
         )
 
     try:
+        # C4: bridge pull_model's plain progress callback to the WebSocket.
+        # pull_model runs in a worker thread (asyncio.to_thread, and the
+        # actual download in a pebble subprocess); the callback lands back on
+        # the event loop via run_coroutine_threadsafe — the same thread-to-
+        # loop bridging pattern used for log events.
+        loop = asyncio.get_running_loop()
+
+        def _progress_cb(payload: dict) -> None:
+            try:
+                asyncio.run_coroutine_threadsafe(broadcast_pull_progress(payload), loop)
+            except Exception:
+                logger.debug("Failed to bridge pull progress event", exc_info=True)
+
         result = await asyncio.to_thread(
             models_manager.pull_model,
             source=req.source,
@@ -237,6 +254,7 @@ async def pull_model(req: PullRequest) -> PullResponse | JSONResponse:
             metadata=req.metadata,
             backend_type=req.backend_type,
             file_filters=req.file_filters,
+            progress_cb=_progress_cb,
         )
     except ModelPullError as exc:
         return JSONResponse(

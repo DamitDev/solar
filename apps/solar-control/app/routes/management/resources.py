@@ -6,10 +6,12 @@ GET /api/resources — cluster-wide view of host capacity, workloads, and reserv
 import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 import aiohttp
 from fastapi import APIRouter, HTTPException, Query
 
+from app.config import settings
 from app.database.hosts import host_db
 from app.models import (
     AggregatedResourceResponse,
@@ -28,95 +30,16 @@ router = APIRouter(prefix="/resources", tags=["resources"])
 _RESOURCE_TIMEOUT = 5  # seconds to wait for a host's /resources response
 
 
-async def _fetch_host_resource_snapshot(
-    host: Host,
+def _merge_resource_payload(
+    base: HostResourceSnapshot, data: dict[str, Any]
 ) -> HostResourceSnapshot:
-    """Fetch live resource data from a single solar-host.
+    """Merge a host resource payload into *base* and return it.
 
-    Proxies GET /resources from the host. On any error (connection,
-    timeout, non-200), marks the host as unreachable and returns a
-    degraded snapshot with DB-only data.
+    Pure and unit-testable. Both the WS health push and the HTTP fallback
+    produce the same payload shape (memory_type, vram/ram/disk dimensions,
+    reservations), so a WS snapshot and the equivalent HTTP body merge
+    identically (C5).
     """
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    # Base snapshot from local DB (always available)
-    base = HostResourceSnapshot(
-        host_id=host.id,
-        host_name=host.name,
-        url=host.url,
-        status=host.status,
-        drain_state=host.drain_state,
-        roles=host.roles or [],
-        gpu_type=host.gpu_type,
-        version=host.version,
-        reachable=False,
-        snapshot_timestamp=now_iso,
-    )
-
-    # Try to get instances from Redis
-    try:
-        instances = await host_store.get_host_instances(host.id)
-        base.instance_count = len(instances)
-        base.running_instance_count = sum(
-            1 for i in instances if i.get("status") == "running"
-        )
-        base.instances = [
-            HostInstanceSummary(
-                id=i["id"],
-                alias=i.get("alias"),
-                status=i.get("status"),
-                backend_type=i.get("backend_type"),
-                port=i.get("port"),
-                supported_endpoints=list(i.get("supported_endpoints") or []),
-                # Ownership markers let consumers tell intent-managed
-                # replicas from manual instances (S-043 §6).
-                managed_by=i.get("managed_by"),
-                intent_id=i.get("intent_id"),
-            )
-            for i in instances
-            if i.get("id")
-        ]
-    except Exception:
-        logger.warning(
-            "Failed to fetch instances from Redis for host %s",
-            host.id,
-            exc_info=True,
-        )
-
-    # Aggregate active job workloads from the jobs table
-    base.active_jobs = await get_host_active_jobs(host.id)
-
-    # Proxy live resource data from the host
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"{host.url.rstrip('/')}/resources"
-            headers = {"X-API-Key": host.api_key}
-            async with session.get(
-                url,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=_RESOURCE_TIMEOUT),
-            ) as resp:
-                if resp.status != 200:
-                    base.error = (
-                        f"Host {host.name} at {host.url} returned HTTP {resp.status}"
-                    )
-                    return base
-
-                data = await resp.json()
-    except (aiohttp.ClientConnectionError, aiohttp.ClientConnectorError):
-        base.error = f"Host unreachable at {host.url}"
-        return base
-    except asyncio.TimeoutError:
-        base.error = f"Host timed out ({_RESOURCE_TIMEOUT}s)"
-        return base
-    except Exception as exc:  # noqa: BLE001
-        base.error = f"Failed to fetch resources: {exc}"
-        return base
-
-    # Merge live resource dimensions
-    base.reachable = True
-    base.snapshot_timestamp = now_iso
-
     for dim_name in ("vram", "ram", "disk"):
         dim = data.get(dim_name)
         if dim is None:
@@ -131,6 +54,8 @@ async def _fetch_host_resource_snapshot(
 
     # Merge reservation details + totals
     reservations = data.get("reservations", [])
+    if not isinstance(reservations, list):
+        reservations = []
     base.reservation_count = len(reservations)
     base.reservation_vram_total_gb = sum(
         float(r.get("vram_gb", 0)) for r in reservations
@@ -183,6 +108,146 @@ async def _fetch_host_resource_snapshot(
     )
 
     return base
+
+
+async def _read_fresh_ws_snapshot(
+    host_id: str,
+) -> tuple[dict[str, Any], str] | None:
+    """Return (resources, at) when a fresh WS-pushed snapshot exists.
+
+    The snapshot counts as fresh when the host is connected and the entry
+    is younger than ``settings.host_snapshot_max_age_s`` (three health
+    ticks). Returns None otherwise — the caller falls back to HTTP.
+    """
+    try:
+        entry = await host_store.get_host_resource_snapshot(host_id)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(entry, dict):
+        return None
+    at = entry.get("at")
+    resources = entry.get("resources")
+    if not isinstance(resources, dict) or not isinstance(at, str):
+        return None
+    try:
+        at_dt = datetime.fromisoformat(at)
+    except (ValueError, TypeError):
+        return None
+    age = (datetime.now(timezone.utc) - at_dt).total_seconds()
+    if age > settings.host_snapshot_max_age_s:
+        return None
+    return resources, at
+
+
+async def _fetch_host_resource_snapshot(
+    host: Host,
+) -> HostResourceSnapshot:
+    """Fetch live resource data from a single solar-host.
+
+    Cache-first (C5): when the host is connected over the WS channel and
+    pushed a resource snapshot younger than ``settings.host_snapshot_max_age_s``,
+    the Redis copy is used and no HTTP call is made. Otherwise proxies
+    GET /resources from the host. On any error (connection, timeout,
+    non-200), marks the host as unreachable and returns a degraded snapshot
+    with DB-only data. ``snapshot_source`` reports which path was taken.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # Base snapshot from local DB (always available)
+    base = HostResourceSnapshot(
+        host_id=host.id,
+        host_name=host.name,
+        url=host.url,
+        status=host.status,
+        drain_state=host.drain_state,
+        roles=host.roles or [],
+        gpu_type=host.gpu_type,
+        version=host.version,
+        reachable=False,
+        snapshot_timestamp=now_iso,
+        snapshot_source="none",
+    )
+
+    # Try to get instances from Redis
+    try:
+        instances = await host_store.get_host_instances(host.id)
+        base.instance_count = len(instances)
+        base.running_instance_count = sum(
+            1 for i in instances if i.get("status") == "running"
+        )
+        base.instances = [
+            HostInstanceSummary(
+                id=i["id"],
+                alias=i.get("alias"),
+                status=i.get("status"),
+                backend_type=i.get("backend_type"),
+                port=i.get("port"),
+                supported_endpoints=list(i.get("supported_endpoints") or []),
+                # Ownership markers let consumers tell intent-managed
+                # replicas from manual instances (S-043 §6).
+                managed_by=i.get("managed_by"),
+                intent_id=i.get("intent_id"),
+            )
+            for i in instances
+            if i.get("id")
+        ]
+    except Exception:
+        logger.warning(
+            "Failed to fetch instances from Redis for host %s",
+            host.id,
+            exc_info=True,
+        )
+
+    # Aggregate active job workloads from the jobs table
+    base.active_jobs = await get_host_active_jobs(host.id)
+
+    # ── WS-first: serve the Redis snapshot when it is fresh (C5) ──
+    try:
+        connected = await host_store.is_host_connected(host.id)
+    except Exception:  # noqa: BLE001
+        connected = False
+    if connected:
+        cached = await _read_fresh_ws_snapshot(host.id)
+        if cached is not None:
+            payload, at = cached
+            base = _merge_resource_payload(base, payload)
+            base.reachable = True
+            base.snapshot_timestamp = at
+            base.snapshot_source = "ws"
+            return base
+
+    # ── HTTP fallback: proxy live resource data from the host ──
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"{host.url.rstrip('/')}/resources"
+            headers = {"X-API-Key": host.api_key}
+            async with session.get(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=_RESOURCE_TIMEOUT),
+            ) as resp:
+                if resp.status != 200:
+                    base.error = (
+                        f"Host {host.name} at {host.url} returned HTTP {resp.status}"
+                    )
+                    return base
+
+                data = await resp.json()
+    except (aiohttp.ClientConnectionError, aiohttp.ClientConnectorError):
+        base.error = f"Host unreachable at {host.url}"
+        return base
+    except asyncio.TimeoutError:
+        base.error = f"Host timed out ({_RESOURCE_TIMEOUT}s)"
+        return base
+    except Exception as exc:  # noqa: BLE001
+        base.error = f"Failed to fetch resources: {exc}"
+        return base
+
+    # Merge live resource dimensions
+    base.reachable = True
+    base.snapshot_timestamp = now_iso
+    base.snapshot_source = "http"
+    return _merge_resource_payload(base, data)
 
 
 @router.get("", response_model=AggregatedResourceResponse)

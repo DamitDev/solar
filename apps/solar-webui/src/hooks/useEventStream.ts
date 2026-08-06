@@ -15,7 +15,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
 import solarClient from '@/api/client';
-import { MemoryInfo, LogMessage, PendingHost, Intent, ActiveJobSummary, DrainState } from '@/api/types';
+import { ApiEndpoint, MemoryInfo, LogMessage, PendingHost, Intent, ActiveJobSummary, DrainState } from '@/api/types';
 
 // Event type definitions
 export type WSMessageType =
@@ -36,7 +36,26 @@ export type WSMessageType =
   | 'filter_status'
   | 'intent_update'
   | 'intent_removed'
+  | 'pull_progress'
+  | 'endpoints_update'
   | 'keepalive';
+
+/** C4: model pull progress pushed by a host and rebroadcast by control. */
+export interface PullProgressData {
+  source_uri: string;
+  phase: 'resolving' | 'downloading' | 'verifying' | 'finalizing' | 'completed' | 'failed' | string;
+  bytes_done?: number | null;
+  bytes_total?: number | null;
+  speed_bps?: number | null;
+  error?: string | null;
+}
+
+export interface PullProgressEvent {
+  host_id: string;
+  host_name?: string | null;
+  timestamp?: string;
+  data: PullProgressData;
+}
 
 export interface InstanceSummary {
   id: string;
@@ -208,6 +227,10 @@ export function useEventStream(handlers: EventHandlers = {}) {
   const [gatewayRequests, setGatewayRequests] = useState<GatewayRequestSummary[]>([]);
   const [gatewayFilter, setGatewayFilter] = useState<GatewayFilter>(DEFAULT_FILTER);
   const [intents, setIntents] = useState<Map<string, Intent>>(new Map());
+  // C4: latest pull progress per "{host_id}|{source_uri}".
+  const [pullProgress, setPullProgress] = useState<Map<string, PullProgressEvent>>(new Map());
+  // C5: multi-tenant API endpoint records, event-driven (endpoints_update).
+  const [endpoints, setEndpoints] = useState<ApiEndpoint[]>([]);
 
   const socketRef = useRef<Socket | null>(null);
   const handlersRef = useRef(handlers);
@@ -481,6 +504,31 @@ export function useEventStream(handlers: EventHandlers = {}) {
           }
           break;
 
+        case 'pull_progress':
+          // C4: latest pull progress per host|source_uri, as rebroadcast
+          // by control ({host_id, host_name, timestamp, data}).
+          if (event.host_id && event.data?.source_uri) {
+            const key = `${event.host_id}|${event.data.source_uri}`;
+            setPullProgress((prev) => {
+              const m = new Map(prev);
+              m.set(key, {
+                host_id: event.host_id!,
+                host_name: event.host_name ?? null,
+                timestamp: event.timestamp,
+                data: event.data,
+              });
+              return m;
+            });
+          }
+          break;
+
+        case 'endpoints_update':
+          // C5: endpoint records change only on edits — event-driven.
+          if (Array.isArray(event.data?.endpoints)) {
+            setEndpoints(event.data.endpoints as ApiEndpoint[]);
+          }
+          break;
+
         case 'keepalive':
           // Ignore keepalives
           break;
@@ -604,6 +652,14 @@ export function useEventStream(handlers: EventHandlers = {}) {
       }));
       bindEvent('intent_update', (payload) => ({ type: 'intent_update', data: payload }));
       bindEvent('intent_removed', (payload) => ({ type: 'intent_removed', data: payload }));
+      bindEvent('pull_progress', (payload) => ({
+        type: 'pull_progress',
+        host_id: payload?.host_id,
+        host_name: payload?.host_name,
+        timestamp: payload?.timestamp,
+        data: payload?.data ?? payload,
+      }));
+      bindEvent('endpoints_update', (payload) => ({ type: 'endpoints_update', data: payload }));
     };
 
     connect();
@@ -642,6 +698,22 @@ export function useEventStream(handlers: EventHandlers = {}) {
     });
   }, []);
 
+  // C4: latest pull progress for an intent's model source (any host).
+  const getPullProgress = useCallback(
+    (sourceUri: string): PullProgressEvent | undefined => {
+      let latest: PullProgressEvent | undefined;
+      for (const [key, entry] of pullProgress) {
+        if (key.endsWith(`|${sourceUri}`)) {
+          if (!latest || (entry.timestamp ?? '') > (latest.timestamp ?? '')) {
+            latest = entry;
+          }
+        }
+      }
+      return latest;
+    },
+    [pullProgress],
+  );
+
   return {
     isConnected,
     hosts,
@@ -653,8 +725,11 @@ export function useEventStream(handlers: EventHandlers = {}) {
     gatewayRequests,
     gatewayFilter,
     intents,
+    pullProgress,
+    endpoints,
     getInstanceLogs,
     getInstanceState,
+    getPullProgress,
     clearInstanceLogs,
     removeRequest,
     setFilter,

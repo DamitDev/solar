@@ -3,6 +3,7 @@ import { Activity, AlertTriangle, CheckCircle2, RefreshCw, RotateCcw, TriangleAl
 import solarClient from '@/api/client';
 import { ApiEndpoint, GatewayStats, GatewayRequestSummary } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
+import { useFallbackPolling } from '@/hooks/useFallbackPolling';
 import { useRoutingEventsContext } from '@/context/RoutingEventsContext';
 import { formatTokenCount } from '@/lib/utils';
 
@@ -130,13 +131,29 @@ export function GatewayDashboard() {
     clearGatewayRequests();
   }, [statusFilter, requestTypeFilter, hostFilter, modelFilter, endpointFilter, setFilter, clearGatewayRequests]);
 
-  // Fetch endpoints on mount
+  // Fetch endpoints on mount — C5: event-driven via endpoints_update,
+  // REST as fallback while the event stream has no records yet.
+  const { endpoints: eventEndpoints, isConnected: streamConnected } = useEventStreamContext();
   useEffect(() => {
+    if (eventEndpoints.length > 0) {
+      setEndpoints(eventEndpoints);
+      return;
+    }
     solarClient
       .getEndpoints()
       .then(setEndpoints)
       .catch(() => setEndpoints([]));
-  }, []);
+  }, [eventEndpoints]);
+
+  useFallbackPolling(
+    () => {
+      solarClient
+        .getEndpoints()
+        .then(setEndpoints)
+        .catch(() => setEndpoints([]));
+    },
+    { enabled: !streamConnected, intervalMs: 15000 },
+  );
 
   // Fetch data functions
   const fetchStats = useCallback(async () => {

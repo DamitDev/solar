@@ -1,10 +1,14 @@
 """API endpoint management routes (under /api/endpoints)."""
 
+import logging
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, model_validator
 
 from app.auth import invalidate_endpoint_cache
 from app.database.endpoints import endpoint_db
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/endpoints", tags=["endpoints"])
 
@@ -29,6 +33,25 @@ class EndpointUpdate(BaseModel):
         return values
 
 
+async def _emit_endpoints_update() -> None:
+    """Emit the current endpoint list on /webui (C5).
+
+    Endpoint records change only when a user edits them, so the RoutingGraph
+    should be event-driven and poll only as a disconnected fallback.
+    """
+    try:
+        from app.socketio_app import sio
+
+        endpoints = await endpoint_db.get_all_endpoints()
+        await sio.emit(
+            "endpoints_update",
+            {"endpoints": [ep.model_dump() for ep in endpoints]},
+            namespace="/webui",
+        )
+    except Exception:
+        logger.warning("Failed to emit endpoints_update", exc_info=True)
+
+
 @router.get("")
 async def list_endpoints():
     endpoints = await endpoint_db.get_all_endpoints()
@@ -42,6 +65,7 @@ async def create_endpoint(data: EndpointCreate):
             name=data.name, description=data.description, api_key=data.api_key
         )
         await invalidate_endpoint_cache()
+        await _emit_endpoints_update()
         return ep.model_dump()
     except Exception as e:  # noqa: BLE001
         if "unique" in str(e).lower():
@@ -73,6 +97,7 @@ async def update_endpoint(endpoint_id: str, data: EndpointUpdate):
     if not ep:
         raise HTTPException(status_code=404, detail="Endpoint not found")
     await invalidate_endpoint_cache()
+    await _emit_endpoints_update()
     return ep.model_dump()
 
 
@@ -83,6 +108,7 @@ async def delete_endpoint(endpoint_id: str):
         raise HTTPException(status_code=404, detail="Endpoint not found")
     await endpoint_db.delete_endpoint(endpoint_id)
     await invalidate_endpoint_cache()
+    await _emit_endpoints_update()
     return {"message": f"Endpoint '{ep.name}' deleted", "id": endpoint_id}
 
 

@@ -426,6 +426,19 @@ export interface GatewayEventDTO {
 }
 
 // API Endpoint management (multi-tenant API keys)
+/** C4: terminal + live pull progress cached by control (GET /api/pulls). */
+export interface PullProgressEntry {
+  at: string;
+  data: {
+    source_uri: string;
+    phase: string;
+    bytes_done?: number | null;
+    bytes_total?: number | null;
+    speed_bps?: number | null;
+    error?: string | null;
+  };
+}
+
 export interface ApiEndpoint {
   id: string;
   name: string;
@@ -618,6 +631,12 @@ export interface IntentLastError {
   host_id?: string | null;
   source_uri?: string | null;
   at: string;
+  /** C2: the instance that failed — links the error to its process logs. */
+  instance_id?: string | null;
+  /** C2: tail of the process log the host attached to the failure. */
+  log_tail?: string[] | null;
+  /** C4: true when the action gave up while the host was still working (e.g. still downloading). */
+  recoverable?: boolean;
 }
 
 export interface IntentStatus {
@@ -635,6 +654,10 @@ export interface IntentStatus {
   last_error: IntentLastError | null;
   /** Set while an edited spec is still rolling out (S-044). */
   spec_changed_at?: string | null;
+  /** C1: consecutive drift-driven REPLACE rounds for a pending spec change. */
+  drift_replace_attempts?: number;
+  /** C3: why the intent cannot be fully placed (Degraded condition detail). */
+  shortfall_reason?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
   last_reconciled_at?: string | null;
@@ -653,6 +676,8 @@ export interface Intent {
   resources: IntentResources;
   metadata: Record<string, string>;
   status: IntentStatus;
+  /** C3: advisory warnings from create/update — response-only, never persisted. */
+  warnings?: { field: string; message: string }[] | null;
 }
 
 export interface IntentDeletedResponse {

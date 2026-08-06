@@ -13,7 +13,13 @@ from app.models.intent import (
     ReconcileState,
     ResourceRequirements,
 )
-from app.validation import validate_intent_create, validate_intent_update
+from app.validation import (
+    canonicalize_intent_backend,
+    normalize_gpu_type,
+    validate_intent_create,
+    validate_intent_update,
+    validate_intent_warnings,
+)
 
 # ── Validation unit tests ──────────────────────────────────────
 
@@ -38,9 +44,11 @@ def test_validate_intent_create_valid_full():
         "priority": "staging",
         "strategy": "immediate",
         "backend": {
-            "backend_type": "llamacpp",
+            "backend_type": "huggingface_causal",
+            "device": "cuda",
             "dtype": "float16",
             "max_length": 512,
+            "use_flash_attention": True,
         },
         "placement": {
             "roles": ["inference"],
@@ -473,6 +481,23 @@ def test_intent_status_defaults():
 
 
 # ── Route integration tests (mock IntentDB) ────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _mock_fleet_validation(monkeypatch):
+    """Route tests run without a database — stub the fleet validation layer.
+
+    The fleet layer (host roster + Redis snapshots, C3) is covered by its
+    own unit tests (tests/test_intent_validation_fleet.py) and the
+    integration suite; here it would just trip 'Database not initialized'.
+    """
+
+    async def _noop_fleet(data):
+        return [], []
+
+    monkeypatch.setattr(
+        "app.services.intent_validation.validate_intent_fleet", _noop_fleet
+    )
 
 
 @pytest.fixture
@@ -1108,4 +1133,257 @@ async def test_update_intent_db_refuses_deleted_intents(row_overrides):
     with patch.object(IntentDB, "_session", return_value=_FakeSession(row)):
         assert await db.update_intent(row.id, **_update_kwargs(replicas=9)) is None
 
-    assert row.replicas == 2
+
+# ── C3: accelerator vocabulary, field ownership, device contract ──
+
+
+def _llamacpp_backend(**extra) -> dict:
+    return {"backend_type": "llamacpp", **extra}
+
+
+class TestGpuTypeVocabulary:
+    def test_aliases_normalize_to_canonical_tokens(self):
+        assert normalize_gpu_type("nvidia") == "nvidia_cuda"
+        assert normalize_gpu_type("NVIDIA") == "nvidia_cuda"
+        assert normalize_gpu_type("cuda") == "nvidia_cuda"
+        assert normalize_gpu_type("nvidia_cuda") == "nvidia_cuda"
+        assert normalize_gpu_type("mps") == "apple_mps"
+        assert normalize_gpu_type("Metal") == "apple_mps"
+        assert normalize_gpu_type("apple_mps") == "apple_mps"
+        assert normalize_gpu_type("none") == "cpu"
+        assert normalize_gpu_type("cpu") == "cpu"
+
+    def test_unknown_token_returns_none(self):
+        assert normalize_gpu_type("quantum") is None
+        assert normalize_gpu_type(42) is None
+
+    def test_validation_rejects_unknown_gpu_type(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(model_file="m.gguf"),
+            "placement": {"gpu_type": "quantum"},
+        }
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "placement.gpu_type" and "quantum" in e["message"]
+            for e in errors
+        )
+
+    def test_validation_canonicalizes_gpu_type_in_place(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(model_file="m.gguf"),
+            "placement": {"gpu_type": "NVIDIA"},
+        }
+        assert validate_intent_create(data) == []
+        assert data["placement"]["gpu_type"] == "nvidia_cuda"
+
+
+class TestFieldOwnership:
+    def test_device_on_llamacpp_is_rejected(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(model_file="m.gguf", device="cuda"),
+        }
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "backend.device"
+            and "huggingface" in e["message"]
+            and "n_gpu_layers" in e["message"]
+            for e in errors
+        )
+
+    def test_llamacpp_only_field_on_hf_backend_is_rejected(self):
+        data = {
+            "alias": "t",
+            "model_source": "huggingface://org/model",
+            "backend": {
+                "backend_type": "huggingface_causal",
+                "model_file": "x.gguf",
+                "ctx_size": 4096,
+            },
+        }
+        errors = validate_intent_create(data)
+        assert any(e["field"] == "backend.model_file" for e in errors)
+        assert any(e["field"] == "backend.ctx_size" for e in errors)
+
+    def test_per_type_field_on_wrong_hf_backend_is_rejected(self):
+        data = {
+            "alias": "t",
+            "model_source": "huggingface://org/model",
+            "backend": {
+                "backend_type": "huggingface_causal",
+                "labels": ["a", "b"],
+            },
+        }
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "backend.labels"
+            and "huggingface_classification" in e["message"]
+            for e in errors
+        )
+
+    def test_hf_backend_with_repo_source_is_accepted(self):
+        """HuggingFace weights in a Harbor artifact are legal — must not be
+        'fixed' into a rejection later."""
+        data = {
+            "alias": "t",
+            "model_source": "repo://org/model:v1",
+            "backend": {
+                "backend_type": "huggingface_causal",
+                "device": "cuda",
+                "dtype": "float16",
+            },
+        }
+        assert validate_intent_create(data) == []
+
+    def test_ownership_table_matches_documented_field_lists(self):
+        """Pins BACKEND_FIELD_OWNERS to the documented sets so a host-side
+        field addition fails loudly."""
+        from app.validation import BACKEND_FIELD_OWNERS
+
+        llamacpp_fields = BACKEND_FIELD_OWNERS["llamacpp"]
+        assert {
+            "model_file",
+            "mmproj",
+            "threads",
+            "n_gpu_layers",
+            "ctx_size",
+            "chat_template_kwargs",
+            "reasoning",
+            "pooling",
+            "model_type",
+        } <= llamacpp_fields
+        assert BACKEND_FIELD_OWNERS["huggingface"] >= {
+            "device",
+            "dtype",
+            "max_length",
+            "trust_remote_code",
+        }
+        assert "labels" in BACKEND_FIELD_OWNERS["huggingface_classification"]
+        assert "normalize_embeddings" in BACKEND_FIELD_OWNERS["huggingface_embedding"]
+        assert "use_flash_attention" in BACKEND_FIELD_OWNERS["huggingface_causal"]
+        assert "use_flash_attention" in BACKEND_FIELD_OWNERS["huggingface_vision"]
+        # Shared fields belong to no single owner.
+        for owner in BACKEND_FIELD_OWNERS.values():
+            assert "file_filters" not in owner
+            assert "backend_type" not in owner
+
+
+class TestDeviceContract:
+    def test_invalid_device_value_rejected(self):
+        data = {
+            "alias": "t",
+            "model_source": "huggingface://org/model",
+            "backend": {"backend_type": "huggingface_causal", "device": "tpux"},
+        }
+        errors = validate_intent_create(data)
+        assert any(e["field"] == "backend.device" for e in errors)
+
+    def test_device_contradicting_gpu_type_is_rejected(self):
+        """The reported symptom: device mps + gpu_type nvidia_cuda."""
+        data = {
+            "alias": "t",
+            "model_source": "huggingface://org/model",
+            "backend": {"backend_type": "huggingface_causal", "device": "mps"},
+            "placement": {"gpu_type": "nvidia_cuda"},
+        }
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "backend.device"
+            and "apple_mps" in e["message"]
+            and "nvidia_cuda" in e["message"]
+            for e in errors
+        )
+
+    def test_device_consistent_with_gpu_type_passes(self):
+        data = {
+            "alias": "t",
+            "model_source": "huggingface://org/model",
+            "backend": {"backend_type": "huggingface_causal", "device": "mps"},
+            "placement": {"gpu_type": "apple_mps"},
+        }
+        assert validate_intent_create(data) == []
+
+
+class TestModalityRules:
+    def test_mmproj_on_embedding_mode_rejected(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(
+                model_file="m.gguf", mmproj="mmproj.gguf", model_type="embedding"
+            ),
+        }
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "backend.mmproj" and "embedding" in e["message"]
+            for e in errors
+        )
+
+    def test_mmproj_on_llm_mode_accepted(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(model_file="m.gguf", mmproj="mmproj.gguf"),
+        }
+        assert validate_intent_create(data) == []
+
+    def test_pooling_without_embedding_mode_warns_not_errors(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(model_file="m.gguf", pooling="mean"),
+        }
+        assert validate_intent_create(data) == []
+        warnings = validate_intent_warnings(data)
+        assert any(w["field"] == "backend.pooling" for w in warnings)
+
+
+class TestChatTemplateKwargsCanonicalization:
+    def test_string_kwargs_canonicalized_to_compact_json(self):
+        backend = {
+            "backend_type": "llamacpp",
+            "chat_template_kwargs": '{"enable_thinking": "true", "depth": 3}',
+        }
+        canonicalize_intent_backend(backend)
+        assert backend["chat_template_kwargs"] == '{"enable_thinking":true,"depth":3}'
+
+    def test_dict_kwargs_canonicalized(self):
+        backend = {
+            "backend_type": "llamacpp",
+            "chat_template_kwargs": {"enable_thinking": True},
+        }
+        canonicalize_intent_backend(backend)
+        assert backend["chat_template_kwargs"] == '{"enable_thinking":true}'
+
+    def test_malformed_json_raises_422(self):
+        from fastapi import HTTPException
+
+        backend = {"backend_type": "llamacpp", "chat_template_kwargs": "{nope"}
+        with pytest.raises(HTTPException) as excinfo:
+            canonicalize_intent_backend(backend)
+        assert excinfo.value.status_code == 422
+        errors = excinfo.value.detail["errors"]
+        assert errors[0]["field"] == "backend.chat_template_kwargs"
+
+    def test_non_object_kwargs_raises_422(self):
+        from fastapi import HTTPException
+
+        backend = {"backend_type": "llamacpp", "chat_template_kwargs": "[1, 2]"}
+        with pytest.raises(HTTPException):
+            canonicalize_intent_backend(backend)
+
+    def test_validation_accepts_canonicalized_round_trip(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(
+                model_file="m.gguf",
+                chat_template_kwargs='{"enable_thinking": "true"}',
+            ),
+        }
+        assert validate_intent_create(data) == []

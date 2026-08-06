@@ -243,6 +243,40 @@ The S-040 API must reject invalid intents with `400`/`422` (Section 12.5):
 - `backend.spec_draft_model` is required by `spec_type == "draft-dspark"` and rejected for every other type; `backend.spec_draft_conf_min` is `draft-dspark`-only and must be between 0 and 1.
 - `placement.roles` non-empty; `gpu_type` (if set) is a known type.
 
+#### 4.7.2 Accelerator vocabulary and field ownership (S-052)
+
+- `placement.gpu_type` accepts the canonical tokens `auto`, `cpu`,
+  `apple_mps`, `nvidia_cuda`, `amd_rocm` plus the aliases `mps`,
+  `cuda`, `NVIDIA`, `NVIDIA-CUDA`, `rocm`. The API normalizes to the
+  canonical token on save; unknown tokens are a 422.
+- **Field ownership**: each backend type owns a field table; a field that
+  belongs to a different backend type (e.g. `device` on `llamacpp`,
+  `dtype`/`labels` on `llamacpp`) is a 422 with a field-level error —
+  never a silent host-side drop.
+- **Device contract**: `device` is a HuggingFace-only field. A
+  device/`gpu_type` contradiction (e.g. `device: mps` with
+  `gpu_type: nvidia_cuda`) is a 422.
+- **Modality rules**: `mmproj` is only valid for LLM backends
+  (`llamacpp`, `huggingface_causal`); `pooling` on an embedding backend is
+  advisory.
+- `chat_template_kwargs` is canonicalized at the API boundary (Section
+  8.2.1): the stored form is the compact JSON the host produces.
+- HuggingFace backends with a `repo://` model source are **legal** (the
+  repo resolver materializes the model directory on the host).
+
+#### 4.7.3 Hard errors versus advisory warnings (S-052)
+
+Validation is split into two layers. **Pure rules** (the vocabulary,
+ownership, device contract, modality) are synchronous and reject with
+field-level 422s. **Fleet-aware rules** evaluate the live fleet
+(host roster + resource snapshots) and return **advisory warnings only** —
+a temporarily offline host or a capacity shortfall must never block an
+edit. Hard errors in the fleet layer are limited to durable, static facts:
+`host_allow`/`host_deny` naming unknown host ids, and a device that
+contradicts the allow-list accelerators. Warnings are returned in the
+`warnings` field of create/update responses (Sections 12.4/12.5) and are
+never persisted on the intent.
+
 ### 4.7.1 Model file selection and download filters
 
 A `model_source` names a whole artifact, but a llama.cpp instance needs one GGUF **file**, and a HuggingFace GGUF repository typically ships many quantisations. Two optional `backend` fields close that gap:
@@ -467,6 +501,32 @@ The reconciler is the only component that decides what has drifted, and it hands
 
 A `replace` that runs outside a strategy retires the drifted replica with **stop + delete**, not stop alone. A stopped replica still counts towards `observed`, so leaving it holds the intent at its desired count with nothing serving: no `create` for the replacement, and the `recreate` that would restart it is suppressed by the pending `replace`.
 
+#### 8.2.1 Drift-safe comparison (S-049)
+
+Backend values are compared with **JSON-structural semantics**, not plain
+`==`: JSON strings are parsed on both sides, values are compared
+recursively with boolean coercion mirroring the host's own config coercion
+(`_coerce_template_kwargs`), and glob / relative-path values are resolved
+before comparing. This makes a host-rewritten `chat_template_kwargs` (the
+host writes the compact canonical form) compare equal to the spec's
+structured form instead of reading as drift forever.
+
+New intents and edits are **canonicalized at the API boundary**
+(`canonicalize_intent_backend`): `chat_template_kwargs` is stored in the
+same compact form the host produces, so a fresh intent never starts out
+looking drifted.
+
+#### 8.2.2 Churn circuit breaker (S-049)
+
+A drift vector the host keeps re-producing (a value the host normalizes
+differently than the spec) would otherwise trap the intent in an endless
+stop/recreate loop. After `settings.max_drift_replace_attempts` consecutive
+drift-driven REPLACE rounds, the reconciler stops planning REPLACEs and
+records a `BackendDriftUnsettled` `last_error` naming the mismatching keys,
+with condition `Degraded/DriftUnsettled`. The counter resets when the spec
+settles or the user edits the intent again; `status.drift_replace_attempts`
+exposes the current count.
+
 ### 8.3 Idempotency and safety
 
 - Actions are keyed by `(intent_id, host_id)`. The reconciler never creates two managed replicas of the same alias on one host.
@@ -499,6 +559,11 @@ select the top (desired - observed) candidates.
 ```
 
 If `candidates` is smaller than needed, evaluate displacement (Section 8.5). If still insufficient, fulfill partially and record the shortfall.
+
+The **durable-eligibility filter** (roles / reachability / drain exclusion
+per [host-draining.md](host-draining.md) §4.1) is extracted as a single
+shared helper (`filter_durable_hosts`) reused by the fleet-aware intent
+validation (Section 4.7.3) and placement — one filter, one semantics.
 
 ### 8.5 Priority-aware displacement (conservative)
 
@@ -632,10 +697,23 @@ Every intent read returns the desired fields plus a server-managed `status` obje
 | `replica_set` | object[] | Per-replica detail (host, instance, state, source, health, message, timestamp). |
 | `conditions` | object[] | Coarse machine-readable conditions (Section 10.3). |
 | `strategy_progress` | object \| null | Non-null during an in-flight `rolling`/`immediate` update (Section 11). |
-| `last_error` | object \| null | Most recent error: `{ code, message, host_id?, source_uri?, at }`. |
+| `last_error` | object \| null | Most recent error: `{ code, message, host_id?, source_uri?, at, instance_id?, log_tail?, recoverable? }`. |
+| `spec_changed_at` | ISO 8601 \| null | Set while an edited spec is still rolling out; clears when every replica provably matches the spec (S-044, S-049). |
+| `drift_replace_attempts` | int | Consecutive drift-driven REPLACE rounds for the pending spec change (S-049); resets on settle/edit. |
+| `shortfall_reason` | string \| null | Specific cause of an unplaceable shortfall (e.g. `no host matches gpu_type=apple_mps`, `needs 24 GB VRAM, largest available is 16 GB`, `host_allow names 1 host(s), 2 replicas requested`). |
 | `created_at` / `updated_at` | ISO 8601 | Record create / last spec or status change. |
 | `last_reconciled_at` | ISO 8601 | Timestamp of the last reconcile pass. |
 | `ready_at` | ISO 8601 \| null | When the intent first reached `ready` for the current spec. |
+
+`last_error` extensions (S-049/S-051):
+
+- `instance_id` — the failed instance, so the UI can link the error to its
+  process logs (host-attached `log_tail` is included when the host answers
+  with the structured start-failure body).
+- `log_tail` — tail of the failed instance's process log attached by the
+  host (`start_failure_log_tail_lines` lines at most).
+- `recoverable` — true when the action gave up while the host was still
+  working (e.g. a pull still downloading); the UI shows it as transient.
 
 All timestamps are ISO 8601 UTC (e.g. `2026-05-29T08:31:42Z`), consistent with existing Solar Control payloads.
 
@@ -660,6 +738,8 @@ Reconciliation status should be observable live in Solar WebUI without polling. 
 |-------|---------|------|
 | `intent_update` | `{ intent }` (full record incl. `status`) | On any intent status/spec change. |
 | `intent_removed` | `{ id, alias }` | When an intent reaches `deleted`. |
+| `pull_progress` | `{ host_id, host_name, timestamp, data }` with `data = { source_uri, phase, bytes_done?, bytes_total?, speed_bps?, error? }` | C4/S-051: host pull progress rebroadcast; `phase` ∈ `resolving` \| `downloading` \| `verifying` \| `finalizing` \| `completed` \| `failed`; exactly one terminal event per pull. |
+| `endpoints_update` | `{ endpoints: [...] }` | C5/S-050: on endpoint create/update — the webui's endpoint pages are event-driven. |
 
 Existing events remain the source for low-level changes the reconciler reacts to and the UI can correlate: `instances_update`, `instance_state`, `host_status`, `host_health`. No new host→control events are required for intents; reconciliation derives everything it needs from existing host telemetry plus the gateway registry.
 
@@ -753,6 +833,18 @@ Starting an instance blocks on the host while it launches the server, so a clien
 
 - Neither `create` nor `recreate` may delete the instance. Deleting destroys a replica mid-start and pays for the cold start again, which under the load that caused the timeout only makes the next attempt slower.
 - A rollout step keeps its host rather than trying the next one, because the replacement it just asked for may exist. On the following tick the step **adopts** a replacement found on its own host that it has no id for — the instance a create it never got an answer for left behind — instead of creating a second one.
+- A timeout while the host is **still working** (progress was observed) records `last_error.recoverable: true` — the webui shows it as transient, and the intent keeps its backoff instead of churning.
+
+#### Cold-start actions are progress-aware (S-051)
+
+A multi-GB model pull takes minutes, so cold-start actions (CREATE,
+EVACUATE, MIGRATE) are **not** bounded by the raw per-action timeout that
+quick actions (STOP, RESTART) keep. Their bound is
+`_action_timeout_s(action)` — the settings-derived cold-start bound
+(`model_pull_timeout_s + host_start_timeout_s + _ACTION_TIMEOUT_S`). The
+wait is sliced and fresh pull progress (`pull_progress` events) extends the
+wait up to that bound; a give-up while the host is still pulling is
+recorded with `recoverable: true` instead of a bare timeout.
 
 This is what separates "the host said no" from "the host did not answer". Only the former is evidence about the replica.
 
@@ -869,7 +961,19 @@ Errors follow existing Solar Control conventions:
 { "detail": "Invalid intent", "errors": [ { "field": "model_source", "message": "unsupported scheme 'http://'" } ] }
 ```
 
+Field-level 422s from the S-052 validation layer always use the structured
+list (Sections 4.7.2/4.7.3), so the webui can render errors inline next to
+the offending form fields.
+
 - Per-replica/reconcile errors are **not** HTTP errors — a created intent that cannot be fulfilled returns `201`/`200` and reports problems in `status` (`phase`, `conditions`, `last_error`). The API call succeeds; the deployment state is observable.
+
+Advisory fleet warnings (Section 4.7.3) are returned in the `warnings`
+field of successful create/update responses and are **never persisted** on
+the intent:
+
+```json
+{ "...intent...", "warnings": [ { "field": "replicas", "message": "3 replicas requested, 2 eligible hosts — expect partial fulfillment" } ] }
+```
 
 ---
 

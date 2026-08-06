@@ -196,7 +196,10 @@ describe('IntentFormModal in edit mode', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
     expect(await screen.findByText('Invalid intent')).toBeInTheDocument();
-    expect(screen.getByText(/too many/)).toBeInTheDocument();
+    // C3: the server error also renders inline next to the offending field
+    // (fieldErrors), in addition to the banner list — at least one
+    // occurrence is guaranteed.
+    expect(screen.getAllByText(/too many/).length).toBeGreaterThanOrEqual(1);
     expect(onSaved).not.toHaveBeenCalled();
   });
 });

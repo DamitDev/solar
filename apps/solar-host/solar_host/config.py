@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     # before the start attempt is killed and marked failed.
     instance_ready_timeout_s: float = 600.0
     log_buffer_size: int = 1000
+    # C2: how many dead-instance log buffers to retain in memory (each is
+    # log_buffer_size lines), and how long on-disk log files survive before
+    # _cleanup_old_logs unlinks them (the newest file per alias is always
+    # kept regardless of age). start_failure_log_tail_lines bounds the tail
+    # attached to the structured start-failure response.
+    retained_log_buffers: int = 20
+    log_file_retention_s: float = 86400.0
+    start_failure_log_tail_lines: int = 20
     models_dir: str = "./models"
     min_free_disk_gb: float = 2.0
     # When True, run Harbor/HF downloads in a worker process so the parent can
@@ -56,6 +64,9 @@ class Settings(BaseSettings):
     pull_use_subprocess: bool = True
     # How often to poll disk while a subprocess pull is in flight.
     pull_disk_poll_interval_s: float = 0.5
+    # C4: throttle for pull-progress telemetry emission (seconds). The
+    # parent's disk-poll loop doubles as the progress meter.
+    pull_progress_interval_s: float = 5.0
 
     # Solar-control connection settings (WebSocket 2.0)
     # URL(s) to solar-control's host channel endpoint

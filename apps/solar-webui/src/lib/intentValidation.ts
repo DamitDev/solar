@@ -23,6 +23,32 @@ export const INTENT_BACKEND_TYPES = [
 export const INTENT_PRIORITIES = ['production', 'staging', 'ephemeral'] as const;
 export const INTENT_STRATEGIES = ['rolling', 'immediate'] as const;
 
+/**
+ * C3: accelerator vocabulary accepted on intent placement, with aliases.
+ * Mirrors the server's VALID_GPU_TYPES table — the server stays
+ * authoritative and normalizes to the canonical token on save.
+ */
+export const GPU_TYPES: Record<string, string> = {
+  auto: 'auto',
+  cpu: 'cpu',
+  mps: 'apple_mps',
+  apple_mps: 'apple_mps',
+  cuda: 'nvidia_cuda',
+  nvidia_cuda: 'nvidia_cuda',
+  NVIDIA: 'nvidia_cuda',
+  'NVIDIA-CUDA': 'nvidia_cuda',
+  rocm: 'amd_rocm',
+  amd_rocm: 'amd_rocm',
+};
+
+/** C3: normalize a gpu_type token (alias -> canonical) or return null when unknown. */
+export function normalizeGpuType(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return GPU_TYPES[trimmed] ?? null;
+}
+
 /** Fields that must NOT appear inside `backend` — they are server-derived (§4.7). */
 export const FORBIDDEN_BACKEND_FIELDS = ['alias', 'model_source', 'host', 'port', 'api_key'];
 

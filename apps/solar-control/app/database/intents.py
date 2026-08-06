@@ -180,6 +180,9 @@ class IntentDB:
                 # The recorded error belongs to the previous spec; the next
                 # pass reports whatever the new one runs into.
                 status["last_error"] = None
+                # A new spec restarts the C1 drift circuit breaker: the
+                # counter is about the *previous* drift vector.
+                status["drift_replace_attempts"] = 0
                 row.status_json = status
 
             await session.commit()

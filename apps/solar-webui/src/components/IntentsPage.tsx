@@ -8,12 +8,14 @@
  * that never emits events.
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { AlertCircle, RefreshCw, Target, Trash2, Plus, Pencil } from 'lucide-react';
 import solarClient from '@/api/client';
 import { Intent, IntentCreateRequest } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
+import type { PullProgressEvent } from '@/hooks/useEventStream';
+import { useFallbackPolling } from '@/hooks/useFallbackPolling';
 import { formatRelativeTime } from '@/lib/utils';
 import { sortIntents } from '@/lib/intents';
 import { IntentPhaseBadge } from './IntentBadges';
@@ -22,10 +24,24 @@ import { DeleteIntentModal } from './DeleteIntentModal';
 
 const POLL_INTERVAL_MS = 10_000;
 
+/** C4: compact live-pull indicator for the intents table. */
+function pullProgressRow(intent: Intent, lookup: (sourceUri: string) => PullProgressEvent | undefined): ReactNode {
+  const progress = lookup(intent.model_source);
+  if (!progress || progress.data.phase !== 'downloading') return null;
+  const total = progress.data.bytes_total ?? 0;
+  const done = progress.data.bytes_done ?? 0;
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  return (
+    <span className="block text-[11px] text-nord-8">
+      ↓ {pct}% · {(done / 1024 / 1024).toFixed(1)} MB
+    </span>
+  );
+}
+
 export function IntentsPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { intents: eventIntents } = useEventStreamContext();
+  const { intents: eventIntents, getPullProgress, isConnected } = useEventStreamContext();
 
   const [restIntents, setRestIntents] = useState<Map<string, Intent>>(new Map());
   const [loading, setLoading] = useState(true);
@@ -66,14 +82,9 @@ export function IntentsPage() {
     fetchList();
   }, [fetchList]);
 
-  // Polling fallback (S-040-only backends emit no events)
-  useEffect(() => {
-    const id = window.setInterval(() => {
-      if (document.hidden) return;
-      fetchList();
-    }, POLL_INTERVAL_MS);
-    return () => window.clearInterval(id);
-  }, [fetchList]);
+  // Polling fallback (C5): the event stream is the source while connected;
+  // REST polls only when the socket is down.
+  useFallbackPolling(fetchList, { enabled: !isConnected, intervalMs: POLL_INTERVAL_MS });
 
   // U-002 handoff: /intents?alias=...&model_source=... auto-opens the pre-filled modal
   const aliasParam = searchParams.get('alias');
@@ -206,7 +217,17 @@ export function IntentsPage() {
                     <td className="py-2.5 pr-4">
                       <IntentPhaseBadge phase={intent.status?.phase} reconcile={intent.status?.reconcile} />
                     </td>
-                    <td className="py-2.5 pr-4 font-mono text-nord-6">{intent.alias}</td>
+                    <td className="py-2.5 pr-4 font-mono text-nord-6">
+                      {intent.alias}
+                      {intent.status?.strategy_progress?.message && (
+                        <span
+                          className="block text-[11px] font-normal text-nord-4 truncate max-w-[280px]"
+                          title={intent.status.strategy_progress.message}
+                        >
+                          {intent.status.strategy_progress.message}
+                        </span>
+                      )}
+                    </td>
                     <td className="py-2.5 pr-4">
                       <span
                         className="font-mono text-xs text-nord-4 block max-w-[280px] truncate"
@@ -214,6 +235,8 @@ export function IntentsPage() {
                       >
                         {intent.model_source}
                       </span>
+                      {/* C4: compact live-pull indicator */}
+                      {pullProgressRow(intent, getPullProgress)}
                     </td>
                     <td className="py-2.5 pr-4 text-nord-6">
                       {intent.status?.ready_replicas ?? 0}/{intent.replicas}

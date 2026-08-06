@@ -220,6 +220,15 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
           message: editing ? detail.message : `Alias already claimed by an active intent — "${detail.message}"`,
         });
       } else {
+        // C3: server validation errors (field-level) also surface inline,
+        // next to the client-side ones — the server is authoritative.
+        if (detail.errors && detail.errors.length > 0) {
+          const grouped: Record<string, string> = {};
+          for (const errItem of detail.errors) {
+            if (!grouped[errItem.field]) grouped[errItem.field] = errItem.message;
+          }
+          setFieldErrors((prev) => ({ ...prev, ...grouped }));
+        }
         setServerError({ message: detail.message, errors: detail.errors });
       }
     } finally {

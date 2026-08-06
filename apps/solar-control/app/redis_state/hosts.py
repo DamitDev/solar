@@ -13,6 +13,10 @@ from .connection import redis_client
 SID_MAP = "solar:hosts:sids"
 CONNECTED_MAP = "solar:hosts:connected"
 INSTANCES_MAP = "solar:hosts:instances"
+SNAPSHOTS_MAP = "solar:hosts:snapshots"
+# C4: latest pull progress per (host, model source). Field format:
+# "{host_id}|{source_uri}" → {"at": <iso8601>, "data": {...}}.
+PULLS_MAP = "solar:hosts:pulls"
 
 DISCONNECT_TS_MAP = "solar:hosts:disconnect_ts"
 RECONNECT_REQ_MAP = "solar:hosts:reconnect_req_ts"
@@ -89,6 +93,39 @@ class HostConnectionStore:
     async def remove_host_instances(self, host_id: str) -> None:
         r = redis_client()
         await r.hdel(INSTANCES_MAP, host_id)
+
+    # ── Resource snapshots (C5, WS-first read model) ───────────
+
+    async def set_host_resource_snapshot(
+        self, host_id: str, snapshot: dict[str, Any], *, at: str
+    ) -> None:
+        """Store the resource snapshot the host pushed with host_health.
+
+        The stored value is ``{"at": <iso8601>, "resources": {...}}`` — the
+        ``at`` field is what makes freshness gating possible. No TTL,
+        matching the instances map; staleness is decided on read.
+        """
+        r = redis_client()
+        await r.hset(
+            SNAPSHOTS_MAP,
+            host_id,
+            json.dumps({"at": at, "resources": snapshot}),
+        )
+
+    async def get_host_resource_snapshot(self, host_id: str) -> dict[str, Any] | None:
+        """Read the last pushed snapshot for *host_id*, or None."""
+        r = redis_client()
+        raw = await r.hget(SNAPSHOTS_MAP, host_id)
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+
+    async def remove_host_resource_snapshot(self, host_id: str) -> None:
+        r = redis_client()
+        await r.hdel(SNAPSHOTS_MAP, host_id)
 
     # ── Disconnect timestamp tracking ─────────────────────────
 

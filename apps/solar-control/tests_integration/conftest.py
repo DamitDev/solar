@@ -565,6 +565,10 @@ async def _build_stack(
         "HF_HOME": str(tmp_root / "hf-cache"),
         "TOKENIZERS_PARALLELISM": "false",
         "LOG_LEVEL": "INFO",
+        # C4: pull-progress telemetry throttled tight so the integration
+        # test can observe terminal progress entries without waiting for
+        # the 5 s default.
+        "PULL_PROGRESS_INTERVAL_S": "0.5",
     }
     stack.host_a_env = build_subprocess_env(
         base,
