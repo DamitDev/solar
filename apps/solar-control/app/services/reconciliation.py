@@ -181,6 +181,17 @@ class Reconciler:
         """Trigger an immediate reconciliation pass (event-driven)."""
         self._wake_event.set()
 
+    def settle_intent(self, intent_id: str, seconds: float) -> None:
+        """Skip diffing *intent_id* for *seconds*.
+
+        Used by flows that mutate an intent's instances outside the
+        reconciler (e.g. the API migration path) so a tick cannot race
+        a duplicate CREATE against a freshly placed instance whose WS
+        push has not landed in the instance cache yet — the duplicate
+        then surplus-stops (and deletes) the placed instance.
+        """
+        self._settle_until[intent_id] = time.monotonic() + seconds
+
     # ── Backoff ────────────────────────────────────────────────
 
     def _backoff_clear(self, intent_id: str) -> None:
