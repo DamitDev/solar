@@ -181,6 +181,17 @@ class Reconciler:
         """Trigger an immediate reconciliation pass (event-driven)."""
         self._wake_event.set()
 
+    def settle_intent(self, intent_id: str, seconds: float) -> None:
+        """Skip diffing *intent_id* for *seconds*.
+
+        Used by flows that mutate an intent's instances outside the
+        reconciler (e.g. the API migration path) so a tick cannot race
+        a duplicate CREATE against a freshly placed instance whose WS
+        push has not landed in the instance cache yet — the duplicate
+        then surplus-stops (and deletes) the placed instance.
+        """
+        self._settle_until[intent_id] = time.monotonic() + seconds
+
     # ── Backoff ────────────────────────────────────────────────
 
     def _backoff_clear(self, intent_id: str) -> None:
@@ -2269,9 +2280,28 @@ def _detect_backend_drift(intent: Any, instance_config: dict[str, Any]) -> bool:
         if key not in instance_config:
             continue  # flat WS cache does not carry this field
         inst_value = instance_config.get(key)
-        if inst_value != value:
+        if not _backend_value_matches(value, inst_value):
             return True
     return False
+
+
+def _backend_value_matches(spec_value: Any, inst_value: Any) -> bool:
+    """Compare a backend spec value against the instance's reported value.
+
+    The instance's full config carries resolve-time artifacts: paths the
+    host resolved from the spec's patterns. A bare filename in the spec
+    (e.g. ``mmproj: "mmproj-BF16.gguf"``) that is the tail of the
+    instance's resolved path (``/opt/.../mmproj-BF16.gguf``) is a match.
+    Treating it as drift flags every replacement while a spec change is
+    pending, trapping the intent in a REPLACE-stop churn that never lets
+    the edit settle.
+    """
+    return spec_value == inst_value or (
+        isinstance(spec_value, str)
+        and isinstance(inst_value, str)
+        and "/" not in spec_value
+        and inst_value.endswith("/" + spec_value)
+    )
 
 
 # Singleton

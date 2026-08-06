@@ -615,6 +615,38 @@ def _build_result(
     )
 
 
+async def _settle_owning_intent(alias: str) -> None:
+    """Keep the reconciler off the intent owning *alias* for a settle window.
+
+    The reconciler's own MIGRATE/EVACUATE actions settle the displaced
+    intent before moving its instance; the API migration path had no such
+    protection. A tick that lands between the source's stop and its
+    disown would RECREATE the source, and one between the disown and the
+    target's WS push landing in the instance cache observes a shortfall
+    and races a duplicate CREATE against the target being placed — the
+    duplicate then surplus-stops (and deletes) the freshly placed target
+    (the D-017 regression seen in CI). Mirrors the reconciler's
+    ``_MIGRATE_SETTLE_S`` for the API-driven path.
+
+    Best-effort: the settle is race protection, never a migration
+    dependency — a lookup failure must not fail the migration.
+    """
+    from app.database.intents import intent_db
+    from app.services.reconciliation import _MIGRATE_SETTLE_S, reconciler
+
+    try:
+        intent = await intent_db.get_intent_by_alias(alias)
+    except Exception:
+        logger.warning(
+            "Could not look up intent for alias '%s' to settle it",
+            alias,
+            exc_info=True,
+        )
+        return
+    if intent is not None:
+        reconciler.settle_intent(intent.id, _MIGRATE_SETTLE_S)
+
+
 async def execute_migration(
     *,
     instance_id: str,
@@ -705,6 +737,12 @@ async def execute_migration(
             },
         )
     )
+
+    # Keep the reconciler off this intent while the migration runs: a tick
+    # between the source's stop and its disown would RECREATE the source,
+    # and one between the disown and the target's WS push landing would
+    # observe a shortfall and duplicate-CREATE the target (D-017).
+    await _settle_owning_intent(alias)
 
     # ── 3. Validate target fitness ──────────────────────────────
     await validate_target_fitness(
@@ -899,6 +937,12 @@ async def execute_migration(
             detail={"target_instance_id": target_instance_id},
         )
     )
+
+    # Refresh the settle so the target's WS push lands in the instance
+    # cache before the next diff — a slow pull can outlast the
+    # pre-migration window, and the post-create gap is where the
+    # duplicate-CREATE race lives.
+    await _settle_owning_intent(alias)
 
     logger.info(
         "Migration %s completed: %s/%s (%s) → %s/%s",

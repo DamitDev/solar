@@ -1,6 +1,7 @@
 """Tests for instance migration (S-037)."""
 
 import copy
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -9,6 +10,7 @@ from fastapi import HTTPException
 from app.models import Host, HostStatus
 from app.models.migration import MigrationResult
 from app.services.migration import (
+    _settle_owning_intent,
     capture_instance_config,
     check_one_replica_per_host,
     create_instance_on_host,
@@ -509,12 +511,66 @@ async def test_disown_source_instance_unreachable(source_host, instance_config):
         assert exc.value.status_code == 502
 
 
+# ── _settle_owning_intent ────────────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_settle_owning_intent_sets_window():
+    """The API migration settles the owning intent (D-017 race protection)."""
+    from app.services.reconciliation import _MIGRATE_SETTLE_S, reconciler
+
+    intent = SimpleNamespace(id="intent-1")
+    with (
+        patch("app.database.intents.intent_db") as mock_db,
+        patch.object(reconciler, "settle_intent") as mock_settle,
+    ):
+        mock_db.get_intent_by_alias = AsyncMock(return_value=intent)
+        await _settle_owning_intent("test-model:v1")
+
+    mock_db.get_intent_by_alias.assert_awaited_once_with("test-model:v1")
+    mock_settle.assert_called_once_with("intent-1", _MIGRATE_SETTLE_S)
+
+
+@pytest.mark.anyio
+async def test_settle_owning_intent_no_intent_is_noop():
+    """A manual instance (no owning intent) settles nothing."""
+    from app.services.reconciliation import reconciler
+
+    with (
+        patch("app.database.intents.intent_db") as mock_db,
+        patch.object(reconciler, "settle_intent") as mock_settle,
+    ):
+        mock_db.get_intent_by_alias = AsyncMock(return_value=None)
+        await _settle_owning_intent("manual-alias")
+
+    mock_settle.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_settle_owning_intent_lookup_failure_is_best_effort():
+    """A settle lookup failure must never fail the migration itself."""
+    from app.services.reconciliation import reconciler
+
+    with (
+        patch("app.database.intents.intent_db") as mock_db,
+        patch.object(reconciler, "settle_intent") as mock_settle,
+    ):
+        mock_db.get_intent_by_alias = AsyncMock(
+            side_effect=RuntimeError("db unavailable")
+        )
+        await _settle_owning_intent("test-model:v1")  # must not raise
+
+    mock_settle.assert_not_called()
+
+
 # ── execute_migration (integration) ───────────────────────────────
 
 
 @pytest.mark.anyio
 async def test_migrate_happy_path(source_host, target_host, instance_config):
     """Full happy-path migration: all steps succeed."""
+    from app.services.reconciliation import reconciler
+
     with (
         patch("app.services.migration.host_db") as mock_db,
         patch("app.services.migration.host_store") as mock_store,
@@ -524,6 +580,8 @@ async def test_migrate_happy_path(source_host, target_host, instance_config):
         patch("app.services.migration.create_instance_on_host") as mock_create,
         patch("aiohttp.ClientSession.get") as mock_get,
         patch("aiohttp.ClientSession.put") as mock_put,
+        patch("app.database.intents.intent_db") as mock_intent_db,
+        patch.object(reconciler, "settle_intent") as mock_settle,
     ):
         # DB: both hosts exist
         mock_db.get_host = AsyncMock(
@@ -540,6 +598,9 @@ async def test_migrate_happy_path(source_host, target_host, instance_config):
         )
         mock_store.set_host_instances = AsyncMock()
         mock_train_check.return_value = None
+        mock_intent_db.get_intent_by_alias = AsyncMock(
+            return_value=SimpleNamespace(id="intent-1")
+        )
 
         # Disk check passes
         mock_resp = AsyncMock()
@@ -586,6 +647,13 @@ async def test_migrate_happy_path(source_host, target_host, instance_config):
         _, put_kwargs = mock_put.call_args
         assert put_kwargs["json"]["managed_by"] is None
         assert put_kwargs["json"]["intent_id"] is None
+
+        # The owning intent is settled before the destructive steps and
+        # refreshed after the target is created (D-017 duplicate-CREATE
+        # protection — a tick between disown and the target's WS push
+        # would otherwise see a shortfall and race a duplicate CREATE).
+        assert mock_settle.call_count == 2
+        assert all(call.args[0] == "intent-1" for call in mock_settle.call_args_list)
 
 
 @pytest.mark.anyio
