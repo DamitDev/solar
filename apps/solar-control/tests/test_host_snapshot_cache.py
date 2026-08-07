@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 import aiohttp
 import pytest
 
-from app.models import Host, HostStatus, HostResourceSnapshot
+from app.models import Host, HostResourceSnapshot, HostStatus
 from app.routes.management.resources import (
     _fetch_host_resource_snapshot,
     _merge_resource_payload,
@@ -141,6 +141,34 @@ class TestCacheFirst:
     @pytest.mark.anyio
     async def test_http_fallback_when_cache_empty(self):
         snap = await _fetch(get_host_resource_snapshot=AsyncMock(return_value=None))
+        assert snap.snapshot_source == "http"
+
+    @pytest.mark.anyio
+    async def test_naive_timestamp_falls_back_instead_of_raising(self):
+        """A naive 'at' from an older build must not raise out of the check.
+
+        Mixing naive and aware datetimes raises TypeError, which would
+        propagate through _fetch_host_resource_snapshot into _observe and fail
+        the whole reconcile tick.
+        """
+        snap = await _fetch(
+            get_host_resource_snapshot=AsyncMock(
+                return_value={
+                    "at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
+                    "resources": _WS_PAYLOAD,
+                }
+            ),
+        )
+        # Treated as UTC and therefore fresh — no exception, no HTTP call.
+        assert snap.snapshot_source == "ws"
+
+    @pytest.mark.anyio
+    async def test_unparseable_timestamp_falls_back_to_http(self):
+        snap = await _fetch(
+            get_host_resource_snapshot=AsyncMock(
+                return_value={"at": "not-a-timestamp", "resources": _WS_PAYLOAD}
+            ),
+        )
         assert snap.snapshot_source == "http"
 
     @pytest.mark.anyio

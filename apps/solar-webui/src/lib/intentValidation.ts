@@ -24,29 +24,34 @@ export const INTENT_PRIORITIES = ['production', 'staging', 'ephemeral'] as const
 export const INTENT_STRATEGIES = ['rolling', 'immediate'] as const;
 
 /**
- * C3: accelerator vocabulary accepted on intent placement, with aliases.
- * Mirrors the server's VALID_GPU_TYPES table — the server stays
- * authoritative and normalizes to the canonical token on save.
+ * C3: the canonical accelerator tokens, mirroring the server's
+ * VALID_GPU_TYPES. The server stays authoritative and normalizes on save;
+ * this exists so the form can reject an unknown token before the round trip.
  */
-export const GPU_TYPES: Record<string, string> = {
-  auto: 'auto',
-  cpu: 'cpu',
-  mps: 'apple_mps',
-  apple_mps: 'apple_mps',
+export const VALID_GPU_TYPES = ['nvidia_cuda', 'apple_mps', 'cpu'] as const;
+
+/**
+ * Accepted aliases, mirroring the server's GPU_TYPE_ALIASES. Keys are matched
+ * after case-folding and unifying `-`/`_`, so only one spelling is listed.
+ */
+export const GPU_TYPE_ALIASES: Record<string, string> = {
+  nvidia: 'nvidia_cuda',
   cuda: 'nvidia_cuda',
-  nvidia_cuda: 'nvidia_cuda',
-  NVIDIA: 'nvidia_cuda',
-  'NVIDIA-CUDA': 'nvidia_cuda',
-  rocm: 'amd_rocm',
-  amd_rocm: 'amd_rocm',
+  mps: 'apple_mps',
+  metal: 'apple_mps',
+  apple: 'apple_mps',
+  none: 'cpu',
 };
+
+const gpuToken = (value: string) => value.trim().toLowerCase().replace(/-/g, '_');
 
 /** C3: normalize a gpu_type token (alias -> canonical) or return null when unknown. */
 export function normalizeGpuType(value: string | null | undefined): string | null {
   if (!value) return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  return GPU_TYPES[trimmed] ?? null;
+  const token = gpuToken(value);
+  if (!token) return null;
+  if ((VALID_GPU_TYPES as readonly string[]).includes(token)) return token;
+  return GPU_TYPE_ALIASES[token] ?? null;
 }
 
 /** Fields that must NOT appear inside `backend` — they are server-derived (§4.7). */
@@ -140,6 +145,26 @@ export function validateIntentRequest(req: IntentCreateRequest): IntentFieldErro
 
   if (req.placement?.roles !== undefined && req.placement.roles.length === 0) {
     errors.push({ field: 'placement.roles', message: 'Placement roles must not be empty' });
+  }
+
+  // C3: a gpu_type the server does not know is a 422; catching it here names
+  // the accepted values instead of leaving the user to guess from a rejection.
+  const gpuType = req.placement?.gpu_type;
+  if (gpuType && normalizeGpuType(gpuType) === null) {
+    errors.push({
+      field: 'placement.gpu_type',
+      message: `Unknown GPU type '${gpuType}' — use one of: ${VALID_GPU_TYPES.join(', ')}`,
+    });
+  }
+
+  const allow = req.placement?.host_allow ?? [];
+  const deny = req.placement?.host_deny ?? [];
+  const contradictory = allow.filter((h) => deny.includes(h));
+  if (contradictory.length > 0) {
+    errors.push({
+      field: 'placement.host_allow',
+      message: `Host${contradictory.length > 1 ? 's' : ''} both allowed and denied: ${contradictory.join(', ')}`,
+    });
   }
 
   return errors;

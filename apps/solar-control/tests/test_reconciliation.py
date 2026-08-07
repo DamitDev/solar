@@ -324,6 +324,32 @@ class TestBackendValueMatching:
             "chat_template_kwargs"
         ]
 
+    def _detect_field(self, field: str, spec_value, inst_value) -> list[str]:
+        intent = _make_intent(backend={"backend_type": "llamacpp", field: spec_value})
+        return _detect_backend_drift(
+            intent, {"backend_type": "llamacpp", field: inst_value}
+        )
+
+    def test_string_boolean_versus_coerced_boolean_is_not_drift(self):
+        """The host's Pydantic models coerce at the config boundary, which is
+        C1's whole premise; excluding bare scalars from the JSON layer left
+        exactly those coercions reading as drift."""
+        assert self._detect_field("flash_attn", "true", True) == []
+        assert self._detect_field("flash_attn", "false", False) == []
+        assert self._detect_field("flash_attn", True, "true") == []
+
+    def test_string_number_versus_coerced_number_is_not_drift(self):
+        assert self._detect_field("ctx_size", "131072", 131072) == []
+        assert self._detect_field("gpu_layers", 99, "99") == []
+        assert self._detect_field("temperature", "0.7", 0.7) == []
+
+    def test_a_genuinely_different_scalar_still_drifts(self):
+        assert self._detect_field("flash_attn", "true", False) == ["flash_attn"]
+        assert self._detect_field("ctx_size", "131072", 262144) == ["ctx_size"]
+
+    def test_a_non_numeric_string_against_a_number_still_drifts(self):
+        assert self._detect_field("ctx_size", "many", 262144) == ["ctx_size"]
+
     def test_mmproj_glob_spec_matches_resolved_path(self):
         intent = _make_intent(
             backend={"backend_type": "llamacpp", "mmproj": "*mmproj-BF16*.gguf"}
@@ -353,6 +379,50 @@ class TestBackendValueMatching:
             "mmproj": "/opt/models/hf--x--y/sub/mmproj.gguf",
         }
         assert _detect_backend_drift(intent, instance_config) == []
+
+    def test_mmproj_glob_with_a_directory_component_matches(self):
+        """Matching the pattern against the basename alone made any glob with a
+        directory component unmatchable, so every replacement read as drift."""
+        intent = _make_intent(
+            backend={"backend_type": "llamacpp", "mmproj": "sub/*mmproj*.gguf"}
+        )
+        instance_config = {
+            "backend_type": "llamacpp",
+            "mmproj": "/opt/models/hf--x--y/sub/mmproj-BF16.gguf",
+        }
+        assert _detect_backend_drift(intent, instance_config) == []
+
+    def test_mmproj_glob_with_a_wrong_directory_component_drifts(self):
+        intent = _make_intent(
+            backend={"backend_type": "llamacpp", "mmproj": "other/*mmproj*.gguf"}
+        )
+        instance_config = {
+            "backend_type": "llamacpp",
+            "mmproj": "/opt/models/hf--x--y/sub/mmproj-BF16.gguf",
+        }
+        assert _detect_backend_drift(intent, instance_config) == ["mmproj"]
+
+    def test_dotfile_relative_path_is_not_stripped_to_its_stem(self):
+        """``lstrip("./")`` takes a set of characters, so it ate the leading
+        dot of a dotfile and then failed to match the resolved path."""
+        intent = _make_intent(
+            backend={"backend_type": "llamacpp", "mmproj": "./.hidden.gguf"}
+        )
+        instance_config = {
+            "backend_type": "llamacpp",
+            "mmproj": "/opt/models/hf--x--y/.hidden.gguf",
+        }
+        assert _detect_backend_drift(intent, instance_config) == []
+
+    def test_dotfile_stem_alone_does_not_match_the_dotfile(self):
+        intent = _make_intent(
+            backend={"backend_type": "llamacpp", "mmproj": "hidden.gguf"}
+        )
+        instance_config = {
+            "backend_type": "llamacpp",
+            "mmproj": "/opt/models/hf--x--y/.hidden.gguf",
+        }
+        assert _detect_backend_drift(intent, instance_config) == ["mmproj"]
 
     def test_coerce_jsonish_matches_host_semantics(self):
         """Pins _coerce_jsonish against the documented behaviour of

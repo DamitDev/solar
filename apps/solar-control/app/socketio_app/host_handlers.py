@@ -458,9 +458,13 @@ async def host_health(sid: str, data: dict[str, Any]):
             await host_store.set_host_resource_snapshot(
                 host_id,
                 resources,
-                at=health_data.get("at")
-                or data.get("timestamp")
-                or datetime.now(timezone.utc).isoformat(),
+                # Control's receive time, not the host's: freshness is checked
+                # against control's clock, so a host whose clock drifts would
+                # otherwise have its snapshots read as permanently stale (and
+                # trigger the HTTP fallback C5 exists to avoid) or as
+                # permanently fresh.
+                at=datetime.now(timezone.utc).isoformat(),
+                host_at=health_data.get("at") or data.get("timestamp"),
             )
         except Exception:
             logger.warning(
@@ -518,7 +522,18 @@ async def host_pull_progress(sid: str, data: dict[str, Any]):
         await r.hset(
             PULLS_MAP,
             f"{host_id}|{source_uri}",
-            json.dumps({"at": timestamp, "data": payload}),
+            # ``at`` is *control's* receive time, not the host's: freshness
+            # gating compares it against control's clock, and a host whose
+            # clock runs behind would otherwise look permanently stale (or,
+            # running ahead, permanently fresh). The host's own timestamp
+            # stays in ``data`` for display.
+            json.dumps(
+                {
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "host_at": timestamp,
+                    "data": payload,
+                }
+            ),
         )
     except Exception:
         logger.warning(

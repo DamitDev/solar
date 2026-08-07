@@ -20,6 +20,7 @@ the other quants' files with it.
 """
 
 import asyncio
+import concurrent.futures
 import fnmatch
 import logging
 import os
@@ -233,11 +234,24 @@ async def pull_model(req: PullRequest) -> PullResponse | JSONResponse:
         # loop bridging pattern used for log events.
         loop = asyncio.get_running_loop()
 
+        def _log_emit_failure(future: concurrent.futures.Future) -> None:
+            # Without consuming the future, an exception raised inside
+            # broadcast_pull_progress is swallowed and the progress stream
+            # goes quiet with no trace of why.
+            try:
+                future.result()
+            except Exception:
+                logger.warning("Failed to emit pull progress event", exc_info=True)
+
         def _progress_cb(payload: dict) -> None:
             try:
-                asyncio.run_coroutine_threadsafe(broadcast_pull_progress(payload), loop)
+                future = asyncio.run_coroutine_threadsafe(
+                    broadcast_pull_progress(payload), loop
+                )
             except Exception:
                 logger.debug("Failed to bridge pull progress event", exc_info=True)
+                return
+            future.add_done_callback(_log_emit_failure)
 
         result = await asyncio.to_thread(
             models_manager.pull_model,

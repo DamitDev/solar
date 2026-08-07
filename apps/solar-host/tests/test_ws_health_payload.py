@@ -2,7 +2,7 @@
 (byte-identical to GET /resources) alongside the legacy summary keys, so
 control can serve cache-first from the WS read model."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 

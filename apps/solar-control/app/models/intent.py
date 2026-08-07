@@ -211,6 +211,17 @@ class IntentStatus(BaseModel):
             "planning REPLACE and records a BackendDriftUnsettled error"
         ),
     )
+    drift_unsettled_keys: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Backend keys that stayed mismatched after "
+            "max_drift_replace_attempts REPLACE rounds (C1). Persisted rather "
+            "than derived per tick: only the diff path can detect the "
+            "condition, so a tick routed through the settle window or a "
+            "rollout strategy would otherwise let the phase flip back to "
+            "Ready and flap. Cleared when the spec settles or is edited"
+        ),
+    )
     shortfall_reason: str | None = Field(
         default=None,
         description=(

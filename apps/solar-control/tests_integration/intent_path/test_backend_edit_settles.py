@@ -18,6 +18,8 @@ unit tests; here we prove the end-to-end properties:
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 
 import pytest
@@ -25,7 +27,6 @@ from fixtures.helpers import wait_for
 from fixtures.intents import (
     create_intent,
     get_intent,
-    replica_states,
     update_intent,
     wait_intent_ready,
 )
@@ -66,9 +67,6 @@ async def test_backend_edit_settles_without_churn(http_control, clean_state):
     # test guards (a churn loop) manifests as drift_replace_attempts climbing
     # or a BackendDriftUnsettled last_error — so fail FAST on those, and only
     # race the wall clock as a last resort.
-    import asyncio
-    import json as _json
-
     async def _wait_settled() -> None:
         deadline = asyncio.get_running_loop().time() + 600.0
         while True:
@@ -80,15 +78,15 @@ async def test_backend_edit_settles_without_churn(http_control, clean_state):
             if status.get("drift_replace_attempts", 0) > 0:
                 raise AssertionError(
                     "drift circuit breaker tripped while settling:\n"
-                    + _json.dumps(status, indent=1)
+                    + json.dumps(status, indent=1)
                 )
             if status.get("last_error") is not None:
                 raise AssertionError(
-                    "last_error set while settling:\n" + _json.dumps(status, indent=1)
+                    "last_error set while settling:\n" + json.dumps(status, indent=1)
                 )
             if asyncio.get_running_loop().time() > deadline:
                 raise AssertionError(
-                    "still not settled after 600s:\n" + _json.dumps(status, indent=1)
+                    "still not settled after 600s:\n" + json.dumps(status, indent=1)
                 )
             await asyncio.sleep(0.5)
 
@@ -108,8 +106,6 @@ async def test_backend_edit_settles_without_churn(http_control, clean_state):
 
     # No churn: the replacement happens exactly once. The instance id must
     # stay stable across further reconcile intervals.
-    import asyncio
-
     for _ in range(6):
         await asyncio.sleep(0.6)
         assert await _instance_ids(http_control, intent["id"]) == ids_after
@@ -139,8 +135,6 @@ async def test_replica_scale_edit_settles_without_churn(http_control, clean_stat
     assert final["status"]["last_error"] is None
 
     # Keep observing: instance ids stay stable across further ticks.
-    import asyncio
-
     for _ in range(6):
         await asyncio.sleep(0.6)
         assert await _instance_ids(http_control, intent["id"]) == ids_after
@@ -183,7 +177,5 @@ async def test_unsettlable_edit_degrades_to_bounded_error(http_control, clean_st
         snap = await get_intent(http_control, intent["id"])
         if snap is not None:
             counts.add(snap["status"]["observed_replicas"])
-        import asyncio
-
         await asyncio.sleep(0.6)
     assert counts <= {0, 1}, f"observed replica count oscillated: {counts}"

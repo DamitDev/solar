@@ -56,6 +56,28 @@ const PRIORITY_EXPLANATIONS: Record<IntentPriority, string> = {
   ephemeral: 'Lowest priority — first to be stopped or migrated when capacity is needed.',
 };
 
+/**
+ * Fields with an inline error slot. The banner lists the rest, so an error is
+ * shown exactly once — next to its input where it can be fixed, or in the
+ * banner when there is no input to attach it to.
+ */
+const INLINE_ERROR_FIELDS: ReadonlySet<string> = new Set([
+  'alias',
+  'model_source',
+  'replicas',
+  'backend',
+  'backend.file_filters',
+  'backend.model_file',
+  'backend.mmproj',
+  'backend.chat_template_kwargs',
+  'backend.device',
+  'placement.roles',
+  'placement.gpu_type',
+  'placement.host_allow',
+  'resources.vram_gb',
+  'resources.ram_gb',
+]);
+
 export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFormModalProps) {
   const editing = intent != null;
   // In edit mode the intent is the source of truth for every field; `initial`
@@ -161,6 +183,10 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setServerError(null);
+    // Errors from the previous attempt are about the previous values; keeping
+    // them would leave a fixed field marked invalid until it happened to fail
+    // again.
+    setFieldErrors({});
 
     const metadata: Record<string, string> = {};
     for (const row of metadataRows) {
@@ -229,7 +255,12 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
           }
           setFieldErrors((prev) => ({ ...prev, ...grouped }));
         }
-        setServerError({ message: detail.message, errors: detail.errors });
+        // The banner lists only what has no field to sit next to; an error
+        // shown inline and again in the banner reads as two problems.
+        setServerError({
+          message: detail.message,
+          errors: (detail.errors ?? []).filter((errItem) => !INLINE_ERROR_FIELDS.has(errItem.field)),
+        });
       }
     } finally {
       setLoading(false);
@@ -475,7 +506,7 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
           {/* Section 2: Backend */}
           <div>
             <h3 className="text-xs font-semibold text-nord-4 uppercase tracking-wide mb-3">Backend</h3>
-            <BackendConfigFields value={backend} onChange={setBackend} forIntent />
+            <BackendConfigFields value={backend} onChange={setBackend} forIntent fieldError={fieldError} />
             {fieldError('backend')}
             {fieldError('backend.model_file')}
             {fieldError('backend.spec_type')}
@@ -528,6 +559,7 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
                     </option>
                   ))}
                 </select>
+                {fieldError('placement.gpu_type')}
               </div>
 
               <div>
@@ -556,6 +588,7 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
                   </div>
                 )}
                 <p className="text-xs text-nord-4 mt-1">If any are selected, placement is restricted to them.</p>
+                {fieldError('placement.host_allow')}
               </div>
 
               <div>

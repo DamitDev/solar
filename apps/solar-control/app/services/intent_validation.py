@@ -77,39 +77,23 @@ async def _fleet_state(
     return candidates, snapshots, hosts, durable
 
 
-async def validate_intent_fleet(
-    data: dict[str, Any],
-) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """Return (hard_errors, warnings) using the host roster and snapshots.
+def validate_intent_fleet_hard(
+    data: dict[str, Any], hosts: list[Any]
+) -> list[dict[str, str]]:
+    """The hard (422) half of fleet validation, against an existing roster.
 
-    Hard (422): ``host_allow``/``host_deny`` referencing unknown host ids;
-    a ``device`` requiring an accelerator that no host in a non-empty
-    ``host_allow`` provides.
-
-    Advisory: ``replicas`` above the currently eligible host count;
-    ``resources.vram_gb``/``ram_gb`` above the largest capacity among
-    eligible hosts; every eligible host draining or unreachable; a valid
-    ``gpu_type`` that no connected host currently reports.
+    Hard: ``host_allow``/``host_deny`` referencing unknown host ids; a
+    ``device`` requiring an accelerator that no host in a non-empty
+    ``host_allow`` provides. Both are durable, static facts about the roster,
+    so no resource snapshots are needed — which is what lets the reconciler
+    reuse its already-fetched hosts instead of re-reading the fleet.
     """
     hard_errors: list[dict[str, str]] = []
-    warnings: list[dict[str, str]] = []
-
-    from app.database.hosts import host_db
-    from app.redis_state import host_store
 
     placement = data.get("placement") or {}
-    resources = data.get("resources") or {}
     backend = data.get("backend") or {}
-    replicas = data.get("replicas", 1)
     host_allow = list(placement.get("host_allow") or [])
     host_deny = list(placement.get("host_deny") or [])
-    gpu_type = normalize_gpu_type(placement.get("gpu_type")) or placement.get(
-        "gpu_type"
-    )
-    vram_gb = float(resources.get("vram_gb") or 0)
-    ram_gb = resources.get("ram_gb")
-
-    hosts = await host_db.get_all_hosts()
     host_by_id = {h.id: h for h in hosts}
 
     # ── Hard: allow/deny must reference known hosts ─────────────
@@ -149,6 +133,41 @@ async def validate_intent_fleet(
                     ),
                 }
             )
+
+    return hard_errors
+
+
+async def validate_intent_fleet(
+    data: dict[str, Any],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Return (hard_errors, warnings) using the host roster and snapshots.
+
+    Hard (422): see :func:`validate_intent_fleet_hard`.
+
+    Advisory: ``replicas`` above the currently eligible host count;
+    ``resources.vram_gb``/``ram_gb`` above the largest capacity among
+    eligible hosts; every eligible host draining or unreachable; a valid
+    ``gpu_type`` that no connected host currently reports.
+
+    This is the write-path entry point. It reads resource snapshots for every
+    host, so it belongs on create/update — not on a reconcile tick.
+    """
+    warnings: list[dict[str, str]] = []
+
+    from app.database.hosts import host_db
+    from app.redis_state import host_store
+
+    placement = data.get("placement") or {}
+    resources = data.get("resources") or {}
+    replicas = data.get("replicas", 1)
+    gpu_type = normalize_gpu_type(placement.get("gpu_type")) or placement.get(
+        "gpu_type"
+    )
+    vram_gb = float(resources.get("vram_gb") or 0)
+    ram_gb = resources.get("ram_gb")
+
+    hosts = await host_db.get_all_hosts()
+    hard_errors = validate_intent_fleet_hard(data, hosts)
 
     if hard_errors:
         # Hard violations short-circuit the advisory half: the spec is

@@ -5,6 +5,7 @@ mocked. Filesystem operations use tmp_path so nothing touches the real disk.
 """
 
 import hashlib
+import itertools
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1586,10 +1587,15 @@ class _FakeFuture:
         self._polls = polls
         self._result = result
         self._error = error
+        self.cancelled = False
 
     def done(self) -> bool:
         self._polls -= 1
         return self._polls <= 0
+
+    def cancel(self) -> bool:
+        self.cancelled = True
+        return True
 
     def result(self):
         if self._error is not None:
@@ -1599,7 +1605,6 @@ class _FakeFuture:
 
 class TestPullProgress:
     def test_in_process_emits_start_and_terminal_events(self, _isolated_env: Path):
-        from solar_host import models_manager
         from solar_host.models_manager import ensure_models_dir, pull_model
 
         ensure_models_dir()
@@ -1625,14 +1630,16 @@ class TestPullProgress:
 
         events: list[dict] = []
         exc = ModelPullError(404, "not_found", "Gone", "repo://iris-osl:v3")
-        with patch("solar_host.models_manager._pull_harbor", side_effect=exc):
-            with pytest.raises(ModelPullError):
-                pull_model(
-                    source="harbor",
-                    source_uri="repo://iris-osl:v3",
-                    harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v3",
-                    progress_cb=events.append,
-                )
+        with (
+            patch("solar_host.models_manager._pull_harbor", side_effect=exc),
+            pytest.raises(ModelPullError),
+        ):
+            pull_model(
+                source="harbor",
+                source_uri="repo://iris-osl:v3",
+                harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v3",
+                progress_cb=events.append,
+            )
 
         phases = [e["phase"] for e in events]
         assert phases == ["resolving", "failed"]
@@ -1689,7 +1696,7 @@ class TestPullProgress:
         assert done_values == sorted(done_values)
         assert done_values[0] >= 100
         assert all(e["bytes_total"] == 1000 for e in downloading)
-        for prev, cur in zip(downloading, downloading[1:]):
+        for _prev, cur in itertools.pairwise(downloading):
             assert cur["speed_bps"] is not None and cur["speed_bps"] >= 0
         assert events[-1]["phase"] == "completed"
 
@@ -1707,14 +1714,76 @@ class TestPullProgress:
         events: list[dict] = []
         exc = ModelPullError(500, "model_pull_failed", "boom", "repo://iris-osl:v3")
         future = _FakeFuture(polls=2, result=None, error=exc)
-        with patch("pebble.ProcessPool", lambda max_workers: _FakePool(future)):
-            with pytest.raises(ModelPullError):
-                pull_model(
-                    source="harbor",
-                    source_uri="repo://iris-osl:v3",
-                    harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v3",
-                    progress_cb=events.append,
-                )
+        with (
+            patch("pebble.ProcessPool", lambda max_workers: _FakePool(future)),
+            pytest.raises(ModelPullError),
+        ):
+            pull_model(
+                source="harbor",
+                source_uri="repo://iris-osl:v3",
+                harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v3",
+                progress_cb=events.append,
+            )
 
         assert sum(1 for e in events if e["phase"] == "failed") == 1
         assert not any(e["phase"] == "completed" for e in events)
+
+    def test_low_disk_abort_emits_failed_exactly_once(
+        self, _isolated_env: Path, monkeypatch
+    ):
+        """The abort emits 'failed' and then raises; the handler emits it again.
+
+        Two terminal events for one pull make consumers keyed on "first
+        terminal wins" disagree with those keyed on "last wins".
+        """
+        from solar_host.models_manager import (
+            ModelPullError,
+            ensure_models_dir,
+            pull_model,
+        )
+
+        ensure_models_dir()
+        monkeypatch.setattr("solar_host.config.settings.pull_use_subprocess", True)
+        monkeypatch.setattr("solar_host.config.settings.min_free_disk_gb", 10_000.0)
+        events: list[dict] = []
+        future = _FakeFuture(polls=50)
+        with (
+            patch("pebble.ProcessPool", lambda max_workers: _FakePool(future)),
+            pytest.raises(ModelPullError) as excinfo,
+        ):
+            pull_model(
+                source="harbor",
+                source_uri="repo://iris-osl:v3",
+                harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v3",
+                # A declared size keeps the proactive check (step 3.5) happy so
+                # the mid-download abort is the one that fires.
+                size_bytes=500,
+                progress_cb=events.append,
+            )
+
+        assert excinfo.value.status_code == 507
+        assert "during download" in excinfo.value.detail
+        assert sum(1 for e in events if e["phase"] == "failed") == 1
+
+    def test_progress_cb_exception_does_not_abort_the_pull(self, _isolated_env: Path):
+        """A bad telemetry consumer must not fail an otherwise fine download."""
+        from solar_host.models_manager import ensure_models_dir, pull_model
+
+        ensure_models_dir()
+        calls: list[str] = []
+
+        def _bad_cb(payload: dict) -> None:
+            calls.append(payload["phase"])
+            raise RuntimeError("consumer exploded")
+
+        with patch("solar_host.models_manager._pull_harbor", return_value=None):
+            result = pull_model(
+                source="harbor",
+                source_uri="repo://iris-osl:v3",
+                harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v3",
+                progress_cb=_bad_cb,
+            )
+
+        assert result is not None
+        # Every phase was still attempted, including the terminal one.
+        assert "completed" in calls

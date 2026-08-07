@@ -108,6 +108,23 @@ _DEVICE_TO_GPU_TYPE: dict[str, str] = {
 }
 
 
+def _gpu_token(value: str) -> str:
+    """Case-fold and unify separators to the canonical underscore form."""
+    return value.strip().lower().replace("-", "_")
+
+
+# Alias keys are accepted in either separator form, so both the table and the
+# incoming value are folded the same way. Comparing a hyphenated token against
+# the underscore-bearing VALID_GPU_TYPES only ever worked because the table
+# happened to list hyphenated duplicates of the canonical names.
+_NORMALIZED_GPU_ALIASES: dict[str, str] = {
+    _gpu_token(alias): canonical for alias, canonical in GPU_TYPE_ALIASES.items()
+}
+_NORMALIZED_VALID_GPU_TYPES: frozenset[str] = frozenset(
+    _gpu_token(t) for t in VALID_GPU_TYPES
+)
+
+
 def normalize_gpu_type(value: Any) -> str | None:
     """Case-fold, unify ``-``/``_``, resolve aliases; None for unknown tokens.
 
@@ -117,10 +134,10 @@ def normalize_gpu_type(value: Any) -> str | None:
     """
     if not isinstance(value, str):
         return None
-    token = value.strip().lower().replace("_", "-")
-    if token in VALID_GPU_TYPES:
+    token = _gpu_token(value)
+    if token in _NORMALIZED_VALID_GPU_TYPES:
         return token
-    return GPU_TYPE_ALIASES.get(token)
+    return _NORMALIZED_GPU_ALIASES.get(token)
 
 
 def validate_priority(instance_data: dict[str, Any]) -> None:
@@ -281,8 +298,39 @@ def _validate_backend_speculative_decoding(
     return errors
 
 
+def _backend_field_owners(key: str) -> frozenset[str]:
+    """The backend types that accept *key*; empty when control does not know it.
+
+    Ownership is many-to-many: ``use_flash_attention`` belongs to both
+    ``huggingface_causal`` and ``huggingface_vision``, and the ``huggingface``
+    entry stands for every ``huggingface_*`` type.
+    """
+    owners: set[str] = set()
+    for owner, fields in BACKEND_FIELD_OWNERS.items():
+        if key not in fields:
+            continue
+        if owner == "huggingface":
+            owners.update(t for t in VALID_BACKEND_TYPES if t.startswith("huggingface"))
+        else:
+            owners.add(owner)
+    return frozenset(owners)
+
+
+def _describe_owners(owners: frozenset[str]) -> str:
+    """Human-readable owner list, collapsing the full huggingface_* set."""
+    hf_types = {t for t in VALID_BACKEND_TYPES if t.startswith("huggingface")}
+    if owners == hf_types:
+        return "huggingface_* backends"
+    names = sorted(owners)
+    if len(names) == 1:
+        return f"the {names[0]} backend"
+    return "the " + " or ".join(names) + " backends"
+
+
 def _validate_backend_field_ownership(
     backend: dict[str, Any],
+    *,
+    exempt_fields: frozenset[str] = frozenset(),
 ) -> list[dict[str, str]]:
     """Reject fields used with the wrong backend type (C3).
 
@@ -291,86 +339,53 @@ def _validate_backend_field_ownership(
     on a llamacpp intent vanished without a trace. This table is the
     control-side mirror of the host's config models; a test pins it against
     the documented field lists so a host-side field addition fails loudly.
+
+    ``exempt_fields`` carries fields an update left untouched, so tightening
+    this table can never strand an already-stored intent (see
+    :func:`validate_intent_update`).
     """
     errors: list[dict[str, str]] = []
     backend_type = backend.get("backend_type")
     if not isinstance(backend_type, str) or backend_type not in VALID_BACKEND_TYPES:
         return errors
 
-    llamacpp_fields = BACKEND_FIELD_OWNERS["llamacpp"]
-    hf_common = BACKEND_FIELD_OWNERS["huggingface"]
-
-    for key in backend:
+    for key, value in backend.items():
         if key in ("backend_type", "file_filters") or key in FORBIDDEN_BACKEND_FIELDS:
             continue
-        if backend_type == "llamacpp":
-            if key in hf_common:
-                errors.append(
-                    {
-                        "field": f"backend.{key}",
-                        "message": (
-                            f"{key} is only supported for huggingface_* backends "
-                            f"(this intent uses llamacpp)"
-                        ),
-                    }
-                )
-                continue
-            for hf_type, fields in BACKEND_FIELD_OWNERS.items():
-                if (
-                    hf_type.startswith("huggingface")
-                    and hf_type != "huggingface"
-                    and key in fields
-                ):
-                    errors.append(
-                        {
-                            "field": f"backend.{key}",
-                            "message": (
-                                f"{key} is only supported for the {hf_type} "
-                                f"backend (this intent uses llamacpp)"
-                            ),
-                        }
-                    )
-        elif backend_type.startswith("huggingface"):
-            if key in llamacpp_fields:
-                errors.append(
-                    {
-                        "field": f"backend.{key}",
-                        "message": (
-                            f"{key} is only supported for the llamacpp backend "
-                            f"(this intent uses {backend_type})"
-                        ),
-                    }
-                )
-                continue
-            if key not in hf_common:
-                owner = next(
-                    (
-                        t
-                        for t, fields in BACKEND_FIELD_OWNERS.items()
-                        if t.startswith("huggingface")
-                        and t != "huggingface"
-                        and key in fields
-                    ),
-                    None,
-                )
-                if owner is not None and owner != backend_type:
-                    errors.append(
-                        {
-                            "field": f"backend.{key}",
-                            "message": (
-                                f"{key} is only supported for the {owner} backend "
-                                f"(this intent uses {backend_type})"
-                            ),
-                        }
-                    )
-                # Unknown keys are ignored by the host; flagging them would
-                # break forward compatibility, so they pass.
+        # _validate_device owns "device" and names the llamacpp alternative;
+        # reporting it here too would show the user two errors for one field.
+        if key == "device":
+            continue
+        if key in exempt_fields:
+            continue
+        # An explicit null configures nothing — the host's Pydantic default is
+        # identical to omitting the key. _validate_device already skips None,
+        # so rejecting here would make the two inconsistent.
+        if value is None:
+            continue
+        owners = _backend_field_owners(key)
+        # No owner means control does not know the field. The host ignores
+        # unknown fields, so flagging them would break forward compatibility.
+        if not owners or backend_type in owners:
+            continue
+        errors.append(
+            {
+                "field": f"backend.{key}",
+                "message": (
+                    f"{key} is only supported for {_describe_owners(owners)} "
+                    f"(this intent uses {backend_type})"
+                ),
+            }
+        )
 
     return errors
 
 
 def _validate_device(
-    backend: dict[str, Any], placement: dict[str, Any]
+    backend: dict[str, Any],
+    placement: dict[str, Any],
+    *,
+    exempt_fields: frozenset[str] = frozenset(),
 ) -> list[dict[str, str]]:
     """Validate the HuggingFace-only ``device`` field against the placement (C3).
 
@@ -380,6 +395,11 @@ def _validate_device(
     backends the value must be one of ``auto/cuda/mps/cpu`` and must not
     contradict an explicitly chosen ``placement.gpu_type`` — the reported
     ``mps`` plus NVIDIA-host symptom is fully static and a hard 422.
+
+    ``exempt_fields`` grandfathers the *ownership* rejection only. The value
+    checks below still run: an update that leaves ``device`` alone but points
+    ``placement.gpu_type`` at a different accelerator is a new contradiction,
+    not a stored one.
     """
     errors: list[dict[str, str]] = []
     device = backend.get("device")
@@ -387,6 +407,8 @@ def _validate_device(
         return errors
 
     if backend.get("backend_type") == "llamacpp":
+        if "device" in exempt_fields:
+            return errors
         errors.append(
             {
                 "field": "backend.device",
@@ -453,15 +475,46 @@ def validate_intent_warnings(data: dict[str, Any]) -> list[dict[str, str]]:
     return warnings
 
 
+def _unchanged_backend_fields(backend: Any, current_backend: Any) -> frozenset[str]:
+    """Backend keys an update carries over from the stored spec unchanged.
+
+    Field ownership is a static table that can be tightened at any time, and
+    an intent stored before a tightening would otherwise become permanently
+    uneditable: every update replays the full spec, so it would fail on a
+    field the user is not even touching. Exempting untouched fields keeps
+    such intents editable while still rejecting a *newly* misplaced field.
+    """
+    if not isinstance(backend, dict) or not isinstance(current_backend, dict):
+        return frozenset()
+    # A backend_type change re-homes every field, so nothing is grandfathered.
+    if backend.get("backend_type") != current_backend.get("backend_type"):
+        return frozenset()
+    return frozenset(
+        key
+        for key, value in backend.items()
+        if key in current_backend and current_backend[key] == value
+    )
+
+
 def validate_intent_update(
-    data: dict[str, Any], *, current_alias: str
+    data: dict[str, Any],
+    *,
+    current_alias: str,
+    current_backend: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Validate an intent update request (S-039 §12.5).
 
     Applies every creation rule — an update must not be able to write a
-    spec that submission would reject — plus alias immutability.
+    spec that submission would reject — plus alias immutability. Backend
+    fields carried over unchanged from ``current_backend`` are exempt from
+    the field-ownership table; see :func:`_unchanged_backend_fields`.
     """
-    errors = validate_intent_create(data)
+    errors = validate_intent_create(
+        data,
+        ownership_exempt_fields=_unchanged_backend_fields(
+            data.get("backend"), current_backend
+        ),
+    )
 
     alias = data.get("alias")
     if isinstance(alias, str) and alias.strip() and alias != current_alias:
@@ -479,14 +532,19 @@ def validate_intent_update(
     return errors
 
 
-def validate_intent_create(data: dict[str, Any]) -> list[dict[str, str]]:
+def validate_intent_create(
+    data: dict[str, Any],
+    *,
+    ownership_exempt_fields: frozenset[str] = frozenset(),
+) -> list[dict[str, str]]:
     """Validate an intent creation request (S-039 §4.7).
 
     Returns a list of {field, message} errors. Empty list means valid.
     Does NOT raise — the route handler decides the HTTP status.
 
     Shared with the update path (:func:`validate_intent_update`) so the two
-    cannot drift apart.
+    cannot drift apart; ``ownership_exempt_fields`` is that path's
+    grandfathering hook and is always empty for a genuine creation.
     """
     errors: list[dict[str, str]] = []
 
@@ -610,8 +668,14 @@ def validate_intent_create(data: dict[str, Any]) -> list[dict[str, str]]:
 
         # C3: field ownership (a field used with the wrong backend type used
         # to be silently dropped by the host) and the device contract.
-        errors.extend(_validate_backend_field_ownership(backend))
-        errors.extend(_validate_device(backend, placement))
+        errors.extend(
+            _validate_backend_field_ownership(
+                backend, exempt_fields=ownership_exempt_fields
+            )
+        )
+        errors.extend(
+            _validate_device(backend, placement, exempt_fields=ownership_exempt_fields)
+        )
         errors.extend(_validate_backend_model_selection(backend, model_source))
         errors.extend(_validate_backend_speculative_decoding(backend))
 

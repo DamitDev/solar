@@ -72,12 +72,74 @@ async def _validate(payload, hosts, snapshots=None, connected=None):
         return await validate_intent_fleet(payload)
 
 
+class TestReconcilerDefensiveValidation:
+    """C5: a reconcile tick must not pay for the advisory half of validation."""
+
+    @pytest.mark.anyio
+    async def test_tick_reuses_observed_hosts_and_reads_no_snapshots(self):
+        """The per-tick check runs off _observe's roster — no snapshot reads.
+
+        _fetch_host_resource_snapshot falls through to a 5 s HTTP call per host
+        whenever a host is stale or disconnected, which is exactly the cost C5
+        set out to remove from the reconcile path.
+        """
+        from test_reconciliation import _HostStub, _make_intent, _make_observed
+
+        from app.services.reconciliation import Reconciler
+
+        reconciler = Reconciler()
+        intent = _make_intent(replicas=0)
+        observed = _make_observed(managed=[], hosts=[_HostStub(id="h1")])
+
+        with (
+            patch.object(reconciler, "_observe", new=AsyncMock(return_value=observed)),
+            patch.object(reconciler, "_update_status", new=AsyncMock()),
+            patch(
+                "app.routes.management.resources._fetch_host_resource_snapshot",
+                new=AsyncMock(side_effect=AssertionError("snapshot read on tick")),
+            ),
+            patch(
+                "app.database.hosts.host_db.get_all_hosts",
+                new=AsyncMock(side_effect=AssertionError("host refetch on tick")),
+            ),
+        ):
+            await reconciler._reconcile_one(intent)
+
+    @pytest.mark.anyio
+    async def test_violations_are_logged_once_per_spec_version(self):
+        """An unfixable legacy spec must not log once per tick forever."""
+        from test_reconciliation import _HostStub, _make_intent, _make_observed
+
+        from app.services.reconciliation import Reconciler
+
+        reconciler = Reconciler()
+        # host_allow names a host that is not in the roster: a hard violation.
+        intent = _make_intent(replicas=0)
+        intent.placement.host_allow = ["ghost"]
+        observed = _make_observed(managed=[], hosts=[_HostStub(id="h1")])
+
+        with (
+            patch.object(reconciler, "_observe", new=AsyncMock(return_value=observed)),
+            patch.object(reconciler, "_update_status", new=AsyncMock()),
+            patch("app.services.reconciliation.logger") as mock_logger,
+        ):
+            for _ in range(4):
+                await reconciler._reconcile_one(intent)
+
+        violations = [
+            c
+            for c in mock_logger.error.call_args_list
+            if "violates fleet validation" in str(c)
+        ]
+        assert len(violations) == 1
+
+
 class TestHardErrors:
     @pytest.mark.anyio
     async def test_unknown_host_allow_id_is_hard(self):
         hosts = [_host("h1"), _host("h2")]
         payload = _payload(placement={"host_allow": ["h1", "ghost"]})
-        hard, warnings = await _validate(payload, hosts)
+        hard, _ = await _validate(payload, hosts)
         assert any(
             e["field"] == "placement.host_allow" and "ghost" in e["message"]
             for e in hard

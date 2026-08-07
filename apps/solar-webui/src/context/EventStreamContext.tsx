@@ -39,7 +39,7 @@ interface EventStreamContextValue {
   endpoints: ApiEndpoint[];
   getInstanceLogs: (hostId: string, instanceId: string) => LogMessage[];
   getInstanceState: (hostId: string, instanceId: string) => InstanceStateData | undefined;
-  getPullProgress: (sourceUri: string) => PullProgressEvent | undefined;
+  getPullProgress: (hostId: string | null | undefined, sourceUri: string) => PullProgressEvent | undefined;
   clearInstanceLogs: (hostId: string, instanceId: string) => void;
   removeRequest: (requestId: string) => void;
   setFilter: (filter: Partial<GatewayFilter>) => void;

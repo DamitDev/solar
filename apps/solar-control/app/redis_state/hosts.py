@@ -97,20 +97,26 @@ class HostConnectionStore:
     # ── Resource snapshots (C5, WS-first read model) ───────────
 
     async def set_host_resource_snapshot(
-        self, host_id: str, snapshot: dict[str, Any], *, at: str
+        self,
+        host_id: str,
+        snapshot: dict[str, Any],
+        *,
+        at: str,
+        host_at: str | None = None,
     ) -> None:
         """Store the resource snapshot the host pushed with host_health.
 
         The stored value is ``{"at": <iso8601>, "resources": {...}}`` — the
-        ``at`` field is what makes freshness gating possible. No TTL,
-        matching the instances map; staleness is decided on read.
+        ``at`` field is what makes freshness gating possible, and callers must
+        pass *control's* receive time so the comparison on read is against the
+        same clock. ``host_at`` preserves the host's own stamp for display. No
+        TTL, matching the instances map; staleness is decided on read.
         """
         r = redis_client()
-        await r.hset(
-            SNAPSHOTS_MAP,
-            host_id,
-            json.dumps({"at": at, "resources": snapshot}),
-        )
+        entry: dict[str, Any] = {"at": at, "resources": snapshot}
+        if host_at:
+            entry["host_at"] = host_at
+        await r.hset(SNAPSHOTS_MAP, host_id, json.dumps(entry))
 
     async def get_host_resource_snapshot(self, host_id: str) -> dict[str, Any] | None:
         """Read the last pushed snapshot for *host_id*, or None."""
@@ -126,6 +132,36 @@ class HostConnectionStore:
     async def remove_host_resource_snapshot(self, host_id: str) -> None:
         r = redis_client()
         await r.hdel(SNAPSHOTS_MAP, host_id)
+
+    # ── Pull progress (C4) ─────────────────────────────────────
+
+    async def remove_host_pulls(self, host_id: str) -> int:
+        """Drop every pull-progress entry belonging to *host_id*.
+
+        Fields are keyed ``{host_id}|{source_uri}``, and nothing else expires
+        them, so a removed host's entries would otherwise stay in the hash for
+        the lifetime of the deployment and keep showing up in ``GET
+        /api/pulls``.
+        """
+        r = redis_client()
+        prefix = f"{host_id}|"
+        fields = [
+            field for field in await r.hkeys(PULLS_MAP) if str(field).startswith(prefix)
+        ]
+        if not fields:
+            return 0
+        await r.hdel(PULLS_MAP, *fields)
+        return len(fields)
+
+    async def purge_host_state(self, host_id: str) -> None:
+        """Remove all Redis state for a host that no longer exists.
+
+        Called on host removal: the instance cache, resource snapshot and
+        pull-progress entries are all keyed by host id and have no TTL.
+        """
+        await self.remove_host_instances(host_id)
+        await self.remove_host_resource_snapshot(host_id)
+        await self.remove_host_pulls(host_id)
 
     # ── Disconnect timestamp tracking ─────────────────────────
 

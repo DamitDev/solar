@@ -11,19 +11,18 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from test_reconciliation import (
+    _HostStub,
+    _make_intent,
+    _make_observed,
+    _SnapshotStub,
+)
 
 from app.services.reconciliation import (
     Action,
     ActionType,
     Reconciler,
     _await_action_with_progress,
-)
-
-from test_reconciliation import (
-    _HostStub,
-    _SnapshotStub,
-    _make_intent,
-    _make_observed,
 )
 
 
@@ -75,14 +74,16 @@ class TestAwaitActionWithProgress:
         monkeypatch.setattr(
             "app.services.reconciliation._action_timeout_s", lambda a: 0.2
         )
-        with patch(
-            "app.services.reconciliation._pull_progress_fresh",
-            new=AsyncMock(return_value=False),
+        with (
+            patch(
+                "app.services.reconciliation._pull_progress_fresh",
+                new=AsyncMock(return_value=False),
+            ),
+            pytest.raises(asyncio.TimeoutError) as excinfo,
         ):
-            with pytest.raises(asyncio.TimeoutError) as excinfo:
-                await _await_action_with_progress(
-                    _sleep_coro(0.5), _action(ActionType.CREATE), _make_intent()
-                )
+            await _await_action_with_progress(
+                _sleep_coro(0.5), _action(ActionType.CREATE), _make_intent()
+            )
         assert excinfo.value.recoverable is False
 
     @pytest.mark.anyio
@@ -103,15 +104,97 @@ class TestAwaitActionWithProgress:
         monkeypatch.setattr(
             "app.services.reconciliation._action_timeout_s", lambda a: 0.2
         )
+        with (
+            patch(
+                "app.services.reconciliation._pull_progress_fresh",
+                new=AsyncMock(return_value=True),
+            ),
+            pytest.raises(asyncio.TimeoutError) as excinfo,
+        ):
+            await _await_action_with_progress(
+                _sleep_coro(0.5), _action(ActionType.CREATE), _make_intent()
+            )
+        assert excinfo.value.recoverable is True
+
+    @pytest.mark.anyio
+    async def test_action_timeout_error_propagates_without_spinning(self, monkeypatch):
+        """A TimeoutError raised *by the action* must not read as a slice expiry.
+
+        asyncio.TimeoutError is the builtin TimeoutError on 3.11+ and aiohttp's
+        timeouts subclass it. Catching it as a slice boundary re-awaits an
+        already-finished task, which spins at full speed until the ceiling
+        (measured at >200k progress checks/second) and replaces the real error
+        with a synthetic one.
+        """
+        monkeypatch.setattr("app.config.settings.action_progress_slice_s", 0.02)
+        monkeypatch.setattr(
+            "app.services.reconciliation._action_timeout_s", lambda a: 5.0
+        )
+        sentinel = asyncio.TimeoutError("inner host pull timeout")
+
+        async def _raises_timeout():
+            raise sentinel
+
+        progress = AsyncMock(return_value=True)
+        with (
+            patch("app.services.reconciliation._pull_progress_fresh", new=progress),
+            pytest.raises(asyncio.TimeoutError) as excinfo,
+        ):
+            await _await_action_with_progress(
+                _raises_timeout(), _action(ActionType.CREATE), _make_intent()
+            )
+
+        # The action's own exception, not a synthesized "exceeded its bound".
+        assert excinfo.value is sentinel
+        # And no busy-loop: the progress cache is never consulted.
+        assert progress.await_count == 0
+
+    @pytest.mark.anyio
+    async def test_action_exception_propagates_unchanged(self, monkeypatch):
+        """Non-timeout action failures are not reshaped either."""
+        monkeypatch.setattr("app.config.settings.action_progress_slice_s", 0.02)
+
+        async def _raises():
+            raise ValueError("host said no")
+
+        with pytest.raises(ValueError, match="host said no"):
+            await _await_action_with_progress(
+                _raises(), _action(ActionType.CREATE), _make_intent()
+            )
+
+    @pytest.mark.anyio
+    async def test_outer_cancellation_does_not_leak_the_task(self, monkeypatch):
+        """Reconciler shutdown must cancel the in-flight action, not detach it."""
+        monkeypatch.setattr("app.config.settings.action_progress_slice_s", 0.05)
+        monkeypatch.setattr(
+            "app.services.reconciliation._action_timeout_s", lambda a: 5.0
+        )
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def _long_action():
+            started.set()
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
         with patch(
             "app.services.reconciliation._pull_progress_fresh",
             new=AsyncMock(return_value=True),
         ):
-            with pytest.raises(asyncio.TimeoutError) as excinfo:
-                await _await_action_with_progress(
-                    _sleep_coro(0.5), _action(ActionType.CREATE), _make_intent()
+            outer = asyncio.ensure_future(
+                _await_action_with_progress(
+                    _long_action(), _action(ActionType.CREATE), _make_intent()
                 )
-        assert excinfo.value.recoverable is True
+            )
+            await started.wait()
+            outer.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await outer
+
+        assert cancelled.is_set()
 
     @pytest.mark.anyio
     async def test_keeps_waiting_while_progress_is_fresh(self, monkeypatch):

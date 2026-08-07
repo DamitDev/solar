@@ -103,8 +103,18 @@ export function RoutingGraph() {
     },
     { enabled: !isConnected, intervalMs: 10000 },
   );
+  // endpoints_update is only emitted on endpoint CRUD, never on connect, so a
+  // healthy socket with no event data yet needs a one-off REST bootstrap —
+  // otherwise the graph stays empty until someone edits an endpoint.
   useEffect(() => {
-    if (eventEndpoints.length > 0) setEndpoints(eventEndpoints);
+    if (eventEndpoints.length > 0) {
+      setEndpoints(eventEndpoints);
+      return;
+    }
+    solarClient
+      .getEndpoints()
+      .then(setEndpoints)
+      .catch((err) => console.error('Failed to fetch endpoints:', err));
   }, [eventEndpoints]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState([]);

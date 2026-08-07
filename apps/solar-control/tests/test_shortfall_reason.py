@@ -1,13 +1,13 @@
 """C3 _shortfall_reason: unplaceable intents get a specific message instead
 of only the generic 'desired replicas cannot all be made ready'."""
 
+from test_reconciliation import _HostStub, _make_intent, _make_observed, _SnapshotStub
+
 from app.models.intent import (
     PlacementConstraints,
     ResourceRequirements,
 )
 from app.services.reconciliation import _shortfall_reason
-
-from test_reconciliation import _HostStub, _SnapshotStub, _make_intent, _make_observed
 
 
 def test_no_reason_when_fulfilled():

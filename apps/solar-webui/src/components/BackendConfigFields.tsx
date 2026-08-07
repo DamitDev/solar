@@ -14,7 +14,7 @@
  *     not appear inside `backend` (spec deployment-intent.md §4.7).
  */
 
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Cpu, Brain } from 'lucide-react';
 import {
   PrimaryBackend,
@@ -46,6 +46,12 @@ interface BackendConfigFieldsProps {
   /** Bound through for AddInstanceModal (alias is part of its formData). */
   aliasValue?: string;
   onAliasChange?: (v: string) => void;
+  /**
+   * C3: renders the validation error for a backend field next to that field.
+   * Keys are the API's dotted names (e.g. `backend.mmproj`). The parent form
+   * owns the error state, so it supplies the renderer.
+   */
+  fieldError?: (field: string) => ReactNode;
 }
 
 /** Derive the initial tab/mode selection from an existing backend object. */
@@ -68,6 +74,7 @@ export function BackendConfigFields({
   forIntent = false,
   aliasValue,
   onAliasChange,
+  fieldError = () => null,
 }: BackendConfigFieldsProps) {
   const initial = getInitialSelection(value);
   const [primaryBackend, setPrimaryBackend] = useState<PrimaryBackend>(initial.primary);
@@ -264,6 +271,7 @@ export function BackendConfigFields({
                     Which GGUF to serve. A filename, relative path or <code>*</code> glob, searched recursively in the
                     downloaded model directory. Leave empty to use the largest GGUF found.
                   </p>
+                  {fieldError('backend.model_file')}
                 </div>
               )}
 
@@ -283,6 +291,7 @@ export function BackendConfigFields({
                     Passed to llama-server as <code>--mmproj</code> for vision-capable models. A bare filename or glob
                     is resolved in the model directory, same as the model file.
                   </p>
+                  {fieldError('backend.mmproj')}
                 </div>
               )}
 
@@ -359,6 +368,7 @@ export function BackendConfigFields({
                   <p className="text-xs text-nord-4 mt-1">
                     JSON string passed to llama-server as <code>--chat-template-kwargs</code>.
                   </p>
+                  {fieldError('backend.chat_template_kwargs')}
                 </div>
               )}
 
@@ -739,6 +749,7 @@ export function BackendConfigFields({
                     </option>
                   ))}
                 </select>
+                {fieldError('backend.device')}
               </div>
 
               {/* Dtype */}

@@ -104,6 +104,10 @@ class Settings(BaseSettings):
     # progress is newer than pull_progress_stale_after_s.
     action_progress_slice_s: float = 120.0
     pull_progress_stale_after_s: float = 180.0
+    # How long a finished pull (phase completed/failed) stays readable before
+    # it is pruned. Long enough for a late-joining webui to render the outcome,
+    # short enough that the pulls hash does not grow without bound.
+    pull_progress_terminal_grace_s: float = 300.0
 
 
 settings = Settings()

@@ -196,11 +196,70 @@ describe('IntentFormModal in edit mode', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
     expect(await screen.findByText('Invalid intent')).toBeInTheDocument();
-    // C3: the server error also renders inline next to the offending field
-    // (fieldErrors), in addition to the banner list — at least one
-    // occurrence is guaranteed.
-    expect(screen.getAllByText(/too many/).length).toBeGreaterThanOrEqual(1);
+    // C3: the error renders inline next to the offending field, and exactly
+    // once — the banner lists only fields with no inline slot, so a matched
+    // error does not also appear there and read as two problems.
+    expect(screen.getByText(/too many/)).toBeInTheDocument();
+    expect(screen.queryByText('replicas')).not.toBeInTheDocument();
     expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  it('keeps unmatched fields in the banner, since they have no input to sit next to', async () => {
+    vi.spyOn(solarClient, 'updateIntent').mockRejectedValue({
+      response: {
+        status: 422,
+        data: {
+          detail: {
+            detail: 'Invalid intent',
+            errors: [{ field: 'metadata.owner', message: 'reserved key' }],
+          },
+        },
+      },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    renderEdit();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText('Invalid intent')).toBeInTheDocument();
+    expect(screen.getByText('metadata.owner')).toBeInTheDocument();
+    expect(screen.getByText(/reserved key/)).toBeInTheDocument();
+  });
+
+  it('clears the previous attempt errors when submitting again', async () => {
+    const updateIntent = vi
+      .spyOn(solarClient, 'updateIntent')
+      .mockRejectedValueOnce({
+        response: {
+          status: 422,
+          data: { detail: { detail: 'Invalid intent', errors: [{ field: 'replicas', message: 'too many' }] } },
+        },
+      })
+      .mockResolvedValueOnce({ ...intent, replicas: 1 });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    renderEdit();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(await screen.findByText(/too many/)).toBeInTheDocument();
+
+    const replicasInput = screen.getByDisplayValue('2');
+    await userEvent.clear(replicasInput);
+    await userEvent.type(replicasInput, '1');
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => expect(updateIntent).toHaveBeenCalledTimes(2));
+    // A stale error would leave the field marked invalid after it was fixed.
+    await waitFor(() => expect(screen.queryByText(/too many/)).not.toBeInTheDocument());
+  });
+
+  it('rejects an unknown gpu_type before the round trip', async () => {
+    const updateIntent = vi.spyOn(solarClient, 'updateIntent');
+    renderEdit({ placement: { roles: ['inference'], gpu_type: 'rocm', host_allow: [], host_deny: [] } as any });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText(/Unknown GPU type 'rocm'/)).toBeInTheDocument();
+    expect(updateIntent).not.toHaveBeenCalled();
   });
 });
 

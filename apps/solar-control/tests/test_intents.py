@@ -14,6 +14,7 @@ from app.models.intent import (
     ResourceRequirements,
 )
 from app.validation import (
+    VALID_GPU_TYPES,
     canonicalize_intent_backend,
     normalize_gpu_type,
     validate_intent_create,
@@ -828,6 +829,66 @@ def test_validate_intent_update_rejects_changed_alias():
     assert "immutable" in errors[0]["message"]
 
 
+def test_validate_intent_update_grandfathers_unchanged_backend_field():
+    """A stored intent must stay editable after the ownership table tightens.
+
+    Every update replays the full spec, so a field the table only started
+    rejecting later would block edits to unrelated fields forever.
+    """
+    stored = {"backend_type": "llamacpp", "device": "cuda", "ctx_size": 4096}
+    payload = _update_payload(
+        backend={"backend_type": "llamacpp", "device": "cuda", "ctx_size": 8192}
+    )
+    errors = validate_intent_update(
+        payload, current_alias="test-model", current_backend=stored
+    )
+    assert errors == []
+
+
+def test_validate_intent_update_still_rejects_newly_added_bad_field():
+    """Grandfathering is per-field: a value the user actually changes is checked."""
+    stored = {"backend_type": "llamacpp", "device": "cuda"}
+    payload = _update_payload(
+        backend={"backend_type": "llamacpp", "device": "mps"},
+    )
+    errors = validate_intent_update(
+        payload, current_alias="test-model", current_backend=stored
+    )
+    assert any(e["field"] == "backend.device" for e in errors)
+
+
+def test_validate_intent_update_grandfathering_does_not_hide_new_contradiction():
+    """Exemption covers ownership, not cross-field value checks.
+
+    device is unchanged, but pointing gpu_type at a different accelerator is a
+    contradiction the user just introduced.
+    """
+    stored = {"backend_type": "huggingface_causal", "device": "mps"}
+    payload = _update_payload(
+        model_source="huggingface://org/model",
+        backend={"backend_type": "huggingface_causal", "device": "mps"},
+        placement={"gpu_type": "nvidia_cuda"},
+    )
+    errors = validate_intent_update(
+        payload, current_alias="test-model", current_backend=stored
+    )
+    assert any(
+        e["field"] == "backend.device" and "nvidia_cuda" in e["message"] for e in errors
+    )
+
+
+def test_validate_intent_update_backend_type_change_drops_grandfathering():
+    """Switching backend_type re-homes every field, so nothing is exempt."""
+    stored = {"backend_type": "llamacpp", "ctx_size": 4096}
+    payload = _update_payload(
+        backend={"backend_type": "huggingface_causal", "ctx_size": 4096}
+    )
+    errors = validate_intent_update(
+        payload, current_alias="test-model", current_backend=stored
+    )
+    assert any(e["field"] == "backend.ctx_size" for e in errors)
+
+
 def test_validate_intent_update_applies_creation_rules():
     """An update must not write a spec that creation would have rejected."""
     errors = validate_intent_update(
@@ -1157,6 +1218,23 @@ class TestGpuTypeVocabulary:
         assert normalize_gpu_type("quantum") is None
         assert normalize_gpu_type(42) is None
 
+    def test_canonical_names_match_without_relying_on_the_alias_table(self):
+        """Both sides of the membership test are folded the same way.
+
+        Folding only the input meant a hyphenated token was compared against
+        underscore-bearing canonical names, so every canonical name round-tripped
+        purely because the alias table happened to list a hyphenated duplicate.
+        """
+        with patch.dict("app.validation._NORMALIZED_GPU_ALIASES", {}, clear=True):
+            for canonical in VALID_GPU_TYPES:
+                assert normalize_gpu_type(canonical) == canonical
+                assert normalize_gpu_type(canonical.replace("_", "-")) == canonical
+                assert normalize_gpu_type(f"  {canonical.upper()}  ") == canonical
+
+    def test_hyphenated_and_underscored_aliases_are_equivalent(self):
+        assert normalize_gpu_type("nvidia-cuda") == "nvidia_cuda"
+        assert normalize_gpu_type("apple-mps") == "apple_mps"
+
     def test_validation_rejects_unknown_gpu_type(self):
         data = {
             "alias": "t",
@@ -1225,6 +1303,80 @@ class TestFieldOwnership:
             and "huggingface_classification" in e["message"]
             for e in errors
         )
+
+    def test_shared_field_is_legal_for_every_owner(self):
+        """use_flash_attention belongs to causal *and* vision (many-to-many).
+
+        A first-match owner lookup rejects it on whichever type is not first
+        in the table, which is a false 422 on a configuration the host
+        accepts.
+        """
+        for backend_type in ("huggingface_causal", "huggingface_vision"):
+            data = {
+                "alias": "t",
+                "model_source": "huggingface://org/model",
+                "backend": {
+                    "backend_type": backend_type,
+                    "use_flash_attention": True,
+                },
+            }
+            assert validate_intent_create(data) == [], backend_type
+
+    def test_shared_field_on_llamacpp_reports_one_error(self):
+        """Both owners are named, but the field is only reported once."""
+        data = {
+            "alias": "t",
+            "model_source": "repo://test:v1",
+            "backend": {
+                "backend_type": "llamacpp",
+                "use_flash_attention": True,
+            },
+        }
+        errors = validate_intent_create(data)
+        flash = [e for e in errors if e["field"] == "backend.use_flash_attention"]
+        assert len(flash) == 1
+        assert "huggingface_causal" in flash[0]["message"]
+        assert "huggingface_vision" in flash[0]["message"]
+
+    def test_explicit_null_backend_field_is_not_a_rejection(self):
+        """A null configures nothing: the host default is the same as omitting
+        the key, and _validate_device already skips None."""
+        data = {
+            "alias": "t",
+            "model_source": "repo://test:v1",
+            "backend": {
+                "backend_type": "llamacpp",
+                "device": None,
+                "dtype": None,
+                "trust_remote_code": None,
+            },
+        }
+        assert validate_intent_create(data) == []
+
+    def test_llamacpp_device_reports_one_error_not_two(self):
+        """The ownership table and _validate_device both cover device; only the
+        more specific message (which names n_gpu_layers/ot) is shown."""
+        data = {
+            "alias": "t",
+            "model_source": "repo://test:v1",
+            "backend": {"backend_type": "llamacpp", "device": "cuda"},
+        }
+        errors = [
+            e for e in validate_intent_create(data) if e["field"] == "backend.device"
+        ]
+        assert len(errors) == 1
+        assert "n_gpu_layers" in errors[0]["message"]
+
+    def test_hf_common_field_message_names_huggingface_backends(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://test:v1",
+            "backend": {"backend_type": "llamacpp", "dtype": "float16"},
+        }
+        errors = validate_intent_create(data)
+        dtype = [e for e in errors if e["field"] == "backend.dtype"]
+        assert len(dtype) == 1
+        assert "huggingface_*" in dtype[0]["message"]
 
     def test_hf_backend_with_repo_source_is_accepted(self):
         """HuggingFace weights in a Harbor artifact are legal — must not be

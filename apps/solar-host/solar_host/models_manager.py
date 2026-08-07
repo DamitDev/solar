@@ -777,6 +777,12 @@ def pull_model(
         # (exact for repo:// pulls); it is captured before the size recompute
         # at step 7 overwrites the local variable.
         total_bytes = size_bytes
+        # ``completed``/``failed`` end the stream. The low-disk abort emits
+        # ``failed`` and then raises, and the handler that catches the raise
+        # emits it again — one pull would report two terminal events, and a
+        # consumer keyed on "first terminal wins" would disagree with one
+        # keyed on "last wins".
+        terminal_emitted = False
 
         def _emit_progress(
             phase: str,
@@ -784,17 +790,31 @@ def pull_model(
             bytes_done: int | None = None,
             speed_bps: float | None = None,
         ) -> None:
+            nonlocal terminal_emitted
             if progress_cb is None:
                 return
-            progress_cb(
-                {
-                    "source_uri": source_uri,
-                    "phase": phase,
-                    "bytes_done": bytes_done,
-                    "bytes_total": total_bytes,
-                    "speed_bps": speed_bps,
-                }
-            )
+            if terminal_emitted:
+                return
+            if phase in ("completed", "failed"):
+                terminal_emitted = True
+            try:
+                progress_cb(
+                    {
+                        "source_uri": source_uri,
+                        "phase": phase,
+                        "bytes_done": bytes_done,
+                        "bytes_total": total_bytes,
+                        "speed_bps": speed_bps,
+                    }
+                )
+            except Exception:
+                # Telemetry must never abort a download that is otherwise fine.
+                logger.warning(
+                    "Pull progress callback failed for %s (phase=%s)",
+                    source_uri,
+                    phase,
+                    exc_info=True,
+                )
 
         _emit_progress("resolving")
 

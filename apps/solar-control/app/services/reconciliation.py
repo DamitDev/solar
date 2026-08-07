@@ -111,6 +111,59 @@ class InstanceStartFailed(HTTPException):
         self.log_tail = log_tail
 
 
+def _parse_start_failure_body(
+    text: str,
+) -> tuple[str, str | None, int | None, list[str] | None]:
+    """Parse a host's start-failure body into (message, instance_id, exit, tail).
+
+    Hosts are deployed separately from control, so three shapes must all be
+    understood (C2):
+
+    * flat — ``{"detail": "...", "instance_id": ..., "exit_code": N,
+      "log_tail": [...]}``, what a current host returns;
+    * nested — ``{"detail": {"detail": "...", "instance_id": ...}}``, which is
+      what FastAPI produces when the payload is raised as an
+      ``HTTPException`` detail rather than returned as a ``JSONResponse``;
+    * legacy — ``{"detail": "some string"}`` or a non-JSON body, from hosts
+      predating the structured payload.
+
+    The returned message is always a ``str``: interpolating a parsed dict into
+    the human-readable 502 would leak a Python ``repr`` to the user.
+    """
+    try:
+        body: Any = json.loads(text)
+    except (ValueError, TypeError):
+        return text, None, None, None
+
+    if not isinstance(body, dict):
+        return (body if isinstance(body, str) else text), None, None, None
+
+    # Unwrap one level of FastAPI's HTTPException nesting.
+    inner = body.get("detail")
+    if isinstance(inner, dict):
+        body = inner
+
+    detail = body.get("detail")
+    message = detail if isinstance(detail, str) else text
+
+    instance_id = body.get("instance_id")
+    if not isinstance(instance_id, str) or not instance_id:
+        instance_id = None
+
+    exit_code = body.get("exit_code")
+    # bool is an int subclass; an exit code is never a boolean.
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+        exit_code = None
+
+    log_tail = body.get("log_tail")
+    if isinstance(log_tail, list):
+        log_tail = [line if isinstance(line, str) else str(line) for line in log_tail]
+    else:
+        log_tail = None
+
+    return message, instance_id, exit_code, log_tail
+
+
 # Hard bound on a single reconciliation action. Host calls are individually
 # time-bounded, but a MIGRATE can chain several (pull with ORAS retries,
 # create, start, delete) and stall the whole loop for minutes; the bound
@@ -144,12 +197,36 @@ def _action_timeout_s(action: Action) -> float:
 # key constant lives in app.redis_state.hosts (PULLS_MAP).
 
 
+def _entry_age_s(at: Any) -> float | None:
+    """Age in seconds of an ISO-8601 ``at`` stamp, or None if unusable.
+
+    ``at`` is written by control (see ``host_pull_progress`` and
+    ``set_host_resource_snapshot``), but an entry persisted by an older build
+    may be naive. Subtracting a naive from an aware datetime raises
+    ``TypeError``, so the naive case is assumed UTC rather than allowed to
+    propagate out of a freshness check.
+    """
+    if not isinstance(at, str):
+        return None
+    try:
+        at_dt = datetime.fromisoformat(at)
+        if at_dt.tzinfo is None:
+            at_dt = at_dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - at_dt).total_seconds()
+    except (ValueError, TypeError):
+        return None
+
+
 async def _pull_progress_fresh(host_id: str | None, source_uri: str) -> bool:
     """True when the host recently reported pull progress for the URI (C4).
 
-    Fresh means the entry's ``at`` timestamp is younger than
-    ``settings.pull_progress_stale_after_s``. Any Redis/parse failure reads
-    as stale, which degrades the progress-aware wait to the plain bound.
+    Fresh means the entry's ``at`` timestamp — control's receive time — is
+    younger than ``settings.pull_progress_stale_after_s``. Any Redis/parse
+    failure reads as stale, which degrades the progress-aware wait to the
+    plain bound.
+
+    A terminal entry (``completed``/``failed``) is never fresh: the pull is
+    over, so there is no progress left to wait for.
     """
     if not host_id or not source_uri:
         return False
@@ -164,14 +241,14 @@ async def _pull_progress_fresh(host_id: str | None, source_uri: str) -> bool:
         entry = json.loads(raw)
     except (ValueError, TypeError):
         return False
-    at = entry.get("at") if isinstance(entry, dict) else None
-    if not isinstance(at, str):
+    if not isinstance(entry, dict):
         return False
-    try:
-        at_dt = datetime.fromisoformat(at)
-    except (ValueError, TypeError):
+    data = entry.get("data")
+    if isinstance(data, dict) and data.get("phase") in ("completed", "failed"):
         return False
-    age = (datetime.now(timezone.utc) - at_dt).total_seconds()
+    age = _entry_age_s(entry.get("at"))
+    if age is None:
+        return False
     return age <= settings.pull_progress_stale_after_s
 
 
@@ -190,48 +267,60 @@ async def _await_action_with_progress(coro: Any, action: Action, intent: Any) ->
     When the ceiling is hit while the host is *still* downloading, the
     raised ``TimeoutError`` carries ``recoverable=True`` so the recorded
     ``last_error`` tells the webui the deployment is still working rather
-    than dead. The action coroutine runs in a shielded task, so a slice
-    timeout never cancels a host call mid-flight.
+    than dead.
+
+    The slice boundary is decided on *task state*, never on exception type:
+    ``asyncio.TimeoutError`` is the builtin ``TimeoutError`` on 3.11+ and
+    aiohttp's timeouts subclass it, so treating a raised timeout as a slice
+    expiry would re-await an already-finished task in a tight loop and
+    swallow the real error. ``asyncio.wait`` leaves the task running on
+    timeout, so a slice boundary never cancels a host call mid-flight.
     """
     if action.type not in _COLD_START_ACTIONS:
         return await asyncio.wait_for(coro, timeout=_ACTION_TIMEOUT_S)
 
     deadline = time.monotonic() + _action_timeout_s(action)
     task = asyncio.ensure_future(coro)
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        slice_s = min(settings.action_progress_slice_s, remaining)
-        try:
-            return await asyncio.wait_for(asyncio.shield(task), timeout=slice_s)
-        except asyncio.TimeoutError:
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            slice_s = min(settings.action_progress_slice_s, remaining)
+            done, _pending = await asyncio.wait({task}, timeout=slice_s)
+            if done:
+                # Returns the action's result, or re-raises its exception
+                # unchanged — including a genuine TimeoutError from a host
+                # call, which must not be mistaken for a slice expiry.
+                return task.result()
             if not await _pull_progress_fresh(action.host_id, intent.model_source):
                 break
 
-    if not task.done():
-        task.cancel()
-        try:
-            await task
-        except BaseException:  # noqa: BLE001 — CancelledError and task errors alike
-            logger.debug(
-                "action task %s cancelled after %s timeout",
-                getattr(task, "get_name", lambda: "?")() or "?",
-                deadline,
+        still_working = await _pull_progress_fresh(action.host_id, intent.model_source)
+        exc = asyncio.TimeoutError(
+            f"Action {action.type} for intent {intent.alias} exceeded its bound "
+            f"({_action_timeout_s(action):.0f}s)"
+            + (
+                f" while the host is still downloading {intent.model_source}"
+                if still_working
+                else ""
             )
-
-    still_working = await _pull_progress_fresh(action.host_id, intent.model_source)
-    exc = asyncio.TimeoutError(
-        f"Action {action.type} for intent {intent.alias} exceeded its bound "
-        f"({_action_timeout_s(action):.0f}s)"
-        + (
-            f" while the host is still downloading {intent.model_source}"
-            if still_working
-            else ""
         )
-    )
-    exc.recoverable = still_working  # type: ignore[attr-defined]
-    raise exc
+        exc.recoverable = still_working  # type: ignore[attr-defined]
+        raise exc
+    finally:
+        # Covers both giving up above and an outer cancellation (reconciler
+        # shutdown): without this the task would keep running detached.
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except BaseException:  # noqa: BLE001 — CancelledError and task errors alike
+                logger.debug(
+                    "Cancelled in-flight %s action task for intent %s",
+                    action.type,
+                    getattr(intent, "alias", "?"),
+                )
 
 
 # How long the *displaced* intent is left alone after a displacement
@@ -279,6 +368,9 @@ class Reconciler:
         # drops the intent's stale entries.
         self._config_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._config_cache_spec: dict[str, str] = {}
+        # C3: spec version whose fleet violations have already been logged, so
+        # a legacy spec is reported once rather than on every tick forever.
+        self._fleet_violations_logged: dict[str, str | None] = {}
 
     # ── Lifecycle ──────────────────────────────────────────────
 
@@ -364,6 +456,41 @@ class Reconciler:
                 intent.id,
             )
             self._backoff.pop(intent.id, None)
+
+    def _log_fleet_violations(self, intent: Any, hosts: list[Any]) -> None:
+        """Report hard fleet violations in an already-stored spec, once (C3).
+
+        A spec written before these rules existed cannot be fixed from here —
+        only the owner can edit it — so this is pure diagnostics. It runs off
+        the roster ``_observe`` already fetched and logs once per spec version:
+        an unfixed legacy spec must not fill the log at one line per tick.
+        """
+        # _spec_version is None for a settled intent — the common case — so
+        # "never checked" has to be distinguished from "checked at version
+        # None" rather than leaning on dict.get's default.
+        version = _spec_version(intent)
+        if (
+            intent.id in self._fleet_violations_logged
+            and self._fleet_violations_logged[intent.id] == version
+        ):
+            return
+        try:
+            from app.services.intent_validation import validate_intent_fleet_hard
+
+            hard = validate_intent_fleet_hard(intent.model_dump(), hosts)
+        except Exception:
+            logger.warning(
+                "Fleet validation skipped for intent %s", intent.id, exc_info=True
+            )
+            return
+        self._fleet_violations_logged[intent.id] = version
+        if hard:
+            logger.error(
+                "Intent %s (%s) violates fleet validation: %s",
+                intent.id,
+                intent.alias,
+                hard,
+            )
 
     def _backoff_active(self, intent_id: str) -> bool:
         """Return True if backoff is active and retry should be skipped."""
@@ -460,24 +587,6 @@ class Reconciler:
             logger.debug("Intent %s in backoff, skipping", intent.id)
             return
 
-        # C3 defensive fleet validation: a spec written before these rules
-        # existed shows up in the logs instead of silently churning.
-        try:
-            from app.services.intent_validation import validate_intent_fleet
-
-            hard, _warnings = await validate_intent_fleet(intent.model_dump())
-            if hard:
-                logger.error(
-                    "Intent %s (%s) violates fleet validation: %s",
-                    intent.id,
-                    intent.alias,
-                    hard,
-                )
-        except Exception:
-            logger.debug(
-                "Fleet validation skipped for intent %s", intent.id, exc_info=True
-            )
-
         # Settle window: skip diffing right after a CREATE/MIGRATE so the
         # host's WS push lands before we re-observe (closes the
         # duplicate-create window; still refresh status).
@@ -493,6 +602,13 @@ class Reconciler:
         # 1. Observe
         observed = await self._observe(intent)
 
+        # C3 defensive fleet validation: a spec written before these rules
+        # existed shows up in the logs instead of silently churning. Only the
+        # hard half runs, off the roster _observe already fetched, and only
+        # once per spec version — the advisory half reads a snapshot per host
+        # and belongs on the write path, where the user can act on it.
+        self._log_fleet_violations(intent, observed.get("hosts") or [])
+
         # ── S-042: Check if a strategy is already in-flight ──────
         strategy_progress = self._get_strategy_progress(intent)
         if strategy_progress is not None:
@@ -506,15 +622,12 @@ class Reconciler:
         ):
             # Normal delete/scale-to-zero flow via _diff
             actions = self._diff(intent, observed)
-            drift_replace = any(
-                a.type == ActionType.REPLACE and a.reason == "backend config drift"
-                for a in actions
-            )
             if not actions:
-                await self._update_status(intent, observed, drift_replace=drift_replace)
+                await self._update_status(intent, observed)
                 return
             actions.sort(key=lambda a: a.priority)
             action = actions[0]
+            drift_replace = _is_drift_replace(action)
             last_error = None
             action_succeeded = False
             try:
@@ -577,22 +690,18 @@ class Reconciler:
 
         # 2. Diff
         actions = self._diff(intent, observed)
-        drift_replace = any(
-            a.type == ActionType.REPLACE and a.reason == "backend config drift"
-            for a in actions
-        )
 
         # ── S-042: Check if a strategy should be initiated ────────
         strategy_progress_data = self._maybe_initiate_strategy(
             intent, observed, actions
         )
         if strategy_progress_data is not None:
-            # Persist strategy_progress; next tick will execute it
+            # Persist strategy_progress; next tick will execute it. No action
+            # ran, so the drift counter does not move.
             await self._update_status(
                 intent,
                 observed,
                 strategy_progress=strategy_progress_data,
-                drift_replace=drift_replace,
             )
             return
 
@@ -605,7 +714,6 @@ class Reconciler:
                 intent,
                 observed,
                 spec_settled=_spec_settled(observed, actions),
-                drift_replace=drift_replace,
             )
             return
 
@@ -613,6 +721,11 @@ class Reconciler:
         # Actions are sorted by priority (stops first, creates last)
         actions.sort(key=lambda a: a.priority)
         action = actions[0]
+        # Counted off the action actually executed, not every planned one: a
+        # drift REPLACE that loses the priority sort is not an attempt, and
+        # counting it would burn the breaker's budget without ever having
+        # tried the replacement.
+        drift_replace = _is_drift_replace(action)
         logger.info(
             "Reconciling intent %s (%s): action=%s reason=%s",
             intent.id,
@@ -1190,8 +1303,7 @@ class Reconciler:
                         host_id=inst.get("_host_id"),
                         instance_id=inst_id,
                         reason=(
-                            f"model_source drift: {inst_source} → "
-                            f"{intent.model_source}"
+                            f"model_source drift: {inst_source} → {intent.model_source}"
                         ),
                         priority=20,
                     )
@@ -1816,10 +1928,11 @@ class Reconciler:
                 # not stopped, when possible — leave it untouched.
                 from app.redis_state import host_store as _hs
 
-                inst_priority, displaced_intent_id = (
-                    await self._displaced_instance_info(
-                        action.host_id, action.instance_id
-                    )
+                (
+                    inst_priority,
+                    displaced_intent_id,
+                ) = await self._displaced_instance_info(
+                    action.host_id, action.instance_id
                 )
                 if displaced_intent_id:
                     self._settle_until[displaced_intent_id] = (
@@ -2081,7 +2194,7 @@ class Reconciler:
                     await release_host_capacity(host, host_reservation_id)
                 except HTTPException as exc:
                     logger.warning(
-                        "Failed to release reservation %s for intent %s on " "%s: %s",
+                        "Failed to release reservation %s for intent %s on %s: %s",
                         host_reservation_id,
                         intent.id,
                         host_id,
@@ -2119,20 +2232,12 @@ class Reconciler:
                     # (C2): {"detail", "instance_id", "exit_code", "log_tail"}.
                     # Parse what we can so last_error links the failure to
                     # its process logs; older hosts send a plain string.
-                    body_instance_id = None
-                    exit_code = None
-                    log_tail = None
-                    try:
-                        body = json.loads(text)
-                    except (ValueError, TypeError):
-                        body = None
-                    if isinstance(body, dict):
-                        body_instance_id = body.get("instance_id") or None
-                        exit_code = body.get("exit_code")
-                        log_tail = body.get("log_tail")
-                        detail_msg = body.get("detail") or text
-                    else:
-                        detail_msg = text
+                    (
+                        detail_msg,
+                        body_instance_id,
+                        exit_code,
+                        log_tail,
+                    ) = _parse_start_failure_body(text)
                     raise InstanceStartFailed(
                         detail=(
                             f"Host '{host.name}' failed to start instance "
@@ -2288,7 +2393,6 @@ class Reconciler:
         # Drift circuit breaker bookkeeping (C1): count consecutive
         # drift-driven REPLACE rounds; reset when the spec settles (or was
         # edited — the update route resets the counter in status_json).
-        unsettled_keys = observed.get("_drift_unsettled")
         prev_attempts = getattr(intent.status, "drift_replace_attempts", 0) or 0
         if drift_replace:
             drift_attempts = prev_attempts + 1
@@ -2296,6 +2400,19 @@ class Reconciler:
             drift_attempts = 0
         else:
             drift_attempts = prev_attempts
+
+        # Only the diff path can observe the tripped breaker, so the state is
+        # carried on the status: a tick that returns through the settle window
+        # or a rollout strategy never populates ``observed`` and would let the
+        # phase flip back to Ready, flapping every other tick. It is cleared
+        # when the spec settles (or is edited, via the update route).
+        unsettled_keys: list[str] | set[str] = observed.get("_drift_unsettled") or []
+        if not unsettled_keys and not spec_settled:
+            unsettled_keys = list(
+                getattr(intent.status, "drift_unsettled_keys", None) or []
+            )
+        if spec_settled:
+            unsettled_keys = []
 
         # Determine phase
         current_phase = intent.status.phase.value
@@ -2378,7 +2495,7 @@ class Reconciler:
                         status=True,
                         reason="ShortfallOrFailure",
                         message=(
-                            f"{ready_count}/{desired} ready — " f"{shortfall_reason}"
+                            f"{ready_count}/{desired} ready — {shortfall_reason}"
                             if shortfall_reason
                             else (
                                 f"{ready_count}/{desired} ready — "
@@ -2462,6 +2579,7 @@ class Reconciler:
             "last_error": last_error_model.model_dump() if last_error_model else None,
             "spec_changed_at": None if spec_settled else _spec_version(intent),
             "drift_replace_attempts": drift_attempts,
+            "drift_unsettled_keys": sorted(unsettled_keys),
             "shortfall_reason": shortfall_reason,
         }
 
@@ -2559,8 +2677,7 @@ def _shortfall_reason(intent: Any, observed: dict[str, Any]) -> str | None:
     # An explicit allow-list smaller than the request can never be satisfied.
     if host_allow and len(host_allow) < desired:
         return (
-            f"host_allow names {len(host_allow)} host(s), "
-            f"{desired} replicas requested"
+            f"host_allow names {len(host_allow)} host(s), {desired} replicas requested"
         )
 
     hosts = observed.get("hosts", [])
@@ -2615,6 +2732,11 @@ def _spec_version(intent: Any) -> str | None:
     (S-044), which is what makes it usable as a spec identity.
     """
     return getattr(getattr(intent, "status", None), "spec_changed_at", None)
+
+
+def _is_drift_replace(action: Action) -> bool:
+    """Whether *action* is the drift-driven REPLACE the C1 breaker counts."""
+    return action.type == ActionType.REPLACE and action.reason == "backend config drift"
 
 
 def _spec_settled(observed: dict[str, Any], actions: list[Action]) -> bool:
@@ -2681,13 +2803,19 @@ def _detect_backend_drift(intent: Any, instance_config: dict[str, Any]) -> list[
 
 
 def _jsonish(value: Any) -> Any:
-    """Parse a JSON-looking string; pass dicts/lists through; else None.
+    """Parse a JSON-looking string; pass JSON-native values through; else None.
+
+    Scalars (bool/int/float) pass through so a string-typed spec value can be
+    compared against the host's coerced value: C1's premise is host-side
+    Pydantic coercion, which turns ``"true"`` into ``True`` and ``"99"`` into
+    ``99``. Excluding them from this layer left exactly those cases reading as
+    drift.
 
     The sentinel is None, so a JSON literal null (which parses to None) is
     indistinguishable from 'not JSON' — acceptable, since a null spec value
     equals a None instance value via the exact equality fast path anyway.
     """
-    if isinstance(value, (dict, list)):
+    if isinstance(value, (dict, list, bool, int, float)):
         return value
     if isinstance(value, str):
         try:
@@ -2713,6 +2841,18 @@ def _coerce_jsonish(value: Any) -> Any:
         return [_coerce_jsonish(v) for v in value]
     if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
         return value.strip().lower() == "true"
+    return value
+
+
+def _strip_relative_prefix(value: str) -> str:
+    """Drop leading './' segments from a relative spec path.
+
+    ``lstrip("./")`` takes a *set* of characters, so it would eat leading dots
+    and slashes indiscriminately — turning '.gitignore' into 'gitignore' and
+    then failing to match a path that really ends in '/.gitignore'.
+    """
+    while value.startswith("./"):
+        value = value[2:]
     return value
 
 
@@ -2747,8 +2887,13 @@ def _backend_value_matches(spec_value: Any, inst_value: Any) -> bool:
 
     if isinstance(spec_value, str) and isinstance(inst_value, str):
         if any(c in spec_value for c in "*?["):
-            return fnmatch.fnmatch(os.path.basename(inst_value), spec_value)
-        return inst_value.endswith("/" + spec_value.lstrip("./"))
+            # A pattern with a directory component must be matched against a
+            # matching number of trailing path segments, not the basename:
+            # 'models/*.gguf' can never equal a basename.
+            depth = spec_value.replace(os.sep, "/").count("/") + 1
+            tail = "/".join(inst_value.replace(os.sep, "/").split("/")[-depth:])
+            return fnmatch.fnmatch(tail, spec_value.replace(os.sep, "/"))
+        return inst_value.endswith("/" + _strip_relative_prefix(spec_value))
     return False
 
 

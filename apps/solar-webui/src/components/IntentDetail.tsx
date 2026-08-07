@@ -6,11 +6,11 @@
 
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { AlertCircle, ArrowLeft, ChevronDown, FileText, Pencil, Trash2, TriangleAlert } from 'lucide-react';
+import { AlertCircle, ArrowLeft, ChevronDown, FileText, Pencil, Trash2, TriangleAlert, X } from 'lucide-react';
 import solarClient from '@/api/client';
-import { Intent, IntentCondition } from '@/api/types';
+import { Intent, IntentCondition, IntentFieldNotice, PullProgressEntry } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
-import type { PullProgressEvent } from '@/hooks/useEventStream';
+import { isTerminalPullPhase, PULL_PROGRESS_TERMINAL_GRACE_MS, type PullProgressEvent } from '@/hooks/useEventStream';
 import { useFallbackPolling } from '@/hooks/useFallbackPolling';
 import { cn, formatDateTime, formatRelativeTime } from '@/lib/utils';
 import { IntentPhaseBadge } from './IntentBadges';
@@ -30,10 +30,18 @@ function StatBlock({ label, children }: { label: string; children: ReactNode }) 
 }
 
 /** C4: compact pull-progress row — live bar while downloading, terminal
- * status line once the host finished (or failed) the pull. */
-function pullProgressRow(progress: PullProgressEvent | undefined): ReactNode {
+ * status line for a short grace once the host finished (or failed) the pull.
+ *
+ * A finished pull is only news for a moment: the outcome shows up in the
+ * replica table or the error block, so a row that stayed forever would keep
+ * claiming a download is relevant long after it ended. */
+function pullProgressRow(progress: PullProgressEvent | undefined, now: number = Date.now()): ReactNode {
   if (!progress) return null;
   const data = progress.data;
+  if (isTerminalPullPhase(data.phase)) {
+    const at = progress.timestamp ? Date.parse(progress.timestamp) : NaN;
+    if (Number.isNaN(at) || now - at > PULL_PROGRESS_TERMINAL_GRACE_MS) return null;
+  }
   const total = data.bytes_total ?? 0;
   const done = data.bytes_done ?? 0;
   const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
@@ -84,6 +92,30 @@ function pullProgressRow(progress: PullProgressEvent | undefined): ReactNode {
   return null;
 }
 
+/**
+ * C4: the newest `GET /api/pulls` entry for one of *hostIds*, shaped like a
+ * stream event so both sources render through the same row.
+ *
+ * Keys are "{host_id}|{source_uri}"; `at` is control's receive time.
+ */
+function restPullFor(
+  pulls: Record<string, PullProgressEntry>,
+  hostIds: (string | null)[],
+  sourceUri: string,
+): PullProgressEvent | undefined {
+  let best: PullProgressEvent | undefined;
+  for (const [key, entry] of Object.entries(pulls)) {
+    const [hostId, entrySource] = key.split('|', 2);
+    if (entrySource !== sourceUri) continue;
+    // A null in hostIds means "host unknown yet", so accept any host.
+    if (!hostIds.some((h) => h === null || h === hostId)) continue;
+    if (!best || (entry.at ?? '') > (best.timestamp ?? '')) {
+      best = { host_id: hostId, timestamp: entry.at, data: entry.data };
+    }
+  }
+  return best;
+}
+
 function ConditionChip({ condition }: { condition: IntentCondition }) {
   const active = condition.status;
   const color = active
@@ -123,6 +155,16 @@ export function IntentDetail() {
   const [showEdit, setShowEdit] = useState(false);
   // C2: process-log viewer for a failed instance (from last_error).
   const [logViewer, setLogViewer] = useState<{ hostId: string; instanceId: string } | null>(null);
+  // C4: pull progress seen before this view mounted. The event stream only
+  // carries pulls that started while the page was open, so a cold start
+  // already in flight would show nothing until it finished.
+  const [restPulls, setRestPulls] = useState<Record<string, PullProgressEntry>>({});
+  /* C3: advisory warnings are returned with a save and are not part of the
+   * intent record, so the next intent_update replaces `intent` with a copy
+   * that has none. Held separately, and dismissible — an advisory the user
+   * has read should not be permanent furniture. */
+  const [warnings, setWarnings] = useState<IntentFieldNotice[]>([]);
+  const [warningsDismissed, setWarningsDismissed] = useState(false);
 
   const fetchIntent = useCallback(async () => {
     if (!id) return;
@@ -130,6 +172,10 @@ export function IntentDetail() {
       const record = await solarClient.getIntent(id);
       setFetched(record);
       setError(null);
+      if (record.warnings && record.warnings.length > 0) {
+        setWarnings(record.warnings);
+        setWarningsDismissed(false);
+      }
     } catch (err: any) {
       if (err?.response?.status === 404) {
         setFetched(null);
@@ -142,8 +188,27 @@ export function IntentDetail() {
 
   useEffect(() => {
     setFetched(undefined);
+    setWarnings([]);
+    setWarningsDismissed(false);
     fetchIntent();
   }, [fetchIntent]);
+
+  // C4: a pull already running when this view opened emitted its events
+  // before the socket handler existed; control's cache has them.
+  useEffect(() => {
+    let cancelled = false;
+    solarClient
+      .getPulls()
+      .then((pulls) => {
+        if (!cancelled) setRestPulls(pulls);
+      })
+      .catch(() => {
+        // Progress is a nicety; the rest of the view does not depend on it.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
 
   // C5: fallback polling — REST refreshes only while the socket is down.
   useFallbackPolling(fetchIntent, { enabled: !isConnected, intervalMs: DETAIL_POLL_INTERVAL_MS });
@@ -211,8 +276,25 @@ export function IntentDetail() {
   const pendingStored = status.phase === 'pending' && status.reconcile === 'idle';
   const partialFulfillment = status.phase === 'degraded' && status.shortfall > 0;
   const hasConflict = status.conditions.some((c) => c.type === 'Conflict');
-  // C3: advisory warnings returned with the last create/update save.
-  const warnings = intent.warnings ?? [];
+  const shownWarnings = warningsDismissed ? [] : warnings;
+
+  /* C4: a pull belongs to the host that is downloading, so ask per host —
+   * two hosts pulling the same model report independent progress. The
+   * intent's own replicas name those hosts; before the first replica lands
+   * there is no host to ask for, and the newest entry for the source is the
+   * best answer available. */
+  const replicaHostIds = status.replica_set.map((r) => r.host_id).filter((h): h is string => !!h);
+  const pullHostIds = replicaHostIds.length > 0 ? replicaHostIds : [status.last_error?.host_id ?? null];
+  const livePull = intent.model_source
+    ? (pullHostIds
+        .map((hostId) => getPullProgress(hostId, intent.model_source))
+        .filter((p): p is PullProgressEvent => !!p)
+        .sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? ''))[0] ??
+      restPullFor(restPulls, pullHostIds, intent.model_source))
+    : undefined;
+  /* A pull is only news while the deployment is still converging; on a ready
+   * intent the row is noise. */
+  const showPull = status.phase === 'reconciling' || status.phase === 'degraded';
 
   const metadataEntries = Object.entries(intent.metadata ?? {});
 
@@ -294,19 +376,27 @@ export function IntentDetail() {
         )}
 
         {/* C3: advisory warnings returned with the last save */}
-        {warnings.length > 0 && (
+        {shownWarnings.length > 0 && (
           <div className="p-3 bg-nord-13 bg-opacity-15 border border-nord-13 rounded text-sm text-nord-6 flex items-start gap-2">
             <TriangleAlert size={16} className="flex-shrink-0 mt-0.5" />
-            <div>
+            <div className="flex-1 min-w-0">
               <p className="font-medium">Saved with warnings</p>
               <ul className="mt-1 space-y-0.5 text-xs text-nord-4">
-                {warnings.map((w, i) => (
+                {shownWarnings.map((w, i) => (
                   <li key={i}>
                     {w.field}: {w.message}
                   </li>
                 ))}
               </ul>
             </div>
+            <button
+              onClick={() => setWarningsDismissed(true)}
+              aria-label="Dismiss warnings"
+              title="Dismiss"
+              className="flex-shrink-0 p-0.5 rounded text-nord-4 hover:text-nord-6 hover:bg-nord-3 transition-colors"
+            >
+              <X size={14} />
+            </button>
           </div>
         )}
 
@@ -319,6 +409,10 @@ export function IntentDetail() {
           <StatBlock label="Available">{status.available ? 'yes' : 'no'}</StatBlock>
           <StatBlock label="Missing">{status.shortfall}</StatBlock>
         </dl>
+
+        {/* C4: model pull progress — above the replicas it explains, since an
+            empty replica table during a cold start is the thing it answers */}
+        {showPull && pullProgressRow(livePull)}
 
         {/* Replica set */}
         <section>
@@ -428,30 +522,49 @@ export function IntentDetail() {
           </section>
         )}
 
-        {/* C4: live model pull progress for the intent's model source */}
-        {intent.model_source && pullProgressRow(getPullProgress(intent.model_source))}
+        {/* C4: a recoverable last_error is not a failure — the reconciler gave
+            up on this attempt while the host was still making progress (a cold
+            start pull, typically) and will pick it up again. Amber, and instead
+            of the red block: showing both says "error" louder than it says
+            "wait". */}
+        {status.last_error && status.last_error.recoverable && (
+          <div className="p-4 bg-nord-13 bg-opacity-15 border border-nord-13 rounded-lg flex items-start gap-3">
+            <TriangleAlert className="text-nord-13 flex-shrink-0" size={20} />
+            <div className="text-sm flex-1 min-w-0">
+              <p className="font-semibold text-nord-6">
+                Still working
+                {status.last_error.host_id && (
+                  <span className="font-normal text-nord-4"> · host {status.last_error.host_id}</span>
+                )}
+                {status.last_error.source_uri && (
+                  <span className="font-normal text-nord-4"> · {status.last_error.source_uri}</span>
+                )}
+              </p>
+              <p className="text-nord-4 mt-1">
+                The host is still preparing this deployment — the last attempt ran out of time while it was making
+                progress, and reconciliation continues automatically.
+              </p>
+              <p className="text-xs text-nord-4 mt-1">
+                {status.last_error.code} · {formatDateTime(status.last_error.at)}
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Last error — C2: links to the failed instance's process logs */}
-        {status.last_error && (
+        {status.last_error && !status.last_error.recoverable && (
           <div className="p-4 bg-nord-11 bg-opacity-20 border border-nord-11 rounded-lg flex items-start gap-3">
             <AlertCircle className="text-nord-11 flex-shrink-0" size={20} />
             <div className="text-sm flex-1 min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <p className="font-semibold text-nord-11">
-                  {status.last_error.code}
-                  {status.last_error.host_id && (
-                    <span className="font-normal text-nord-4"> · host {status.last_error.host_id}</span>
-                  )}
-                  {status.last_error.source_uri && (
-                    <span className="font-normal text-nord-4"> · {status.last_error.source_uri}</span>
-                  )}
-                </p>
-                {status.last_error.recoverable && (
-                  <span className="px-1.5 py-0.5 rounded bg-nord-13 bg-opacity-30 text-nord-6 text-[10px] uppercase tracking-wide">
-                    host still working
-                  </span>
+              <p className="font-semibold text-nord-11">
+                {status.last_error.code}
+                {status.last_error.host_id && (
+                  <span className="font-normal text-nord-4"> · host {status.last_error.host_id}</span>
                 )}
-              </div>
+                {status.last_error.source_uri && (
+                  <span className="font-normal text-nord-4"> · {status.last_error.source_uri}</span>
+                )}
+              </p>
               <p className="text-nord-4 mt-1">{status.last_error.message}</p>
               {status.last_error.log_tail && status.last_error.log_tail.length > 0 && (
                 <pre className="mt-2 rounded-md bg-nord-1 border border-nord-11 border-opacity-40 p-2 text-[11px] font-mono text-nord-4 overflow-x-auto max-h-40 overflow-y-auto">
@@ -543,6 +656,8 @@ export function IntentDetail() {
           onSaved={(updated) => {
             setShowEdit(false);
             setFetched(updated);
+            setWarnings(updated.warnings ?? []);
+            setWarningsDismissed(false);
           }}
         />
       )}
@@ -558,6 +673,7 @@ export function IntentDetail() {
           hostId={logViewer.hostId}
           instanceId={logViewer.instanceId}
           alias={intent.alias}
+          postMortem
           onClose={() => setLogViewer(null)}
         />
       )}

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { FORBIDDEN_BACKEND_FIELDS, validateIntentRequest, sanitizeIntentBackend } from '@/lib/intentValidation';
+import {
+  FORBIDDEN_BACKEND_FIELDS,
+  normalizeGpuType,
+  validateIntentRequest,
+  sanitizeIntentBackend,
+} from '@/lib/intentValidation';
 
 const validRequest = {
   alias: 'my-model',
@@ -152,6 +157,74 @@ describe('validateIntentRequest', () => {
   it('rejects empty placement roles', () => {
     expect(fieldNames({ placement: { roles: [] } })).toContain('placement.roles');
     expect(fieldNames({ placement: { roles: ['inference'] } })).not.toContain('placement.roles');
+  });
+
+  describe('placement.gpu_type', () => {
+    it('rejects a token the server would reject too', () => {
+      const errors = errorsFor({ placement: { gpu_type: 'quantum' } });
+      const gpuError = errors.find((e) => e.field === 'placement.gpu_type');
+      expect(gpuError).toBeDefined();
+      // Naming the accepted values beats a bare rejection.
+      expect(gpuError!.message).toContain('nvidia_cuda');
+    });
+
+    it('accepts every canonical token and alias the server accepts', () => {
+      for (const token of ['nvidia_cuda', 'apple_mps', 'cpu', 'nvidia', 'cuda', 'mps', 'metal', 'apple', 'none']) {
+        expect(fieldNames({ placement: { gpu_type: token } })).not.toContain('placement.gpu_type');
+      }
+    });
+
+    it('ignores case and the -/_ spelling, as the server does', () => {
+      for (const token of ['NVIDIA', 'NVIDIA-CUDA', 'nvidia-cuda', ' Apple-MPS ', 'Metal']) {
+        expect(fieldNames({ placement: { gpu_type: token } })).not.toContain('placement.gpu_type');
+      }
+    });
+
+    it('treats an empty gpu_type as "any" rather than invalid', () => {
+      expect(fieldNames({ placement: { gpu_type: '' } })).not.toContain('placement.gpu_type');
+      expect(fieldNames({ placement: { gpu_type: null } })).not.toContain('placement.gpu_type');
+    });
+  });
+
+  describe('placement.host_allow', () => {
+    it('rejects a host that is both allowed and denied', () => {
+      const errors = errorsFor({ placement: { host_allow: ['h1', 'h2'], host_deny: ['h2'] } });
+      const err = errors.find((e) => e.field === 'placement.host_allow');
+      expect(err).toBeDefined();
+      expect(err!.message).toContain('h2');
+    });
+
+    it('accepts disjoint allow and deny lists', () => {
+      expect(fieldNames({ placement: { host_allow: ['h1'], host_deny: ['h2'] } })).not.toContain(
+        'placement.host_allow',
+      );
+    });
+  });
+});
+
+describe('normalizeGpuType', () => {
+  it('mirrors the control-side normalization', () => {
+    // Same canonical tokens and aliases as app/validation.py; the previous
+    // table invented amd_rocm/auto and missed metal/apple/none.
+    expect(normalizeGpuType('nvidia_cuda')).toBe('nvidia_cuda');
+    expect(normalizeGpuType('nvidia-cuda')).toBe('nvidia_cuda');
+    expect(normalizeGpuType('NVIDIA')).toBe('nvidia_cuda');
+    expect(normalizeGpuType('cuda')).toBe('nvidia_cuda');
+    expect(normalizeGpuType('apple_mps')).toBe('apple_mps');
+    expect(normalizeGpuType('apple-mps')).toBe('apple_mps');
+    expect(normalizeGpuType('Metal')).toBe('apple_mps');
+    expect(normalizeGpuType('mps')).toBe('apple_mps');
+    expect(normalizeGpuType('none')).toBe('cpu');
+    expect(normalizeGpuType('cpu')).toBe('cpu');
+  });
+
+  it('returns null for unknown, empty and non-values', () => {
+    expect(normalizeGpuType('rocm')).toBeNull();
+    expect(normalizeGpuType('auto')).toBeNull();
+    expect(normalizeGpuType('')).toBeNull();
+    expect(normalizeGpuType('   ')).toBeNull();
+    expect(normalizeGpuType(null)).toBeNull();
+    expect(normalizeGpuType(undefined)).toBeNull();
   });
 });
 

@@ -129,11 +129,18 @@ async def _read_fresh_ws_snapshot(
     resources = entry.get("resources")
     if not isinstance(resources, dict) or not isinstance(at, str):
         return None
+    # Age is computed against control's clock, and ``at`` is written by
+    # control, so the two are comparable. The subtraction stays inside the
+    # try because an entry left by an older build may be naive, and mixing
+    # naive with aware raises TypeError — which must not escape a freshness
+    # check into _observe.
     try:
         at_dt = datetime.fromisoformat(at)
+        if at_dt.tzinfo is None:
+            at_dt = at_dt.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - at_dt).total_seconds()
     except (ValueError, TypeError):
         return None
-    age = (datetime.now(timezone.utc) - at_dt).total_seconds()
     if age > settings.host_snapshot_max_age_s:
         return None
     return resources, at

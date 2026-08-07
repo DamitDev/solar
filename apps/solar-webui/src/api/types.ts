@@ -664,6 +664,12 @@ export interface IntentStatus {
   ready_at?: string | null;
 }
 
+/** A per-field message from intent validation — an error or an advisory. */
+export interface IntentFieldNotice {
+  field: string;
+  message: string;
+}
+
 export interface Intent {
   id: string;
   alias: string;
@@ -677,7 +683,7 @@ export interface Intent {
   metadata: Record<string, string>;
   status: IntentStatus;
   /** C3: advisory warnings from create/update — response-only, never persisted. */
-  warnings?: { field: string; message: string }[] | null;
+  warnings?: IntentFieldNotice[] | null;
 }
 
 export interface IntentDeletedResponse {

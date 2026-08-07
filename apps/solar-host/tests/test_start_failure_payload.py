@@ -1,19 +1,26 @@
 """C2 structured start-failure payload: POST /instances/{id}/start answers
 500 with {detail, instance_id, exit_code, log_tail} so control can link the
-failure to its process logs."""
+failure to its process logs.
+
+Asserted at the wire level. The fields have to be top-level in the serialized
+body: solar-control reads ``body["instance_id"]`` directly, and raising the
+payload as an ``HTTPException`` detail would nest it under FastAPI's own
+``detail`` key where control cannot see it.
+"""
 
 import sys
-from typing import cast
+from pathlib import Path
 
 import pytest
-
-from fastapi import HTTPException
+from starlette.testclient import TestClient
 
 from solar_host.backends.llamacpp import LlamaCppRunner
-from solar_host.config import config_manager, settings
+from solar_host.config import config_manager
+from solar_host.main import app
 from solar_host.models import InstanceStatus
 from solar_host.models.llamacpp import LlamaCppConfig
-from solar_host.process_manager import ProcessManager
+
+API_KEY = "test-api-key"
 
 
 class _ScriptRunner(LlamaCppRunner):
@@ -42,8 +49,10 @@ def _make_instance(instance_id: str = "inst-1", status=InstanceStatus.STOPPED):
 
 
 @pytest.fixture(autouse=True)
-def _isolated_env(tmp_path, monkeypatch):
+def _isolated_env(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("solar_host.config.settings.log_dir", str(tmp_path / "logs"))
+    monkeypatch.setattr("solar_host.config.settings.solar_control_url", "")
+    monkeypatch.setattr("solar_host.config.settings.api_key", API_KEY)
     monkeypatch.setattr("solar_host.config.settings.instance_ready_timeout_s", 5.0)
     monkeypatch.setattr("solar_host.config.settings.start_failure_log_tail_lines", 20)
     config_manager.config_file = tmp_path / "config.json"
@@ -51,28 +60,39 @@ def _isolated_env(tmp_path, monkeypatch):
     return tmp_path
 
 
-@pytest.mark.anyio
-async def test_start_failure_body_is_structured(_isolated_env, monkeypatch):
-    from solar_host.routes.instances import start_instance
+@pytest.fixture()
+def client():
+    with TestClient(app, raise_server_exceptions=True) as c:
+        yield c
 
-    script = (
-        "print('loading model', flush=True); "
-        "print('fatal: bad config', flush=True); "
-        "import sys; sys.exit(7)"
-    )
+
+def _headers() -> dict:
+    return {"X-API-Key": API_KEY}
+
+
+def _use_script(monkeypatch, script: str) -> None:
     monkeypatch.setattr(
         "solar_host.process_manager.get_runner_for_config",
         lambda cfg: _ScriptRunner(script),
     )
-    manager = ProcessManager()
-    manager.instance_runners["inst-1"] = _ScriptRunner(script)
+
+
+def test_start_failure_body_is_flat_and_structured(client, monkeypatch):
+    """The diagnostic fields are top-level, not nested under "detail"."""
+    _use_script(
+        monkeypatch,
+        "print('loading model', flush=True); "
+        "print('fatal: bad config', flush=True); "
+        "import sys; sys.exit(7)",
+    )
     _make_instance("inst-1")
 
-    with pytest.raises(HTTPException) as excinfo:
-        await start_instance("inst-1")
+    resp = client.post("/instances/inst-1/start", headers=_headers())
 
-    assert excinfo.value.status_code == 500
-    body: dict = cast(dict, excinfo.value.detail)  # structured body at runtime
+    assert resp.status_code == 500
+    body = resp.json()
+    # Guards the regression: an HTTPException detail would make this a dict.
+    assert isinstance(body["detail"], str)
     assert body["instance_id"] == "inst-1"
     assert body["exit_code"] == 7
     assert "loading model" in body["log_tail"]
@@ -80,25 +100,16 @@ async def test_start_failure_body_is_structured(_isolated_env, monkeypatch):
     assert "Process exited unexpectedly" in body["detail"]
 
 
-@pytest.mark.anyio
-async def test_log_tail_bounded_by_setting(_isolated_env, monkeypatch):
-    from solar_host.routes.instances import start_instance
-
+def test_log_tail_bounded_by_setting(client, monkeypatch):
     monkeypatch.setattr("solar_host.config.settings.start_failure_log_tail_lines", 1)
-    script = (
+    _use_script(
+        monkeypatch,
         "print('first', flush=True); print('second', flush=True); "
-        "import sys; sys.exit(1)"
+        "import sys; sys.exit(1)",
     )
-    monkeypatch.setattr(
-        "solar_host.process_manager.get_runner_for_config",
-        lambda cfg: _ScriptRunner(script),
-    )
-    manager = ProcessManager()
-    manager.instance_runners["inst-1"] = _ScriptRunner(script)
     _make_instance("inst-1")
 
-    with pytest.raises(HTTPException) as excinfo:
-        await start_instance("inst-1")
+    resp = client.post("/instances/inst-1/start", headers=_headers())
 
-    body: dict = cast(dict, excinfo.value.detail)
-    assert body["log_tail"] == ["second"]
+    assert resp.status_code == 500
+    assert resp.json()["log_tail"] == ["second"]

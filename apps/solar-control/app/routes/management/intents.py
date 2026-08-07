@@ -61,7 +61,7 @@ async def create_intent(request: Request, body: IntentCreate) -> IntentResponse:
     if hard_errors:
         raise HTTPException(
             status_code=422,
-            detail={"detail": "Invalid intent", "errors": errors + hard_errors},
+            detail={"detail": "Invalid intent", "errors": hard_errors},
         )
     warnings = warnings + validate_intent_warnings(data)
 
@@ -143,15 +143,16 @@ async def update_intent(
             status_code=409,
             detail={
                 "detail": (
-                    f"Intent '{existing.alias}' is being deleted and cannot be "
-                    f"updated"
+                    f"Intent '{existing.alias}' is being deleted and cannot be updated"
                 )
             },
         )
 
     data = body.model_dump()
 
-    errors = validate_intent_update(data, current_alias=existing.alias)
+    errors = validate_intent_update(
+        data, current_alias=existing.alias, current_backend=existing.backend
+    )
     if errors:
         raise HTTPException(
             status_code=422,
@@ -168,7 +169,7 @@ async def update_intent(
     if hard_errors:
         raise HTTPException(
             status_code=422,
-            detail={"detail": "Invalid intent", "errors": errors + hard_errors},
+            detail={"detail": "Invalid intent", "errors": hard_errors},
         )
     warnings = warnings + validate_intent_warnings(data)
 
@@ -180,7 +181,7 @@ async def update_intent(
             status_code=409,
             detail={
                 "detail": (
-                    f"An active intent already exists for alias " f"'{existing.alias}'"
+                    f"An active intent already exists for alias '{existing.alias}'"
                 )
             },
         )

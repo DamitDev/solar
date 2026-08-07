@@ -24,9 +24,22 @@ import { DeleteIntentModal } from './DeleteIntentModal';
 
 const POLL_INTERVAL_MS = 10_000;
 
-/** C4: compact live-pull indicator for the intents table. */
-function pullProgressRow(intent: Intent, lookup: (sourceUri: string) => PullProgressEvent | undefined): ReactNode {
-  const progress = lookup(intent.model_source);
+/**
+ * C4: compact live-pull indicator for the intents table.
+ *
+ * The lookup is per host, so the row asks for the intent's own replicas and
+ * shows the newest of them — with the same model on two hosts, matching on
+ * the source alone could report the wrong host's download.
+ */
+function pullProgressRow(
+  intent: Intent,
+  lookup: (hostId: string | null | undefined, sourceUri: string) => PullProgressEvent | undefined,
+): ReactNode {
+  const hostIds = intent.status?.replica_set?.map((r) => r.host_id).filter((h): h is string => !!h) ?? [];
+  const progress = (hostIds.length > 0 ? hostIds : [null])
+    .map((hostId) => lookup(hostId, intent.model_source))
+    .filter((p): p is PullProgressEvent => !!p)
+    .sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? ''))[0];
   if (!progress || progress.data.phase !== 'downloading') return null;
   const total = progress.data.bytes_total ?? 0;
   const done = progress.data.bytes_done ?? 0;

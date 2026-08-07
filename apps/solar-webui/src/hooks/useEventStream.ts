@@ -57,6 +57,48 @@ export interface PullProgressEvent {
   data: PullProgressData;
 }
 
+/** A pull that ended: nothing further will arrive on this key. */
+export function isTerminalPullPhase(phase: string | undefined): boolean {
+  return phase === 'completed' || phase === 'failed';
+}
+
+/** How long a finished pull stays visible before it is dropped (C4). */
+export const PULL_PROGRESS_TERMINAL_GRACE_MS = 60_000;
+/** Hard ceiling on tracked pulls, mirroring the per-instance log cap. */
+const MAX_PULL_PROGRESS_ENTRIES = 200;
+
+/**
+ * Keep the pull-progress map bounded.
+ *
+ * Every (host, model) pair a session ever sees adds a key that nothing else
+ * removes, and a finished pull would otherwise be reported as current
+ * forever. Finished pulls age out after a grace so a late-arriving viewer
+ * still sees the outcome; *keepKey* is never dropped so the entry just
+ * written always survives.
+ */
+export function prunePullProgress(
+  entries: Map<string, PullProgressEvent>,
+  keepKey?: string,
+  now: number = Date.now(),
+): Map<string, PullProgressEvent> {
+  for (const [key, entry] of entries) {
+    if (key === keepKey || !isTerminalPullPhase(entry.data?.phase)) continue;
+    const at = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
+    // An unparseable stamp is treated as expired: a terminal entry we cannot
+    // age is exactly the one that would linger forever.
+    if (Number.isNaN(at) || now - at > PULL_PROGRESS_TERMINAL_GRACE_MS) {
+      entries.delete(key);
+    }
+  }
+  if (entries.size <= MAX_PULL_PROGRESS_ENTRIES) return entries;
+  const oldestFirst = [...entries.entries()].sort((a, b) => (a[1].timestamp ?? '').localeCompare(b[1].timestamp ?? ''));
+  for (const [key] of oldestFirst) {
+    if (entries.size <= MAX_PULL_PROGRESS_ENTRIES) break;
+    if (key !== keepKey) entries.delete(key);
+  }
+  return entries;
+}
+
 export interface InstanceSummary {
   id: string;
   alias?: string;
@@ -517,7 +559,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
                 timestamp: event.timestamp,
                 data: event.data,
               });
-              return m;
+              return prunePullProgress(m, key);
             });
           }
           break;
@@ -698,9 +740,21 @@ export function useEventStream(handlers: EventHandlers = {}) {
     });
   }, []);
 
-  // C4: latest pull progress for an intent's model source (any host).
+  /**
+   * C4: pull progress for one host's copy of a model.
+   *
+   * Keyed by host, not just source: two hosts pulling the same model produce
+   * two independent progressions, and matching on the source alone showed
+   * whichever arrived last — potentially a different host's download.
+   *
+   * `hostId` may be null when the caller does not know which host is pulling
+   * yet (a shortfall CREATE has not landed a replica), in which case the
+   * newest entry for the source is the best available answer.
+   */
   const getPullProgress = useCallback(
-    (sourceUri: string): PullProgressEvent | undefined => {
+    (hostId: string | null | undefined, sourceUri: string): PullProgressEvent | undefined => {
+      if (!sourceUri) return undefined;
+      if (hostId) return pullProgress.get(`${hostId}|${sourceUri}`);
       let latest: PullProgressEvent | undefined;
       for (const [key, entry] of pullProgress) {
         if (key.endsWith(`|${sourceUri}`)) {

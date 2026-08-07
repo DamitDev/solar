@@ -126,9 +126,8 @@ async def test_structured_failure_body_carries_instance_details(mock_host):
         '(exit code: 1)", "instance_id": "inst-1", "exit_code": 1, '
         '"log_tail": ["loading model", "fatal: bad config"]}'
     )
-    with _mock_failed_start(body):
-        with pytest.raises(InstanceStartFailed) as excinfo:
-            await reconciler._start_instance(mock_host, "inst-1")
+    with _mock_failed_start(body), pytest.raises(InstanceStartFailed) as excinfo:
+        await reconciler._start_instance(mock_host, "inst-1")
 
     exc = excinfo.value
     assert exc.status_code == 502
@@ -140,13 +139,73 @@ async def test_structured_failure_body_carries_instance_details(mock_host):
 
 
 @pytest.mark.anyio
+async def test_nested_failure_body_is_unwrapped(mock_host):
+    """A host that raised the payload as an HTTPException detail still parses.
+
+    FastAPI wraps ``HTTPException.detail`` in its own ``detail`` key, so such a
+    host puts the diagnostic fields one level deeper. Hosts deploy separately
+    from control, so both shapes have to work.
+    """
+    from app.services.reconciliation import InstanceStartFailed, reconciler
+
+    body = (
+        '{"detail": {"detail": "Failed to start instance: Process exited '
+        'unexpectedly (exit code: 3)", "instance_id": "inst-1", '
+        '"exit_code": 3, "log_tail": ["boom"]}}'
+    )
+    with _mock_failed_start(body), pytest.raises(InstanceStartFailed) as excinfo:
+        await reconciler._start_instance(mock_host, "inst-1")
+
+    exc = excinfo.value
+    assert exc.instance_id == "inst-1"
+    assert exc.exit_code == 3
+    assert exc.log_tail == ["boom"]
+    # Never leak a dict repr into the human-readable detail.
+    assert "{" not in exc.detail
+    assert "Process exited unexpectedly" in exc.detail
+
+
+@pytest.mark.anyio
+async def test_legacy_dict_body_with_string_detail(mock_host):
+    """A pre-C2 host answers {"detail": "..."} — no structured fields."""
+    from app.services.reconciliation import InstanceStartFailed, reconciler
+
+    body = '{"detail": "Failed to start instance: Process exited unexpectedly"}'
+    with _mock_failed_start(body), pytest.raises(InstanceStartFailed) as excinfo:
+        await reconciler._start_instance(mock_host, "inst-1")
+
+    exc = excinfo.value
+    assert "Process exited unexpectedly" in exc.detail
+    assert exc.instance_id == "inst-1"  # falls back to the requested id
+    assert exc.exit_code is None
+    assert exc.log_tail is None
+
+
+def test_parse_start_failure_body_rejects_malformed_fields():
+    """Wrong-typed fields degrade to None rather than propagating garbage."""
+    from app.services.reconciliation import _parse_start_failure_body
+
+    message, instance_id, exit_code, log_tail = _parse_start_failure_body(
+        '{"detail": 42, "instance_id": "", "exit_code": true, "log_tail": "nope"}'
+    )
+    # A non-string detail falls back to the raw body rather than a repr.
+    assert isinstance(message, str)
+    assert instance_id is None
+    # bool is an int subclass, but an exit code is never a boolean.
+    assert exit_code is None
+    assert log_tail is None
+
+
+@pytest.mark.anyio
 async def test_plain_string_body_keeps_legacy_502(mock_host):
     """Older hosts send a plain string; the legacy 502 detail survives."""
     from app.services.reconciliation import InstanceStartFailed, reconciler
 
-    with _mock_failed_start("Process exited unexpectedly (exit code: 1)"):
-        with pytest.raises(InstanceStartFailed) as excinfo:
-            await reconciler._start_instance(mock_host, "inst-1")
+    with (
+        _mock_failed_start("Process exited unexpectedly (exit code: 1)"),
+        pytest.raises(InstanceStartFailed) as excinfo,
+    ):
+        await reconciler._start_instance(mock_host, "inst-1")
 
     exc = excinfo.value
     assert exc.status_code == 502
@@ -161,18 +220,19 @@ async def test_plain_string_body_keeps_legacy_502(mock_host):
 @pytest.mark.anyio
 async def test_last_error_carries_structured_fields():
     """The reconciler's last_error mapping populates instance_id + log_tail."""
+    from unittest.mock import patch as _patch
+
+    from test_reconciliation import (
+        _HostStub,
+        _make_intent,
+        _make_observed,
+        _SnapshotStub,
+    )
+
     from app.services.reconciliation import (
         InstanceStartFailed,
         Reconciler,
     )
-
-    from test_reconciliation import (
-        _HostStub,
-        _SnapshotStub,
-        _make_intent,
-        _make_observed,
-    )
-    from unittest.mock import patch as _patch
 
     reconciler = Reconciler()
     intent = _make_intent(replicas=1)

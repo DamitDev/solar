@@ -15,8 +15,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from fixtures.helpers import wait_for
-from fixtures.intents import create_intent, get_intent, intent_payload
+from fixtures.intents import intent_payload
 
 pytestmark = pytest.mark.intent_path
 

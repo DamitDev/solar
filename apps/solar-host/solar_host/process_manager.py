@@ -184,11 +184,18 @@ class ProcessManager:
         """Register a retained dead-instance log buffer, evicting the oldest."""
         self._retained_log_ids.pop(instance_id, None)
         self._retained_log_ids[instance_id] = None
-        while len(self._retained_log_ids) > settings.retained_log_buffers:
-            oldest = next(iter(self._retained_log_ids))
-            self._retained_log_ids.pop(oldest, None)
-            self.log_buffers.pop(oldest, None)
-            self.log_sequences.pop(oldest, None)
+        for candidate in list(self._retained_log_ids):
+            if len(self._retained_log_ids) <= settings.retained_log_buffers:
+                break
+            # A stop/start cycle leaves the id registered here while the
+            # instance runs again. Dropping a live buffer would also reset
+            # log_sequences to 0 on the next line, breaking the
+            # seq:timestamp dedup the webui LogViewer relies on.
+            if candidate in self.processes:
+                continue
+            self._retained_log_ids.pop(candidate, None)
+            self.log_buffers.pop(candidate, None)
+            self.log_sequences.pop(candidate, None)
 
     def _handle_child_exit(self, instance_id: str, process: subprocess.Popen) -> None:
         """Mark instance FAILED when the child process exits unexpectedly.
@@ -567,6 +574,18 @@ class ProcessManager:
 
         instance.port = self._get_available_port()
 
+        # A readiness timeout records no exit code of its own, so a stale one
+        # from an earlier attempt would be reported as this failure's cause
+        # (C2).
+        self.last_exit_codes.pop(instance_id, None)
+        # On a retry, drop the previous attempt's lines so log_tail describes
+        # the attempt that actually failed. Only on a retry: a first attempt
+        # after a stop would otherwise discard the retained buffer the user
+        # may still be reading.
+        if attempt > 0:
+            self.log_buffers.pop(instance_id, None)
+            self.log_sequences.pop(instance_id, None)
+
         runner = get_runner_for_config(instance.config)
         self.instance_runners[instance_id] = runner
         self.instance_contexts[instance_id] = runner.initialize_context()
@@ -622,6 +641,10 @@ class ProcessManager:
             )
 
             self.processes[instance_id] = process
+            # No longer a dead instance: holding a retention slot would let a
+            # later eviction drop this live instance's log buffer. A failure
+            # from here on re-retains it via _purge_instance_resources.
+            self._retained_log_ids.pop(instance_id, None)
 
             log_thread = threading.Thread(
                 target=self._read_logs,
@@ -763,30 +786,44 @@ class ProcessManager:
         """Clean up old log files for stopped instances (C2).
 
         Files older than ``settings.log_file_retention_s`` are unlinked. The
-        most recent file per alias is always kept regardless of age, so the
-        last boot is never lost.
+        most recent file per *(alias, instance_id)* is always kept regardless
+        of age: keeping only the newest per alias would leave a multi-replica
+        intent with a single post-mortem, discarding every other replica's.
         """
         try:
             alias_safe = alias.replace(":", "-").replace("/", "-")
             pattern = f"{alias_safe}_*.log"
-            newest: Path | None = None
-            newest_mtime = 0.0
+            files: list[tuple[Path, float, str]] = []
             for log_file in self.log_dir.glob(pattern):
                 try:
                     mtime = log_file.stat().st_mtime
                 except OSError:
                     continue
-                if mtime > newest_mtime:
-                    newest, newest_mtime = log_file, mtime
+                # {alias_safe}_{instance_id}_{ts}.log — the alias prefix is
+                # known, and the timestamp is the last component, so what is
+                # left in between is the instance id. Files predating the
+                # instance-id naming yield "" and share one group.
+                remainder = log_file.stem[len(alias_safe) + 1 :]
+                instance_id = remainder.rpartition("_")[0]
+                files.append((log_file, mtime, instance_id))
+
+            newest_per_instance: dict[str, Path] = {}
+            newest_mtimes: dict[str, float] = {}
+            for log_file, mtime, instance_id in files:
+                if mtime > newest_mtimes.get(instance_id, -1.0):
+                    newest_per_instance[instance_id] = log_file
+                    newest_mtimes[instance_id] = mtime
+
             cutoff = time.time() - settings.log_file_retention_s
-            for log_file in self.log_dir.glob(pattern):
+            for log_file, mtime, instance_id in files:
                 # Path equality by value: glob() yields fresh Path objects on
                 # every call, so identity comparison would never match.
-                if log_file == newest:
+                if log_file == newest_per_instance.get(instance_id):
+                    continue
+                if mtime >= cutoff:
                     continue
                 try:
-                    if log_file.stat().st_mtime < cutoff:
-                        log_file.unlink()
+                    log_file.unlink()
                 except OSError:
                     continue
         except Exception as e:  # noqa: BLE001

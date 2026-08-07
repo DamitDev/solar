@@ -13,11 +13,9 @@ API exposes snapshot_source so the read model is observable.
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 
 import pytest
-from fixtures.constants import MODEL_ALIAS
 from fixtures.helpers import wait_for
 
 pytestmark = pytest.mark.infrastructure
