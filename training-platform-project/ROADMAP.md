@@ -108,6 +108,10 @@ Enables Solar to autonomously manage resources, migrate instances, and fulfill d
 | S-050 | Host resource snapshot over the WS push plus the Redis read model. `host_health` carries the full snapshot; `solar:hosts:snapshots` cache-first fetch with HTTP fallback (`snapshot_source: ws/http/none`); `endpoints_update` events. | solar-control, solar-host | M | S-041 |
 | S-051 | Model pull progress telemetry and progress-aware cold-start bounds. Host `progress_cb` + `pull_progress` WS events; `solar:hosts:pulls` cache + `GET /api/pulls`; reconciler waits with sliced progress-aware bounds (`recoverable` last_error). | solar-control, solar-host | M | S-041 |
 | S-052 | Intent validation layer. Accelerator vocabulary with aliases, per-backend field ownership, device contract, modality rules, and fleet-aware advisory validation reusing the placement filter chain. | solar-control | M | S-040, S-044 |
+| S-053 | Drift circuit-breaker persistence. Hydrate `drift_replace_attempts`, `drift_unsettled_keys` and `shortfall_reason` in `_row_to_response` so the breaker survives a reload, plus a pin test that every key `_update_status` writes is hydrated on read. | solar-control | S | S-049 |
+| S-054 | Update grandfathering for modality rules, path-scoped drift comparison (resolved path keys only, absolute instance values), and `gpu_type` normalization on the reconciler read path. | solar-control | M | S-049, S-052 |
+| S-055 | Recoverable cold-start failures on the inner pull bound. A resolver timeout raised inside the action is marked `recoverable` when Redis pull progress is still fresh, so the webui shows "still working" instead of a hard error. | solar-control | S | S-051 |
+| S-056 | Progress-aware resolver timeouts. Replace the total pull bound in the model resolvers with a read-idle bound so a healthy slow download is not cancelled and a stalled one fails promptly. | solar-control | M | S-055 |
 
 ---
 
@@ -293,6 +297,7 @@ Adds the destructive counterpart to the upload path: models and versions can be 
 | U-008 | Add catalog delete UI. Version list in the model detail panel, repository and version delete with a confirmation modal (blocked state for running instances, host-cache warning, typed confirmation for repo delete, per-version results). | solar-webui | M | S-048 |
 | U-009 | webui: process logs on start failures (log_tail + View process logs), live model pull progress, field-level validation errors and advisory warnings, shortfall_reason and strategy_progress messages. Event-driven endpoint pages with fallback polling. | solar-webui | M | S-049, S-051, S-052 |
 | U-010 | webui: `huggingface_vision` in the backend-mode picker. Recorded, not implemented in the five-case-fixes PR. | solar-webui | S | - |
+| U-011 | webui: intent form error routing (render-tracked banner filter, auto-open collapsed sections, scroll to first error) and advisory warnings carried across the create redirect. | solar-webui | M | S-052, U-009 |
 
 ---
 

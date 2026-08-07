@@ -58,6 +58,12 @@ class IntentDB:
                 strategy_progress=status.get("strategy_progress"),
                 last_error=status.get("last_error"),
                 spec_changed_at=status.get("spec_changed_at"),
+                # C1: the drift circuit breaker only counts across ticks if
+                # the persisted counter survives the reload. Without these the
+                # breaker resets to 0 every tick and can never trip.
+                drift_replace_attempts=status.get("drift_replace_attempts", 0),
+                drift_unsettled_keys=status.get("drift_unsettled_keys", []),
+                shortfall_reason=status.get("shortfall_reason"),
                 created_at=row.created_at.isoformat() if row.created_at else None,
                 updated_at=row.updated_at.isoformat() if row.updated_at else None,
                 last_reconciled_at=(

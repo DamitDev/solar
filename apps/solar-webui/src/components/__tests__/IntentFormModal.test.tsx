@@ -252,6 +252,118 @@ describe('IntentFormModal in edit mode', () => {
     await waitFor(() => expect(screen.queryByText(/too many/)).not.toBeInTheDocument());
   });
 
+  it('keeps a 422 visible when the field owns a slot that did not mount', async () => {
+    // backend.mmproj only renders a slot in llm mode, and the server only
+    // rejects mmproj outside llm mode — the two conditions are exclusive, so a
+    // hand-maintained "has an inline slot" list drops the error entirely and
+    // the user gets a red box reading "Invalid intent" and nothing else.
+    vi.spyOn(solarClient, 'updateIntent').mockRejectedValue({
+      response: {
+        status: 422,
+        data: {
+          detail: {
+            detail: 'Invalid intent',
+            errors: [{ field: 'backend.mmproj', message: "mmproj is meaningless for model_type 'embedding'" }],
+          },
+        },
+      },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    renderEdit({ backend: { backend_type: 'llamacpp', model_type: 'embedding', mmproj: 'mmproj.gguf' } });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText('Invalid intent')).toBeInTheDocument();
+    expect(screen.getByText('backend.mmproj')).toBeInTheDocument();
+    expect(screen.getByText(/meaningless for model_type/)).toBeInTheDocument();
+  });
+
+  it('keeps a model_file error visible when the backend is not llama.cpp', async () => {
+    // The model_file slot lives inside the llama.cpp branch, so it does not
+    // mount on a HuggingFace backend — which is the only configuration that
+    // produces the error. Client-side validation gets there before the server
+    // here, and used to set a field error with no slot and no banner, so the
+    // submit button did nothing at all.
+    const updateIntent = vi.spyOn(solarClient, 'updateIntent');
+    renderEdit({ backend: { backend_type: 'huggingface_causal', model_file: 'm.gguf' } });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText('backend.model_file')).toBeInTheDocument();
+    expect(screen.getByText(/only available for the llama\.cpp backend/)).toBeInTheDocument();
+    expect(updateIntent).not.toHaveBeenCalled();
+  });
+
+  it('keeps a 422 on device visible when the backend is llama.cpp', async () => {
+    vi.spyOn(solarClient, 'updateIntent').mockRejectedValue({
+      response: {
+        status: 422,
+        data: {
+          detail: {
+            detail: 'Invalid intent',
+            errors: [{ field: 'backend.device', message: 'device is only supported for huggingface_* backends' }],
+          },
+        },
+      },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    renderEdit({ backend: { backend_type: 'llamacpp', model_type: 'llm', device: 'cuda' } });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText('Invalid intent')).toBeInTheDocument();
+    expect(screen.getByText('backend.device')).toBeInTheDocument();
+    expect(screen.getByText(/only supported for huggingface_\* backends/)).toBeInTheDocument();
+  });
+
+  it('renders an error inline, not in the banner, when its slot did mount', async () => {
+    vi.spyOn(solarClient, 'updateIntent').mockRejectedValue({
+      response: {
+        status: 422,
+        data: {
+          detail: {
+            detail: 'Invalid intent',
+            errors: [{ field: 'backend.mmproj', message: 'mmproj must be a non-empty string' }],
+          },
+        },
+      },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    renderEdit({ backend: { backend_type: 'llamacpp', model_type: 'llm', mmproj: 'mmproj.gguf' } });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText(/must be a non-empty string/)).toBeInTheDocument();
+    // Shown once, next to the input — not also listed in the banner.
+    expect(screen.queryByText('backend.mmproj')).not.toBeInTheDocument();
+  });
+
+  it('opens a collapsed section that holds an error', async () => {
+    vi.spyOn(solarClient, 'updateIntent').mockRejectedValue({
+      response: {
+        status: 422,
+        data: {
+          detail: {
+            detail: 'Invalid intent',
+            errors: [{ field: 'resources.vram_gb', message: 'vram_gb exceeds every host' }],
+          },
+        },
+      },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // No seeded resources or metadata, so the section starts closed and the
+    // inline error would render into a section the user cannot see.
+    renderEdit({ resources: { vram_gb: null, ram_gb: null } as any, metadata: {} });
+
+    const section = screen.getByText(/Resources & Metadata/).closest('details') as HTMLDetailsElement;
+    expect(section.open).toBe(false);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText(/exceeds every host/)).toBeInTheDocument();
+    await waitFor(() => expect(section.open).toBe(true));
+  });
+
   it('rejects an unknown gpu_type before the round trip', async () => {
     const updateIntent = vi.spyOn(solarClient, 'updateIntent');
     renderEdit({ placement: { roles: ['inference'], gpu_type: 'rocm', host_allow: [], host_deny: [] } as any });

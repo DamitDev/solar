@@ -5,7 +5,7 @@
  */
 
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { AlertCircle, ArrowLeft, ChevronDown, FileText, Pencil, Trash2, TriangleAlert, X } from 'lucide-react';
 import solarClient from '@/api/client';
 import { Intent, IntentCondition, IntentFieldNotice, PullProgressEntry } from '@/api/types';
@@ -147,6 +147,7 @@ const CONDITION_LABELS: Record<string, string> = {
 export function IntentDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const { intents, getPullProgress, isConnected } = useEventStreamContext();
 
   const [fetched, setFetched] = useState<Intent | null | undefined>(undefined); // null = 404
@@ -172,10 +173,9 @@ export function IntentDetail() {
       const record = await solarClient.getIntent(id);
       setFetched(record);
       setError(null);
-      if (record.warnings && record.warnings.length > 0) {
-        setWarnings(record.warnings);
-        setWarningsDismissed(false);
-      }
+      // Warnings are deliberately not recomputed by GET /api/intents/{id} —
+      // the fleet-derived ones would mean a fleet scan on every detail poll.
+      // A create's advisories arrive through the navigation state instead.
     } catch (err: any) {
       if (err?.response?.status === 404) {
         setFetched(null);
@@ -188,9 +188,17 @@ export function IntentDetail() {
 
   useEffect(() => {
     setFetched(undefined);
-    setWarnings([]);
+    // C3: a create redirects here with its advisories in the navigation state,
+    // since they exist only on the create response. The entry is cleared right
+    // away so a reload of this URL does not resurrect a stale advisory.
+    const carried = (location.state as { warnings?: IntentFieldNotice[] } | null)?.warnings;
+    setWarnings(carried ?? []);
     setWarningsDismissed(false);
+    if (carried) navigate(location.pathname, { replace: true, state: null });
     fetchIntent();
+    // location.state is read once per navigation; re-running on every location
+    // identity change would clear the warnings the redirect just delivered.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchIntent]);
 
   // C4: a pull already running when this view opened emitted its events

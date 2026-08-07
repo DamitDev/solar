@@ -31,6 +31,7 @@ from app.config import settings
 from app.redis_state.connection import redis_client
 from app.redis_state.freshness import entry_age_s
 from app.redis_state.hosts import PULLS_MAP
+from app.validation import normalize_gpu_type
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +256,31 @@ async def _pull_progress_state(host_id: str | None, source_uri: str) -> _PullSta
     if age <= settings.pull_progress_stale_after_s:
         return _PullState.FRESH
     return _PullState.STALE
+
+
+async def _failure_is_recoverable(
+    exc: BaseException, host_id: str | None, source_uri: str
+) -> bool:
+    """Whether *exc* is a give-up while the host is demonstrably still working.
+
+    ``_await_action_with_progress`` marks the synthetic timeout it raises
+    itself, but that is not the only bound in play: the control-to-host pull
+    request carries its own ``ClientTimeout(total=model_pull_timeout_s)``
+    (30 min by default), which fires *inside* ``_act`` and therefore arrives
+    here as a genuine task result with no marker. The host is unaffected — it
+    runs ``pull_model`` in a thread and keeps downloading — so reporting a
+    hard failure would contradict the progress the user is watching tick up.
+
+    Every aiohttp timeout subclasses ``asyncio.TimeoutError`` (itself the
+    builtin ``TimeoutError`` on 3.11+), so the one check covers the client
+    timeouts and the reconciler's own. A stalled or absent pull is not
+    recoverable: "still working" has to mean something.
+    """
+    if getattr(exc, "recoverable", False):
+        return True
+    if not isinstance(exc, asyncio.TimeoutError):
+        return False
+    return await _pull_progress_state(host_id, source_uri) is _PullState.FRESH
 
 
 async def _await_action_with_progress(coro: Any, action: Action, intent: Any) -> Any:
@@ -575,6 +601,7 @@ class Reconciler:
         from app.services.drain import sweep_drained_hosts
 
         intents = await intent_db.list_active_for_reconciliation()
+        self._prune_intent_state({intent.id for intent in intents})
 
         logger.debug("Reconciling %d active intent(s)", len(intents))
         for intent in intents:
@@ -609,6 +636,39 @@ class Reconciler:
             await sweep_drained_hosts()
         except Exception:
             logger.exception("Drain sweep failed")
+
+    def _prune_intent_state(self, live_intent_ids: set[str]) -> None:
+        """Drop per-intent bookkeeping for intents that no longer exist.
+
+        These dicts are only ever written, so a deleted intent's entries used
+        to survive for the lifetime of the process. The listing is every
+        non-soft-deleted intent, which makes "absent from it" the same thing
+        as "gone".
+
+        ``_displace_cooldown`` is keyed by *instance* id rather than intent id,
+        so it is pruned by expiry instead: its values are monotonic deadlines,
+        and one that has passed is already inert.
+        """
+        for state in (
+            self._backoff,
+            self._settle_until,
+            self._fleet_violations_logged,
+            self._config_cache_spec,
+        ):
+            for intent_id in [k for k in state if k not in live_intent_ids]:
+                del state[intent_id]
+
+        self._config_cache = {
+            key: value
+            for key, value in self._config_cache.items()
+            if key[0] in live_intent_ids
+        }
+
+        now = time.monotonic()
+        for instance_id in [
+            k for k, deadline in self._displace_cooldown.items() if now >= deadline
+        ]:
+            del self._displace_cooldown[instance_id]
 
     # ── Per-intent reconciliation ──────────────────────────────
 
@@ -709,7 +769,9 @@ class Reconciler:
                     "log_tail": getattr(e, "log_tail", None),
                     # C4: set when the action gave up while the host was
                     # still making progress (e.g. a cold-start pull).
-                    "recoverable": bool(getattr(e, "recoverable", False)),
+                    "recoverable": await _failure_is_recoverable(
+                        e, action.host_id, intent.model_source
+                    ),
                 }
             if action_succeeded and last_error is None:
                 self._backoff_clear(intent.id)
@@ -818,7 +880,9 @@ class Reconciler:
                 "log_tail": getattr(e, "log_tail", None),
                 # C4: set when the action gave up while the host was still
                 # making progress (e.g. a cold-start pull).
-                "recoverable": bool(getattr(e, "recoverable", False)),
+                "recoverable": await _failure_is_recoverable(
+                    e, action.host_id, intent.model_source
+                ),
             }
 
         # Update backoff state
@@ -990,7 +1054,9 @@ class Reconciler:
                     "instance_id": getattr(e, "instance_id", None)
                     or action_dict.get("instance_id"),
                     "log_tail": getattr(e, "log_tail", None),
-                    "recoverable": bool(getattr(e, "recoverable", False)),
+                    "recoverable": await _failure_is_recoverable(
+                        e, action_dict.get("host_id"), intent.model_source
+                    ),
                 }
                 if new_progress and isinstance(e, StartOutcomeUnknown):
                     # The replacement may be coming up. Hold the step where it
@@ -1192,11 +1258,7 @@ class Reconciler:
             else None
         )
         req_roles = list(placement.roles) if placement.roles else ["inference"]
-        req_gpu = (
-            placement.gpu_type
-            if hasattr(placement, "gpu_type") and placement.gpu_type
-            else None
-        )
+        req_gpu = _requested_gpu_type(placement)
         req_allow = (
             list(placement.host_allow)
             if hasattr(placement, "host_allow") and placement.host_allow
@@ -2741,7 +2803,7 @@ def _shortfall_reason(intent: Any, observed: dict[str, Any]) -> str | None:
     roles = list(placement.roles) if placement.roles else ["inference"]
     host_allow = list(getattr(placement, "host_allow", None) or [])
     host_deny = list(getattr(placement, "host_deny", None) or [])
-    gpu_type = getattr(placement, "gpu_type", None)
+    gpu_type = _requested_gpu_type(placement)
 
     # An explicit allow-list smaller than the request can never be satisfied.
     if host_allow and len(host_allow) < desired:
@@ -2791,6 +2853,26 @@ def _shortfall_reason(intent: Any, observed: dict[str, Any]) -> str | None:
             )
 
     return None
+
+
+def _requested_gpu_type(placement: Any) -> str | None:
+    """The intent's ``placement.gpu_type`` as placement compares it (C3).
+
+    Normalization runs in ``validate_intent_create``, which mutates the payload
+    before it is stored — so a row written before that landed can still hold an
+    alias token such as ``mps``. ``validate_intent_fleet`` normalizes on read
+    before running the very same filter chain, so without this the fleet
+    validator reports such an intent as placeable while the reconciler places
+    nothing: precisely the disagreement §3.5 set out to make impossible.
+
+    Falls back to the raw value when the token is unknown, exactly as
+    ``intent_validation`` does — an unrecognized token must keep matching
+    nothing rather than silently widen to "any host".
+    """
+    raw = getattr(placement, "gpu_type", None)
+    if not raw:
+        return None
+    return normalize_gpu_type(raw) or raw
 
 
 def _spec_version(intent: Any) -> str | None:
@@ -2866,7 +2948,7 @@ def _detect_backend_drift(intent: Any, instance_config: dict[str, Any]) -> list[
         if key not in instance_config:
             continue  # flat WS cache does not carry this field
         inst_value = instance_config.get(key)
-        if not _backend_value_matches(value, inst_value):
+        if not _backend_value_matches(value, inst_value, key=key):
             drifted.append(key)
     return drifted
 
@@ -2913,6 +2995,17 @@ def _coerce_jsonish(value: Any) -> Any:
     return value
 
 
+# Backend keys the host resolves into an absolute path at start time, so the
+# spec's pattern and the instance's reported value are legitimately different
+# strings. Every other field compares literally: `ot` is a llama.cpp tensor
+# override *regex* that routinely contains '*', '?' and '[', and glob-matching
+# it reports no drift where there is some — silently keeping a stale replica
+# alive after a real config change.
+_PATH_RESOLVED_KEYS: frozenset[str] = frozenset(
+    {"mmproj", "chat_template_file", "model_file", "spec_draft_model"}
+)
+
+
 def _strip_relative_prefix(value: str) -> str:
     """Drop leading './' segments from a relative spec path.
 
@@ -2925,7 +3018,7 @@ def _strip_relative_prefix(value: str) -> str:
     return value
 
 
-def _backend_value_matches(spec_value: Any, inst_value: Any) -> bool:
+def _backend_value_matches(spec_value: Any, inst_value: Any, *, key: str = "") -> bool:
     """Compare a backend spec value against the instance's reported value.
 
     Three comparison layers, tried in order:
@@ -2937,14 +3030,14 @@ def _backend_value_matches(spec_value: Any, inst_value: Any) -> bool:
        applies at the config boundary (``_coerce_jsonish``). This tolerates
        the host re-serializing ``chat_template_kwargs`` as compact canonical
        JSON with real booleans.
-    3. Path/glob equality: the instance's full config carries resolve-time
-       artifacts — absolute paths the host resolved from the spec's
-       patterns. A bare filename (e.g. mmproj: 'mmproj-BF16.gguf'), a glob
-       ('*mmproj-BF16*.gguf') or a relative path ('sub/mmproj.gguf') in the
-       spec that matches the tail of the instance's resolved path is a
-       match. Treating these as drift flags every replacement while a spec
-       change is pending, trapping the intent in a REPLACE-stop churn that
-       never lets the edit settle.
+    3. Path/glob equality, for ``_PATH_RESOLVED_KEYS`` only: the instance's
+       full config carries resolve-time artifacts — absolute paths the host
+       resolved from the spec's patterns. A bare filename (e.g. mmproj:
+       'mmproj-BF16.gguf'), a glob ('*mmproj-BF16*.gguf') or a relative path
+       ('sub/mmproj.gguf') in the spec that matches the tail of the
+       instance's resolved path is a match. Treating these as drift flags
+       every replacement while a spec change is pending, trapping the intent
+       in a REPLACE-stop churn that never lets the edit settle.
     """
     if spec_value == inst_value:
         return True
@@ -2954,7 +3047,15 @@ def _backend_value_matches(spec_value: Any, inst_value: Any) -> bool:
     if parsed_spec is not None and parsed_inst is not None:
         return _coerce_jsonish(parsed_spec) == _coerce_jsonish(parsed_inst)
 
-    if isinstance(spec_value, str) and isinstance(inst_value, str):
+    if (
+        key in _PATH_RESOLVED_KEYS
+        and isinstance(spec_value, str)
+        and isinstance(inst_value, str)
+        # Only a resolved absolute path can be the tail-match target. A
+        # relative instance value is the spec's own form, so comparing it with
+        # endswith would call 'a/m.gguf' and 'b/m.gguf' equal.
+        and inst_value.replace(os.sep, "/").startswith("/")
+    ):
         if any(c in spec_value for c in "*?["):
             # A pattern with a directory component must be matched against a
             # matching number of trailing path segments, not the basename:

@@ -46,9 +46,21 @@ ameddig a letöltés. Több GB esetén ez percek, és ez alatt **nem hiba**, ha 
   `MODEL_PULL_TIMEOUT_S + HOST_START_TIMEOUT_S + 60` másodperces korláton belül
   várnak, nem a rövid 60 másodpercesen. Amíg a letöltés halad, a várakozás
   végigmegy; ha a host abbahagyja a jelentést, a művelet hamarabb feladja.
+- A külső korláton belül van egy **belső korlát is**: a modell letöltése a
+  resolverben `MODEL_PULL_TIMEOUT_S` (alapból 1800 s, azaz 30 perc) teljes
+  időkorláttal fut, és ez a teljes letöltésre vonatkozik, nem a némaságra. Egy
+  elég nagy modell elég lassú kapcsolaton tehát akkor is elbukhat 30 percnél,
+  ha a letöltés végig haladt. Ilyenkor a `MODEL_PULL_TIMEOUT_S` megemelése a
+  megoldás, nem az újrapróbálkozás.
 - Ha egy hidegindítás úgy szakad meg, hogy a host közben még dolgozott, a hiba
   `recoverable` jelölést kap, és a WebUI-n sárga „még dolgozik” üzenetként jelenik
   meg piros hiba helyett. Ilyenkor nincs teendő, a következő kör folytatja.
+  Üzemeltetőként ez a különbség számít: a **piros** hiba azt állítja, hogy a
+  művelet magától nem lesz jobb (rossz konfiguráció, elérhetetlen host), a
+  **sárga** viszont csak annyit, hogy a kör lejárt, miközben a letöltés
+  bizonyíthatóan haladt — a Redisben tárolt `pull_progress` frissebb volt
+  `PULL_PROGRESS_STALE_AFTER_S`-nél. Sárgánál a helyes reakció a várakozás; ha
+  órákon át sárga marad, akkor a fenti belső korlátot érdemes megnézni.
 - Ha egy instance elindulás közben elszáll, a host megőrzi a kimenetét (a logfájl
   neve tartalmazza az instance id-t), így a WebUI-ról a hibaüzenet mellől
   megnyitható akkor is, ha a reconciler már törölte az instance-t.
@@ -74,7 +86,7 @@ beállítás nélkül a viselkedés változatlan maradjon.
 | Változó | Alap | Mit állít |
 |---|---|---|
 | `RETAINED_LOG_BUFFERS` | `20` | Hány leállt instance logpuffere marad a memóriában. Egyenként `LOG_BUFFER_SIZE` sor, tehát a memóriaigény felülről korlátos. |
-| `LOG_FILE_RETENTION_S` | `86400.0` | Meddig maradnak meg a logfájlok a lemezen (24 óra a korábbi 5 perc helyett). Az alias legfrissebb fájlja kortól függetlenül megmarad. |
+| `LOG_FILE_RETENTION_S` | `86400.0` | Meddig maradnak meg a logfájlok a lemezen (24 óra a korábbi 5 perc helyett). Minden `(alias, instance_id)` páros legfrissebb fájlja kortól függetlenül megmarad, tehát egy több replikás alias nem veszíti el a többi replika utolsó logját. |
 | `START_FAILURE_LOG_TAIL_LINES` | `20` | Hány sort csatol a host a strukturált indítási hibaválaszhoz. |
 | `PULL_PROGRESS_INTERVAL_S` | `5.0` | Milyen sűrűn küld a host letöltési folyamatjelzést. |
 

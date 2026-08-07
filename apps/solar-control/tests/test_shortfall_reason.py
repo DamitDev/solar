@@ -85,3 +85,21 @@ def test_generic_fallback_when_no_specific_cause():
         snapshots={"h1": _SnapshotStub(host_id="h1", vram_available_gb=100.0)},
     )
     assert _shortfall_reason(intent, observed) is None
+
+
+def test_a_stored_gpu_type_alias_matches_the_canonical_host_token():
+    """Normalization runs on write, so a row stored before it landed can still
+    hold an alias. Reading it raw made the fleet validator (which normalizes)
+    call the intent placeable while the reconciler matched nothing."""
+    intent = _make_intent(replicas=1, placement=PlacementConstraints(gpu_type="mps"))
+    observed = _make_observed(
+        hosts=[_HostStub(id="h1", gpu_type="apple_mps")],
+        snapshots={"h1": _SnapshotStub(host_id="h1", vram_available_gb=100.0)},
+    )
+    assert _shortfall_reason(intent, observed) is None
+
+
+def test_an_unknown_gpu_type_still_matches_nothing():
+    intent = _make_intent(replicas=1, placement=PlacementConstraints(gpu_type="rocm"))
+    observed = _make_observed(hosts=[_HostStub(id="h1", gpu_type="nvidia_cuda")])
+    assert _shortfall_reason(intent, observed) == "no host matches gpu_type=rocm"

@@ -1195,6 +1195,78 @@ async def test_update_intent_db_refuses_deleted_intents(row_overrides):
         assert await db.update_intent(row.id, **_update_kwargs(replicas=9)) is None
 
 
+# ── Status round trip (C1) ─────────────────────────────────────
+
+# One entry per key the reconciler writes into status_json, each holding a
+# value that differs from the model's default. Hydration is proven by the
+# result differing from the default: a key _row_to_response forgets is one
+# Pydantic silently fills in, which is how the drift circuit breaker shipped
+# unable to fire. Adding a status field means adding a sentinel here.
+_STATUS_JSON_SENTINELS: dict[str, object] = {
+    "observed_replicas": 3,
+    "ready_replicas": 2,
+    "updated_replicas": 1,
+    "available": True,
+    "shortfall": 4,
+    "replica_set": [{"instance_id": "inst-1", "host_id": "host-1", "healthy": True}],
+    "conditions": [
+        {
+            "type": "Degraded",
+            "status": True,
+            "reason": "DriftUnsettled",
+            "message": "backend config drift unsettled",
+            "last_transition": "2026-08-06T00:00:00+00:00",
+        }
+    ],
+    "strategy_progress": {"strategy": "rolling", "phase": "stopping"},
+    "last_error": {
+        "code": "BackendDriftUnsettled",
+        "message": "mismatching keys: chat_template_kwargs",
+        "at": "2026-08-06T00:00:00+00:00",
+    },
+    "spec_changed_at": "2026-08-06T00:00:00+00:00",
+    "drift_replace_attempts": 2,
+    "drift_unsettled_keys": ["chat_template_kwargs"],
+    "shortfall_reason": "no host matches gpu_type=mps",
+}
+
+
+@pytest.mark.anyio
+async def test_every_status_json_key_is_hydrated_on_read():
+    """Whatever _update_status persists, _row_to_response must read back.
+
+    The two halves are written independently — one builds a dict, the other
+    an explicit keyword list — so nothing but this test stops a new status
+    field from being persisted and then silently defaulted on every load.
+    """
+    from test_reconciliation import _make_intent, _make_observed
+
+    from app.database.intents import IntentDB
+    from app.services.reconciliation import Reconciler
+
+    intent = _make_intent()
+    with patch("app.database.intents.intent_db") as mock_db:
+        mock_db.update_status = AsyncMock()
+        mock_db.get_intent = AsyncMock(return_value=intent)
+        await Reconciler()._update_status(intent, _make_observed())
+    written = set(mock_db.update_status.call_args.kwargs["status_json"])
+
+    assert written == set(_STATUS_JSON_SENTINELS), (
+        "status_json keys and the sentinel table disagree; add the new field "
+        "to _row_to_response and to _STATUS_JSON_SENTINELS"
+    )
+
+    row = _intent_row(status_json=dict(_STATUS_JSON_SENTINELS))
+    status = IntentDB()._row_to_response(row).status
+
+    defaults = IntentStatus()
+    for key in _STATUS_JSON_SENTINELS:
+        assert getattr(status, key) != getattr(defaults, key), (
+            f"status.{key} came back as its default, so _row_to_response "
+            f"never read it out of status_json"
+        )
+
+
 # ── C3: accelerator vocabulary, field ownership, device contract ──
 
 
@@ -1394,31 +1466,52 @@ class TestFieldOwnership:
 
     def test_ownership_table_matches_documented_field_lists(self):
         """Pins BACKEND_FIELD_OWNERS to the documented sets so a host-side
-        field addition fails loudly."""
+        field addition fails loudly.
+
+        Asserted as equality, not containment: a subset check passes when the
+        table gains a field the documented list omits, which is precisely the
+        direction this test exists to catch — the table is control's mirror of
+        the host's config models and a field added on one side only is the bug.
+        """
         from app.validation import BACKEND_FIELD_OWNERS
 
-        llamacpp_fields = BACKEND_FIELD_OWNERS["llamacpp"]
-        assert {
+        assert BACKEND_FIELD_OWNERS["llamacpp"] == {
             "model_file",
             "mmproj",
+            "mmproj_offload",
             "threads",
             "n_gpu_layers",
+            "temp",
+            "top_p",
+            "top_k",
+            "min_p",
             "ctx_size",
+            "chat_template_file",
             "chat_template_kwargs",
             "reasoning",
-            "pooling",
+            "reasoning_budget",
+            "spec_type",
+            "spec_draft_n_max",
+            "cache_type_k",
+            "cache_type_v",
+            "rope_scaling",
+            "rope_scale",
+            "yarn_orig_ctx",
+            "special",
+            "ot",
             "model_type",
-        } <= llamacpp_fields
-        assert BACKEND_FIELD_OWNERS["huggingface"] >= {
+            "pooling",
+        }
+        assert BACKEND_FIELD_OWNERS["huggingface"] == {
             "device",
             "dtype",
             "max_length",
             "trust_remote_code",
         }
-        assert "labels" in BACKEND_FIELD_OWNERS["huggingface_classification"]
-        assert "normalize_embeddings" in BACKEND_FIELD_OWNERS["huggingface_embedding"]
-        assert "use_flash_attention" in BACKEND_FIELD_OWNERS["huggingface_causal"]
-        assert "use_flash_attention" in BACKEND_FIELD_OWNERS["huggingface_vision"]
+        assert BACKEND_FIELD_OWNERS["huggingface_classification"] == {"labels"}
+        assert BACKEND_FIELD_OWNERS["huggingface_embedding"] == {"normalize_embeddings"}
+        assert BACKEND_FIELD_OWNERS["huggingface_causal"] == {"use_flash_attention"}
+        assert BACKEND_FIELD_OWNERS["huggingface_vision"] == {"use_flash_attention"}
         # Shared fields belong to no single owner.
         for owner in BACKEND_FIELD_OWNERS.values():
             assert "file_filters" not in owner
@@ -1493,6 +1586,69 @@ class TestModalityRules:
         assert validate_intent_create(data) == []
         warnings = validate_intent_warnings(data)
         assert any(w["field"] == "backend.pooling" for w in warnings)
+
+
+class TestUpdateGrandfathersModalityRules:
+    """Both configurations below were legal before the modality rules landed —
+    the host silently dropped the field — so they exist in stored specs. An
+    update replays the full spec, so without grandfathering the intent becomes
+    permanently uneditable on a field the user is not touching.
+    """
+
+    def _update(self, backend: dict, current: dict, **overrides) -> list[dict]:
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": backend,
+            **overrides,
+        }
+        return validate_intent_update(data, current_alias="t", current_backend=current)
+
+    def test_carried_over_mmproj_on_embedding_mode_is_editable(self):
+        stored = _llamacpp_backend(mmproj="mmproj.gguf", model_type="embedding")
+        errors = self._update(dict(stored), stored, replicas=3)
+        assert errors == []
+
+    def test_newly_introduced_mmproj_on_embedding_mode_is_rejected(self):
+        stored = _llamacpp_backend(model_type="embedding")
+        edited = _llamacpp_backend(mmproj="mmproj.gguf", model_type="embedding")
+        errors = self._update(edited, stored)
+        assert any(
+            e["field"] == "backend.mmproj" and "embedding" in e["message"]
+            for e in errors
+        )
+
+    def test_changed_mmproj_on_embedding_mode_is_rejected(self):
+        """Grandfathering is per value, not per key: touching it re-validates."""
+        stored = _llamacpp_backend(mmproj="old.gguf", model_type="embedding")
+        edited = _llamacpp_backend(mmproj="new.gguf", model_type="embedding")
+        errors = self._update(edited, stored)
+        assert any(e["field"] == "backend.mmproj" for e in errors)
+
+    def test_carried_over_model_file_on_huggingface_is_editable(self):
+        stored = {"backend_type": "huggingface_causal", "model_file": "m.gguf"}
+        errors = self._update(dict(stored), stored, replicas=3)
+        assert errors == []
+
+    def test_newly_introduced_model_file_on_huggingface_is_rejected(self):
+        stored = {"backend_type": "huggingface_causal"}
+        edited = {"backend_type": "huggingface_causal", "model_file": "m.gguf"}
+        errors = self._update(edited, stored)
+        assert any(e["field"] == "backend.model_file" for e in errors)
+
+    def test_file_filters_are_not_grandfathered(self):
+        """file_filters is validated against model_source, which an update can
+        change independently of the backend, so a carried-over value can become
+        newly invalid and must still be reported."""
+        stored = _llamacpp_backend(file_filters=["*Q4*"])
+        errors = self._update(
+            dict(stored), stored, model_source="huggingface://org/model"
+        )
+        assert errors == []
+
+        # Same untouched backend, a model_source the filters cannot apply to.
+        errors = self._update(dict(stored), stored, model_source="repo://x:v1")
+        assert any(e["field"] == "backend.file_filters" for e in errors)
 
 
 class TestChatTemplateKwargsCanonicalization:

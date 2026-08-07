@@ -219,6 +219,29 @@ class TestWarnings:
         assert any(w["field"] == "placement.gpu_type" for w in warnings)
 
     @pytest.mark.anyio
+    async def test_a_stored_gpu_type_alias_is_placeable_here_and_in_the_reconciler(
+        self,
+    ):
+        """§3.5: eligibility reuses the real filter chain so validation and
+        placement cannot disagree. Normalization ran only on write, so a row
+        stored with an alias made exactly those two disagree — this asserts the
+        agreement, not just that the validator normalizes."""
+        from app.models.intent import PlacementConstraints
+        from app.services.reconciliation import _requested_gpu_type
+
+        hosts = [_host("h1", gpu_type="apple_mps")]
+        payload = _payload(placement={"gpu_type": "mps"})
+
+        hard, warnings = await _validate(payload, hosts)
+        assert hard == []
+        assert not any(w["field"] == "placement.gpu_type" for w in warnings)
+
+        # The reconciler reads the same stored value off the model, not the
+        # payload dict, so it needs its own normalization to reach the token.
+        stored = PlacementConstraints(**payload["placement"])
+        assert _requested_gpu_type(stored) == "apple_mps"
+
+    @pytest.mark.anyio
     async def test_warnings_never_become_errors(self):
         """Dynamic fleet state must not block an edit."""
         hosts = [

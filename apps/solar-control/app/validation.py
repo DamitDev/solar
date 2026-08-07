@@ -154,32 +154,44 @@ def validate_priority(instance_data: dict[str, Any]) -> None:
 
 
 def _validate_backend_model_selection(
-    backend: dict[str, Any], model_source: Any
+    backend: dict[str, Any],
+    model_source: Any,
+    *,
+    exempt_fields: frozenset[str] = frozenset(),
 ) -> list[dict[str, str]]:
     """Validate the model file selector and the download filters.
 
     ``model_file`` picks a GGUF inside the pulled model directory and only
     llama.cpp consumes it; ``file_filters`` maps to HuggingFace Hub
     ``allow_patterns``, which ORAS (``repo://``) and ``local://`` cannot honour.
+
+    ``model_file``'s wrong-backend rejection lives in the ownership table
+    (``_LLAMACPP_ONLY_FIELDS``) rather than here, so one mechanism owns it and
+    grandfathering applies uniformly.
+
+    ``exempt_fields`` grandfathers values an update carried over unchanged, so
+    tightening a rule cannot strand a stored intent. ``file_filters`` is
+    deliberately *not* grandfathered: it is validated against ``model_source``,
+    which an update can change independently of the backend, so a carried-over
+    value can become newly invalid.
     """
     errors: list[dict[str, str]] = []
 
     model_file = backend.get("model_file")
-    if model_file is not None:
-        if backend.get("backend_type") != "llamacpp":
-            errors.append(
-                {
-                    "field": "backend.model_file",
-                    "message": "model_file is only supported for the llamacpp backend",
-                }
-            )
-        elif not isinstance(model_file, str) or not model_file.strip():
-            errors.append(
-                {
-                    "field": "backend.model_file",
-                    "message": "model_file must be a non-empty string",
-                }
-            )
+    if (
+        model_file is not None
+        and "model_file" not in exempt_fields
+        # A wrong-backend model_file is reported by the ownership table; the
+        # shape check is llama.cpp's own contract.
+        and backend.get("backend_type") == "llamacpp"
+        and (not isinstance(model_file, str) or not model_file.strip())
+    ):
+        errors.append(
+            {
+                "field": "backend.model_file",
+                "message": "model_file must be a non-empty string",
+            }
+        )
 
     file_filters = backend.get("file_filters")
     if file_filters is not None:
@@ -203,7 +215,7 @@ def _validate_backend_model_selection(
             )
 
     mmproj = backend.get("mmproj")
-    if mmproj is not None:
+    if mmproj is not None and "mmproj" not in exempt_fields:
         model_type = backend.get("model_type")
         if model_type not in (None, "llm"):
             errors.append(
@@ -676,7 +688,11 @@ def validate_intent_create(
         errors.extend(
             _validate_device(backend, placement, exempt_fields=ownership_exempt_fields)
         )
-        errors.extend(_validate_backend_model_selection(backend, model_source))
+        errors.extend(
+            _validate_backend_model_selection(
+                backend, model_source, exempt_fields=ownership_exempt_fields
+            )
+        )
         errors.extend(_validate_backend_speculative_decoding(backend))
 
     return errors

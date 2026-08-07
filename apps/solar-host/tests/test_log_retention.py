@@ -271,10 +271,16 @@ class TestStartAttemptState:
     async def test_stale_exit_code_not_reported_on_readiness_timeout(
         self, _isolated_env, monkeypatch
     ):
-        """A readiness timeout has no exit code of its own.
+        """A readiness timeout reports its own kill, never the previous run's.
 
-        Reporting the previous run's code would blame the wrong failure.
+        The backend was alive and simply never reported ready, so the host
+        signals it: the recorded code is negative (killed by SIGTERM), which is
+        what distinguishes a hung start from a backend that died on its own.
+        Reporting the earlier attempt's 42 would blame the wrong failure, and
+        reporting nothing leaves the payload's exit_code null.
         """
+        import signal
+
         monkeypatch.setattr("solar_host.config.settings.instance_ready_timeout_s", 0.5)
         monkeypatch.setattr("solar_host.config.settings.max_retries", 1)
         manager = ProcessManager()
@@ -288,7 +294,7 @@ class TestStartAttemptState:
             lambda cfg: _ScriptRunner("import time; time.sleep(30)"),
         )
         assert await manager.start_instance("inst-1") is False
-        assert manager.get_last_exit_code("inst-1") is None
+        assert manager.get_last_exit_code("inst-1") == -signal.SIGTERM
 
     @pytest.mark.anyio
     async def test_retry_buffer_reflects_final_attempt_only(

@@ -1,5 +1,6 @@
 """Tests for reconciliation engine (S-041)."""
 
+import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -274,6 +275,30 @@ class TestHelpers:
         assert _detect_backend_drift(intent, instance_config) == ["ctx_size"]
 
 
+# C1 cross-service pin. Duplicated verbatim in
+# apps/solar-host/tests/test_llamacpp_command.py — keep the two in step.
+# The host rewrites chat_template_kwargs at its config boundary and control
+# compares against the result, so the two coercions agreeing is what makes a
+# canonicalized value read as "no drift" instead of churning the intent.
+COERCION_PARITY_TABLE: list[tuple[object, object]] = [
+    ({"a": "true", "b": ["false", "x"]}, {"a": True, "b": [False, "x"]}),
+    ({"outer": {"enable_thinking": "True"}}, {"outer": {"enable_thinking": True}}),
+    (" TRUE ", True),
+    ("False", False),
+    ("true", True),
+    ("trueish", "trueish"),
+    ("", ""),
+    (["false"], [False]),
+    ({}, {}),
+    ([], []),
+    (1, 1),
+    (0, 0),
+    (1.5, 1.5),
+    (True, True),
+    (None, None),
+]
+
+
 class TestBackendValueMatching:
     """C1 canonicalization-aware comparison.
 
@@ -424,21 +449,86 @@ class TestBackendValueMatching:
         }
         assert _detect_backend_drift(intent, instance_config) == ["mmproj"]
 
-    def test_coerce_jsonish_matches_host_semantics(self):
-        """Pins _coerce_jsonish against the documented behaviour of
-        solar_host.models.llamacpp._coerce_template_kwargs (the duplication
-        is intentional — control cannot import solar_host)."""
-        from app.services.reconciliation import _coerce_jsonish
 
-        assert _coerce_jsonish({"a": "true", "b": ["false", "x"]}) == {
-            "a": True,
-            "b": [False, "x"],
-        }
-        assert _coerce_jsonish(" TRUE ") is True
-        assert _coerce_jsonish("False") is False
-        assert _coerce_jsonish("trueish") == "trueish"
-        assert _coerce_jsonish(1) == 1
-        assert _coerce_jsonish(None) is None
+class TestPathMatchingIsScopedToResolvedPathKeys:
+    """Layer 3 exists for fields the host resolves into an absolute path. Applied
+    to every string field it reports *no* drift where there is some, which
+    silently keeps a stale replica alive after a real config change — the mirror
+    image of the churn C1 set out to fix.
+    """
+
+    def _detect_field(self, field: str, spec_value, inst_value) -> list[str]:
+        intent = _make_intent(backend={"backend_type": "llamacpp", field: spec_value})
+        return _detect_backend_drift(
+            intent, {"backend_type": "llamacpp", field: inst_value}
+        )
+
+    def test_an_ot_regex_change_is_drift_even_when_it_globs(self):
+        """``ot`` is a regex, and one routinely contains '*', '?' and '['. Read
+        as a glob, the old spec happens to fnmatch the new instance value and
+        the replica is left running the superseded override."""
+        assert self._detect_field(
+            "ot", "blk\\.[0-9]*\\.ffn.*=CPU", "blk.1.ffn=CUDA0"
+        ) == ["ot"]
+
+    def test_a_bare_star_does_not_match_every_value(self):
+        assert self._detect_field("ot", "*", "blk.1.ffn=CPU") == ["ot"]
+
+    def test_a_bare_star_mmproj_does_not_match_an_arbitrary_path(self):
+        """Even on a path key, '*' matching any single-segment tail would call
+        every resolved projector a match and mask a genuine change."""
+        assert self._detect_field("mmproj", "*", "/opt/models/x/mmproj-BF16.gguf") == []
+        # One segment of tail is all '*' can claim; a real edit still drifts.
+        assert self._detect_field("mmproj", "*.bin", "/opt/models/x/mmproj.gguf") == [
+            "mmproj"
+        ]
+
+    def test_a_relative_instance_value_does_not_tail_match(self):
+        """Only a resolved absolute path is a tail-match target; two relative
+        paths sharing a basename are different files."""
+        assert self._detect_field("mmproj", "m.gguf", "other/m.gguf") == ["mmproj"]
+
+    def test_a_non_path_field_sharing_a_suffix_is_still_drift(self):
+        assert self._detect_field("chat_template_kwargs", "b/c", "/a/b/c") == [
+            "chat_template_kwargs"
+        ]
+
+    def test_path_keys_still_match_their_resolved_paths(self):
+        assert self._detect_field("model_file", "m.gguf", "/opt/models/x/m.gguf") == []
+        assert (
+            self._detect_field(
+                "chat_template_file", "tpl.jinja", "/opt/models/x/tpl.jinja"
+            )
+            == []
+        )
+
+    def test_coerce_jsonish_matches_host_semantics(self):
+        """Pins both of control's copies against the host's.
+
+        Asserting only against control's own copy proves nothing about the
+        agreement the comparison depends on: the host could change and this
+        would still pass. The table below is duplicated verbatim in
+        apps/solar-host/tests/test_llamacpp_command.py, which asserts the same
+        rows against ``_coerce_template_kwargs`` — control's test env cannot
+        import ``solar_host``, so identical tables either side is the pin.
+        Change one implementation and the other suite fails.
+        """
+        from app.services.reconciliation import _coerce_jsonish
+        from app.validation import _coerce_jsonish as _validation_coerce_jsonish
+
+        for value, expected in COERCION_PARITY_TABLE:
+            for name, fn in (
+                ("reconciliation", _coerce_jsonish),
+                ("validation", _validation_coerce_jsonish),
+            ):
+                result = fn(value)
+                # Type too, not just equality: True == 1 in Python, so an
+                # equality-only assertion cannot tell a coerced bool from the
+                # int it must not become.
+                assert result == expected and type(result) is type(expected), (
+                    f"{name}._coerce_jsonish({value!r}) == {result!r}, "
+                    f"expected {expected!r}"
+                )
 
 
 # ── Diff tests ─────────────────────────────────────────────────
@@ -1667,3 +1757,52 @@ class TestUpdateStatusConditions:
         types = {c["type"] for c in status_json["conditions"]}
         assert "Degraded" in types
         assert "Progressing" not in types
+
+
+class TestPerIntentStateIsPruned:
+    """Every per-intent dict on the reconciler is only ever written, so a
+    deleted intent's entries used to survive for the lifetime of the process.
+    The leak is slow, but it is unbounded — a long-lived control instance
+    accumulates one entry per intent ever created."""
+
+    def _seeded(self) -> Reconciler:
+        reconciler = Reconciler()
+        for intent_id in ("live", "gone"):
+            reconciler._backoff[intent_id] = {"failures": 1, "next_retry_at": "x"}
+            reconciler._settle_until[intent_id] = time.monotonic() + 60
+            reconciler._fleet_violations_logged[intent_id] = "spec-1"
+            reconciler._config_cache_spec[intent_id] = "spec-1"
+            reconciler._config_cache[(intent_id, "inst-1", "spec-1")] = {"a": 1}
+        return reconciler
+
+    def test_drops_every_dict_for_an_intent_that_is_gone(self):
+        reconciler = self._seeded()
+
+        reconciler._prune_intent_state({"live"})
+
+        assert set(reconciler._backoff) == {"live"}
+        assert set(reconciler._settle_until) == {"live"}
+        assert set(reconciler._fleet_violations_logged) == {"live"}
+        assert set(reconciler._config_cache_spec) == {"live"}
+        assert {k[0] for k in reconciler._config_cache} == {"live"}
+
+    def test_keeps_state_for_an_intent_still_in_the_listing(self):
+        reconciler = self._seeded()
+
+        reconciler._prune_intent_state({"live", "gone"})
+
+        assert set(reconciler._backoff) == {"live", "gone"}
+        assert set(reconciler._config_cache_spec) == {"live", "gone"}
+
+    def test_displace_cooldown_is_pruned_by_expiry_not_by_intent_id(self):
+        """It is keyed by *instance* id, so pruning it against intent ids would
+        drop every entry on the first tick and re-enable the thrash the
+        cooldown exists to prevent."""
+        reconciler = Reconciler()
+        now = time.monotonic()
+        reconciler._displace_cooldown["inst-live"] = now + 60
+        reconciler._displace_cooldown["inst-expired"] = now - 1
+
+        reconciler._prune_intent_state({"live"})
+
+        assert set(reconciler._displace_cooldown) == {"inst-live"}

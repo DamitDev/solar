@@ -100,6 +100,37 @@ def test_start_failure_body_is_flat_and_structured(client, monkeypatch):
     assert "Process exited unexpectedly" in body["detail"]
 
 
+def test_readiness_timeout_reports_the_signal_that_killed_the_process(
+    client, monkeypatch
+):
+    """A backend that runs but never reports readiness is killed by the host.
+
+    ``_handle_child_exit`` cannot claim this exit — the start path pops the
+    process before signalling it — so the exit code has to be recorded on the
+    timeout path or the payload reports ``null`` and the operator cannot tell
+    a hung start from one that died on its own. The value is negative:
+    terminated by our signal, not a crash of the backend's own making.
+    """
+    import signal
+
+    monkeypatch.setattr("solar_host.config.settings.instance_ready_timeout_s", 0.5)
+    monkeypatch.setattr("solar_host.config.settings.max_retries", 1)
+    _use_script(
+        monkeypatch,
+        "print('loading model', flush=True); " "import time; time.sleep(30)",
+    )
+    _make_instance("inst-1")
+
+    resp = client.post("/instances/inst-1/start", headers=_headers())
+
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["instance_id"] == "inst-1"
+    assert body["exit_code"] == -signal.SIGTERM
+    assert "did not report readiness" in body["detail"]
+    assert "loading model" in body["log_tail"]
+
+
 def test_log_tail_bounded_by_setting(client, monkeypatch):
     monkeypatch.setattr("solar_host.config.settings.start_failure_log_tail_lines", 1)
     _use_script(

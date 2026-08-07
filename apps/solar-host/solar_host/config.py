@@ -50,8 +50,9 @@ class Settings(BaseSettings):
     log_buffer_size: int = 1000
     # C2: how many dead-instance log buffers to retain in memory (each is
     # log_buffer_size lines), and how long on-disk log files survive before
-    # _cleanup_old_logs unlinks them (the newest file per alias is always
-    # kept regardless of age). start_failure_log_tail_lines bounds the tail
+    # _cleanup_old_logs unlinks them (the newest file per (alias, instance_id)
+    # is always kept regardless of age, so a multi-replica intent keeps one
+    # post-mortem per replica). start_failure_log_tail_lines bounds the tail
     # attached to the structured start-failure response.
     retained_log_buffers: int = 20
     log_file_retention_s: float = 86400.0

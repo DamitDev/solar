@@ -259,6 +259,15 @@ The S-040 API must reject invalid intents with `400`/`422` (Section 12.5):
 - **Modality rules**: `mmproj` is only valid for LLM backends
   (`llamacpp`, `huggingface_causal`); `pooling` on an embedding backend is
   advisory.
+- **Grandfathering on update**: ownership and modality rules apply to the
+  fields an update *changes*. A stored value the request carries over
+  unchanged is exempt, so tightening a rule cannot render an existing
+  intent permanently uneditable — the user would otherwise be asked to fix
+  a field the form does not even offer for their backend. Introducing or
+  changing such a field is still a 422.
+  `backend.file_filters` is deliberately **not** grandfathered: it is
+  validated against `model_source`, which an update may change
+  independently, so a carried-over filter can become newly wrong.
 - `chat_template_kwargs` is canonicalized at the API boundary (Section
   8.2.1): the stored form is the compact JSON the host produces.
 - HuggingFace backends with a `repo://` model source are **legal** (the
@@ -506,10 +515,17 @@ A `replace` that runs outside a strategy retires the drifted replica with **stop
 Backend values are compared with **JSON-structural semantics**, not plain
 `==`: JSON strings are parsed on both sides, values are compared
 recursively with boolean coercion mirroring the host's own config coercion
-(`_coerce_template_kwargs`), and glob / relative-path values are resolved
-before comparing. This makes a host-rewritten `chat_template_kwargs` (the
-host writes the compact canonical form) compare equal to the spec's
-structured form instead of reading as drift forever.
+(`_coerce_template_kwargs`). This makes a host-rewritten
+`chat_template_kwargs` (the host writes the compact canonical form) compare
+equal to the spec's structured form instead of reading as drift forever.
+
+Glob and relative-path resolution is applied **only to the fields whose
+values the host resolves to a path** — `model_file`, `mmproj` and
+`chat_template_file` — and only against an absolute instance value.
+Applying it to every string field would silently swallow real drift: `ot`
+is a regular expression that routinely contains `*`, `?` and `[`, so a
+changed routing expression can glob-match the old one and keep a stale
+instance alive past a genuine config change.
 
 New intents and edits are **canonicalized at the API boundary**
 (`canonicalize_intent_backend`): `chat_template_kwargs` is stored in the
@@ -526,6 +542,14 @@ records a `BackendDriftUnsettled` `last_error` naming the mismatching keys,
 with condition `Degraded/DriftUnsettled`. The counter resets when the spec
 settles or the user edits the intent again; `status.drift_replace_attempts`
 exposes the current count.
+
+The counter and the mismatching key list are **persisted in `status_json`
+and hydrated back on read**. Both halves are load-bearing: the reconciler
+holds no cross-tick state of its own, so a counter that is written but not
+re-read is indistinguishable from no counter at all — every tick would
+start from zero and the breaker could never reach its threshold. Any new
+`status` field the reconciler writes and later reads must be added to
+**both** sides.
 
 A round only counts when the REPLACE was actually executed **and
 succeeded**. The breaker's claim is "the host keeps reproducing this

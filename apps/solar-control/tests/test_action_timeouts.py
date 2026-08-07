@@ -409,3 +409,99 @@ class TestNormalReconcilePath:
                 await reconciler._reconcile_one(intent)
 
             assert mock_status.call_args[1].get("last_error") is None
+
+
+class TestInnerPullBoundIsRecoverable:
+    """Root cause B: the progress-aware ceiling is not the only bound.
+
+    ``resolve()`` runs inside ``_act`` and the control-to-host pull request
+    carries its own ``ClientTimeout(total=model_pull_timeout_s)`` — 30 minutes
+    by default, well under the ~46 min outer ceiling. When it fires, aiohttp
+    raises inside the action task, so the helper returns it verbatim as a
+    genuine result and never gets to mark it. The host keeps downloading
+    (``pull_model`` runs in a thread), so a hard error contradicts the progress
+    the user is watching.
+    """
+
+    async def _reconcile_with_act_error(self, monkeypatch, exc, pull_state):
+        monkeypatch.setattr("app.config.settings.action_progress_slice_s", 0.02)
+        monkeypatch.setattr(
+            "app.services.reconciliation._action_timeout_s", lambda a: 5.0
+        )
+        with patch(
+            "app.services.reconciliation._pull_progress_state",
+            new=_progress(pull_state),
+        ):
+            reconciler = Reconciler()
+            intent = _make_intent(replicas=1)
+            host = _HostStub(id="h1")
+            observed = _make_observed(
+                managed=[],
+                hosts=[host],
+                candidates=[(host, _SnapshotStub("h1"))],
+            )
+
+            async def _act_raises(*args, **kwargs):
+                raise exc
+
+            with (
+                patch.object(
+                    reconciler, "_observe", new=AsyncMock(return_value=observed)
+                ),
+                patch.object(reconciler, "_act", new=_act_raises),
+                patch.object(
+                    reconciler, "_update_status", new=AsyncMock()
+                ) as mock_status,
+            ):
+                await reconciler._reconcile_one(intent)
+
+            return mock_status.call_args[1].get("last_error")
+
+    @pytest.mark.anyio
+    async def test_client_timeout_while_progress_is_fresh_is_recoverable(
+        self, monkeypatch
+    ):
+        import aiohttp
+
+        last_error = await self._reconcile_with_act_error(
+            monkeypatch,
+            aiohttp.ServerTimeoutError("Timeout on reading data from socket"),
+            _PullState.FRESH,
+        )
+        assert last_error is not None
+        assert last_error["recoverable"] is True
+
+    @pytest.mark.anyio
+    async def test_bare_asyncio_timeout_while_progress_is_fresh_is_recoverable(
+        self, monkeypatch
+    ):
+        """``ClientTimeout(total=...)`` surfaces as a plain ``TimeoutError``."""
+        last_error = await self._reconcile_with_act_error(
+            monkeypatch, asyncio.TimeoutError(), _PullState.FRESH
+        )
+        assert last_error is not None
+        assert last_error["recoverable"] is True
+
+    @pytest.mark.anyio
+    async def test_a_wedged_pull_is_not_recoverable(self, monkeypatch):
+        last_error = await self._reconcile_with_act_error(
+            monkeypatch, asyncio.TimeoutError(), _PullState.STALE
+        )
+        assert last_error["recoverable"] is False
+
+    @pytest.mark.anyio
+    async def test_no_pull_running_is_not_recoverable(self, monkeypatch):
+        last_error = await self._reconcile_with_act_error(
+            monkeypatch, asyncio.TimeoutError(), _PullState.ABSENT
+        )
+        assert last_error["recoverable"] is False
+
+    @pytest.mark.anyio
+    async def test_a_non_timeout_failure_is_never_recoverable(self, monkeypatch):
+        """A fresh pull says nothing about an unrelated failure — a start that
+        crashed is dead however healthy the download is."""
+        last_error = await self._reconcile_with_act_error(
+            monkeypatch, RuntimeError("exited with code 1"), _PullState.FRESH
+        )
+        assert last_error["code"] == "RuntimeError"
+        assert last_error["recoverable"] is False

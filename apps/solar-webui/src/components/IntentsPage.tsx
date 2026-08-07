@@ -8,11 +8,11 @@
  * that never emits events.
  */
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { AlertCircle, RefreshCw, Target, Trash2, Plus, Pencil } from 'lucide-react';
+import { AlertCircle, RefreshCw, Target, Trash2, Plus, Pencil, TriangleAlert, X } from 'lucide-react';
 import solarClient from '@/api/client';
-import { Intent, IntentCreateRequest } from '@/api/types';
+import { Intent, IntentCreateRequest, IntentFieldNotice } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
 import type { PullProgressEvent } from '@/hooks/useEventStream';
 import { useFallbackPolling } from '@/hooks/useFallbackPolling';
@@ -64,6 +64,8 @@ export function IntentsPage() {
   const [intentInitial, setIntentInitial] = useState<Partial<IntentCreateRequest> | undefined>(undefined);
   const [editTarget, setEditTarget] = useState<Intent | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Intent | null>(null);
+  // C3: advisories from the last in-place edit, shown under their own row.
+  const [editWarnings, setEditWarnings] = useState<{ id: string; warnings: IntentFieldNotice[] } | null>(null);
 
   // Events overwrite REST records (both are full records)
   const intents = useMemo(() => {
@@ -117,12 +119,18 @@ export function IntentsPage() {
 
   const handleCreated = (intent: Intent) => {
     setShowNewIntent(false);
-    navigate(`/intents/${intent.id}`);
+    // C3: advisory warnings ride on the create response only — they are never
+    // persisted, so the detail page's own GET cannot recover them. Carrying
+    // them through the navigation is the only way they reach the user.
+    navigate(`/intents/${intent.id}`, { state: { warnings: intent.warnings ?? [] } });
   };
 
   const handleEdited = (intent: Intent) => {
     setEditTarget(null);
     setRestIntents((prev) => new Map(prev).set(intent.id, intent));
+    // The edit succeeded, so the user stays here; the advisory is reported on
+    // the row rather than by routing them somewhere else.
+    setEditWarnings(intent.warnings?.length ? { id: intent.id, warnings: intent.warnings } : null);
   };
 
   const handleDeleted = () => {
@@ -222,70 +230,98 @@ export function IntentsPage() {
               </thead>
               <tbody>
                 {sorted.map((intent) => (
-                  <tr
-                    key={intent.id}
-                    onClick={() => navigate(`/intents/${intent.id}`)}
-                    className="border-b border-nord-3 hover:bg-nord-2 cursor-pointer transition-colors"
-                  >
-                    <td className="py-2.5 pr-4">
-                      <IntentPhaseBadge phase={intent.status?.phase} reconcile={intent.status?.reconcile} />
-                    </td>
-                    <td className="py-2.5 pr-4 font-mono text-nord-6">
-                      {intent.alias}
-                      {intent.status?.strategy_progress?.message && (
+                  <Fragment key={intent.id}>
+                    <tr
+                      onClick={() => navigate(`/intents/${intent.id}`)}
+                      className="border-b border-nord-3 hover:bg-nord-2 cursor-pointer transition-colors"
+                    >
+                      <td className="py-2.5 pr-4">
+                        <IntentPhaseBadge phase={intent.status?.phase} reconcile={intent.status?.reconcile} />
+                      </td>
+                      <td className="py-2.5 pr-4 font-mono text-nord-6">
+                        {intent.alias}
+                        {intent.status?.strategy_progress?.message && (
+                          <span
+                            className="block text-[11px] font-normal text-nord-4 truncate max-w-[280px]"
+                            title={intent.status.strategy_progress.message}
+                          >
+                            {intent.status.strategy_progress.message}
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2.5 pr-4">
                         <span
-                          className="block text-[11px] font-normal text-nord-4 truncate max-w-[280px]"
-                          title={intent.status.strategy_progress.message}
+                          className="font-mono text-xs text-nord-4 block max-w-[280px] truncate"
+                          title={intent.model_source}
                         >
-                          {intent.status.strategy_progress.message}
+                          {intent.model_source}
                         </span>
-                      )}
-                    </td>
-                    <td className="py-2.5 pr-4">
-                      <span
-                        className="font-mono text-xs text-nord-4 block max-w-[280px] truncate"
-                        title={intent.model_source}
-                      >
-                        {intent.model_source}
-                      </span>
-                      {/* C4: compact live-pull indicator */}
-                      {pullProgressRow(intent, getPullProgress)}
-                    </td>
-                    <td className="py-2.5 pr-4 text-nord-6">
-                      {intent.status?.ready_replicas ?? 0}/{intent.replicas}
-                    </td>
-                    <td className="py-2.5 pr-4">
-                      <span className="px-2 py-0.5 rounded text-xs font-medium bg-nord-3 text-nord-4">
-                        {intent.priority}
-                      </span>
-                    </td>
-                    <td className="py-2.5 pr-4 text-nord-4">{intent.strategy}</td>
-                    <td className="py-2.5 pr-4 text-nord-4 whitespace-nowrap">
-                      {formatRelativeTime(intent.status?.updated_at ?? intent.status?.created_at ?? undefined)}
-                    </td>
-                    <td className="py-2.5 text-right whitespace-nowrap">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setEditTarget(intent);
-                        }}
-                        className="p-1.5 rounded hover:bg-nord-3 text-nord-4 hover:text-nord-6 transition-colors"
-                        title="Edit intent"
-                      >
-                        <Pencil size={16} />
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setDeleteTarget(intent);
-                        }}
-                        className="p-1.5 rounded hover:bg-nord-11 hover:bg-opacity-20 text-nord-4 hover:text-nord-11 transition-colors"
-                        title="Delete intent"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </td>
-                  </tr>
+                        {/* C4: compact live-pull indicator */}
+                        {pullProgressRow(intent, getPullProgress)}
+                      </td>
+                      <td className="py-2.5 pr-4 text-nord-6">
+                        {intent.status?.ready_replicas ?? 0}/{intent.replicas}
+                      </td>
+                      <td className="py-2.5 pr-4">
+                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-nord-3 text-nord-4">
+                          {intent.priority}
+                        </span>
+                      </td>
+                      <td className="py-2.5 pr-4 text-nord-4">{intent.strategy}</td>
+                      <td className="py-2.5 pr-4 text-nord-4 whitespace-nowrap">
+                        {formatRelativeTime(intent.status?.updated_at ?? intent.status?.created_at ?? undefined)}
+                      </td>
+                      <td className="py-2.5 text-right whitespace-nowrap">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setEditTarget(intent);
+                          }}
+                          className="p-1.5 rounded hover:bg-nord-3 text-nord-4 hover:text-nord-6 transition-colors"
+                          title="Edit intent"
+                        >
+                          <Pencil size={16} />
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDeleteTarget(intent);
+                          }}
+                          className="p-1.5 rounded hover:bg-nord-11 hover:bg-opacity-20 text-nord-4 hover:text-nord-11 transition-colors"
+                          title="Delete intent"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </td>
+                    </tr>
+                    {editWarnings?.id === intent.id && (
+                      <tr className="border-b border-nord-3">
+                        <td colSpan={8} className="pb-2.5">
+                          <div className="flex items-start gap-2 rounded border border-nord-13 bg-nord-13 bg-opacity-15 p-2 text-xs text-nord-6">
+                            <TriangleAlert size={14} className="flex-shrink-0 mt-0.5" />
+                            <div className="flex-1 min-w-0">
+                              <p className="font-medium">Saved with warnings</p>
+                              <ul className="mt-1 space-y-0.5 text-nord-4">
+                                {editWarnings.warnings.map((w, i) => (
+                                  <li key={i}>
+                                    {w.field}: {w.message}
+                                  </li>
+                                ))}
+                              </ul>
+                            </div>
+                            <button
+                              onClick={() => setEditWarnings(null)}
+                              aria-label="Dismiss warnings"
+                              title="Dismiss"
+                              className="flex-shrink-0 p-0.5 rounded text-nord-4 hover:text-nord-6 hover:bg-nord-3 transition-colors"
+                            >
+                              <X size={14} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

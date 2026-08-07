@@ -662,16 +662,25 @@ class ProcessManager:
             except TimeoutError:
                 # The backend never reported readiness — kill it and fail.
                 proc = self.processes.pop(instance_id, None)
+                exit_code: int | None = None
                 if proc is not None:
                     try:
                         proc.terminate()
                     except OSError:
                         pass
                     try:
-                        await asyncio.to_thread(proc.wait, 10)
+                        exit_code = await asyncio.to_thread(proc.wait, 10)
                     except subprocess.TimeoutExpired:
                         proc.kill()
-                        await asyncio.to_thread(proc.wait)
+                        exit_code = await asyncio.to_thread(proc.wait)
+                if exit_code is not None:
+                    # Popping the process above stops _handle_child_exit from
+                    # claiming this one, so without recording it here the
+                    # start-failure payload reports exit_code: null (C2). The
+                    # value is negative — killed by our own signal, not a crash
+                    # of the backend's own making — which is exactly what
+                    # distinguishes a readiness timeout from a failed start.
+                    self.last_exit_codes[instance_id] = exit_code
 
                 instance = config_manager.get_instance(instance_id)
                 if instance is None:

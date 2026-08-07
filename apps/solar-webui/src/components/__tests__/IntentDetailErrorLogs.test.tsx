@@ -57,11 +57,11 @@ function makeIntent(lastError: IntentLastError | null, override: Partial<Intent>
   } as Intent;
 }
 
-async function renderDetail(intent: Intent) {
+async function renderDetail(intent: Intent, state?: unknown) {
   vi.spyOn(solarClient, 'getIntent').mockResolvedValue(intent);
   const { IntentDetail } = await import('@/components/IntentDetail');
   render(
-    <MemoryRouter initialEntries={[`/intents/${intent.id}`]}>
+    <MemoryRouter initialEntries={[{ pathname: `/intents/${intent.id}`, state }]}>
       <Routes>
         <Route path="/intents/:id" element={<IntentDetail />} />
       </Routes>
@@ -198,10 +198,9 @@ describe('IntentDetail advisory warnings', () => {
   it('survives an intent_update that carries no warnings', async () => {
     // `intent` resolves to the event copy once one arrives, and warnings are
     // response-only — held on the record they would vanish on the next tick.
-    const withWarnings = makeIntent(null, {
+    await renderDetail(makeIntent(null), {
       warnings: [{ field: 'resources.vram_gb', message: 'exceeds every host today' }],
     });
-    await renderDetail(withWarnings);
     expect(screen.getByText(/exceeds every host today/)).toBeInTheDocument();
 
     await act(async () => {
@@ -214,9 +213,9 @@ describe('IntentDetail advisory warnings', () => {
   });
 
   it('can be dismissed', async () => {
-    await renderDetail(
-      makeIntent(null, { warnings: [{ field: 'placement.gpu_type', message: 'no host has apple_mps' }] }),
-    );
+    await renderDetail(makeIntent(null), {
+      warnings: [{ field: 'placement.gpu_type', message: 'no host has apple_mps' }],
+    });
     expect(screen.getByText(/no host has apple_mps/)).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole('button', { name: /Dismiss warnings/i }));

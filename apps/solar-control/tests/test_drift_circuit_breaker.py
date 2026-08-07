@@ -2,6 +2,7 @@
 unsettled spec degrades into one clear BackendDriftUnsettled error instead
 of a stop/recreate loop that never converges."""
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ from test_reconciliation import (
     _make_observed,
 )
 
+from app.database.intents import IntentDB
 from app.models.intent import (
     IntentPhase,
     IntentResponse,
@@ -38,6 +40,37 @@ def _drifted_intent(
             drift_replace_attempts=attempts,
         ),
     )
+
+
+def _reload(intent: IntentResponse, kwargs: dict) -> IntentResponse:
+    """Re-read *intent* the way the next tick does: through ``_row_to_response``.
+
+    Every tick reloads via ``get_intent``, so breaker state only carries across
+    ticks if it survives a ``status_json`` round trip. Assigning the counter
+    onto the in-memory intent instead would model a hydration path that does
+    not exist, and the suite would pass against a reconciler whose breaker can
+    never fire.
+    """
+    row = SimpleNamespace(
+        id=intent.id,
+        alias=intent.alias,
+        model_source=intent.model_source,
+        replicas=intent.replicas,
+        priority=intent.priority,
+        strategy=intent.strategy,
+        backend=intent.backend,
+        placement=intent.placement.model_dump(),
+        resources=intent.resources.model_dump(),
+        metadata_=intent.metadata,
+        phase=kwargs["phase"],
+        reconcile=kwargs["reconcile"],
+        status_json=kwargs["status_json"],
+        created_at=None,
+        updated_at=None,
+        last_reconciled_at=None,
+        ready_at=None,
+    )
+    return IntentDB()._row_to_response(row)
 
 
 def _drifted_observed() -> dict:
@@ -373,8 +406,69 @@ class TestDriftReplaceCounting:
                 mock_db.get_intent = AsyncMock(return_value=intent)
                 await reconciler._reconcile_one(intent)
 
-            status_json = mock_db.update_status.call_args.kwargs["status_json"]
-            intent.status.drift_replace_attempts = status_json["drift_replace_attempts"]
+            kwargs = mock_db.update_status.call_args.kwargs
+            status_json = kwargs["status_json"]
+            intent = _reload(intent, kwargs)
 
         assert intent.status.drift_replace_attempts == 0
         assert status_json["last_error"]["code"] == "RuntimeError"
+
+    @pytest.mark.anyio
+    async def test_breaker_trips_after_max_attempts_across_reloads(self, monkeypatch):
+        """The whole point of the feature, exercised through persistence.
+
+        Each iteration stands for a tick: the reconciler executes the drift
+        REPLACE, persists the counter, and the next tick reads it back the way
+        ``get_intent`` does. If ``_row_to_response`` drops the counter the
+        intent churns forever and the breaker never trips.
+        """
+        monkeypatch.setattr("app.config.settings.max_drift_replace_attempts", 3)
+        reconciler = Reconciler()
+        intent = _drifted_intent(attempts=0)
+        intent.replicas = 1
+
+        for expected in (1, 2, 3):
+            reconciler._backoff_clear(intent.id)
+            with (
+                patch("app.database.intents.intent_db") as mock_db,
+                patch("app.services.strategies.initiate_strategy", return_value=None),
+                patch.object(
+                    reconciler,
+                    "_observe",
+                    new=AsyncMock(return_value=_drifted_observed()),
+                ),
+                patch.object(reconciler, "_act", new=AsyncMock(return_value=True)),
+            ):
+                mock_db.update_status = AsyncMock()
+                mock_db.get_intent = AsyncMock(return_value=intent)
+                await reconciler._reconcile_one(intent)
+
+            kwargs = mock_db.update_status.call_args.kwargs
+            assert kwargs["status_json"]["drift_replace_attempts"] == expected
+            intent = _reload(intent, kwargs)
+            assert intent.status.drift_replace_attempts == expected
+
+        # The counter reached the bound, so this tick plans no REPLACE and
+        # degrades into one actionable error instead.
+        reconciler._backoff_clear(intent.id)
+        with (
+            patch("app.database.intents.intent_db") as mock_db,
+            patch.object(
+                reconciler, "_observe", new=AsyncMock(return_value=_drifted_observed())
+            ),
+            patch.object(reconciler, "_act", new=AsyncMock(return_value=True)) as act,
+        ):
+            mock_db.update_status = AsyncMock()
+            mock_db.get_intent = AsyncMock(return_value=intent)
+            await reconciler._reconcile_one(intent)
+
+        act.assert_not_awaited()
+        kwargs = mock_db.update_status.call_args.kwargs
+        assert kwargs["phase"] == "degraded"
+        assert kwargs["status_json"]["last_error"]["code"] == "BackendDriftUnsettled"
+        assert kwargs["status_json"]["drift_unsettled_keys"] == ["chat_template_kwargs"]
+
+        # And the tripped state itself survives the reload, so a later tick
+        # routed around _diff cannot flip the phase back to Ready.
+        intent = _reload(intent, kwargs)
+        assert intent.status.drift_unsettled_keys == ["chat_template_kwargs"]

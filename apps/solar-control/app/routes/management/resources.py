@@ -21,6 +21,7 @@ from app.models import (
     HostResourceSnapshot,
 )
 from app.redis_state import host_store
+from app.redis_state.freshness import entry_age_s
 from app.services.host_status import get_host_active_jobs
 
 logger = logging.getLogger(__name__)
@@ -36,9 +37,12 @@ def _merge_resource_payload(
     """Merge a host resource payload into *base* and return it.
 
     Pure and unit-testable. Both the WS health push and the HTTP fallback
-    produce the same payload shape (memory_type, vram/ram/disk dimensions,
-    reservations), so a WS snapshot and the equivalent HTTP body merge
-    identically (C5).
+    produce the same payload shape (vram/ram/disk dimensions, reservations),
+    so a WS snapshot and the equivalent HTTP body merge identically (C5).
+
+    The payload's ``memory_type`` is deliberately dropped: control models the
+    dimensions explicitly (``vram_*``/``ram_*``), so which one the host calls
+    primary has no field on ``HostResourceSnapshot`` to land in.
     """
     for dim_name in ("vram", "ram", "disk"):
         dim = data.get(dim_name)
@@ -129,19 +133,11 @@ async def _read_fresh_ws_snapshot(
     resources = entry.get("resources")
     if not isinstance(resources, dict) or not isinstance(at, str):
         return None
-    # Age is computed against control's clock, and ``at`` is written by
-    # control, so the two are comparable. The subtraction stays inside the
-    # try because an entry left by an older build may be naive, and mixing
-    # naive with aware raises TypeError — which must not escape a freshness
-    # check into _observe.
-    try:
-        at_dt = datetime.fromisoformat(at)
-        if at_dt.tzinfo is None:
-            at_dt = at_dt.replace(tzinfo=timezone.utc)
-        age = (datetime.now(timezone.utc) - at_dt).total_seconds()
-    except (ValueError, TypeError):
-        return None
-    if age > settings.host_snapshot_max_age_s:
+    # Shared with the reconciler's pull-progress freshness check: an unusable
+    # stamp reads as None there and must read as "not fresh" here, so the two
+    # cannot drift into disagreeing about what a stale entry is.
+    age = entry_age_s(at)
+    if age is None or age > settings.host_snapshot_max_age_s:
         return None
     return resources, at
 
