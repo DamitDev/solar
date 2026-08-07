@@ -22,12 +22,14 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any
 
 from fastapi import HTTPException
 
 from app.config import settings
 from app.redis_state.connection import redis_client
+from app.redis_state.freshness import entry_age_s
 from app.redis_state.hosts import PULLS_MAP
 
 logger = logging.getLogger(__name__)
@@ -197,77 +199,93 @@ def _action_timeout_s(action: Action) -> float:
 # key constant lives in app.redis_state.hosts (PULLS_MAP).
 
 
-def _entry_age_s(at: Any) -> float | None:
-    """Age in seconds of an ISO-8601 ``at`` stamp, or None if unusable.
+class _PullState(str, Enum):
+    """Whether a model pull is in flight for a (host, source URI) pair (C4).
 
-    ``at`` is written by control (see ``host_pull_progress`` and
-    ``set_host_resource_snapshot``), but an entry persisted by an older build
-    may be naive. Subtracting a naive from an aware datetime raises
-    ``TypeError``, so the naive case is assumed UTC rather than allowed to
-    propagate out of a freshness check.
+    A boolean cannot express this: "no pull is running" and "a pull stopped
+    reporting" are opposite situations that need opposite responses from the
+    progress-aware wait, and collapsing them is what bounded cold starts at
+    one slice.
     """
-    if not isinstance(at, str):
-        return None
-    try:
-        at_dt = datetime.fromisoformat(at)
-        if at_dt.tzinfo is None:
-            at_dt = at_dt.replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - at_dt).total_seconds()
-    except (ValueError, TypeError):
-        return None
+
+    #: No entry at all, or a terminal one — nothing is downloading. The
+    #: action is doing something else (create, start), which the host call's
+    #: own timeout bounds.
+    ABSENT = "absent"
+    #: Non-terminal and reported within ``pull_progress_stale_after_s``.
+    FRESH = "fresh"
+    #: Non-terminal but silent for longer than that — a wedged pull.
+    STALE = "stale"
 
 
-async def _pull_progress_fresh(host_id: str | None, source_uri: str) -> bool:
-    """True when the host recently reported pull progress for the URI (C4).
+async def _pull_progress_state(host_id: str | None, source_uri: str) -> _PullState:
+    """Classify the host's latest pull progress for *source_uri* (C4).
 
-    Fresh means the entry's ``at`` timestamp — control's receive time — is
-    younger than ``settings.pull_progress_stale_after_s``. Any Redis/parse
-    failure reads as stale, which degrades the progress-aware wait to the
-    plain bound.
+    Freshness is measured off the entry's ``at`` timestamp — control's
+    receive time, so host clock skew cannot make an entry look fresh
+    forever. Any Redis/parse failure reads as ``ABSENT``: an unreadable
+    cache is no evidence that a pull is wedged.
 
-    A terminal entry (``completed``/``failed``) is never fresh: the pull is
-    over, so there is no progress left to wait for.
+    A terminal entry (``completed``/``failed``) is ``ABSENT`` rather than
+    ``STALE``. The pull is over, so there is no progress left to wait for,
+    but the action may legitimately still be creating and starting the
+    instance.
     """
     if not host_id or not source_uri:
-        return False
+        return _PullState.ABSENT
     try:
         r = redis_client()
         raw = await r.hget(PULLS_MAP, f"{host_id}|{source_uri}")
     except Exception:  # noqa: BLE001
-        return False
+        return _PullState.ABSENT
     if not raw:
-        return False
+        return _PullState.ABSENT
     try:
         entry = json.loads(raw)
     except (ValueError, TypeError):
-        return False
+        return _PullState.ABSENT
     if not isinstance(entry, dict):
-        return False
+        return _PullState.ABSENT
     data = entry.get("data")
     if isinstance(data, dict) and data.get("phase") in ("completed", "failed"):
-        return False
-    age = _entry_age_s(entry.get("at"))
+        return _PullState.ABSENT
+    age = entry_age_s(entry.get("at"))
     if age is None:
-        return False
-    return age <= settings.pull_progress_stale_after_s
+        return _PullState.ABSENT
+    if age <= settings.pull_progress_stale_after_s:
+        return _PullState.FRESH
+    return _PullState.STALE
 
 
 async def _await_action_with_progress(coro: Any, action: Action, intent: Any) -> Any:
     """Await *coro* with a progress-aware bound (C4, fixes the 60 s trap).
 
     Cold-start actions (CREATE/EVACUATE/MIGRATE) are bounded by
-    ``_action_timeout_s(action)`` — but that bound can still fire
-    mid-download on a slow link. Instead of one big ``wait_for``, wait in
-    slices of ``settings.action_progress_slice_s``; at each slice boundary
-    the host's pull progress for ``(action.host_id, intent.model_source)``
-    is checked, and the wait continues while that progress is newer than
-    ``settings.pull_progress_stale_after_s``. The hard ceiling remains
-    ``_action_timeout_s(action)``.
+    ``_action_timeout_s(action)``. Instead of one big ``wait_for``, wait in
+    slices of ``settings.action_progress_slice_s`` so the host's pull
+    progress for ``(action.host_id, intent.model_source)`` can be consulted
+    at each boundary. Progress may only *shorten* the wait for a pull that
+    demonstrably wedged; it never shortens it below the documented bound:
 
-    When the ceiling is hit while the host is *still* downloading, the
-    raised ``TimeoutError`` carries ``recoverable=True`` so the recorded
+    * ``FRESH`` — a download is running. Keep waiting to the ceiling.
+    * ``ABSENT`` — nothing is downloading, because the model was already
+      cached or the pull already finished. Keep waiting to the ceiling too:
+      the remaining work is create + start, whose host calls carry their own
+      ``host_start_timeout_s`` bound, and a warm start of a large model
+      legitimately outlives a slice (the host waits up to
+      ``instance_ready_timeout_s`` for the backend's ready line). Treating
+      "no pull entry" as a reason to give up is what capped every
+      cached-model CREATE at one slice.
+    * ``STALE`` — a pull was reporting and went silent. That is a genuine
+      stall, so give up early rather than hold the (sequential) reconcile
+      loop for the full ceiling.
+
+    When the wait ends while the host is *still* downloading, the raised
+    ``TimeoutError`` carries ``recoverable=True`` so the recorded
     ``last_error`` tells the webui the deployment is still working rather
-    than dead.
+    than dead. A stalled or absent pull is not recoverable — claiming
+    "still working" there would be the same dead-end contradiction in
+    reverse.
 
     The slice boundary is decided on *task state*, never on exception type:
     ``asyncio.TimeoutError`` is the builtin ``TimeoutError`` on 3.11+ and
@@ -279,9 +297,11 @@ async def _await_action_with_progress(coro: Any, action: Action, intent: Any) ->
     if action.type not in _COLD_START_ACTIONS:
         return await asyncio.wait_for(coro, timeout=_ACTION_TIMEOUT_S)
 
-    deadline = time.monotonic() + _action_timeout_s(action)
+    bound_s = _action_timeout_s(action)
+    deadline = time.monotonic() + bound_s
     task = asyncio.ensure_future(coro)
     try:
+        stalled = False
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -293,18 +313,41 @@ async def _await_action_with_progress(coro: Any, action: Action, intent: Any) ->
                 # unchanged — including a genuine TimeoutError from a host
                 # call, which must not be mistaken for a slice expiry.
                 return task.result()
-            if not await _pull_progress_fresh(action.host_id, intent.model_source):
+            if (
+                await _pull_progress_state(action.host_id, intent.model_source)
+                is _PullState.STALE
+            ):
+                stalled = True
                 break
 
-        still_working = await _pull_progress_fresh(action.host_id, intent.model_source)
-        exc = asyncio.TimeoutError(
-            f"Action {action.type} for intent {intent.alias} exceeded its bound "
-            f"({_action_timeout_s(action):.0f}s)"
-            + (
+        if stalled:
+            still_working = False
+            reason = (
+                f"the host stopped reporting download progress for "
+                f"{intent.model_source} for over "
+                f"{settings.pull_progress_stale_after_s:.0f}s"
+            )
+        else:
+            still_working = (
+                await _pull_progress_state(action.host_id, intent.model_source)
+                is _PullState.FRESH
+            )
+            reason = f"it exceeded its {bound_s:.0f}s bound" + (
                 f" while the host is still downloading {intent.model_source}"
                 if still_working
                 else ""
             )
+
+        # The checks above are await points, so the action may have finished
+        # while they ran. Its result must win over a synthetic timeout: the
+        # finally below does not cancel a done task, so the outcome would
+        # otherwise be dropped and a bogus error recorded for work that
+        # actually succeeded.
+        if task.done():
+            return task.result()
+        exc = asyncio.TimeoutError(
+            f"Action {action.type} for intent {intent.alias} was abandoned: "
+            f"{reason}"
         )
         exc.recoverable = still_working  # type: ignore[attr-defined]
         raise exc
@@ -679,7 +722,7 @@ class Reconciler:
                 intent,
                 observed,
                 last_error=last_error,
-                drift_replace=drift_replace,
+                drift_replace=drift_replace and action_succeeded,
             )
             logger.debug(
                 "update_status for %s took %.1fs",
@@ -724,7 +767,11 @@ class Reconciler:
         # Counted off the action actually executed, not every planned one: a
         # drift REPLACE that loses the priority sort is not an attempt, and
         # counting it would burn the breaker's budget without ever having
-        # tried the replacement.
+        # tried the replacement. Only a REPLACE that ran to completion counts
+        # (see the _update_status call below) — one that failed for an
+        # unrelated reason (host unreachable, pull error) is no evidence that
+        # the drift is unsettleable, and three of them would otherwise report
+        # a host outage as BackendDriftUnsettled.
         drift_replace = _is_drift_replace(action)
         logger.info(
             "Reconciling intent %s (%s): action=%s reason=%s",
@@ -788,7 +835,7 @@ class Reconciler:
             # No replica needed replacing, so nothing is left to roll out for
             # a pending spec change (S-044).
             spec_settled=_spec_settled(observed, actions),
-            drift_replace=drift_replace,
+            drift_replace=drift_replace and action_succeeded,
         )
 
     # ── S-042: Strategy helpers ──────────────────────────────────
@@ -1073,11 +1120,13 @@ class Reconciler:
                 }
 
             hosts_by_id = {h.id: h for h in hosts}
+            live_iids: set[str] = set()
             for inst in managed_instances:
                 host = hosts_by_id.get(inst.get("_host_id"))
                 iid = inst.get("instance_id") or inst.get("id")
                 if host is None or not iid:
                     continue
+                live_iids.add(iid)
                 cache_key = (intent.id, iid, spec_version)
                 if cache_key in self._config_cache:
                     inst["_full_config"] = self._config_cache[cache_key]
@@ -1103,6 +1152,24 @@ class Reconciler:
                 if isinstance(cfg, dict):
                     inst["_full_config"] = cfg
                     self._config_cache[cache_key] = cfg
+
+            # Replicas churn inside a single pending window — a RECREATE or a
+            # rollout replaces instance ids without touching spec_changed_at,
+            # so keying on the spec version alone would keep every dead
+            # replica's full config for the reconciler's lifetime.
+            self._config_cache = {
+                k: v
+                for k, v in self._config_cache.items()
+                if k[0] != intent.id or k[1] in live_iids
+            }
+        else:
+            # The window is closed (or the intent has no replicas left): the
+            # captures cannot be reused and the marker would otherwise outlive
+            # a deleted intent.
+            self._config_cache_spec.pop(intent.id, None)
+            self._config_cache = {
+                k: v for k, v in self._config_cache.items() if k[0] != intent.id
+            }
 
         # 3. Gateway registry — which aliases are registered?
         gateway_aliases: set[str] = set()
@@ -2338,10 +2405,12 @@ class Reconciler:
         S-044 has served its purpose. Status JSON is rebuilt from scratch on
         every write, so the marker has to be carried forward explicitly.
 
-        *drift_replace* reports whether the pass planned a drift-driven
+        *drift_replace* reports whether the pass *completed* a drift-driven
         REPLACE; it feeds the C1 churn circuit breaker counter
         (``drift_replace_attempts``), which is reset when the spec settles
-        or is edited.
+        or is edited. Callers pass it only when the action succeeded: the
+        breaker measures "the host keeps reproducing this drift", so a
+        REPLACE that never ran is not a data point.
         """
         from app.database.intents import intent_db
         from app.models.intent import (

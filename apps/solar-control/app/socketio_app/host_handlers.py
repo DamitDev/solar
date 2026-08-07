@@ -241,6 +241,18 @@ async def host_disconnect(sid: str):
     if host_id:
         await host_store.set_disconnect_time(host_id)
         await host_db.update_host_status(host_id, HostStatus.OFFLINE)
+        # A pull can only report progress over this socket, so an in-flight
+        # entry is dead the moment the socket is. The instance cache and the
+        # resource snapshot are kept: those still describe the host, and both
+        # are freshness-gated on read (C4).
+        try:
+            await host_store.remove_host_pulls(host_id)
+        except Exception:
+            logger.warning(
+                "Failed to drop pull progress for disconnected host %s",
+                host_id,
+                exc_info=True,
+            )
 
         host = await host_db.get_host(host_id)
         logger.info("Host '%s' (%s) disconnected", host.name if host else "?", host_id)

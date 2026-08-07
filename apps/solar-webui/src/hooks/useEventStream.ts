@@ -62,8 +62,25 @@ export function isTerminalPullPhase(phase: string | undefined): boolean {
   return phase === 'completed' || phase === 'failed';
 }
 
-/** How long a finished pull stays visible before it is dropped (C4). */
+/**
+ * How long a finished pull stays visible before it is dropped (C4).
+ *
+ * Deliberately shorter than the server's `pull_progress_terminal_grace_s`
+ * (300 s). The server grace exists so a client that loads mid-pull still gets
+ * the outcome from `GET /api/pulls`; this one only has to cover how long a
+ * viewer already on the page should keep seeing "completed" before the row
+ * disappears.
+ */
 export const PULL_PROGRESS_TERMINAL_GRACE_MS = 60_000;
+/**
+ * How long a pull may go silent before it stops counting as in flight.
+ *
+ * Mirrors the server's `pull_progress_stale_after_s` (180 s) plus the same
+ * margin `GET /api/pulls` applies, so a host that dies mid-download does not
+ * leave a frozen byte count on screen — and so the two sides do not disagree
+ * about which pulls are live.
+ */
+export const PULL_PROGRESS_STALE_MS = 360_000;
 /** Hard ceiling on tracked pulls, mirroring the per-instance log cap. */
 const MAX_PULL_PROGRESS_ENTRIES = 200;
 
@@ -71,10 +88,11 @@ const MAX_PULL_PROGRESS_ENTRIES = 200;
  * Keep the pull-progress map bounded.
  *
  * Every (host, model) pair a session ever sees adds a key that nothing else
- * removes, and a finished pull would otherwise be reported as current
- * forever. Finished pulls age out after a grace so a late-arriving viewer
- * still sees the outcome; *keepKey* is never dropped so the entry just
- * written always survives.
+ * removes, and a stale entry would otherwise be reported as current forever.
+ * Finished pulls age out after a grace so a late-arriving viewer still sees
+ * the outcome; unfinished ones age out once the host has stopped reporting,
+ * which is the only signal a host that died mid-pull ever gives. *keepKey* is
+ * never dropped so the entry just written always survives.
  */
 export function prunePullProgress(
   entries: Map<string, PullProgressEvent>,
@@ -82,11 +100,18 @@ export function prunePullProgress(
   now: number = Date.now(),
 ): Map<string, PullProgressEvent> {
   for (const [key, entry] of entries) {
-    if (key === keepKey || !isTerminalPullPhase(entry.data?.phase)) continue;
+    if (key === keepKey) continue;
+    const terminal = isTerminalPullPhase(entry.data?.phase);
     const at = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
-    // An unparseable stamp is treated as expired: a terminal entry we cannot
-    // age is exactly the one that would linger forever.
-    if (Number.isNaN(at) || now - at > PULL_PROGRESS_TERMINAL_GRACE_MS) {
+    if (Number.isNaN(at)) {
+      // A terminal entry we cannot age is exactly the one that would linger
+      // forever. An unstamped in-flight one may simply be brand new, so it is
+      // left to the size cap below rather than guessed at.
+      if (terminal) entries.delete(key);
+      continue;
+    }
+    const limit = terminal ? PULL_PROGRESS_TERMINAL_GRACE_MS : PULL_PROGRESS_STALE_MS;
+    if (now - at > limit) {
       entries.delete(key);
     }
   }

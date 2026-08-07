@@ -176,12 +176,38 @@ describe('prunePullProgress', () => {
     const map = new Map<string, PullProgressEvent>([
       ['host-a|old', entry('completed', 10 * 60_000)],
       ['host-a|recent', entry('failed', 1_000)],
-      ['host-a|live', entry('downloading', 10 * 60_000)],
+      ['host-a|live', entry('downloading', 60_000)],
     ]);
 
     prunePullProgress(map, undefined, now);
 
     expect([...map.keys()]).toEqual(['host-a|recent', 'host-a|live']);
+  });
+
+  it('drops a download the host stopped reporting', () => {
+    // A host that dies mid-pull never sends a terminal event, so silence is
+    // the only signal there is. Without this the frozen byte count is shown
+    // as live progress for the rest of the session.
+    const map = new Map<string, PullProgressEvent>([
+      ['host-a|abandoned', entry('downloading', 30 * 60_000)],
+      // Silent for a while but inside the margin: a host that skipped a few
+      // emissions keeps its bar.
+      ['host-a|slow', entry('downloading', 4 * 60_000)],
+    ]);
+
+    prunePullProgress(map, undefined, now);
+
+    expect([...map.keys()]).toEqual(['host-a|slow']);
+  });
+
+  it('keeps an unstamped in-flight entry, which may simply be new', () => {
+    const map = new Map<string, PullProgressEvent>([
+      ['host-a|nostamp', { host_id: 'host-a', data: { source_uri: SOURCE, phase: 'downloading' } }],
+    ]);
+
+    prunePullProgress(map, undefined, now);
+
+    expect(map.size).toBe(1);
   });
 
   it('never drops the key just written', () => {

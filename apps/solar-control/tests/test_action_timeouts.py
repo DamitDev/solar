@@ -2,9 +2,14 @@
 
 Root-cause-A regression: cold-start actions (CREATE/EVACUATE/MIGRATE) are
 bounded by ``_action_timeout_s(action)`` — not the raw 60 s ``_ACTION_TIMEOUT_S``
-the normal reconcile flow used to apply to everything — and the wait is
-progress-aware: while the host reports fresh pull progress, the wait
-continues, and giving up mid-progress marks the recorded error recoverable.
+the normal reconcile flow used to apply to everything.
+
+The wait is progress-aware, and the direction of that awareness is the whole
+point: pull progress may only *shorten* the wait for a pull that demonstrably
+wedged (``STALE``). Neither "no pull is running" nor "the pull finished"
+(both ``ABSENT``) may cut the wait below the documented bound — doing so
+capped every cached-model CREATE at a single slice while the host was
+legitimately still starting the instance.
 """
 
 import asyncio
@@ -23,6 +28,7 @@ from app.services.reconciliation import (
     ActionType,
     Reconciler,
     _await_action_with_progress,
+    _PullState,
 )
 
 
@@ -34,6 +40,10 @@ def _action(type_: str, **overrides) -> Action:
         host_id="h1",
         **overrides,
     )
+
+
+def _progress(state: _PullState) -> AsyncMock:
+    return AsyncMock(return_value=state)
 
 
 async def _sleep_coro(seconds: float):
@@ -76,8 +86,8 @@ class TestAwaitActionWithProgress:
         )
         with (
             patch(
-                "app.services.reconciliation._pull_progress_fresh",
-                new=AsyncMock(return_value=False),
+                "app.services.reconciliation._pull_progress_state",
+                new=_progress(_PullState.ABSENT),
             ),
             pytest.raises(asyncio.TimeoutError) as excinfo,
         ):
@@ -85,6 +95,67 @@ class TestAwaitActionWithProgress:
                 _sleep_coro(0.5), _action(ActionType.CREATE), _make_intent()
             )
         assert excinfo.value.recoverable is False
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("state", [_PullState.ABSENT, _PullState.FRESH])
+    async def test_quiet_pull_does_not_shorten_the_bound(self, monkeypatch, state):
+        """The Finding-1 regression, and the C1 scale-1-to-2 scenario.
+
+        A cached model never emits progress (``pull_model`` returns before the
+        first ``progress_cb``), so the entry is ABSENT for the whole create +
+        start. The old code broke out of the slice loop on the first quiet
+        boundary, capping the action at one slice while the host was still
+        starting the instance. Both quiet states must now run to completion.
+        """
+        monkeypatch.setattr("app.config.settings.action_progress_slice_s", 0.02)
+        monkeypatch.setattr(
+            "app.services.reconciliation._action_timeout_s", lambda a: 5.0
+        )
+        with patch(
+            "app.services.reconciliation._pull_progress_state", new=_progress(state)
+        ):
+            started = asyncio.get_running_loop().time()
+            result = await _await_action_with_progress(
+                # Many slices long, so a single-slice bound cannot pass.
+                _sleep_coro(0.3),
+                _action(ActionType.CREATE),
+                _make_intent(),
+            )
+            elapsed = asyncio.get_running_loop().time() - started
+
+        assert result == {"done": True}
+        assert elapsed >= 0.3
+
+    @pytest.mark.anyio
+    async def test_stalled_pull_gives_up_at_the_first_quiet_slice(self, monkeypatch):
+        """A pull that reported and went silent is wedged.
+
+        Giving up early is the one case where progress may shorten the wait:
+        the reconcile loop is sequential, so holding it for the full ~46 min
+        ceiling would starve every other intent.
+        """
+        monkeypatch.setattr("app.config.settings.action_progress_slice_s", 0.02)
+        monkeypatch.setattr(
+            "app.services.reconciliation._action_timeout_s", lambda a: 5.0
+        )
+        with (
+            patch(
+                "app.services.reconciliation._pull_progress_state",
+                new=_progress(_PullState.STALE),
+            ),
+            pytest.raises(asyncio.TimeoutError) as excinfo,
+        ):
+            started = asyncio.get_running_loop().time()
+            await _await_action_with_progress(
+                _sleep_coro(5.0), _action(ActionType.CREATE), _make_intent()
+            )
+        elapsed = asyncio.get_running_loop().time() - started
+
+        # One slice, nowhere near the 5 s ceiling.
+        assert elapsed < 1.0
+        # A stalled pull is not "still working".
+        assert excinfo.value.recoverable is False
+        assert "stopped reporting download progress" in str(excinfo.value)
 
     @pytest.mark.anyio
     async def test_stop_keeps_60s_bound(self, monkeypatch):
@@ -106,8 +177,8 @@ class TestAwaitActionWithProgress:
         )
         with (
             patch(
-                "app.services.reconciliation._pull_progress_fresh",
-                new=AsyncMock(return_value=True),
+                "app.services.reconciliation._pull_progress_state",
+                new=_progress(_PullState.FRESH),
             ),
             pytest.raises(asyncio.TimeoutError) as excinfo,
         ):
@@ -115,6 +186,44 @@ class TestAwaitActionWithProgress:
                 _sleep_coro(0.5), _action(ActionType.CREATE), _make_intent()
             )
         assert excinfo.value.recoverable is True
+        assert "still downloading" in str(excinfo.value)
+
+    @pytest.mark.anyio
+    async def test_action_finishing_during_the_final_checks_wins(self, monkeypatch):
+        """The done-before-raise race.
+
+        The ceiling check and the progress read are await points, so the action
+        can complete between the last slice and the raise. The finally clause
+        does not cancel a task that is already done, so without an explicit
+        re-check its result is dropped and a bogus TimeoutError is recorded for
+        work that actually succeeded.
+        """
+        monkeypatch.setattr("app.config.settings.action_progress_slice_s", 0.02)
+        monkeypatch.setattr(
+            "app.services.reconciliation._action_timeout_s", lambda a: 0.05
+        )
+        finish = asyncio.Event()
+
+        async def _finishes_on_cue():
+            await finish.wait()
+            return {"done": True}
+
+        async def _release_then_report(*_args, **_kwargs):
+            # Stands in for the Redis read after the loop: completing the
+            # action here reproduces the race deterministically.
+            finish.set()
+            await asyncio.sleep(0)
+            return _PullState.ABSENT
+
+        with patch(
+            "app.services.reconciliation._pull_progress_state",
+            new=_release_then_report,
+        ):
+            result = await _await_action_with_progress(
+                _finishes_on_cue(), _action(ActionType.CREATE), _make_intent()
+            )
+
+        assert result == {"done": True}
 
     @pytest.mark.anyio
     async def test_action_timeout_error_propagates_without_spinning(self, monkeypatch):
@@ -135,9 +244,9 @@ class TestAwaitActionWithProgress:
         async def _raises_timeout():
             raise sentinel
 
-        progress = AsyncMock(return_value=True)
+        progress = _progress(_PullState.FRESH)
         with (
-            patch("app.services.reconciliation._pull_progress_fresh", new=progress),
+            patch("app.services.reconciliation._pull_progress_state", new=progress),
             pytest.raises(asyncio.TimeoutError) as excinfo,
         ):
             await _await_action_with_progress(
@@ -181,8 +290,8 @@ class TestAwaitActionWithProgress:
                 raise
 
         with patch(
-            "app.services.reconciliation._pull_progress_fresh",
-            new=AsyncMock(return_value=True),
+            "app.services.reconciliation._pull_progress_state",
+            new=_progress(_PullState.FRESH),
         ):
             outer = asyncio.ensure_future(
                 _await_action_with_progress(
@@ -205,8 +314,8 @@ class TestAwaitActionWithProgress:
             "app.services.reconciliation._action_timeout_s", lambda a: 1.0
         )
         with patch(
-            "app.services.reconciliation._pull_progress_fresh",
-            new=AsyncMock(return_value=True),
+            "app.services.reconciliation._pull_progress_state",
+            new=_progress(_PullState.FRESH),
         ):
             result = await _await_action_with_progress(
                 _sleep_coro(0.3), _action(ActionType.CREATE), _make_intent()
@@ -224,8 +333,8 @@ class TestNormalReconcilePath:
             "app.services.reconciliation._action_timeout_s", lambda a: 0.2
         )
         with patch(
-            "app.services.reconciliation._pull_progress_fresh",
-            new=AsyncMock(return_value=False),
+            "app.services.reconciliation._pull_progress_state",
+            new=_progress(_PullState.STALE),
         ):
             reconciler = Reconciler()
             intent = _make_intent(replicas=1)
@@ -256,3 +365,47 @@ class TestNormalReconcilePath:
             assert last_error is not None
             assert last_error["code"] == "TimeoutError"
             assert last_error["recoverable"] is False
+
+    @pytest.mark.anyio
+    async def test_warm_create_records_no_error(self, monkeypatch):
+        """The reported symptom, end to end.
+
+        Scaling an intent whose model is already cached (the C1 1-to-2 case)
+        runs a CREATE that never emits pull progress. It must reach the host's
+        own start bound, not a red TimeoutError one slice in.
+        """
+        monkeypatch.setattr("app.config.settings.action_progress_slice_s", 0.02)
+        monkeypatch.setattr(
+            "app.services.reconciliation._action_timeout_s", lambda a: 5.0
+        )
+        with patch(
+            "app.services.reconciliation._pull_progress_state",
+            new=_progress(_PullState.ABSENT),
+        ):
+            reconciler = Reconciler()
+            intent = _make_intent(replicas=1)
+            host = _HostStub(id="h1")
+            observed = _make_observed(
+                managed=[],
+                hosts=[host],
+                candidates=[(host, _SnapshotStub("h1"))],
+            )
+
+            async def _warm_start(*args, **kwargs):
+                # Many slices long: a warm start of a large model still waits
+                # on the backend's ready line.
+                await asyncio.sleep(0.3)
+                return {}
+
+            with (
+                patch.object(
+                    reconciler, "_observe", new=AsyncMock(return_value=observed)
+                ),
+                patch.object(reconciler, "_act", new=_warm_start),
+                patch.object(
+                    reconciler, "_update_status", new=AsyncMock()
+                ) as mock_status,
+            ):
+                await reconciler._reconcile_one(intent)
+
+            assert mock_status.call_args[1].get("last_error") is None

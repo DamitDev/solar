@@ -178,7 +178,8 @@ Hosts connect via Socket.IO to the `/hosts` namespace; they appear in pending un
 
 ### Resource Queries
 
-- `GET /api/resources` - Aggregated cluster-wide view of host capacity, workloads, and reservations. Supports filters: `role`, `gpu_type`, `min_available_vram_gb`, `min_available_ram_gb`. Each host entry includes finer details for the resource dashboard (U-004): `instances` (inference workload list with aliases), `reservations` (per-reservation details with owner `job_id`, requested vs actual), and `*_training_used_gb` (the portion of in-use capacity consumed by active training job steps)
+- `GET /api/resources` - Aggregated cluster-wide view of host capacity, workloads, and reservations. Supports filters: `role`, `gpu_type`, `min_available_vram_gb`, `min_available_ram_gb`. Each host entry includes finer details for the resource dashboard (U-004): `instances` (inference workload list with aliases), `reservations` (per-reservation details with owner `job_id`, requested vs actual), and `*_training_used_gb` (the portion of in-use capacity consumed by active training job steps). `snapshot_source` reports where the entry came from: `ws` (the Redis read model fed by `host_health`), `http` (the degraded per-host proxy), or `none`
+- `GET /api/pulls` - Latest model pull progress per `{host_id}|{source_uri}` (S-051), so a client that loads mid-download renders it without waiting for the next `pull_progress` event. Each value is `{"at": <iso8601>, "data": {source_uri, phase, bytes_done, bytes_total, speed_bps}}`; `bytes_total` is `null` for `huggingface://` sources, whose size is not known up front. Doubles as the pruner for the hash, which has no TTL: finished pulls are dropped after `PULL_PROGRESS_TERMINAL_GRACE_S`, and unfinished ones once the host has been silent for well past `PULL_PROGRESS_STALE_AFTER_S` (a host that dies mid-pull never sends a terminal event)
 
 ### Instance Proxy (via solar-control to host)
 

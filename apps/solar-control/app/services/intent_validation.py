@@ -24,16 +24,20 @@ logger = logging.getLogger(__name__)
 
 async def _fleet_state(
     data: dict[str, Any],
-) -> tuple[list[Any], dict[str, Any], list[Any], list[Any]]:
-    """Return (candidates, snapshots, hosts, durable) for the intent payload.
+    hosts: list[Any],
+) -> tuple[list[Any], dict[str, Any], list[Any]]:
+    """Return (candidates, snapshots, durable) for the intent payload.
 
     ``candidates`` comes from the real placement chain (``find_candidates``)
     so validation and placement cannot disagree; ``durable`` is the shared
     durable-filter subset (roles/gpu_type/allow/deny, via
     ``placement.filter_durable_hosts``) used for the capacity and
     drain/unreachable warnings.
+
+    The roster is passed in rather than re-read: the caller already needed it
+    for the hard half, and a second query could see a different fleet than the
+    one the hard errors were computed against.
     """
-    from app.database.hosts import host_db
     from app.routes.management.resources import _fetch_host_resource_snapshot
     from app.services.placement import filter_durable_hosts, find_candidates
 
@@ -46,7 +50,6 @@ async def _fleet_state(
     host_allow = list(placement.get("host_allow") or []) or None
     host_deny = list(placement.get("host_deny") or []) or None
 
-    hosts = await host_db.get_all_hosts()
     snapshots = {
         s.host_id: s
         for s in await asyncio.gather(
@@ -74,7 +77,7 @@ async def _fleet_state(
         disk_gb=None,
         exclude_alias=None,
     )
-    return candidates, snapshots, hosts, durable
+    return candidates, snapshots, durable
 
 
 def validate_intent_fleet_hard(
@@ -176,7 +179,7 @@ async def validate_intent_fleet(
 
     # ── Advisory: dynamic fleet state never blocks an edit ──────
     try:
-        candidates, snapshots, hosts, durable = await _fleet_state(data)
+        candidates, snapshots, durable = await _fleet_state(data, hosts)
     except Exception:
         logger.warning("Fleet validation could not compute eligibility", exc_info=True)
         return hard_errors, warnings

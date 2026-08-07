@@ -527,6 +527,14 @@ with condition `Degraded/DriftUnsettled`. The counter resets when the spec
 settles or the user edits the intent again; `status.drift_replace_attempts`
 exposes the current count.
 
+A round only counts when the REPLACE was actually executed **and
+succeeded**. The breaker's claim is "the host keeps reproducing this
+drift", so a REPLACE that lost the priority sort, was handed to a rollout
+strategy, or failed for an unrelated reason (host unreachable, pull error)
+is not evidence — counting those would let a host outage diagnose itself as
+`BackendDriftUnsettled`. Such failures are still recorded in `last_error`
+on their own terms.
+
 ### 8.3 Idempotency and safety
 
 - Actions are keyed by `(intent_id, host_id)`. The reconciler never creates two managed replicas of the same alias on one host.
@@ -841,10 +849,29 @@ A multi-GB model pull takes minutes, so cold-start actions (CREATE,
 EVACUATE, MIGRATE) are **not** bounded by the raw per-action timeout that
 quick actions (STOP, RESTART) keep. Their bound is
 `_action_timeout_s(action)` — the settings-derived cold-start bound
-(`model_pull_timeout_s + host_start_timeout_s + _ACTION_TIMEOUT_S`). The
-wait is sliced and fresh pull progress (`pull_progress` events) extends the
-wait up to that bound; a give-up while the host is still pulling is
-recorded with `recoverable: true` instead of a bare timeout.
+(`model_pull_timeout_s + host_start_timeout_s + _ACTION_TIMEOUT_S`).
+
+The wait is sliced into `action_progress_slice_s` chunks so the host's pull
+progress can be consulted as it runs. Progress may only ever **shorten** the
+wait for a pull that demonstrably wedged; it never shortens it below the
+bound above. At each slice boundary the cached `pull_progress` entry for
+`(host, model_source)` reads as one of three states:
+
+- **fresh** — reported within `pull_progress_stale_after_s`. A download is
+  running; wait on to the bound. Giving up here records
+  `recoverable: true`, so the UI reads it as "still working".
+- **absent** — no entry, or a terminal one. Nothing is downloading, because
+  the model was already cached or the pull already finished. Wait on to the
+  bound as well: the remaining work is create + start, which the host calls
+  bound themselves (`host_start_timeout_s`, and `instance_ready_timeout_s`
+  on the host), and a warm start of a large model legitimately outlives a
+  slice. Treating an absent entry as a reason to give up would cap every
+  cached-model CREATE at one slice — the common case once a model has been
+  pulled once, and the one that made scaling an existing intent look broken.
+- **stale** — a pull was reporting and went silent. That is a real stall, so
+  the action is abandoned early rather than holding the reconcile loop,
+  which is sequential across intents. Not `recoverable`: nothing is known to
+  be working.
 
 This is what separates "the host said no" from "the host did not answer". Only the former is evidence about the replica.
 

@@ -57,7 +57,23 @@ control rebroadcasts user-facing events to `/webui`.
 | `solar:hosts:pulls` | `{host_id}\|{source_uri}` | `{"at": <iso8601>, "data": {...}}` (C4) |
 
 Freshness is decided on read (`host_snapshot_max_age_s`); entries carry no
-TTL, matching the instances map.
+TTL, matching the instances map. The `at` field is always **control's**
+receive time, never the host's, so clock skew across the fleet cannot make
+an entry look fresh forever.
+
+Because nothing expires on its own, every keyed map is reclaimed
+explicitly:
+
+- Host removal purges all three maps for that host (`purge_host_state`).
+- Host **disconnect** purges only `solar:hosts:pulls`. Progress can arrive
+  only over the socket that just went away, so an in-flight entry is dead;
+  the instances and snapshot maps still describe the host and are
+  freshness-gated on read.
+- `GET /api/pulls` prunes as it serves: terminal entries past
+  `pull_progress_terminal_grace_s`, and non-terminal ones the host has
+  stopped reporting for well past `pull_progress_stale_after_s`. A host
+  that dies mid-pull never sends a terminal event, so without this its
+  frozen `downloading` row would be served as live progress forever.
 
 ## 4. Consumers
 

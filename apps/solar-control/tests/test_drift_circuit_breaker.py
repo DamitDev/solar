@@ -307,3 +307,74 @@ class TestDriftReplaceCounting:
         assert act.call_args.args[1].type == ActionType.REPLACE
         status_json = mock_db.update_status.call_args.kwargs["status_json"]
         assert status_json["drift_replace_attempts"] == 2
+
+    @pytest.mark.anyio
+    async def test_a_failed_drift_replace_does_not_count(self):
+        """A REPLACE the host refused says nothing about the drift.
+
+        The breaker measures "the host keeps reproducing this drift". A
+        REPLACE that failed for an unrelated reason never produced a
+        replacement to compare, so counting it would let a host outage
+        report itself as BackendDriftUnsettled.
+        """
+        reconciler = Reconciler()
+        intent = _drifted_intent(attempts=1)
+        intent.replicas = 1
+        observed = _drifted_observed()
+
+        with (
+            patch("app.database.intents.intent_db") as mock_db,
+            patch("app.services.strategies.initiate_strategy", return_value=None),
+            patch.object(reconciler, "_observe", new=AsyncMock(return_value=observed)),
+            patch.object(
+                reconciler,
+                "_act",
+                new=AsyncMock(side_effect=RuntimeError("host unreachable")),
+            ) as act,
+        ):
+            mock_db.update_status = AsyncMock()
+            mock_db.get_intent = AsyncMock(return_value=intent)
+            await reconciler._reconcile_one(intent)
+
+        assert act.call_args.args[1].type == ActionType.REPLACE
+        status_json = mock_db.update_status.call_args.kwargs["status_json"]
+        assert status_json["drift_replace_attempts"] == 1
+        # The failure is still visible; it is just not the breaker's business.
+        assert status_json["last_error"]["code"] == "RuntimeError"
+
+    @pytest.mark.anyio
+    async def test_repeated_replace_failures_never_trip_the_breaker(self, monkeypatch):
+        """A host outage lasting many ticks must not be diagnosed as drift."""
+        monkeypatch.setattr("app.config.settings.max_drift_replace_attempts", 3)
+        reconciler = Reconciler()
+        intent = _drifted_intent(attempts=0)
+        intent.replicas = 1
+
+        for _ in range(5):
+            # Each iteration stands for a tick after the failure backoff has
+            # elapsed; without this the reconciler skips the intent and the
+            # loop would prove nothing.
+            reconciler._backoff_clear(intent.id)
+            with (
+                patch("app.database.intents.intent_db") as mock_db,
+                patch("app.services.strategies.initiate_strategy", return_value=None),
+                patch.object(
+                    reconciler,
+                    "_observe",
+                    new=AsyncMock(return_value=_drifted_observed()),
+                ),
+                patch.object(
+                    reconciler,
+                    "_act",
+                    new=AsyncMock(side_effect=RuntimeError("host unreachable")),
+                ),
+            ):
+                mock_db.update_status = AsyncMock()
+                mock_db.get_intent = AsyncMock(return_value=intent)
+                await reconciler._reconcile_one(intent)
+
+            status_json = mock_db.update_status.call_args.kwargs["status_json"]
+            intent.status.drift_replace_attempts = status_json["drift_replace_attempts"]
+
+        assert intent.status.drift_replace_attempts == 0
+        assert status_json["last_error"]["code"] == "RuntimeError"

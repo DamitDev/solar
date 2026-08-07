@@ -28,12 +28,22 @@ async def list_pulls() -> dict[str, dict]:
     where ``data`` carries the host's payload (``source_uri``, ``phase``,
     ``bytes_done``, ``bytes_total``, ``speed_bps``).
 
-    Doubles as the pruner for finished pulls: the hash has no TTL, so without
-    this a completed pull would be returned to every client forever. Entries
-    past ``pull_progress_terminal_grace_s`` are dropped, which is long enough
-    for a late-joining client to still see the outcome.
+    Doubles as the pruner: the hash has no TTL, so without this an entry
+    would be returned to every client forever. Two ages apply.
+
+    * Terminal (``completed``/``failed``) entries live for
+      ``pull_progress_terminal_grace_s``, long enough for a late-joining
+      client to still see the outcome.
+    * Non-terminal entries live for ``pull_progress_stale_after_s`` plus a
+      margin of the same length. Past that the host has stopped reporting —
+      it died mid-pull, or the pull wedged — and serving a frozen
+      ``downloading`` row as live progress is worse than showing nothing.
+      The margin keeps a host that merely missed a couple of emissions from
+      having its live download erased.
     """
-    from app.services.reconciliation import _entry_age_s
+    from app.redis_state.freshness import entry_age_s
+
+    stale_after = settings.pull_progress_stale_after_s * 2
 
     r = redis_client()
     raw = await r.hgetall(PULLS_MAP)
@@ -51,14 +61,13 @@ async def list_pulls() -> dict[str, dict]:
             continue
         data = parsed.get("data")
         phase = data.get("phase") if isinstance(data, dict) else None
-        age = _entry_age_s(parsed.get("at"))
-        if (
-            phase in ("completed", "failed")
-            and age is not None
-            and age > settings.pull_progress_terminal_grace_s
-        ):
-            expired.append(str(field))
-            continue
+        age = entry_age_s(parsed.get("at"))
+        if age is not None:
+            terminal = phase in ("completed", "failed")
+            limit = settings.pull_progress_terminal_grace_s if terminal else stale_after
+            if age > limit:
+                expired.append(str(field))
+                continue
         # decode_responses=True is guaranteed by init_redis; str() keeps
         # pyright happy with the bytes|str union.
         result[str(field)] = parsed
@@ -67,5 +76,5 @@ async def list_pulls() -> dict[str, dict]:
         try:
             await r.hdel(PULLS_MAP, *expired)
         except Exception:
-            logger.warning("Failed to prune finished pull entries", exc_info=True)
+            logger.warning("Failed to prune stale pull entries", exc_info=True)
     return result
