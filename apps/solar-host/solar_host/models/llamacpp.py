@@ -190,6 +190,7 @@ class LlamaCppConfig(BaseModel):
                     "'spec_draft_conf_min' is only supported with spec_type 'draft-dspark'"
                 )
         return self
+
     cache_type_k: (
         Literal["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"]
         | None
