@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEVICE_OPTIONS,
   DTYPE_OPTIONS,
+  applySpecType,
   getBackendTypeFromSelection,
   getDefaultConfig,
   stripEmptyOptionalFields,
@@ -69,6 +70,89 @@ describe('stripEmptyOptionalFields', () => {
     expect(stripEmptyOptionalFields({ backend_type: 'llamacpp', file_filters: ['*Q4*'] }).file_filters).toEqual([
       '*Q4*',
     ]);
+  });
+
+  it('drops every speculative field when no implementation is selected', () => {
+    expect(
+      stripEmptyOptionalFields({
+        backend_type: 'llamacpp',
+        spec_draft_n_max: 7,
+        spec_draft_model: '*DSpark*.gguf',
+        spec_draft_conf_min: 0.4,
+      }),
+    ).toEqual({ backend_type: 'llamacpp' });
+  });
+
+  it('drops the dspark-only fields for draft-mtp', () => {
+    expect(
+      stripEmptyOptionalFields({
+        backend_type: 'llamacpp',
+        spec_type: 'draft-mtp',
+        spec_draft_n_max: 2,
+        spec_draft_model: '*DSpark*.gguf',
+        spec_draft_conf_min: 0.4,
+      }),
+    ).toEqual({ backend_type: 'llamacpp', spec_type: 'draft-mtp', spec_draft_n_max: 2 });
+  });
+
+  it('keeps the dspark fields and drops a blank confidence threshold', () => {
+    expect(
+      stripEmptyOptionalFields({
+        backend_type: 'llamacpp',
+        spec_type: 'draft-dspark',
+        spec_draft_model: '*DSpark*.gguf',
+        spec_draft_n_max: 7,
+        spec_draft_conf_min: '',
+      }),
+    ).toEqual({
+      backend_type: 'llamacpp',
+      spec_type: 'draft-dspark',
+      spec_draft_model: '*DSpark*.gguf',
+      spec_draft_n_max: 7,
+    });
+  });
+
+  it('drops speculative decoding for non-generation models', () => {
+    expect(
+      stripEmptyOptionalFields({
+        backend_type: 'llamacpp',
+        model_type: 'embedding',
+        spec_type: 'draft-dspark',
+        spec_draft_model: '*DSpark*.gguf',
+      }),
+    ).toEqual({ backend_type: 'llamacpp', model_type: 'embedding' });
+  });
+});
+
+describe('applySpecType', () => {
+  it('seeds the block size and a draft model slot for dspark', () => {
+    expect(applySpecType({ backend_type: 'llamacpp' }, 'draft-dspark')).toEqual({
+      backend_type: 'llamacpp',
+      spec_type: 'draft-dspark',
+      spec_draft_n_max: 7,
+      spec_draft_model: '',
+    });
+  });
+
+  it('drops the draft model fields when switching to mtp', () => {
+    expect(
+      applySpecType(
+        {
+          backend_type: 'llamacpp',
+          spec_type: 'draft-dspark',
+          spec_draft_model: '*DSpark*.gguf',
+          spec_draft_n_max: 7,
+          spec_draft_conf_min: 0.4,
+        },
+        'draft-mtp',
+      ),
+    ).toEqual({ backend_type: 'llamacpp', spec_type: 'draft-mtp', spec_draft_n_max: 2 });
+  });
+
+  it('clears everything when disabled', () => {
+    expect(applySpecType({ backend_type: 'llamacpp', spec_type: 'draft-mtp', spec_draft_n_max: 2 }, '')).toEqual({
+      backend_type: 'llamacpp',
+    });
   });
 });
 

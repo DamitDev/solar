@@ -239,6 +239,8 @@ The S-040 API must reject invalid intents with `400`/`422` (Section 12.5):
 - `backend` must not contain `alias`, `model_source`, `host`, `port`, or `api_key` (these are server-derived).
 - `backend.model_file` (if set) requires `backend_type == "llamacpp"` and must be a non-empty string.
 - `backend.file_filters` (if set) must be a list of non-empty patterns, and a non-empty list requires a `huggingface://` `model_source`.
+- `backend.spec_type` (if set) requires `backend_type == "llamacpp"` and must be `draft-mtp` or `draft-dspark`.
+- `backend.spec_draft_model` is required by `spec_type == "draft-dspark"` and rejected for every other type; `backend.spec_draft_conf_min` is `draft-dspark`-only and must be between 0 and 1.
 - `placement.roles` non-empty; `gpu_type` (if set) is a known type.
 
 ### 4.7.1 Model file selection and download filters
@@ -264,6 +266,34 @@ A `model_source` names a whole artifact, but a llama.cpp instance needs one GGUF
 ```
 
 Resolution happens on Solar Host, which owns the filesystem — see [model-source-uri.md](model-source-uri.md) §4.3. `mmproj` accepts the same patterns. Omitting `model_file` keeps the previous behaviour: the largest GGUF at the root of a Harbor artifact is served.
+
+### 4.7.2 Speculative decoding
+
+`backend.spec_type` selects how a llama.cpp instance drafts tokens ahead of the served model. It is meaningful only for `model_type: "llm"`.
+
+| Field | Applies to | Description |
+|-------|------------|-------------|
+| `spec_type` | `llamacpp` | `draft-mtp` (the served model's own Multi Token Prediction heads) or `draft-dspark` (a separate DSpark drafter). |
+| `spec_draft_model` | `draft-dspark` | Filename, relative path or `*` glob selecting the draft GGUF, resolved like `model_file`. Required. |
+| `spec_draft_n_max` | both | Maximum draft tokens. For `draft-dspark` this is the block size, clamped by llama.cpp to the one the drafter was trained for. |
+| `spec_draft_conf_min` | `draft-dspark` | Truncate a drafted block at the first position whose predicted acceptance falls below this (0–1). Needs a drafter with a confidence head. |
+
+```json
+{
+  "alias": "qwen3:4b",
+  "model_source": "huggingface://org/Qwen3-4B-GGUF",
+  "backend": {
+    "backend_type": "llamacpp",
+    "model_file": "*Q8_0*.gguf",
+    "spec_type": "draft-dspark",
+    "spec_draft_model": "*DSpark*.gguf",
+    "spec_draft_n_max": 7,
+    "file_filters": ["*Q8_0*", "*DSpark*"]
+  }
+}
+```
+
+A DSpark drafter is trained for one specific target model, so it lives beside the model it drafts for — which means the download filters have to let it through as well.
 
 ---
 

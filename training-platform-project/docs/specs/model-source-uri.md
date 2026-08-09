@@ -299,7 +299,7 @@ Solar Host resolves a `model_file` pattern against the artifact directory (the m
 
 When several files match, the trailing shards of a split GGUF (`...-00002-of-00003.gguf`) are dropped because `llama-server` loads them itself from the first shard, and the largest remaining file wins. A tie between equally sized candidates is an error, not a guess.
 
-The llama.cpp `mmproj` field accepts the same patterns, resolved against the same directory. Note that filters and selectors are independent: `file_filters` decides what lands on disk, `model_file` / `mmproj` decide which of those files each llama-server flag points at.
+The llama.cpp `mmproj` and `spec_draft_model` fields accept the same patterns, resolved against the same directory. Note that filters and selectors are independent: `file_filters` decides what lands on disk, `model_file` / `mmproj` / `spec_draft_model` decide which of those files each llama-server flag points at.
 
 ## 5. Caching
 

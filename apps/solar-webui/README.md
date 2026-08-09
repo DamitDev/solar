@@ -174,6 +174,13 @@ src/
 - **Alias**: Model identifier for API routing
 - **GPU Layers, Context Size, Threads**: Hardware configuration
 - **Sampling Parameters**: Temperature, Top-P, Top-K, Min-P
+- **Speculative decoding** (text generation only): off by default. **MTP heads (draft-mtp)** drafts with the served
+  model's own heads and only needs a maximum draft token count. **DSpark draft model (draft-dspark)** drafts a whole
+  block per step with a separate DSpark GGUF, so it also asks for the **Draft model** — a path for an instance, a
+  filename or glob for an intent, resolved in the model directory like the projector. The drafter has to be trained
+  for the exact model being served; the maximum draft tokens is its block size (7 for the published `block7`
+  checkpoints), which llama.cpp clamps to what the drafter was trained for. The optional **Minimum draft confidence**
+  cuts a drafted block short once the drafter's confidence head predicts acceptance below it.
 
 ### HuggingFace Causal LM Instance
 - **Model ID**: HuggingFace model ID or local path
@@ -203,7 +210,7 @@ src/
 
 An intent declares the desired deployment (alias, model source, replicas, priority) and lets solar-control place it. Unlike an instance, it never names a host or an absolute path — two fields bridge that gap for GGUF models:
 
-- **Model file** (llama.cpp): which GGUF to serve, given as a filename, relative path or `*` glob such as `*UD-Q4_K_XL*.gguf`. It is searched recursively in the downloaded model directory, so it works even when the file sits in a subfolder. Leave it empty to serve the largest GGUF found. The **Multimodal projector** field accepts the same patterns (e.g. `mmproj-BF16.gguf`).
+- **Model file** (llama.cpp): which GGUF to serve, given as a filename, relative path or `*` glob such as `*UD-Q4_K_XL*.gguf`. It is searched recursively in the downloaded model directory, so it works even when the file sits in a subfolder. Leave it empty to serve the largest GGUF found. The **Multimodal projector** and the DSpark **Draft model** fields accept the same patterns (e.g. `mmproj-BF16.gguf`, `*DSpark*.gguf`) — remember to let the download filters through the drafter too.
 - **Download filters** (`huggingface://` sources only): download just the matching files instead of the whole repository — the difference between a few GB and every quantisation of a large GGUF repo. Add one pattern per row; a file is downloaded when it matches any of them.
 
 The two are independent: the filters decide what lands on disk, the model file and projector decide which of those files each llama-server flag points at.

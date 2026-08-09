@@ -102,21 +102,7 @@ class LlamaCppRunner(BackendRunner):
         if reasoning_budget is not None:
             cmd.extend(["--reasoning-budget", str(int(reasoning_budget))])
 
-        spec_type = getattr(config, "spec_type", None)
-        spec_draft_n_max = getattr(config, "spec_draft_n_max", None)
-        if (
-            getattr(config, "model_type", "llm") == "llm"
-            and spec_type == "draft-mtp"
-            and spec_draft_n_max is not None
-        ):
-            cmd.extend(
-                [
-                    "--spec-type",
-                    spec_type,
-                    "--spec-draft-n-max",
-                    str(int(spec_draft_n_max)),
-                ]
-            )
+        cmd.extend(self._speculative_args(config))
 
         cache_type_k = getattr(config, "cache_type_k", None)
         if cache_type_k and cache_type_k.strip():
@@ -165,6 +151,50 @@ class LlamaCppRunner(BackendRunner):
                 cmd.extend(["--pooling", pooling])
 
         return cmd
+
+    @staticmethod
+    def _speculative_args(config: Any) -> list[str]:
+        """Build the --spec-* flags for the configured speculative decoding.
+
+        Only generation models speculate: llama-server rejects the flags for
+        an --embedding or --rerank server. An incomplete config yields no
+        flags at all, since a --spec-type without the file it needs makes
+        llama-server exit instead of falling back to plain decoding.
+        """
+        if getattr(config, "model_type", "llm") != "llm":
+            return []
+
+        spec_type = getattr(config, "spec_type", None)
+        spec_draft_model = getattr(config, "spec_draft_model", None)
+        spec_draft_n_max = getattr(config, "spec_draft_n_max", None)
+        spec_draft_conf_min = getattr(config, "spec_draft_conf_min", None)
+
+        if spec_type == "draft-mtp":
+            if spec_draft_n_max is None:
+                return []
+            return [
+                "--spec-type",
+                spec_type,
+                "--spec-draft-n-max",
+                str(int(spec_draft_n_max)),
+            ]
+
+        if spec_type == "draft-dspark":
+            if not (spec_draft_model and spec_draft_model.strip()):
+                return []
+            args = [
+                "--spec-type",
+                spec_type,
+                "--spec-draft-model",
+                spec_draft_model.strip(),
+            ]
+            if spec_draft_n_max is not None:
+                args.extend(["--spec-draft-n-max", str(int(spec_draft_n_max))])
+            if spec_draft_conf_min is not None:
+                args.extend(["--spec-draft-conf-min", str(float(spec_draft_conf_min))])
+            return args
+
+        return []
 
     def get_health_endpoint(self) -> str:
         return "/health"

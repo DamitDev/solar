@@ -136,15 +136,60 @@ class LlamaCppConfig(BaseModel):
         default=None,
         description="Reasoning budget token limit (passed as --reasoning-budget to llama-server)",
     )
-    spec_type: Literal["draft-mtp"] | None = Field(
+    spec_type: Literal["draft-mtp", "draft-dspark"] | None = Field(
         default=None,
-        description="Speculative decoding type (passed as --spec-type to llama-server)",
+        description=(
+            "Speculative decoding type (passed as --spec-type to llama-server): "
+            "'draft-mtp' uses the main model's MTP heads, 'draft-dspark' needs a "
+            "separate DSpark draft model"
+        ),
+    )
+    spec_draft_model: str | None = Field(
+        default=None,
+        description=(
+            "Path to the DSpark draft GGUF (--spec-draft-model); a bare filename "
+            "or glob is resolved inside the model directory"
+        ),
     )
     spec_draft_n_max: int | None = Field(
         default=None,
         ge=1,
         description="Maximum speculative draft tokens (passed as --spec-draft-n-max to llama-server)",
     )
+    spec_draft_conf_min: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Truncate a drafted block at the first position whose predicted "
+            "acceptance falls below this value (--spec-draft-conf-min); requires "
+            "a draft model with a confidence head"
+        ),
+    )
+
+    @model_validator(mode="after")
+    def check_speculative_decoding(self) -> "LlamaCppConfig":
+        """Keep the speculative fields consistent with the chosen ``spec_type``.
+
+        llama-server accepts the draft-model flags with any ``--spec-type`` but
+        silently ignores them unless the type actually loads a draft model, so
+        a mismatch here is a config error the user wants to hear about at
+        create time rather than debug from a missing speedup.
+        """
+        if self.spec_type == "draft-dspark" and not (
+            self.spec_draft_model and self.spec_draft_model.strip()
+        ):
+            raise ValueError("spec_type 'draft-dspark' requires 'spec_draft_model'")
+        if self.spec_type != "draft-dspark":
+            if self.spec_draft_model and self.spec_draft_model.strip():
+                raise ValueError(
+                    "'spec_draft_model' is only supported with spec_type 'draft-dspark'"
+                )
+            if self.spec_draft_conf_min is not None:
+                raise ValueError(
+                    "'spec_draft_conf_min' is only supported with spec_type 'draft-dspark'"
+                )
+        return self
     cache_type_k: (
         Literal["f32", "f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"]
         | None

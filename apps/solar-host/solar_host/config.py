@@ -194,11 +194,13 @@ def _artifact_base_dir(config_data: dict[str, Any]) -> Path | None:
 
 
 def _resolve_llamacpp_file_patterns(config_data: dict[str, Any], strict: bool) -> None:
-    """Resolve ``model_file`` and a non-absolute ``mmproj`` to real files.
+    """Resolve ``model_file`` and the non-absolute companion GGUF fields.
 
     ``model_file`` is a filename, relative path or glob that is looked up
     inside the pulled artifact; when it resolves it replaces ``model`` (which
     solar-control set to the artifact directory or an auto-selected GGUF).
+    ``mmproj`` and ``spec_draft_model`` name a second file next to the model
+    and are resolved the same way, in place.
     With *strict* off (config reload) an unresolvable pattern is logged and
     the recorded paths are kept, so a temporarily missing file does not drop
     the instance from config.json.
@@ -206,13 +208,14 @@ def _resolve_llamacpp_file_patterns(config_data: dict[str, Any], strict: bool) -
     from solar_host.models_manager import resolve_model_file
 
     model_file = config_data.get("model_file")
-    mmproj = config_data.get("mmproj")
 
     targets: list[tuple[str, str]] = []
     if model_file and str(model_file).strip():
         targets.append(("model", str(model_file).strip()))
-    if mmproj and str(mmproj).strip() and not Path(str(mmproj).strip()).is_file():
-        targets.append(("mmproj", str(mmproj).strip()))
+    for field in ("mmproj", "spec_draft_model"):
+        value = config_data.get(field)
+        if value and str(value).strip() and not Path(str(value).strip()).is_file():
+            targets.append((field, str(value).strip()))
     if not targets:
         return
 

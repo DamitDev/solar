@@ -157,6 +157,32 @@ describe('IntentFormModal in edit mode', () => {
     expect(onSaved).toHaveBeenCalledWith(expect.objectContaining({ replicas: 3 }));
   });
 
+  it('submits a dspark drafter with its block size', async () => {
+    const updateIntent = vi.spyOn(solarClient, 'updateIntent').mockResolvedValue(intent);
+    renderEdit();
+
+    await userEvent.selectOptions(screen.getByLabelText('Speculative decoding'), 'draft-dspark');
+    await userEvent.type(screen.getByLabelText(/Draft model/), '*DSpark*.gguf');
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => expect(updateIntent).toHaveBeenCalled());
+    expect(updateIntent.mock.calls[0][1].backend).toMatchObject({
+      spec_type: 'draft-dspark',
+      spec_draft_model: '*DSpark*.gguf',
+      spec_draft_n_max: 7,
+    });
+  });
+
+  it('refuses to submit dspark without a draft model', async () => {
+    const updateIntent = vi.spyOn(solarClient, 'updateIntent').mockResolvedValue(intent);
+    renderEdit();
+
+    await userEvent.selectOptions(screen.getByLabelText('Speculative decoding'), 'draft-dspark');
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(updateIntent).not.toHaveBeenCalled();
+  });
+
   it('shows server validation errors instead of closing', async () => {
     vi.spyOn(solarClient, 'updateIntent').mockRejectedValue({
       response: {

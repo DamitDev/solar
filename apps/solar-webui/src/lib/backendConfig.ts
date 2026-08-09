@@ -5,7 +5,7 @@
  */
 
 import { Cpu, MessageSquare, Binary, Tags, Search } from 'lucide-react';
-import { BackendType } from '@/api/types';
+import { BackendType, SpecType } from '@/api/types';
 
 export type PrimaryBackend = 'llamacpp' | 'huggingface';
 
@@ -33,6 +33,51 @@ export const HUGGINGFACE_MODES: ModeOption[] = [
 
 export const DEVICE_OPTIONS = ['auto', 'cuda', 'mps', 'cpu'];
 export const DTYPE_OPTIONS = ['auto', 'float16', 'bfloat16', 'float32'];
+
+export const SPEC_TYPE_OPTIONS: { value: SpecType; label: string; description: string }[] = [
+  {
+    value: 'draft-mtp',
+    label: 'MTP heads (draft-mtp)',
+    description: "Drafts with the served model's own Multi Token Prediction heads. No extra model to load.",
+  },
+  {
+    value: 'draft-dspark',
+    label: 'DSpark draft model (draft-dspark)',
+    description:
+      'Drafts a whole block per step with a separate DSpark GGUF trained for this exact target model. Higher acceptance than MTP, but the draft model has to be downloaded alongside the model.',
+  },
+];
+
+// llama.cpp clamps the block size to the one the draft model was trained for,
+// so 7 only matters for the published block7 DSpark drafters; a smaller
+// drafter silently gets its own size.
+export const SPEC_TYPE_DEFAULT_N_MAX: Record<SpecType, number> = {
+  'draft-mtp': 2,
+  'draft-dspark': 7,
+};
+
+/**
+ * Switch the speculative decoding implementation, dropping the fields that do
+ * not belong to the new one. Each type has its own sensible block size, and
+ * only draft-dspark loads a draft model, so leaving the previous values behind
+ * would submit a config the host rejects.
+ */
+export const applySpecType = (config: Record<string, any>, specType: SpecType | ''): Record<string, any> => {
+  const next = { ...config };
+  delete next.spec_type;
+  delete next.spec_draft_n_max;
+  delete next.spec_draft_model;
+  delete next.spec_draft_conf_min;
+
+  if (!specType) return next;
+
+  next.spec_type = specType;
+  next.spec_draft_n_max = SPEC_TYPE_DEFAULT_N_MAX[specType];
+  if (specType === 'draft-dspark') {
+    next.spec_draft_model = config.spec_draft_model ?? '';
+  }
+  return next;
+};
 
 // Helper to get BackendType from selections
 export const getBackendTypeFromSelection = (primary: PrimaryBackend, mode: string): BackendType => {
@@ -152,7 +197,21 @@ export const stripEmptyOptionalFields = (config: Record<string, any>): Record<st
   ]) {
     if (!next[field]) delete next[field];
   }
-  if (!next.spec_type) delete next.spec_draft_n_max;
+
+  // Speculative decoding is a generation-only feature and each type takes a
+  // different set of flags; the host rejects the ones that do not belong.
+  if (!next.spec_type || (next.model_type && next.model_type !== 'llm')) {
+    delete next.spec_type;
+    delete next.spec_draft_n_max;
+    delete next.spec_draft_model;
+    delete next.spec_draft_conf_min;
+  } else if (next.spec_type !== 'draft-dspark') {
+    delete next.spec_draft_model;
+    delete next.spec_draft_conf_min;
+  } else if (next.spec_draft_conf_min === '' || next.spec_draft_conf_min === null) {
+    delete next.spec_draft_conf_min;
+  }
+
   if (Array.isArray(next.file_filters) && next.file_filters.length === 0) delete next.file_filters;
   return next;
 };

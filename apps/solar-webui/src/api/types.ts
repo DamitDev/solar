@@ -13,6 +13,13 @@ export type DrainState = 'draining' | 'drained';
 export type BackendType =
   'llamacpp' | 'huggingface_causal' | 'huggingface_classification' | 'huggingface_embedding' | 'huggingface_vision';
 
+/**
+ * Speculative decoding implementations solar supports (llama-server --spec-type).
+ * `draft-mtp` reuses the served model's own MTP heads; `draft-dspark` needs a
+ * separate DSpark draft GGUF.
+ */
+export type SpecType = 'draft-mtp' | 'draft-dspark';
+
 export interface MemoryInfo {
   used_gb: number;
   total_gb: number;
@@ -57,8 +64,12 @@ export interface LlamaCppConfig extends BaseInstanceConfig {
   chat_template_kwargs?: string;
   reasoning?: 'on' | 'off' | 'auto';
   reasoning_budget?: number;
-  spec_type?: 'draft-mtp';
+  spec_type?: SpecType;
+  /** Draft GGUF for draft-dspark (llama-server --spec-draft-model); filename or glob allowed */
+  spec_draft_model?: string;
   spec_draft_n_max?: number;
+  /** Minimum predicted acceptance before a drafted block is truncated (draft-dspark only) */
+  spec_draft_conf_min?: number;
   cache_type_k?: string;
   cache_type_v?: string;
   rope_scaling?: string;

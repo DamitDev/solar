@@ -267,6 +267,10 @@ All requests require an `X-API-Key` header with your configured API key from the
 | `min_p` | No | 0.0 | Min-p sampling (0.0-1.0) |
 | `ctx_size` | No | 131072 | Context window size |
 | `chat_template_file` | No | - | Path to Jinja chat template file |
+| `spec_type` | No | - | Speculative decoding: `"draft-mtp"` or `"draft-dspark"` — see [Speculative decoding](#speculative-decoding) |
+| `spec_draft_model` | No | - | Draft GGUF for `draft-dspark` (`--spec-draft-model`); accepts the same patterns as `model_file` |
+| `spec_draft_n_max` | No | - | Maximum draft tokens (`--spec-draft-n-max`) |
+| `spec_draft_conf_min` | No | - | Truncate a drafted block below this predicted acceptance (`--spec-draft-conf-min`, `draft-dspark` only) |
 | `special` | No | false | Enable llama-server `--special` flag |
 | `ot` | No | - | Override tensor string (passed as `-ot` flag to llama-server) |
 | `model_type` | No | `"llm"` | Model type: `"llm"`, `"embedding"`, or `"reranker"` |
@@ -349,7 +353,39 @@ A pull resolves a `model_source` to a **directory**, but `llama-server --model` 
 
 The pattern is resolved against the pulled model directory: an absolute path is used as-is, then an exact relative path, then a glob at the directory root, and finally a recursive glob — so a bare filename or a broad pattern is still found inside a subfolder. Among multiple matches, the trailing shards of a split GGUF are dropped (llama-server loads them itself from `...-00001-of-000NN.gguf`) and the largest remaining file wins. `mmproj` accepts the same patterns.
 
-`file_filters` is a separate concern: it limits **what gets downloaded** (a file is kept when it matches any pattern), while `model_file` and `mmproj` decide which of the downloaded files each llama-server flag points at. Filters only apply to HuggingFace pulls — ORAS always pulls a Harbor artifact whole.
+`file_filters` is a separate concern: it limits **what gets downloaded** (a file is kept when it matches any pattern), while `model_file`, `mmproj` and `spec_draft_model` decide which of the downloaded files each llama-server flag points at. Filters only apply to HuggingFace pulls — ORAS always pulls a Harbor artifact whole.
+
+### Speculative decoding
+
+`spec_type` picks how the server drafts tokens ahead of the model. It only applies to `model_type: "llm"`; the flags are dropped for an embedding or reranker instance.
+
+`"draft-mtp"` uses the served model's own Multi Token Prediction heads, so it needs nothing but a block size:
+
+```json
+{
+  "spec_type": "draft-mtp",
+  "spec_draft_n_max": 2
+}
+```
+
+`"draft-dspark"` drafts a whole block per forward pass with a separate DSpark model (a DFlash backbone plus a semi-autoregressive Markov head). It requires `spec_draft_model`, which is resolved exactly like `mmproj` — an absolute path, or a filename or glob looked up in the model directory:
+
+```json
+{
+  "backend_type": "llamacpp",
+  "alias": "qwen3:4b",
+  "model_source": "huggingface://org/Qwen3-4B-GGUF",
+  "model_file": "*Q8_0*.gguf",
+  "spec_type": "draft-dspark",
+  "spec_draft_model": "*DSpark*.gguf",
+  "spec_draft_n_max": 7,
+  "file_filters": ["*Q8_0*", "*DSpark*"]
+}
+```
+
+The drafter must be trained for the exact model being served (for example `deepseek-ai/dspark_qwen3_4b_block7` for `Qwen/Qwen3-4B`), converted with `convert_hf_to_gguf.py --target-model-dir` so it inherits the target's tokenizer and embeddings. `spec_draft_n_max` is the block size and llama.cpp clamps it to the size the drafter was trained for — 7 for the published `block7` checkpoints. The optional `spec_draft_conf_min` truncates each drafted block at the first position whose predicted acceptance falls below it, and only does anything for a drafter that carries a confidence head.
+
+Since the drafter is a second file in the model directory, remember to widen `file_filters` to let it through on a HuggingFace pull.
 
 ## Example Configurations
 

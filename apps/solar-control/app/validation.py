@@ -98,6 +98,86 @@ def _validate_backend_model_selection(
     return errors
 
 
+def _validate_backend_speculative_decoding(
+    backend: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Validate the llama.cpp speculative decoding selection.
+
+    ``draft-dspark`` drafts with a separate GGUF, so it is only a valid spec
+    together with ``spec_draft_model``; ``draft-mtp`` reuses the served
+    model's own heads and takes neither the draft model nor its confidence
+    threshold. Solar Host rejects the same combinations — catching them here
+    keeps a broken intent out of the store instead of surfacing as a failed
+    reconciliation.
+    """
+    errors: list[dict[str, str]] = []
+
+    spec_type = backend.get("spec_type")
+    spec_draft_model = backend.get("spec_draft_model")
+    spec_draft_conf_min = backend.get("spec_draft_conf_min")
+
+    if spec_type is not None and backend.get("backend_type") != "llamacpp":
+        errors.append(
+            {
+                "field": "backend.spec_type",
+                "message": "spec_type is only supported for the llamacpp backend",
+            }
+        )
+        return errors
+
+    if spec_type is not None and spec_type not in {"draft-mtp", "draft-dspark"}:
+        errors.append(
+            {
+                "field": "backend.spec_type",
+                "message": (
+                    f"'{spec_type}' is not a supported spec_type. "
+                    f"Must be one of: draft-dspark, draft-mtp"
+                ),
+            }
+        )
+
+    if spec_type == "draft-dspark":
+        if not isinstance(spec_draft_model, str) or not spec_draft_model.strip():
+            errors.append(
+                {
+                    "field": "backend.spec_draft_model",
+                    "message": (
+                        "spec_type 'draft-dspark' requires spec_draft_model: a "
+                        "filename, relative path or glob selecting the draft GGUF"
+                    ),
+                }
+            )
+    else:
+        if spec_draft_model is not None:
+            errors.append(
+                {
+                    "field": "backend.spec_draft_model",
+                    "message": "spec_draft_model requires spec_type 'draft-dspark'",
+                }
+            )
+        if spec_draft_conf_min is not None:
+            errors.append(
+                {
+                    "field": "backend.spec_draft_conf_min",
+                    "message": "spec_draft_conf_min requires spec_type 'draft-dspark'",
+                }
+            )
+
+    if spec_draft_conf_min is not None and (
+        not isinstance(spec_draft_conf_min, int | float)
+        or isinstance(spec_draft_conf_min, bool)
+        or not 0.0 <= float(spec_draft_conf_min) <= 1.0
+    ):
+        errors.append(
+            {
+                "field": "backend.spec_draft_conf_min",
+                "message": "spec_draft_conf_min must be a number between 0 and 1",
+            }
+        )
+
+    return errors
+
+
 def validate_intent_update(
     data: dict[str, Any], *, current_alias: str
 ) -> list[dict[str, str]]:
@@ -222,6 +302,7 @@ def validate_intent_create(data: dict[str, Any]) -> list[dict[str, str]]:
                 )
 
         errors.extend(_validate_backend_model_selection(backend, model_source))
+        errors.extend(_validate_backend_speculative_decoding(backend))
 
     # placement
     placement = data.get("placement", {})
