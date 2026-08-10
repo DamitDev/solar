@@ -20,6 +20,7 @@ import os
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from fnmatch import fnmatch
 from typing import Any
 
 from fastapi import HTTPException
@@ -2289,19 +2290,22 @@ def _backend_value_matches(spec_value: Any, inst_value: Any) -> bool:
     """Compare a backend spec value against the instance's reported value.
 
     The instance's full config carries resolve-time artifacts: paths the
-    host resolved from the spec's patterns. A bare filename in the spec
-    (e.g. ``mmproj: "mmproj-BF16.gguf"``) that is the tail of the
-    instance's resolved path (``/opt/.../mmproj-BF16.gguf``) is a match.
-    Treating it as drift flags every replacement while a spec change is
-    pending, trapping the intent in a REPLACE-stop churn that never lets
-    the edit settle.
+    host resolved from the spec's patterns. A bare filename or glob in the
+    spec (e.g. ``mmproj: "mmproj-BF16.gguf"``, ``spec_draft_model:
+    "*DSpark*.gguf"``) whose resolution is the instance's path
+    (``/opt/.../mmproj-BF16.gguf``) is a match. Treating it as drift flags
+    every replacement while a spec change is pending, trapping the intent in
+    a REPLACE-stop churn that never lets the edit settle.
     """
-    return spec_value == inst_value or (
-        isinstance(spec_value, str)
-        and isinstance(inst_value, str)
-        and "/" not in spec_value
-        and inst_value.endswith("/" + spec_value)
-    )
+    if spec_value == inst_value:
+        return True
+    if not isinstance(spec_value, str) or not isinstance(inst_value, str):
+        return False
+    # Only a bare filename or glob is a selector; anything with a separator
+    # names a location and has to match verbatim.
+    if "/" in spec_value or "/" not in inst_value:
+        return False
+    return fnmatch(inst_value.rsplit("/", 1)[-1], spec_value)
 
 
 # Singleton

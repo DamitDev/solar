@@ -220,6 +220,38 @@ class TestHelpers:
         }
         assert _detect_backend_drift(intent, instance_config) is False
 
+    def test_detect_backend_drift_resolved_glob_is_not_drift(self):
+        """A glob resolves to a path too — the DSpark drafter's exact filename
+        is not knowable from the intent, so the spec keeps the pattern."""
+        intent = _make_intent(
+            backend={
+                "backend_type": "llamacpp",
+                "spec_type": "draft-dspark",
+                "spec_draft_model": "*DSpark*.gguf",
+            }
+        )
+        instance_config = {
+            "backend_type": "llamacpp",
+            "spec_type": "draft-dspark",
+            "spec_draft_model": (
+                "/opt/projects/models/hf--org--Qwen3-4B-GGUF/Qwen3-4B-DSpark.gguf"
+            ),
+        }
+        assert _detect_backend_drift(intent, instance_config) is False
+
+    def test_detect_backend_drift_resolved_glob_real_change(self):
+        """A resolved file the new pattern no longer matches is real drift."""
+        intent = _make_intent(
+            backend={"backend_type": "llamacpp", "spec_draft_model": "*DSpark*.gguf"}
+        )
+        instance_config = {
+            "backend_type": "llamacpp",
+            "spec_draft_model": (
+                "/opt/projects/models/hf--org--Qwen3-4B-GGUF/Qwen3-4B-DFlash.gguf"
+            ),
+        }
+        assert _detect_backend_drift(intent, instance_config) is True
+
     def test_detect_backend_drift_resolved_path_real_change(self):
         """A genuinely different resolved file still counts as drift."""
         intent = _make_intent(

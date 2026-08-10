@@ -147,6 +147,27 @@ class TestParseInstanceConfigModelFile:
 
         assert config.mmproj == str(mmproj)
 
+    def test_spec_draft_model_filename_resolves_in_the_repo(self, models_dir: Path):
+        source_uri = "huggingface://unsloth/Model-GGUF"
+        repo_dir = self._pulled_repo(models_dir, source_uri)
+        _write(repo_dir / "Model-UD-Q4_K_XL.gguf")
+        draft = _write(repo_dir / "Model-DSpark.gguf")
+
+        config = parse_instance_config(
+            {
+                "backend_type": "llamacpp",
+                "alias": "model:q4",
+                "model_source": source_uri,
+                "model": str(repo_dir),
+                "model_file": "*UD-Q4_K_XL*.gguf",
+                "spec_type": "draft-dspark",
+                "spec_draft_model": "Model-DSpark.gguf",
+                "spec_draft_n_max": 7,
+            }
+        )
+
+        assert config.spec_draft_model == str(draft)
+
     def test_resolves_against_local_source_directory(self, models_dir: Path):
         repo_dir = models_dir / "local-repo"
         target = _write(repo_dir / "Model-Q8_0.gguf")

@@ -115,6 +115,29 @@ describe('validateIntentRequest', () => {
       ).not.toContain('backend.file_filters');
     });
 
+    it('requires a draft model for dspark speculative decoding', () => {
+      expect(fieldNames({ backend: { backend_type: 'llamacpp', spec_type: 'draft-dspark' } })).toContain(
+        'backend.spec_draft_model',
+      );
+      expect(
+        fieldNames({
+          backend: { backend_type: 'llamacpp', spec_type: 'draft-dspark', spec_draft_model: '*DSpark*.gguf' },
+        }),
+      ).not.toContain('backend.spec_draft_model');
+    });
+
+    it('does not ask draft-mtp for a draft model', () => {
+      expect(
+        fieldNames({ backend: { backend_type: 'llamacpp', spec_type: 'draft-mtp', spec_draft_n_max: 2 } }),
+      ).not.toContain('backend.spec_draft_model');
+    });
+
+    it('allows speculative decoding only for llama.cpp', () => {
+      expect(fieldNames({ backend: { backend_type: 'huggingface_causal', spec_type: 'draft-mtp' } })).toContain(
+        'backend.spec_type',
+      );
+    });
+
     it('rejects download filters that are not patterns', () => {
       const source = 'huggingface://unsloth/Model-GGUF';
       expect(

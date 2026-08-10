@@ -85,6 +85,20 @@ export function validateIntentRequest(req: IntentCreateRequest): IntentFieldErro
       });
     }
 
+    const specType = req.backend.spec_type;
+    const draftModel = req.backend.spec_draft_model;
+    if (specType && backendType !== 'llamacpp') {
+      errors.push({
+        field: 'backend.spec_type',
+        message: 'Speculative decoding is only available for the llama.cpp backend',
+      });
+    } else if (specType === 'draft-dspark' && (typeof draftModel !== 'string' || !draftModel.trim())) {
+      errors.push({
+        field: 'backend.spec_draft_model',
+        message: 'DSpark speculative decoding needs a draft model — give a filename, path or glob',
+      });
+    }
+
     const filters = req.backend.file_filters;
     if (filters !== undefined && filters !== null) {
       if (!Array.isArray(filters) || filters.some((f) => typeof f !== 'string' || !f.trim())) {

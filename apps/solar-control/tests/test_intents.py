@@ -327,6 +327,112 @@ def test_validate_intent_empty_file_filters_is_allowed():
     assert errors == []
 
 
+def test_validate_intent_dspark_requires_a_draft_model():
+    """draft-dspark drafts with a second GGUF, so the spec must name one."""
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "huggingface://unsloth/Model-GGUF",
+            "backend": {"backend_type": "llamacpp", "spec_type": "draft-dspark"},
+        }
+    )
+    assert any(e["field"] == "backend.spec_draft_model" for e in errors)
+
+
+def test_validate_intent_dspark_backend_is_accepted():
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "huggingface://unsloth/Model-GGUF",
+            "backend": {
+                "backend_type": "llamacpp",
+                "spec_type": "draft-dspark",
+                "spec_draft_model": "*DSpark*.gguf",
+                "spec_draft_n_max": 7,
+                "spec_draft_conf_min": 0.4,
+            },
+        }
+    )
+    assert errors == []
+
+
+def test_validate_intent_draft_model_requires_dspark():
+    for backend in [
+        {"backend_type": "llamacpp", "spec_draft_model": "*DSpark*.gguf"},
+        {
+            "backend_type": "llamacpp",
+            "spec_type": "draft-mtp",
+            "spec_draft_model": "*DSpark*.gguf",
+        },
+    ]:
+        errors = validate_intent_create(
+            {
+                "alias": "x",
+                "model_source": "huggingface://unsloth/Model-GGUF",
+                "backend": backend,
+            }
+        )
+        assert any(
+            e["field"] == "backend.spec_draft_model" for e in errors
+        ), f"Expected a spec_draft_model error for {backend!r}"
+
+
+def test_validate_intent_conf_min_requires_dspark():
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "huggingface://unsloth/Model-GGUF",
+            "backend": {
+                "backend_type": "llamacpp",
+                "spec_type": "draft-mtp",
+                "spec_draft_conf_min": 0.4,
+            },
+        }
+    )
+    assert any(e["field"] == "backend.spec_draft_conf_min" for e in errors)
+
+
+def test_validate_intent_conf_min_must_be_a_probability():
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "huggingface://unsloth/Model-GGUF",
+            "backend": {
+                "backend_type": "llamacpp",
+                "spec_type": "draft-dspark",
+                "spec_draft_model": "*DSpark*.gguf",
+                "spec_draft_conf_min": 1.5,
+            },
+        }
+    )
+    assert any(e["field"] == "backend.spec_draft_conf_min" for e in errors)
+
+
+def test_validate_intent_spec_type_requires_llamacpp():
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "huggingface://org/model",
+            "backend": {
+                "backend_type": "huggingface_causal",
+                "spec_type": "draft-dspark",
+            },
+        }
+    )
+    assert any(e["field"] == "backend.spec_type" for e in errors)
+
+
+def test_validate_intent_unknown_spec_type_is_rejected():
+    errors = validate_intent_create(
+        {
+            "alias": "x",
+            "model_source": "huggingface://unsloth/Model-GGUF",
+            "backend": {"backend_type": "llamacpp", "spec_type": "draft-eagle3"},
+        }
+    )
+    assert any(e["field"] == "backend.spec_type" for e in errors)
+
+
 def test_validate_intent_empty_placement_roles():
     errors = validate_intent_create(
         {
