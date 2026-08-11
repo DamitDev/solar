@@ -22,15 +22,15 @@ classifiers = [
 
 dependencies = [
     "fastapi>=0.141.1",
-    "uvicorn[standard]>=0.52.0",
+    "uvicorn[standard]>=0.52.1",
     "pydantic>=2.13.4",
-    "pydantic-settings>=2.14.2",
+    "pydantic-settings>=2.15.0",
     "python-multipart>=0.0.32",
     "python-socketio[asyncio_client]",
     "Pebble>=5.2.1",
     "psutil>=7.2.2",
     "harbor-oci-client>=0.1.0",
-    "huggingface-hub>=1.26.0",
+    "huggingface-hub>=1.26.1",
     "docker>=7.2.0",
 ]
 
