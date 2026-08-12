@@ -154,7 +154,10 @@ class IntentDB:
         """
         now = datetime.now(timezone.utc)
         async with self._session() as session:
-            row = await session.get(IntentRow, intent_id)
+            # Locked for the same reason as the status write below: a spec
+            # change rewrites status_json from the copy read here, so an
+            # unserialized read reverts whatever the tick in between recorded.
+            row = await session.get(IntentRow, intent_id, with_for_update=True)
             if row is None or row.deleted_at is not None or row.phase == "deleting":
                 return None
 
@@ -342,7 +345,12 @@ class IntentDB:
         """
         now = datetime.now(timezone.utc)
         async with self._session() as session:
-            row = await session.get(IntentRow, intent_id)
+            # Locked, because the spec_version_seen guard below compares
+            # against a value read here: an unlocked read lets a spec write
+            # commit between it and this transaction's write, so the guard
+            # sees "unchanged" and the whole status document — built before
+            # that edit existed — erases the marker it just stamped.
+            row = await session.get(IntentRow, intent_id, with_for_update=True)
             if row is None:
                 return None
             # Once soft-deleted, status updates are rejected

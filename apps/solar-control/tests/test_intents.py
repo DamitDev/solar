@@ -1014,6 +1014,7 @@ class _FakeSession:
     def __init__(self, row):
         self._row = row
         self.committed = False
+        self.locked_read = False
 
     async def __aenter__(self):
         return self
@@ -1021,7 +1022,8 @@ class _FakeSession:
     async def __aexit__(self, *exc_info):
         return False
 
-    async def get(self, _model, _pk):
+    async def get(self, _model, _pk, *, with_for_update=False):
+        self.locked_read = with_for_update
         return self._row
 
     async def commit(self):
@@ -1121,8 +1123,9 @@ async def test_update_status_keeps_an_edit_that_landed_mid_pass():
         }
     )
     db = IntentDB()
+    session = _FakeSession(row)
 
-    with patch.object(IntentDB, "_session", return_value=_FakeSession(row)):
+    with patch.object(IntentDB, "_session", return_value=session):
         await db.update_status(
             row.id,
             status_json={
@@ -1133,6 +1136,11 @@ async def test_update_status_keeps_an_edit_that_landed_mid_pass():
             spec_version_seen=None,
         )
 
+    # The comparison this test exercises is only sound on a locked read: an
+    # unlocked one lets the edit commit after it, leaving the stored value
+    # looking unchanged so the branch below never runs. See
+    # tests_integration/infrastructure/test_spec_marker_concurrency.py.
+    assert session.locked_read
     assert row.status_json["spec_changed_at"] == "2026-07-24T02:00:00Z"
     assert row.status_json["strategy_progress"] is None
     assert row.status_json["ready_replicas"] == 2
