@@ -63,6 +63,20 @@ export function isTerminalPullPhase(phase: string | undefined): boolean {
 }
 
 /**
+ * Labels for the phases a pull passes through before it ends (C4).
+ *
+ * Only `downloading` carries byte counts; the others report progress by name
+ * alone, and `verifying` in particular walks the whole artifact, so a large
+ * model can sit there long enough that showing nothing reads as a stall.
+ */
+export const PULL_PHASE_LABELS: Record<string, string> = {
+  resolving: 'Resolving',
+  downloading: 'Downloading',
+  verifying: 'Verifying',
+  finalizing: 'Finalizing',
+};
+
+/**
  * How long a finished pull stays visible before it is dropped (C4).
  *
  * Deliberately shorter than the server's `pull_progress_terminal_grace_s`

@@ -157,7 +157,7 @@ The client supplies the **desired** fields only. Server-managed fields (`id`, `s
 | `replicas` | integer | no | `1` | Desired replica count. `>= 0`. `0` means "registered intent, no running instances" (useful to pre-create then scale up). One replica per host. |
 | `priority` | enum | no | `production` | `production` \| `staging` \| `ephemeral`. See Section 4.3. Maps to instance `config.priority` (S-036). |
 | `strategy` | enum | no | `rolling` | `rolling` \| `immediate`. Applies when replacing replicas (version/config change, scale-down churn). See Section 11. |
-| `backend` | object | yes | — | Backend/instance config template (Section 6). Carries `backend_type` and runtime params, plus the optional `model_file` and `file_filters` model selectors (Section 4.7.1). Must **not** include `alias`, `model_source`, `host`, `port`, `api_key`. |
+| `backend` | object | yes | — | Backend/instance config template (Section 6). Carries `backend_type` and runtime params, plus the optional `model_file` and `file_filters` model selectors (Section 4.7.3). Must **not** include `alias`, `model_source`, `host`, `port`, `api_key`. |
 | `placement` | object | no | `{ "roles": ["inference"] }` | Placement constraints. See Section 4.5. |
 | `resources` | object | no | `{}` | Resource hints for placement. See Section 4.6. |
 | `metadata` | object (string→string) | no | `{}` | Free-form audit labels (e.g. originating job, requester). Stored, surfaced in status, never interpreted by placement. |
@@ -243,7 +243,7 @@ The S-040 API must reject invalid intents with `400`/`422` (Section 12.5):
 - `backend.spec_draft_model` is required by `spec_type == "draft-dspark"` and rejected for every other type; `backend.spec_draft_conf_min` is `draft-dspark`-only and must be between 0 and 1.
 - `placement.roles` non-empty; `gpu_type` (if set) is a known type.
 
-#### 4.7.2 Accelerator vocabulary and field ownership (S-052)
+#### 4.7.1 Accelerator vocabulary and field ownership (S-052)
 
 - `placement.gpu_type` accepts the canonical tokens `auto`, `cpu`,
   `apple_mps`, `nvidia_cuda`, `amd_rocm` plus the aliases `mps`,
@@ -273,7 +273,7 @@ The S-040 API must reject invalid intents with `400`/`422` (Section 12.5):
 - HuggingFace backends with a `repo://` model source are **legal** (the
   repo resolver materializes the model directory on the host).
 
-#### 4.7.3 Hard errors versus advisory warnings (S-052)
+#### 4.7.2 Hard errors versus advisory warnings (S-052)
 
 Validation is split into two layers. **Pure rules** (the vocabulary,
 ownership, device contract, modality) are synchronous and reject with
@@ -283,10 +283,10 @@ a temporarily offline host or a capacity shortfall must never block an
 edit. Hard errors in the fleet layer are limited to durable, static facts:
 `host_allow`/`host_deny` naming unknown host ids, and a device that
 contradicts the allow-list accelerators. Warnings are returned in the
-`warnings` field of create/update responses (Sections 12.4/12.5) and are
-never persisted on the intent.
+`warnings` field of the create and update responses (Sections 12.1 and
+12.5; shape in Section 12.6) and are never persisted on the intent.
 
-### 4.7.1 Model file selection and download filters
+#### 4.7.3 Model file selection and download filters
 
 A `model_source` names a whole artifact, but a llama.cpp instance needs one GGUF **file**, and a HuggingFace GGUF repository typically ships many quantisations. Two optional `backend` fields close that gap:
 
@@ -310,7 +310,7 @@ A `model_source` names a whole artifact, but a llama.cpp instance needs one GGUF
 
 Resolution happens on Solar Host, which owns the filesystem — see [model-source-uri.md](model-source-uri.md) §4.3. `mmproj` accepts the same patterns. Omitting `model_file` keeps the previous behaviour: the largest GGUF at the root of a Harbor artifact is served.
 
-### 4.7.2 Speculative decoding
+#### 4.7.4 Speculative decoding
 
 `backend.spec_type` selects how a llama.cpp instance drafts tokens ahead of the served model. It is meaningful only for `model_type: "llm"`.
 
@@ -401,7 +401,7 @@ The reconciler composes a concrete Solar Host `InstanceConfig` for each replica 
 
 Notes:
 
-- Intents use `model_source` **exclusively**. The legacy raw `model` / `model_id` path fields are not part of the intent contract (they remain for manual/backward-compatible flows only). `backend.model_file` is the intent-level way to pick a file inside the resolved source (Section 4.7.1).
+- Intents use `model_source` **exclusively**. The legacy raw `model` / `model_id` path fields are not part of the intent contract (they remain for manual/backward-compatible flows only). `backend.model_file` is the intent-level way to pick a file inside the resolved source (Section 4.7.3).
 - The `backend` template is validated against the matching backend config model at submit time (best-effort) and again when the instance is created on the host (authoritative).
 - Backend-specific required fields (e.g. `model_type` for llama.cpp embedding vs. reranker) travel inside `backend`. The intent layer does not enumerate them; it defers to the existing per-backend config models.
 
@@ -595,7 +595,7 @@ If `candidates` is smaller than needed, evaluate displacement (Section 8.5). If 
 The **durable-eligibility filter** (roles / reachability / drain exclusion
 per [host-draining.md](host-draining.md) §4.1) is extracted as a single
 shared helper (`filter_durable_hosts`) reused by the fleet-aware intent
-validation (Section 4.7.3) and placement — one filter, one semantics.
+validation (Section 4.7.2) and placement — one filter, one semantics.
 
 ### 8.5 Priority-aware displacement (conservative)
 
@@ -921,7 +921,7 @@ All endpoints are under `/api/intents`, require the management API key (`X-API-K
 
 Submit a desired-state intent. Body is the request schema (Section 4.1).
 
-- **201 Created** → the full intent record with `status.phase = "pending"` (until S-041 reconciles).
+- **201 Created** → the full intent record with `status.phase = "pending"` (until S-041 reconciles), plus the advisory `warnings` field (Section 4.7.2; example in Section 12.6) when the fleet layer has something to say. Warnings are response-only and are not persisted, so a client that wants to show them has to keep them from this response.
 - **400 / 422** → validation error (Section 4.7).
 - **409 Conflict** → an active intent already exists for `alias`.
 
@@ -990,6 +990,8 @@ Change an existing deployment: scale, model version, strategy, priority, backend
 - **409 Conflict** → the intent is being deleted (`phase = deleting`), or the alias is taken by another active intent.
 - **422 Unprocessable Entity** → validation failure, in the same structured shape as create. Update applies **every** create rule (Section 4.7); the two validators are shared so they cannot drift apart.
 
+A successful update carries the same advisory `warnings` field as create (Section 4.7.2; example in Section 12.6). Warnings never block the edit and are not persisted, so the record a later `GET` returns has none — a client that wants to show them has to keep them from this response.
+
 Semantics:
 
 - **`alias` is immutable.** It is the served name and the deployment's identity; a request that changes it is rejected. Serving a different name means a new intent.
@@ -1013,12 +1015,12 @@ Errors follow existing Solar Control conventions:
 ```
 
 Field-level 422s from the S-052 validation layer always use the structured
-list (Sections 4.7.2/4.7.3), so the webui can render errors inline next to
+list (Sections 4.7.1/4.7.2), so the webui can render errors inline next to
 the offending form fields.
 
 - Per-replica/reconcile errors are **not** HTTP errors — a created intent that cannot be fulfilled returns `201`/`200` and reports problems in `status` (`phase`, `conditions`, `last_error`). The API call succeeds; the deployment state is observable.
 
-Advisory fleet warnings (Section 4.7.3) are returned in the `warnings`
+Advisory fleet warnings (Section 4.7.2) are returned in the `warnings`
 field of successful create/update responses and are **never persisted** on
 the intent:
 

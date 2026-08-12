@@ -363,9 +363,11 @@ class SolarControlClient:
         """Send host health/memory update to solar-control.
 
         The optional *resource_manager* is the ``ResourceManager`` instance
-        stored in ``app.state``.  When provided a ``reservations`` block is
-        added to the health payload (per-dimension totals + active count only —
-        no per-reservation list, per decision O4).
+        stored in ``app.state``.  When provided the payload carries two
+        resource blocks: the ``reservations`` summary of decision O4
+        (per-dimension totals + active count, no per-reservation list), kept
+        for older control versions, and the full ``resources`` snapshot (C5)
+        that control caches as its WS-first read model.
         """
         from solar_host.config import config_manager, settings
         from solar_host.memory_monitor import (

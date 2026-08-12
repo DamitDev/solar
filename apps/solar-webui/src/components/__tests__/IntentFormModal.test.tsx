@@ -1,9 +1,25 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IntentFormModal } from '@/components/IntentFormModal';
 import solarClient from '@/api/client';
 import { Intent } from '@/api/types';
+
+/**
+ * jsdom implements no `scrollIntoView` at all and the modal optional-chains
+ * the call, so the reveal-the-error scroll silently does nothing here unless
+ * the method exists.
+ */
+let scrollIntoView: ReturnType<typeof vi.fn>;
+
+beforeEach(() => {
+  scrollIntoView = vi.fn();
+  Element.prototype.scrollIntoView = scrollIntoView;
+});
+
+afterEach(() => {
+  delete (Element.prototype as Partial<Element>).scrollIntoView;
+});
 
 const intent: Intent = {
   id: 'intent-1',
@@ -372,6 +388,16 @@ describe('IntentFormModal in edit mode', () => {
 
     expect(await screen.findByText(/Unknown GPU type 'rocm'/)).toBeInTheDocument();
     expect(updateIntent).not.toHaveBeenCalled();
+  });
+
+  it('brings the first error into view — the modal scrolls, so one below the fold reads as no feedback', async () => {
+    vi.spyOn(solarClient, 'updateIntent');
+    renderEdit({ placement: { roles: ['inference'], gpu_type: 'rocm', host_allow: [], host_deny: [] } as any });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText(/Unknown GPU type 'rocm'/)).toBeInTheDocument();
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'center' }));
   });
 });
 

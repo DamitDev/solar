@@ -10,7 +10,12 @@ import { AlertCircle, ArrowLeft, ChevronDown, FileText, Pencil, Trash2, Triangle
 import solarClient from '@/api/client';
 import { Intent, IntentCondition, IntentFieldNotice, PullProgressEntry } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
-import { isTerminalPullPhase, PULL_PROGRESS_TERMINAL_GRACE_MS, type PullProgressEvent } from '@/hooks/useEventStream';
+import {
+  isTerminalPullPhase,
+  PULL_PHASE_LABELS,
+  PULL_PROGRESS_TERMINAL_GRACE_MS,
+  type PullProgressEvent,
+} from '@/hooks/useEventStream';
 import { useFallbackPolling } from '@/hooks/useFallbackPolling';
 import { cn, formatDateTime, formatRelativeTime } from '@/lib/utils';
 import { IntentPhaseBadge } from './IntentBadges';
@@ -29,8 +34,9 @@ function StatBlock({ label, children }: { label: string; children: ReactNode }) 
   );
 }
 
-/** C4: compact pull-progress row — live bar while downloading, terminal
- * status line for a short grace once the host finished (or failed) the pull.
+/** C4: compact pull-progress row — live bar while downloading, a named step
+ * for the phases that carry no byte counts, and a terminal status line for a
+ * short grace once the host finished (or failed) the pull.
  *
  * A finished pull is only news for a moment: the outcome shows up in the
  * replica table or the error block, so a row that stayed forever would keep
@@ -66,8 +72,36 @@ function pullProgressRow(progress: PullProgressEvent | undefined, now: number = 
               {speed ? ` · ${speed}` : ''}
             </span>
           </div>
-          <div className="mt-2 h-1.5 rounded-full bg-nord-3 overflow-hidden">
-            <div className="h-full rounded-full bg-nord-8 transition-all" style={{ width: `${pct}%` }} />
+          {/* huggingface:// pulls report no total, and a bar pinned at 0%
+              reads as a stalled download rather than an unknown size. */}
+          {total > 0 && (
+            <div
+              role="progressbar"
+              aria-valuenow={pct}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              className="mt-2 h-1.5 rounded-full bg-nord-3 overflow-hidden"
+            >
+              <div className="h-full rounded-full bg-nord-8 transition-all" style={{ width: `${pct}%` }} />
+            </div>
+          )}
+        </div>
+      </section>
+    );
+  }
+
+  const stepLabel = PULL_PHASE_LABELS[data.phase];
+  if (stepLabel) {
+    return (
+      <section>
+        <h4 className="text-sm font-semibold text-nord-6 uppercase tracking-wide">Model pull</h4>
+        <div className="mt-3 rounded-md border border-nord-3 bg-nord-2 p-4 text-sm">
+          <div className="flex items-center justify-between text-xs text-nord-4">
+            <span>
+              {data.source_uri}
+              {host}
+            </span>
+            <span>{stepLabel}…</span>
           </div>
         </div>
       </section>

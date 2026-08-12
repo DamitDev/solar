@@ -1,6 +1,7 @@
 """C2 log retention: the log buffer survives process exit and manual stop,
 is cleared only by delete, dead-instance buffers are evicted beyond the cap,
-on-disk files honour log_file_retention_s (keeping the newest per alias),
+on-disk files honour log_file_retention_s (keeping the newest per
+(alias, instance_id)),
 and log filenames carry the instance id."""
 
 import sys

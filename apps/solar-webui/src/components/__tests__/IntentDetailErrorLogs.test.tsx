@@ -5,11 +5,13 @@
  * be dismissed.
  */
 
-import { render, screen, waitFor } from '@testing-library/react';
+// RTL's `act` sets IS_REACT_ACT_ENVIRONMENT; React's bare one does not, and
+// warns that updates may not have been flushed.
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { act } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { useEffect, useState } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import solarClient from '@/api/client';
 import { Intent, IntentLastError } from '@/api/types';
 
@@ -23,9 +25,41 @@ const eventStream = {
   getInstanceState: vi.fn().mockReturnValue(undefined),
 };
 
+/**
+ * Consumers of the mocked context subscribe here so a test can deliver an
+ * event the way the real stream does. Replacing `eventStream.intents` alone
+ * changes nothing on screen — the hook returns the same object every render —
+ * so without this a "survives an update" assertion could never fail.
+ */
+const streamListeners = new Set<() => void>();
+
 vi.mock('@/context/EventStreamContext', () => ({
-  useEventStreamContext: () => eventStream,
+  useEventStreamContext: () => {
+    const [, bump] = useState(0);
+    useEffect(() => {
+      const listener = () => bump((n) => n + 1);
+      streamListeners.add(listener);
+      return () => {
+        streamListeners.delete(listener);
+      };
+    }, []);
+    return eventStream;
+  },
 }));
+
+/** Deliver an intent_update to every mounted consumer. */
+async function pushStreamUpdate(intent: Intent) {
+  await act(async () => {
+    eventStream.intents = new Map([[intent.id, intent]]);
+    for (const listener of streamListeners) listener();
+  });
+}
+
+afterEach(() => {
+  // `streamListeners` outlives a single test, so an unmount that did not run
+  // would otherwise re-render a torn-down tree in the next one.
+  streamListeners.clear();
+});
 
 function makeIntent(lastError: IntentLastError | null, override: Partial<Intent> = {}): Intent {
   return {
@@ -202,13 +236,17 @@ describe('IntentDetail advisory warnings', () => {
       warnings: [{ field: 'resources.vram_gb', message: 'exceeds every host today' }],
     });
     expect(screen.getByText(/exceeds every host today/)).toBeInTheDocument();
+    expect(screen.getByText(/not enough capacity right now/i)).toBeInTheDocument();
 
-    await act(async () => {
-      eventStream.intents = new Map([['intent-1', makeIntent(null)]]);
-      // Force a re-render through a state change the component owns.
-      window.dispatchEvent(new Event('resize'));
-    });
+    const converged = makeIntent(null);
+    await pushStreamUpdate({
+      ...converged,
+      status: { ...converged.status, phase: 'ready', reconcile: 'idle', ready_replicas: 1, shortfall: 0 },
+    } as Intent);
 
+    // The shortfall notice belongs to the fetched copy: it going away is what
+    // proves the update actually landed and the assertion below has teeth.
+    expect(screen.queryByText(/not enough capacity right now/i)).not.toBeInTheDocument();
     expect(screen.getByText(/exceeds every host today/)).toBeInTheDocument();
   });
 

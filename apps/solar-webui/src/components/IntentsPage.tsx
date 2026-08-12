@@ -14,7 +14,7 @@ import { AlertCircle, RefreshCw, Target, Trash2, Plus, Pencil, TriangleAlert, X 
 import solarClient from '@/api/client';
 import { Intent, IntentCreateRequest, IntentFieldNotice } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
-import type { PullProgressEvent } from '@/hooks/useEventStream';
+import { PULL_PHASE_LABELS, type PullProgressEvent } from '@/hooks/useEventStream';
 import { useFallbackPolling } from '@/hooks/useFallbackPolling';
 import { formatRelativeTime } from '@/lib/utils';
 import { sortIntents } from '@/lib/intents';
@@ -40,13 +40,23 @@ function pullProgressRow(
     .map((hostId) => lookup(hostId, intent.model_source))
     .filter((p): p is PullProgressEvent => !!p)
     .sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? ''))[0];
-  if (!progress || progress.data.phase !== 'downloading') return null;
+  // A terminal phase is deliberately absent here: the row's phase badge and
+  // the detail page both report the outcome, and the label lookup covers only
+  // the phases a pull passes through on the way.
+  const label = progress ? PULL_PHASE_LABELS[progress.data.phase] : undefined;
+  if (!progress || !label) return null;
+  if (progress.data.phase !== 'downloading') {
+    return <span className="block text-[11px] text-nord-8">{label}…</span>;
+  }
   const total = progress.data.bytes_total ?? 0;
   const done = progress.data.bytes_done ?? 0;
   const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  // A huggingface:// pull reports no total, so a percentage would sit at a
+  // constant 0% next to a climbing byte count.
   return (
     <span className="block text-[11px] text-nord-8">
-      ↓ {pct}% · {(done / 1024 / 1024).toFixed(1)} MB
+      ↓ {total > 0 ? `${pct}% · ` : ''}
+      {(done / 1024 / 1024).toFixed(1)} MB
     </span>
   );
 }

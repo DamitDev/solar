@@ -44,7 +44,7 @@ control rebroadcasts user-facing events to `/webui`.
 | `step_log` | host → control | job-step log lines | rebroadcast to `/webui` |
 | `pull_progress` | host → control | `{host_id, host_name, timestamp, data}` with `data = {source_uri, phase, bytes_done, bytes_total, speed_bps, error?}` | C4; throttled while `downloading`, exactly one terminal `completed`/`failed` |
 | job lifecycle | host → control | job create/update events | |
-| `endpoints_update` | control → `/webui` | `{endpoints: [...]}` | C5; emitted on endpoint create/update |
+| `endpoints_update` | control → `/webui` | `{endpoints: [...]}` | C5; emitted on endpoint create, update and delete |
 
 ## 3. Redis read models
 

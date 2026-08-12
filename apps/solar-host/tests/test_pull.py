@@ -1625,6 +1625,34 @@ class TestPullProgress:
             assert e["source_uri"] == "repo://iris-osl:v3"
             assert e["bytes_total"] == 500
 
+    def test_unknown_size_reports_no_total_on_every_event(self, _isolated_env: Path):
+        """A huggingface:// pull declares no size, and "unknown" has to stay
+        distinguishable from "zero" all the way to the last event.
+
+        The declared size is captured before step 7 recomputes the directory
+        size into the same local; without that capture the tail of the stream
+        would suddenly grow a total the caller never declared.
+        """
+        from solar_host.models_manager import ensure_models_dir, pull_model
+
+        ensure_models_dir()
+        events: list[dict] = []
+        with patch("solar_host.models_manager._pull_harbor", return_value=None):
+            pull_model(
+                source="harbor",
+                source_uri="repo://iris-osl:v3",
+                harbor_ref="imgrepo.damit.hu/supernova/iris-osl:v3",
+                progress_cb=events.append,
+            )
+
+        assert [e["phase"] for e in events] == [
+            "resolving",
+            "verifying",
+            "finalizing",
+            "completed",
+        ]
+        assert all(e["bytes_total"] is None for e in events)
+
     def test_in_process_failure_emits_failed_exactly_once(self, _isolated_env: Path):
         from solar_host.models_manager import ModelPullError, pull_model
 

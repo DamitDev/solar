@@ -20,7 +20,7 @@ import solarClient from '@/api/client';
 import { Host, Intent, IntentCreateRequest, IntentPriority, IntentStrategy } from '@/api/types';
 import { extractApiError } from '@/lib/apiErrors';
 import { cn } from '@/lib/utils';
-import { validateIntentRequest, sanitizeIntentBackend } from '@/lib/intentValidation';
+import { unchangedBackendFields, validateIntentRequest, sanitizeIntentBackend } from '@/lib/intentValidation';
 import { getDefaultConfig, stripEmptyOptionalFields } from '@/lib/backendConfig';
 import { BackendConfigFields } from './BackendConfigFields';
 
@@ -251,7 +251,9 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
       metadata,
     };
 
-    const errors = validateIntentRequest(request);
+    // Editing replays the whole spec, so a field the user never touched must
+    // not be rejected here when the server would grandfather it.
+    const errors = validateIntentRequest(request, unchangedBackendFields(submittedBackend, intent?.backend));
     if (errors.length > 0) {
       revealErrors(errors, 'Fix the following before saving');
       return;

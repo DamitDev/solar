@@ -7,11 +7,12 @@ identical output from a WS payload and the equivalent HTTP body.
 """
 
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
 
+from app.config import settings
 from app.models import Host, HostResourceSnapshot, HostStatus
 from app.routes.management.resources import (
     _fetch_host_resource_snapshot,
@@ -69,8 +70,14 @@ def _stale_at() -> str:
     return "2020-01-01T00:00:00+00:00"
 
 
-async def _fetch(**store_overrides):
-    """Run _fetch_host_resource_snapshot with all seams mocked."""
+async def _fetch(**store_overrides) -> tuple[HostResourceSnapshot, MagicMock]:
+    """Run _fetch_host_resource_snapshot with all seams mocked.
+
+    Returns the patched ``ClientSession.get`` alongside the snapshot: the
+    point of the cache is the call that does *not* happen, and a
+    ``snapshot_source`` of "ws" would still read correctly on an
+    implementation that asked the host anyway.
+    """
     defaults = {
         "is_host_connected": AsyncMock(return_value=True),
         "get_host_resource_snapshot": AsyncMock(
@@ -99,6 +106,10 @@ async def _fetch(**store_overrides):
             "app.routes.management.resources.get_host_active_jobs",
             new=AsyncMock(return_value=[]),
         ),
+        # Pinned so the fixtures alone decide freshness: with the production
+        # default a slow box could age _fresh_at() past the limit and turn a
+        # cache-hit assertion into a fallback.
+        patch.object(settings, "host_snapshot_max_age_s", 300.0),
         patch("aiohttp.ClientSession.get") as mock_get,
     ):
         if defaults["http_ok"]:
@@ -110,14 +121,16 @@ async def _fetch(**store_overrides):
             mock_get.return_value.__aenter__.side_effect = (
                 aiohttp.ClientConnectionError("refused")
             )
-        return await _fetch_host_resource_snapshot(HOST)
+        return await _fetch_host_resource_snapshot(HOST), mock_get
 
 
 class TestCacheFirst:
     @pytest.mark.anyio
     async def test_ws_snapshot_used_when_connected_and_fresh(self):
-        snap = await _fetch()
+        snap, mock_get = await _fetch()
         assert snap.snapshot_source == "ws"
+        # The whole point of C5: a connected host is not asked over HTTP.
+        mock_get.assert_not_called()
         assert snap.reachable is True
         assert snap.vram_total_gb == 24.0
         assert snap.reservation_count == 1
@@ -126,22 +139,27 @@ class TestCacheFirst:
 
     @pytest.mark.anyio
     async def test_http_fallback_when_cache_stale(self):
-        snap = await _fetch(
+        snap, mock_get = await _fetch(
             get_host_resource_snapshot=AsyncMock(
                 return_value={"at": _stale_at(), "resources": _WS_PAYLOAD}
             ),
         )
         assert snap.snapshot_source == "http"
+        mock_get.assert_called_once()
 
     @pytest.mark.anyio
     async def test_http_fallback_when_disconnected(self):
-        snap = await _fetch(is_host_connected=AsyncMock(return_value=False))
+        snap, mock_get = await _fetch(is_host_connected=AsyncMock(return_value=False))
         assert snap.snapshot_source == "http"
+        mock_get.assert_called_once()
 
     @pytest.mark.anyio
     async def test_http_fallback_when_cache_empty(self):
-        snap = await _fetch(get_host_resource_snapshot=AsyncMock(return_value=None))
+        snap, mock_get = await _fetch(
+            get_host_resource_snapshot=AsyncMock(return_value=None)
+        )
         assert snap.snapshot_source == "http"
+        mock_get.assert_called_once()
 
     @pytest.mark.anyio
     async def test_naive_timestamp_falls_back_instead_of_raising(self):
@@ -151,7 +169,7 @@ class TestCacheFirst:
         propagate through _fetch_host_resource_snapshot into _observe and fail
         the whole reconcile tick.
         """
-        snap = await _fetch(
+        snap, mock_get = await _fetch(
             get_host_resource_snapshot=AsyncMock(
                 return_value={
                     "at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
@@ -161,20 +179,22 @@ class TestCacheFirst:
         )
         # Treated as UTC and therefore fresh — no exception, no HTTP call.
         assert snap.snapshot_source == "ws"
+        mock_get.assert_not_called()
 
     @pytest.mark.anyio
     async def test_unparseable_timestamp_falls_back_to_http(self):
-        snap = await _fetch(
+        snap, mock_get = await _fetch(
             get_host_resource_snapshot=AsyncMock(
                 return_value={"at": "not-a-timestamp", "resources": _WS_PAYLOAD}
             ),
         )
         assert snap.snapshot_source == "http"
+        mock_get.assert_called_once()
 
     @pytest.mark.anyio
     async def test_degraded_when_host_unreachable(self):
         """No WS snapshot, HTTP dead -> reachable False, source none."""
-        snap = await _fetch(
+        snap, mock_get = await _fetch(
             is_host_connected=AsyncMock(return_value=False),
             http_ok=False,
         )
@@ -182,6 +202,7 @@ class TestCacheFirst:
         assert snap.reachable is False
         assert snap.snapshot_source == "none"
         assert snap.error is not None
+        mock_get.assert_called_once()
 
 
 class TestMerge:

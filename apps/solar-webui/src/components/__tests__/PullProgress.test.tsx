@@ -122,6 +122,31 @@ describe('IntentDetail pull progress', () => {
     expect(screen.queryByText(/Model pull/)).not.toBeInTheDocument();
   });
 
+  it('names the phases that carry no byte counts instead of showing nothing', async () => {
+    eventStream.getPullProgress = vi.fn(() =>
+      progress('host-a', 'verifying', { bytes_done: null, bytes_total: null, speed_bps: null }),
+    );
+
+    await renderDetail(makeIntent());
+
+    expect(await screen.findByText(/Model pull/)).toBeInTheDocument();
+    expect(screen.getByText(/Verifying/)).toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+  });
+
+  it('drops the bar when the source reports no total, keeping the byte count', async () => {
+    eventStream.getPullProgress = vi.fn(() =>
+      progress('host-a', 'downloading', { bytes_total: null, speed_bps: 2 * 1024 * 1024 }),
+    );
+
+    await renderDetail(makeIntent());
+
+    expect(await screen.findByText(/Model pull/)).toBeInTheDocument();
+    expect(screen.getByText(/5\.0 MB · 2\.0 MB\/s/)).toBeInTheDocument();
+    expect(screen.queryByText(/%/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+  });
+
   it('shows a finished pull briefly and drops it once stale', async () => {
     const recent = progress('host-a', 'completed');
     eventStream.getPullProgress = vi.fn(() => recent);
