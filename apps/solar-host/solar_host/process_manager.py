@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 
 FLUSH_INTERVAL_S = 0.1
 WATCHDOG_INTERVAL_S = 15.0
+# How often a start parked on the ready event re-reads the instance record,
+# so a lost wake costs a second rather than the whole readiness timeout.
+READY_RECHECK_INTERVAL_S = 1.0
 MAX_QUEUE_SIZE = 10_000
 _HAS_STDBUF = shutil.which("stdbuf") is not None
 
@@ -265,6 +268,43 @@ class ProcessManager:
             loop.call_soon_threadsafe(event.set)
         else:
             event.set()
+
+    async def _await_ready_signal(
+        self, instance_id: str, ready_event: asyncio.Event
+    ) -> None:
+        """Wait for readiness, returning as soon as the start is decided.
+
+        The wake is best-effort: ``_signal_ready`` looks the event up in
+        ``ready_events``, and a concurrent stop or delete purges that entry,
+        so a wake raised between the child's death and the purge reaches
+        nobody. Re-reading the record in slices makes the wait
+        self-sufficient — any status other than ``starting``, or a record
+        that is gone, ends it and the caller re-reads the outcome as usual.
+
+        Without this, a start whose instance is removed underneath parks for
+        the whole ``instance_ready_timeout_s``. solar-control awaits this call
+        one reconciler action at a time, so a single lost wake stalled every
+        intent on the fleet for 600 s.
+
+        Raises ``TimeoutError`` when the backend genuinely never reports
+        readiness, which is the caller's failure path.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + settings.instance_ready_timeout_s
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError
+            try:
+                await asyncio.wait_for(
+                    ready_event.wait(),
+                    timeout=min(READY_RECHECK_INTERVAL_S, remaining),
+                )
+                return
+            except TimeoutError:
+                instance = config_manager.get_instance(instance_id)
+                if instance is None or instance.status != InstanceStatus.STARTING:
+                    return
 
     def _mark_instance_ready(self, instance_id: str, process: subprocess.Popen) -> None:
         """Promote an instance from ``starting`` to ``running`` (thread-safe).
@@ -655,10 +695,7 @@ class ProcessManager:
             self.log_threads[instance_id] = log_thread
 
             try:
-                await asyncio.wait_for(
-                    ready_event.wait(),
-                    timeout=settings.instance_ready_timeout_s,
-                )
+                await self._await_ready_signal(instance_id, ready_event)
             except TimeoutError:
                 # The backend never reported readiness — kill it and fail.
                 proc = self.processes.pop(instance_id, None)

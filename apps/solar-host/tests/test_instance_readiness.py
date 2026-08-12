@@ -202,6 +202,44 @@ async def test_start_fails_on_immediate_exit(_isolated_env, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_start_aborts_when_instance_deleted_mid_flight(
+    _isolated_env, monkeypatch
+):
+    """A record removed under a parked start ends the start in ~a second.
+
+    This must hold with no wake at all: ``_signal_ready`` looks the event up
+    in ``ready_events``, which a concurrent stop or delete purges, so the wake
+    is lost whenever it is raised in that window. solar-control awaits the
+    start one reconciler action at a time, so a start that instead parks for
+    the full readiness timeout stalls every intent on the fleet — observed as
+    a 600 s reconciler stall in the integration suite.
+    """
+    monkeypatch.setattr("solar_host.config.settings.instance_ready_timeout_s", 30.0)
+    manager = ProcessManager()
+    _make_instance()
+    runner = _ScriptRunner("import time; time.sleep(60)")  # never reports ready
+    monkeypatch.setattr(
+        "solar_host.process_manager.get_runner_for_config", lambda cfg: runner
+    )
+
+    task = asyncio.create_task(manager._try_start_instance("inst-1", attempt=0))
+    await asyncio.sleep(0.3)
+    inst = config_manager.get_instance("inst-1")
+    assert inst is not None and inst.status == InstanceStatus.STARTING
+
+    # Drop the record only — no stop, no signal: the lost-wake shape exactly.
+    config_manager.remove_instance("inst-1")
+
+    # Fails loudly if the start parks on the readiness timeout instead.
+    result = await asyncio.wait_for(task, timeout=10.0)
+    assert result is False
+
+    proc = manager.processes.pop("inst-1", None)
+    if proc is not None:
+        proc.kill()
+
+
+@pytest.mark.anyio
 async def test_ready_line_twice_promotes_once(_isolated_env, monkeypatch):
     manager = ProcessManager()
     _make_instance()

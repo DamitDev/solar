@@ -120,7 +120,10 @@ class OpenAIGateway:
 
         new_model_map: dict[str, list[RegistryEntry]] = defaultdict(list)
         hosts = await host_db.get_all_hosts()
-        refresh_failed = False
+        # Tracked per host, not as one boolean: a single unreachable host must
+        # not stop healthy hosts from de-registering aliases whose instances
+        # genuinely went away (see the carry-forward below).
+        failed_host_ids: set[str] = set()
 
         ws_hosts = []
         http_hosts = []
@@ -185,7 +188,6 @@ class OpenAIGateway:
             if poll_hosts:
 
                 async def poll_host(host):
-                    nonlocal refresh_failed
                     result_entries: list[RegistryEntry] = []
                     try:
                         url = f"{host.url}/instances"
@@ -215,12 +217,12 @@ class OpenAIGateway:
                                         if entry:
                                             result_entries.append(entry)
                             else:
-                                refresh_failed = True
+                                failed_host_ids.add(host.id)
                                 await host_db.update_host_status(
                                     host.id, HostStatus.ERROR
                                 )
                     except Exception:  # noqa: BLE001
-                        refresh_failed = True
+                        failed_host_ids.add(host.id)
                         cached = await get_host_instances(host.id)
                         if cached:
                             for instance in cached:
@@ -245,17 +247,53 @@ class OpenAIGateway:
                     for entry in result:
                         new_model_map[entry.model_alias].append(entry)
 
-        if not new_model_map and hosts and refresh_failed:
-            previous_registry = await registry_store.get_registry()
-            if previous_registry:
-                logger.warning(
-                    "Registry refresh produced no entries after host failures; "
-                    "keeping previous registry with %d models",
-                    len(previous_registry),
-                )
-                return
+        if failed_host_ids:
+            await self._carry_forward_failed_hosts(new_model_map, failed_host_ids)
 
         await registry_store.set_registry(dict(new_model_map))
+
+    @staticmethod
+    async def _carry_forward_failed_hosts(
+        new_model_map: dict[str, list[RegistryEntry]],
+        failed_host_ids: set[str],
+    ) -> None:
+        """Re-add previous registry entries owned by hosts we could not reach.
+
+        Evidence from a host we did reach is authoritative for that host's own
+        aliases, so an alias whose instances disappeared on a healthy host is
+        allowed to de-register. Only entries belonging to ``failed_host_ids``
+        are carried forward — the alternative (keeping the whole previous
+        registry whenever any host failed) leaves ``/v1/models`` advertising
+        models that no longer exist and routes requests at dead upstreams.
+        """
+        previous_registry = await registry_store.get_registry()
+        if not previous_registry:
+            return
+
+        present = {
+            (entry.host_id, entry.instance_id)
+            for entries in new_model_map.values()
+            for entry in entries
+        }
+        carried = 0
+        for alias, entries in previous_registry.items():
+            for entry in entries:
+                if entry.host_id not in failed_host_ids:
+                    continue
+                key = (entry.host_id, entry.instance_id)
+                if key in present:
+                    continue
+                present.add(key)
+                new_model_map.setdefault(alias, []).append(entry)
+                carried += 1
+
+        if carried:
+            logger.warning(
+                "Carried forward %d registry entries from %d unreachable host(s); "
+                "aliases on reachable hosts were refreshed normally",
+                carried,
+                len(failed_host_ids),
+            )
 
     async def _notify_host_online(self, host) -> None:
         """Emit host_status to WebUI when HTTP polling discovers a host is online."""

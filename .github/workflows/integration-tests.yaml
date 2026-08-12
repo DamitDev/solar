@@ -8,20 +8,62 @@ on:
       - 'apps/solar-host/**'
       - 'apps/data-repository/**'
       - '.github/workflows/integration-tests.yaml'
+  # Deliberately unfiltered. This workflow is a required status check, and a
+  # path-filtered workflow never creates its check run for a PR that touches
+  # nothing relevant — branch protection then waits for it forever. The filter
+  # lives in `detect` instead: a *skipped* job satisfies the requirement, a
+  # job that never existed does not.
   pull_request:
-    paths:
-      - 'apps/solar-control/**'
-      - 'apps/solar-host/**'
-      - 'apps/data-repository/**'
-      - '.github/workflows/integration-tests.yaml'
   workflow_dispatch:
 
 concurrency:
   group: integration-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
+  detect:
+    runs-on: [self-hosted, fast]
+    outputs:
+      relevant: ${{ steps.changed.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Does this change reach the integration suite?
+        id: changed
+        run: |
+          set -euo pipefail
+
+          # push / workflow_dispatch already arrive path-filtered (or on
+          # purpose), so only a PR needs the diff.
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch origin "$GITHUB_BASE_REF" --depth=1 -q
+          CHANGED=$(git diff --name-only "origin/$GITHUB_BASE_REF...HEAD" || true)
+
+          RELEVANT=false
+          for f in $CHANGED; do
+            case "$f" in
+              apps/solar-control/*|apps/solar-host/*|apps/data-repository/*)
+                RELEVANT=true;;
+              # Shared dependency/tooling changes reach all three services.
+              .github/workflows/integration-tests.yaml|pyproject.toml|uv.lock|Makefile)
+                RELEVANT=true;;
+            esac
+          done
+          echo "integration suite relevant: $RELEVANT"
+          echo "relevant=$RELEVANT" >> "$GITHUB_OUTPUT"
+
   integration:
+    needs: detect
+    if: needs.detect.outputs.relevant == 'true'
     runs-on: [self-hosted, fast]
     timeout-minutes: 60
     steps:
@@ -44,11 +86,47 @@ jobs:
           docker pull redis:7-alpine
           docker pull testcontainers/ryuk:0.8.1
 
+      # No pytest-rerunfailures, no --reruns, no retry-on-failure step. Every
+      # failure this suite has produced so far was deterministic (a leaked
+      # ghost host row and an all-or-nothing registry guard); a retry policy
+      # would have hidden both and shipped the registry bug.
       - name: Run integration tests
         working-directory: apps/solar-control
         env:
           PYTHONUNBUFFERED: "1"
         run: uv run --extra integration pytest tests_integration/ -v --tb=short --durations=20 --junitxml=integration-report.xml
+
+      - name: Collect stack logs and evidence
+        if: failure()
+        run: |
+          set -uo pipefail
+          dest="$GITHUB_WORKSPACE/apps/solar-control/integration-diagnostics"
+          mkdir -p "$dest"
+
+          # The session stack writes every service log under pytest's tmp root
+          # (<basetemp>/stack0/logs, logs-a, logs-b) and dump_instance_evidence
+          # writes <basetemp>/stack0/evidence-<alias>/. Nothing copies them out
+          # of the runner, so without this step a CI failure is undiagnosable:
+          # the JUnit report has the assertion text and none of the evidence.
+          roots="/tmp"
+          if [ -n "${TMPDIR:-}" ] && [ "${TMPDIR%/}" != "/tmp" ]; then
+            roots="$roots ${TMPDIR%/}"
+          fi
+
+          for root in $roots; do
+            [ -d "$root" ] || continue
+            find "$root" -maxdepth 4 -type d -path '*pytest-of-*' \
+                 \( -name logs -o -name 'logs-*' -o -name 'evidence-*' \) \
+                 -print0 2>/dev/null |
+              while IFS= read -r -d '' d; do
+                cp -a "$d" "$dest/$(printf '%s' "${d#"$root"/}" | tr '/' '_')" \
+                  2>/dev/null || true
+              done
+          done
+
+          echo "--- collected diagnostics ---"
+          find "$dest" -mindepth 1 -maxdepth 1 | sort
+          du -sh "$dest" 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -56,3 +134,10 @@ jobs:
           name: integration-report
           path: apps/solar-control/integration-report.xml
           if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: integration-diagnostics
+          path: apps/solar-control/integration-diagnostics/
+          if-no-files-found: warn

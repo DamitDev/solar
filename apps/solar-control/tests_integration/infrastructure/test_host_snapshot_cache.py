@@ -139,29 +139,42 @@ async def test_dead_host_degrades_to_none(http_control, stack, clean_state):
         roles=["inference"],
     )
 
-    async def ghost_degraded() -> bool:
-        hosts = await _resources_by_host(http_control)
-        ghost = hosts.get(host_id)
-        return ghost is not None and ghost["snapshot_source"] == "none"
+    # The hosts table is session-persistent: `clean_state` resets intents,
+    # instances and volatile Redis but deliberately never truncates hosts.
+    # A surviving ghost row is not a cosmetic leak — every later test sees a
+    # permanently unreachable host, which degrades _collect_availability to
+    # partial and makes the gateway's registry refresh fail on every cycle.
+    # The teardown has to be a `finally`, not a trailing line: if an
+    # assertion below fails the row must still go, or one failure here
+    # poisons the rest of the session.
+    try:
 
-    await wait_for(
-        ghost_degraded,
-        timeout=30.0,
-        interval=0.5,
-        description="dead host degraded to none",
-    )
-    hosts = await _resources_by_host(http_control)
-    ghost = hosts[host_id]
-    assert ghost["snapshot_source"] == "none"
-    assert ghost["reachable"] is False
-    assert ghost.get("error")
-    # The response still carries the full shape for every host.
-    for field in (
-        "host_id",
-        "host_name",
-        "status",
-        "roles",
-        "instance_count",
-        "reservations",
-    ):
-        assert field in ghost
+        async def ghost_degraded() -> bool:
+            hosts = await _resources_by_host(http_control)
+            ghost = hosts.get(host_id)
+            return ghost is not None and ghost["snapshot_source"] == "none"
+
+        await wait_for(
+            ghost_degraded,
+            timeout=30.0,
+            interval=0.5,
+            description="dead host degraded to none",
+        )
+        hosts = await _resources_by_host(http_control)
+        ghost = hosts[host_id]
+        assert ghost["snapshot_source"] == "none"
+        assert ghost["reachable"] is False
+        assert ghost.get("error")
+        # The response still carries the full shape for every host.
+        for field in (
+            "host_id",
+            "host_name",
+            "status",
+            "roles",
+            "instance_count",
+            "reservations",
+        ):
+            assert field in ghost
+    finally:
+        resp = await http_control.delete(f"/api/hosts/{host_id}")
+        assert resp.status_code in (200, 404), resp.text

@@ -82,6 +82,37 @@ A full run takes roughly 2–3 minutes (one session-scoped 4-process stack is
 reused by every module; per-test state is reset by `clean_state`). The wake
 test builds its own 3600s-interval stack and runs last.
 
+## CI
+
+[`.github/workflows/integration-tests.yaml`](../../../.github/workflows/integration-tests.yaml)
+runs this suite on a self-hosted runner (Docker is required for the Postgres
+and Redis testcontainers). The `detect` job decides whether a PR reaches
+solar-control, solar-host or data-repository; `integration` is skipped when it
+does not.
+
+**This is meant to be a required status check.** That is a repository setting,
+not something the workflow file can declare — enable it under Settings →
+Branches → branch protection for `main`, adding **`Integration Tests /
+integration`** to the required checks. The `pull_request` trigger is
+deliberately *not* path-filtered: a path-filtered workflow never creates its
+check run for an unrelated PR, and branch protection would then block that PR
+forever. A job skipped by the `detect` gate counts as satisfied, so the filter
+has to live in the job condition instead.
+
+On failure the run uploads two artifacts:
+
+- `integration-report` — the JUnit XML (assertion text, timings).
+- `integration-diagnostics` — every service log the stack wrote
+  (`logs/`, `logs-a/`, `logs-b/`) plus any `evidence-*/` directory from
+  `dump_instance_evidence`. These live under pytest's tmp root on the runner
+  and are otherwise lost; the JUnit report alone is rarely enough to tell a
+  product bug from an environment failure.
+
+There is deliberately **no retry-on-failure** (no `pytest-rerunfailures`, no
+`--reruns`). Both failures that motivated wiring this suite into CI were
+deterministic — a leaked ghost host row and an all-or-nothing gateway registry
+guard — and a retry policy would have hidden both.
+
 ## Layout
 
 ```
