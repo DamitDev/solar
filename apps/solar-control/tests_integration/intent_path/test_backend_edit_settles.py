@@ -170,12 +170,20 @@ async def test_unsettlable_edit_degrades_to_bounded_error(http_control, clean_st
         err = current["status"].get("last_error")
         return err is not None and bool(err.get("instance_id"))
 
-    await wait_for(
-        failed_with_link,
-        timeout=60.0,
-        interval=0.5,
-        description="start failure recorded with instance_id",
-    )
+    try:
+        await wait_for(
+            failed_with_link,
+            timeout=60.0,
+            interval=0.5,
+            description="start failure recorded with instance_id",
+        )
+    except AssertionError as exc:
+        state = await get_intent(http_control, intent["id"])
+        raise AssertionError(
+            "the unsettlable edit settled. A ready phase with no last_error "
+            "means the cuda start SUCCEEDED — this test needs a CPU-only "
+            f"host (see CUDA_VISIBLE_DEVICES in conftest).\nintent={state}"
+        ) from exc
     current = await get_intent(http_control, intent["id"])
     assert current is not None
     err = current["status"]["last_error"]

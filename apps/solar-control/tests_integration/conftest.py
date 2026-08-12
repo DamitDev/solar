@@ -572,6 +572,12 @@ async def _build_stack(
         "HF_HOME": str(tmp_root / "hf-cache"),
         "TOKENIZERS_PARALLELISM": "false",
         "LOG_LEVEL": "INFO",
+        # The C2 start-failure tests use `device: cuda` as their deterministic
+        # failure, which only fails if the host really has no GPU. The
+        # aiops-3 runner does have one, so both tests loaded the model on
+        # cuda and timed out waiting for an error that never came. Hide the
+        # GPUs so the fixture host is CPU-only everywhere, as documented.
+        "CUDA_VISIBLE_DEVICES": "",
         # C4: pull-progress telemetry throttled tight so the integration
         # test can observe terminal progress entries without waiting for
         # the 5 s default.

@@ -66,12 +66,20 @@ async def test_start_failure_links_instance_and_logs(http_control, clean_state):
         # host's structured body or a readable logs endpoint.
         return bool(err.get("instance_id"))
 
-    await wait_for(
-        failed_with_link,
-        timeout=60.0,
-        interval=0.5,
-        description="start failure recorded with instance link",
-    )
+    try:
+        await wait_for(
+            failed_with_link,
+            timeout=60.0,
+            interval=0.5,
+            description="start failure recorded with instance link",
+        )
+    except AssertionError as exc:
+        state = await get_intent(http_control, intent["id"])
+        raise AssertionError(
+            "no start failure was recorded. A ready phase with no last_error "
+            "means the cuda start SUCCEEDED — this test needs a CPU-only "
+            f"host (see CUDA_VISIBLE_DEVICES in conftest).\nintent={state}"
+        ) from exc
     current = await get_intent(http_control, intent["id"])
     assert current is not None
     err = current["status"]["last_error"]
