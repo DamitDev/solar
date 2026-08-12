@@ -123,6 +123,7 @@ tests_integration/
 │   ├── stub_harbor.py     # OCI Distribution v2 stub (TLS, token dance,
 │   │                      # request log, register_model)
 │   ├── helpers.py         # wait_for, free_port, subprocess spawner, certs
+│   ├── faults.py          # scoped fault injection (see "Fault injection")
 │   ├── seed.py            # DB/API seed helpers, host-log request counting
 │   ├── intents.py         # intent payload + readiness polling helpers
 │   ├── constants.py       # shared constants (keys, model URIs, harbor_port)
@@ -145,6 +146,24 @@ cd ~/work/solar/solar-control
 env -u PYTHONPATH ../solar-host/.venv/bin/python \
     tests_integration/fixtures/generate_test_model.py
 ```
+
+## Fault injection
+
+Every deliberate fault goes through a context manager in `fixtures/faults.py`
+— `broken_host_api_key`, `dead_data_repo`, `extra_host` — never through a raw
+call in a test body. All three mutate state the *session* owns (the hosts
+table, the data-repo subprocess, the host topology), so an undo written as a
+plain statement further down the test runs only on the happy path.
+
+That cost a 28-minute red run on 2026-08-12: an assertion failed between
+`update_host_api_key(..., "wrong-key")` and its restore, control 401'd against
+host-b for the remaining 25 minutes, and 13 later tests timed out waiting for
+replicas that could never start. The first failure was the only real one.
+
+`clean_state` re-asserts the baseline (both hosts' `api_key`/`url`, no extra
+hosts) around every test and logs a warning naming the test when it has to
+repair, so the next leak costs one line instead of a session. Adding a fault?
+Add a manager.
 
 ## Design notes / pitfalls encoded in the suite
 

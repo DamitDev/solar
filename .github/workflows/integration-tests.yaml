@@ -94,7 +94,10 @@ jobs:
         working-directory: apps/solar-control
         env:
           PYTHONUNBUFFERED: "1"
-        run: uv run --extra integration pytest tests_integration/ -v --tb=short --durations=20 --junitxml=integration-report.xml
+        # --no-sync: syncing here would re-resolve against solar-control alone
+        # and prune data-repository's harbor-oci-client out of the workspace
+        # venv the two sync steps above just built.
+        run: uv run --no-sync --extra integration pytest tests_integration/ -v --tb=short --durations=20 --junitxml=integration-report.xml
 
       - name: Collect stack logs and evidence
         if: failure()

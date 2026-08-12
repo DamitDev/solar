@@ -217,7 +217,7 @@ async def test_edit_is_not_lost_while_the_host_is_unreachable(
     HTTP calls fail while its WS channel (the reconciler's view of instances)
     stays intact — the lever the RECREATE failure test uses.
     """
-    from fixtures.seed import update_host_api_key
+    from fixtures.faults import broken_host_api_key
 
     intent = await create_intent(http_control, alias=_alias("unreachable"))
     ready = await wait_intent_ready(http_control, intent["id"])
@@ -226,30 +226,35 @@ async def test_edit_is_not_lost_while_the_host_is_unreachable(
 
     hosts = (await http_control.get("/api/hosts")).json()
     host_name = next(h["name"] for h in hosts if h["id"] == host_id)
-    real_key = (
-        stack.secrets["host_a"] if host_name == "host-a" else stack.secrets["host_b"]
-    )
 
-    update_host_api_key(stack.db_env["control_db"], host_id, "wrong-key")
+    with broken_host_api_key(stack, host_id, host_name):
+        backend = dict(ready["backend"])
+        backend["max_length"] = 256
+        updated = await update_intent(http_control, ready, backend=backend)
+        # PUT stamps the marker only when the submitted spec differs from the
+        # stored one, so a bare "is not None" tells you nothing when it fires
+        # (2026-08-12: it fired once in five runs and cost a forensic dig).
+        # Print both sides — the comparison is the thing under suspicion.
+        assert updated["status"]["spec_changed_at"] is not None, (
+            "PUT did not stamp spec_changed_at, so the submitted spec "
+            "compared equal to the stored one\n"
+            f"submitted backend: {backend}\n"
+            f"returned backend:  {updated['backend']}\n"
+            f"returned status:   {updated['status']}"
+        )
 
-    backend = dict(ready["backend"])
-    backend["max_length"] = 256
-    updated = await update_intent(http_control, ready, backend=backend)
-    assert updated["status"]["spec_changed_at"] is not None
+        # Several ticks pass with the host unreachable: the edit must still be
+        # pending, and the replica it applies to must still be the old one.
+        await asyncio.sleep(8)
+        stalled = await get_intent(http_control, intent["id"])
+        assert stalled is not None
+        assert stalled["status"]["spec_changed_at"] is not None, (
+            "the edit was declared rolled out while the host could not be read: "
+            f"{stalled['status']}\n{stack.tail()}"
+        )
+        assert old_instance_id in replica_states(stalled)
 
-    # Several ticks pass with the host unreachable: the edit must still be
-    # pending, and the replica it applies to must still be the old one.
-    await asyncio.sleep(8)
-    stalled = await get_intent(http_control, intent["id"])
-    assert stalled is not None
-    assert stalled["status"]["spec_changed_at"] is not None, (
-        "the edit was declared rolled out while the host could not be read: "
-        f"{stalled['status']}\n{stack.tail()}"
-    )
-    assert old_instance_id in replica_states(stalled)
-
-    # Reachable again: the rollout runs and the edit finally applies.
-    update_host_api_key(stack.db_env["control_db"], host_id, real_key)
+    # The key is restored on block exit: the rollout runs and the edit applies.
 
     async def replaced() -> bool:
         state = await get_intent(http_control, intent["id"])

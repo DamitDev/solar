@@ -178,6 +178,59 @@ def update_host_api_key(database_url: str, host_id: str, api_key: str) -> None:
         cur.execute("UPDATE hosts SET api_key = %s WHERE id = %s", (api_key, host_id))
 
 
+def sync_host_rows(
+    database_url: str, expected: dict[str, dict[str, str]]
+) -> dict[str, list[str]]:
+    """Force the hosts table back to *expected* — ``{name: {api_key, url}}``.
+
+    Returns ``{name: [repaired columns]}`` for the rows that had drifted, and
+    an empty dict when everything already matched.
+
+    The hosts table is session-scoped while tests are not, so a fault
+    injection that breaks a host row and fails before its restore leaves
+    control unable to reach that host for the rest of the run — every call
+    401s and every downstream test times out. ``fixtures.faults`` makes each
+    injection restore itself; this is the backstop that catches whatever it
+    misses (and any future injection that forgets).
+    """
+    repaired: dict[str, list[str]] = {}
+    with control_db_conn(database_url) as conn, conn.cursor() as cur:
+        for name, wanted in expected.items():
+            cur.execute("SELECT api_key, url FROM hosts WHERE name = %s", (name,))
+            row = cur.fetchone()
+            if row is None:
+                continue
+            drifted = [
+                column
+                for column, actual in (("api_key", row[0]), ("url", row[1]))
+                if column in wanted and actual != wanted[column]
+            ]
+            if not drifted:
+                continue
+            sets = ", ".join(f"{column} = %s" for column in drifted)
+            cur.execute(
+                f"UPDATE hosts SET {sets} WHERE name = %s",
+                (*(wanted[column] for column in drifted), name),
+            )
+            repaired[name] = drifted
+    return repaired
+
+
+def delete_hosts_except(database_url: str, names: list[str]) -> list[str]:
+    """Drop every host row whose name is not in *names*; return what went.
+
+    Counterpart to ``sync_host_rows`` for the topology: the migration tests
+    assume exactly the default two hosts, so a leaked extra host changes
+    their outcome rather than failing them outright.
+    """
+    with control_db_conn(database_url) as conn, conn.cursor() as cur:
+        cur.execute("SELECT name FROM hosts WHERE NOT (name = ANY(%s))", (names,))
+        leftovers = [row[0] for row in cur.fetchall()]
+        if leftovers:
+            cur.execute("DELETE FROM hosts WHERE NOT (name = ANY(%s))", (names,))
+    return leftovers
+
+
 def update_host_roles(database_url: str, host_id: str, roles: list[str]) -> None:
     """Set a host's roles directly in the DB.
 
