@@ -1,6 +1,6 @@
 import { createBrowserRouter, RouterProvider, Navigate, Outlet } from 'react-router-dom';
 import { Dashboard } from './components/Dashboard';
-import { RoutingGraph } from './components/RoutingGraph';
+import { RoutingFlow } from './components/RoutingFlow';
 import { GatewayDashboard } from './components/GatewayDashboard';
 import { EndpointsDashboard } from './components/EndpointsDashboard';
 import { ModelCatalog } from './components/ModelCatalog';
@@ -28,7 +28,7 @@ const router = createBrowserRouter([
     element: <Layout />,
     children: [
       { path: '/', element: <Navigate to="/routing" replace /> },
-      { path: '/routing', element: <RoutingGraph /> },
+      { path: '/routing', element: <RoutingFlow /> },
       { path: '/gateway', element: <GatewayDashboard /> },
       { path: '/hosts', element: <Dashboard /> },
       { path: '/intents', element: <IntentsPage /> },

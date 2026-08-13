@@ -1,11 +1,16 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
-import { Activity, AlertTriangle, CheckCircle2, RefreshCw, RotateCcw, TriangleAlert } from 'lucide-react';
+import { Activity, CheckCircle2, RefreshCw } from 'lucide-react';
 import solarClient from '@/api/client';
 import { ApiEndpoint, GatewayStats, GatewayRequestSummary } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
 import { useFallbackPolling } from '@/hooks/useFallbackPolling';
-import { useRoutingEventsContext } from '@/context/RoutingEventsContext';
 import { formatTokenCount } from '@/lib/utils';
+import { Sparkline } from './charts/Sparkline';
+import { NORD, seriesColor } from './charts/chartTheme';
+import { useGatewayTimeseries } from '@/hooks/useGatewayTimeseries';
+import { BreakdownRow, BreakdownTable } from './gateway/BreakdownTable';
+import { EventsPanel } from './gateway/EventsPanel';
+import { TrafficChart } from './gateway/TrafficChart';
 
 function isoInput(dt: Date) {
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -63,7 +68,6 @@ function calculatePresetDates(preset: TimePreset): { from: string; to: string } 
 }
 
 export function GatewayDashboard() {
-  const { events, addRecentEvents } = useRoutingEventsContext();
   const { gatewayRequests, setFilter, clearGatewayRequests, isConnected } = useEventStreamContext();
   const countedIdsRef = useRef<Set<string>>(new Set());
   const gatewayRequestsRef = useRef(gatewayRequests);
@@ -109,6 +113,61 @@ export function GatewayDashboard() {
   );
   const availableModels = useMemo(() => stats?.models?.map((m) => m.model) || [], [stats]);
   const endpointNameById = useMemo(() => new Map(endpoints.map((ep) => [ep.id, ep.name])), [endpoints]);
+  const hostNameById = useMemo(
+    () => new Map((stats?.hosts ?? []).map((h) => [h.host_id, h.host_name || h.host_id])),
+    [stats],
+  );
+
+  const hostNameFor = useCallback((hostId: string) => hostNameById.get(hostId), [hostNameById]);
+
+  // The chart gets raw grouping keys back (endpoint ids, host ids); only the
+  // page knows how to name them.
+  const chartLabelFor = useCallback(
+    (split: string, key: string) => {
+      if (split === 'endpoint') return endpointNameById.get(key) ?? 'Unknown endpoint';
+      if (split === 'host') return hostNameById.get(key) ?? key.slice(0, 8);
+      return key;
+    },
+    [endpointNameById, hostNameById],
+  );
+
+  // Sparklines always show the whole range, unfiltered by the selected card --
+  // otherwise picking one endpoint would flatten every other card's trend.
+  const { data: endpointTrends } = useGatewayTimeseries({
+    from: fromIso,
+    to: toIso,
+    groupBy: 'endpoint',
+    endpointId: null,
+    requestType: requestTypeFilter,
+  });
+
+  // Keyed off the series order so a card's spark is the same color as that
+  // endpoint's band in the traffic chart.
+  const sparklineByEndpoint = useMemo(() => {
+    const map = new Map<string, { values: number[]; color: string }>();
+    (endpointTrends?.series ?? []).forEach((series, i) => {
+      map.set(series.key, {
+        values: series.points.map((p) => p.success + p.error + p.missed),
+        color: seriesColor(i),
+      });
+    });
+    return map;
+  }, [endpointTrends]);
+
+  const modelRows = useMemo<BreakdownRow[]>(
+    () => (stats?.models ?? []).map((m) => ({ id: m.model, label: m.model, ...m })),
+    [stats],
+  );
+
+  const hostRows = useMemo<BreakdownRow[]>(
+    () => (stats?.hosts ?? []).map((h) => ({ id: h.host_id, label: h.host_name || h.host_id, ...h })),
+    [stats],
+  );
+
+  const allEndpointsSparkline = useMemo(
+    () => (endpointTrends?.points ?? []).map((p) => p.success + p.error + p.missed),
+    [endpointTrends],
+  );
 
   // Update dates when preset changes
   useEffect(() => {
@@ -291,21 +350,6 @@ export function GatewayDashboard() {
     });
   }, [gatewayRequests, live, stats]);
 
-  // Backfill recent events on mount
-  useEffect(() => {
-    const loadEvents = async () => {
-      const res = await solarClient.getRecentGatewayEvents({
-        from: fromIso,
-        to: toIso,
-        limit: 1000,
-        types: 'request_error,request_reroute',
-        endpoint_id: endpointFilter !== 'all' ? endpointFilter : undefined,
-      });
-      addRecentEvents(res.items as unknown as any);
-    };
-    loadEvents();
-  }, [fromIso, toIso, endpointFilter, addRecentEvents]);
-
   // Combine requests for display
   const displayRequests = useMemo(() => {
     if (!live || page > 1) {
@@ -445,6 +489,14 @@ export function GatewayDashboard() {
         </div>
       </div>
 
+      <TrafficChart
+        from={fromIso}
+        to={toIso}
+        endpointId={endpointFilter !== 'all' ? endpointFilter : null}
+        requestType={requestTypeFilter}
+        labelFor={chartLabelFor}
+      />
+
       {/* Per-endpoint usage cards */}
       {endpoints.length > 0 && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-6 gap-3">
@@ -466,6 +518,10 @@ export function GatewayDashboard() {
                 const totalTokens = all ? all.token_in_total + all.token_out_total : 0;
                 return `${totalReqs} reqs • ${formatTokenCount(totalTokens)} tokens`;
               })()}
+            </div>
+            <div className="mt-2">
+              {/* Neutral, so the total is not mistaken for one of the endpoint colors. */}
+              <Sparkline values={allEndpointsSparkline} color={NORD.text} />
             </div>
           </div>
           {endpoints.map((ep) => {
@@ -493,63 +549,25 @@ export function GatewayDashboard() {
                   {totalReqs} reqs • {formatTokenCount(totalTokens)} tokens
                   {avgLatency != null && ` • ${avgLatency.toFixed(2)}s avg`}
                 </div>
+                <div className="mt-2">
+                  <Sparkline
+                    values={sparklineByEndpoint.get(ep.id)?.values ?? []}
+                    color={sparklineByEndpoint.get(ep.id)?.color}
+                  />
+                </div>
               </div>
             );
           })}
         </div>
       )}
 
-      {/* Live Events */}
-      <div className="bg-nord-1 border border-nord-3 rounded">
-        <div className="p-4 flex items-center justify-between border-b border-nord-3">
-          <div className="text-nord-6 font-medium">Events (Errors & Reroutes)</div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={async () => {
-                const res = await solarClient.getRecentGatewayEvents({
-                  from: fromIso,
-                  to: toIso,
-                  limit: 1000,
-                  types: 'request_error,request_reroute',
-                });
-                addRecentEvents(res.items as unknown as any);
-              }}
-              className="px-3 py-2 bg-nord-3 text-nord-6 rounded hover:bg-nord-2 flex items-center gap-2"
-            >
-              <RotateCcw size={16} /> Load recent
-            </button>
-            <div className="text-sm text-nord-4">{events.length} events</div>
-          </div>
-        </div>
-        <div className="max-h-72 overflow-auto p-3 text-sm">
-          {events.length === 0 ? (
-            <div className="text-nord-4">No events yet</div>
-          ) : (
-            events.map((e, idx) => (
-              <div key={idx} className="flex items-start gap-2 py-1">
-                {e.type === 'request_reroute' ? (
-                  <AlertTriangle className="text-nord-13" size={16} />
-                ) : (
-                  <TriangleAlert className="text-nord-12" size={16} />
-                )}
-                <div className="text-nord-6">
-                  <span className="text-nord-4">
-                    [{formatDateTime((e as any).data?.timestamp || (e as any).timestamp)}]
-                  </span>{' '}
-                  <span className="uppercase text-xs px-2 py-0.5 rounded bg-nord-2 text-nord-4 mr-2">{e.type}</span>
-                  <span>{(e as any).data?.model}</span>
-                  {e.type === 'request_reroute' && (
-                    <span className="text-nord-4"> → attempt {(e as any).data?.attempt}</span>
-                  )}
-                  {e.type === 'request_error' && (
-                    <span className="text-nord-11"> {(e as any).data?.error_message}</span>
-                  )}
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
+      <EventsPanel
+        from={fromIso}
+        to={toIso}
+        endpointId={endpointFilter !== 'all' ? endpointFilter : null}
+        live={live}
+        hostNameFor={hostNameFor}
+      />
 
       {/* Requests table */}
       <div className="bg-nord-1 border border-nord-3 rounded">
@@ -717,76 +735,8 @@ export function GatewayDashboard() {
 
       {/* Breakdown tables */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="bg-nord-1 border border-nord-3 rounded">
-          <div className="p-4 border-b border-nord-3 text-nord-6 font-medium">By Model</div>
-          <div className="overflow-auto">
-            <table className="min-w-full text-sm">
-              <thead className="bg-nord-2 text-nord-4">
-                <tr>
-                  <th className="text-left px-3 py-2">Model</th>
-                  <th className="text-left px-3 py-2">Completed</th>
-                  <th className="text-left px-3 py-2">Input tokens</th>
-                  <th className="text-left px-3 py-2">Output tokens</th>
-                  <th className="text-left px-3 py-2">Avg Duration</th>
-                </tr>
-              </thead>
-              <tbody className="text-nord-6">
-                {stats?.models?.length ? (
-                  stats.models.map((m) => (
-                    <tr key={m.model} className="border-t border-nord-3">
-                      <td className="px-3 py-2">{m.model}</td>
-                      <td className="px-3 py-2">{m.completed}</td>
-                      <td className="px-3 py-2">{formatTokenCount(m.token_in)}</td>
-                      <td className="px-3 py-2">{formatTokenCount(m.token_out)}</td>
-                      <td className="px-3 py-2">{m.avg_duration_s.toFixed(2)}s</td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={5} className="px-3 py-4 text-center text-nord-4">
-                      No data
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        <div className="bg-nord-1 border border-nord-3 rounded">
-          <div className="p-4 border-b border-nord-3 text-nord-6 font-medium">By Host</div>
-          <div className="overflow-auto">
-            <table className="min-w-full text-sm">
-              <thead className="bg-nord-2 text-nord-4">
-                <tr>
-                  <th className="text-left px-3 py-2">Host</th>
-                  <th className="text-left px-3 py-2">Completed</th>
-                  <th className="text-left px-3 py-2">Input tokens</th>
-                  <th className="text-left px-3 py-2">Output tokens</th>
-                  <th className="text-left px-3 py-2">Avg Duration</th>
-                </tr>
-              </thead>
-              <tbody className="text-nord-6">
-                {stats?.hosts?.length ? (
-                  stats.hosts.map((h) => (
-                    <tr key={h.host_id} className="border-t border-nord-3">
-                      <td className="px-3 py-2">{h.host_name || h.host_id}</td>
-                      <td className="px-3 py-2">{h.completed}</td>
-                      <td className="px-3 py-2">{formatTokenCount(h.token_in)}</td>
-                      <td className="px-3 py-2">{formatTokenCount(h.token_out)}</td>
-                      <td className="px-3 py-2">{h.avg_duration_s.toFixed(2)}s</td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={5} className="px-3 py-4 text-center text-nord-4">
-                      No data
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <BreakdownTable title="By Model" labelHeading="Model" rows={modelRows} />
+        <BreakdownTable title="By Host" labelHeading="Host" rows={hostRows} />
       </div>
     </div>
   );

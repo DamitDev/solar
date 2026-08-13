@@ -8,6 +8,9 @@ import {
   GatewayStats,
   GatewayRequestsResponse,
   GatewayEventDTO,
+  GatewayTimeseries,
+  GatewayBucket,
+  GatewayGroupBy,
   ApiEndpoint,
   PullProgressEntry,
   EndpointCreateRequest,
@@ -260,6 +263,22 @@ class SolarClient {
   }): Promise<GatewayStats> {
     const response = await this.client.get('/api/gateway/stats', { params });
     return response.data as GatewayStats;
+  }
+
+  /** Bucketed gateway traffic for the dashboard charts. `bucket: 'auto'` lets
+   *  the server pick a resolution that suits the range. */
+  async getGatewayTimeseries(params: {
+    from?: string;
+    to?: string;
+    bucket?: GatewayBucket | 'auto';
+    group_by?: GatewayGroupBy;
+    request_type?: string;
+    model?: string;
+    host_id?: string;
+    endpoint_id?: string;
+  }): Promise<GatewayTimeseries> {
+    const response = await this.client.get('/api/gateway/timeseries', { params });
+    return response.data as GatewayTimeseries;
   }
 
   async listGatewayRequests(params: {

@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertCircle, AlertTriangle, Gauge, RefreshCw } from 'lucide-react';
+import { AlertCircle, AlertTriangle, Gauge, LayoutGrid, List, RefreshCw, Search, X } from 'lucide-react';
 import solarClient from '@/api/client';
-import { AggregatedResourceResponse } from '@/api/types';
+import { AggregatedResourceResponse, HostResourceSnapshot } from '@/api/types';
 import { useRoutingEventsContext } from '@/context/RoutingEventsContext';
+import { SortColumn, SortDirection, sortRows } from '@/hooks/useTableSort';
 import { cn, formatRelativeTime } from '@/lib/utils';
+import { readPref, writePref } from '@/lib/viewPrefs';
 import { HostResourceCard } from './HostResourceCard';
+import { HostResourceRow } from './resources/HostResourceRow';
 
 const fmtGb = (value: number | null | undefined): string => (value == null ? '—' : `${value.toFixed(1)} GB`);
 
@@ -52,6 +55,58 @@ const EMPTY_SUMMARY: SummaryTotals = {
   freeVramByGpuType: {},
 };
 
+const DENSITY_KEY = 'solar_resources_density';
+const SORT_KEY = 'solar_resources_sort';
+const SORT_DIR_KEY = 'solar_resources_sort_dir';
+
+const DENSITIES = ['cards', 'compact'] as const;
+type Density = (typeof DENSITIES)[number];
+
+/**
+ * Above this many hosts the card grid stops being scannable, so a first-time
+ * visitor lands in the compact list instead. An explicit choice always wins.
+ */
+const AUTO_COMPACT_THRESHOLD = 12;
+
+/**
+ * `natural` is the direction each field is most useful in: names read A-Z,
+ * status puts the broken hosts first, and free capacity is a question about
+ * the roomiest host.
+ */
+const SORT_OPTIONS = [
+  { key: 'name', label: 'Name', natural: 'asc' },
+  { key: 'status', label: 'Status', natural: 'asc' },
+  { key: 'vram_available_gb', label: 'Free VRAM', natural: 'desc' },
+  { key: 'ram_available_gb', label: 'Free RAM', natural: 'desc' },
+  { key: 'disk_available_gb', label: 'Free disk', natural: 'desc' },
+  { key: 'instances', label: 'Instances', natural: 'desc' },
+] as const satisfies ReadonlyArray<{ key: string; label: string; natural: SortDirection }>;
+
+type SortKey = (typeof SORT_OPTIONS)[number]['key'];
+const SORT_KEYS = SORT_OPTIONS.map((o) => o.key);
+
+/** Unhealthy first when sorting by status: those are the ones worth finding. */
+const STATUS_RANK: Record<string, number> = { error: 0, offline: 1, online: 2 };
+
+const HOST_SORT_COLUMNS: SortColumn<HostResourceSnapshot>[] = [
+  { key: 'name', value: (h) => h.host_name },
+  { key: 'status', value: (h) => `${STATUS_RANK[h.status] ?? 3}${h.host_name}` },
+  { key: 'vram_available_gb', value: (h) => h.vram_available_gb, numeric: true },
+  { key: 'ram_available_gb', value: (h) => h.ram_available_gb, numeric: true },
+  { key: 'disk_available_gb', value: (h) => h.disk_available_gb, numeric: true },
+  { key: 'instances', value: (h) => h.instance_count, numeric: true },
+];
+
+/** Matches on the things an operator would type: name, url, role, GPU. */
+function matchesSearch(host: HostResourceSnapshot, query: string): boolean {
+  const haystack = [host.host_name, host.url, host.gpu_type ?? '', ...host.roles].join(' ').toLowerCase();
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((term) => haystack.includes(term));
+}
+
 export function ResourcesPage() {
   const [data, setData] = useState<AggregatedResourceResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -63,6 +118,14 @@ export function ResourcesPage() {
   const [minRam, setMinRam] = useState(''); // GB threshold input, '' = none
   const [appliedMinVram, setAppliedMinVram] = useState(''); // committed on Enter/blur
   const [appliedMinRam, setAppliedMinRam] = useState(''); // committed on Enter/blur
+  const [search, setSearch] = useState('');
+  const [sortKey, setSortKey] = useState<SortKey>(() => readPref(SORT_KEY, SORT_KEYS, 'name'));
+  const [sortDir, setSortDir] = useState<SortDirection>(() => readPref(SORT_DIR_KEY, ['asc', 'desc'] as const, 'asc'));
+  const [density, setDensity] = useState<Density | null>(() => {
+    const stored = readPref(DENSITY_KEY, [...DENSITIES, 'auto'] as const, 'auto');
+    return stored === 'auto' ? null : (stored as Density);
+  });
+  const [expandedHost, setExpandedHost] = useState<string | null>(null);
 
   const { hostStatuses, hostInstances, routingConnected } = useRoutingEventsContext();
 
@@ -157,6 +220,38 @@ export function ResourcesPage() {
       freeVramByGpuType,
     };
   }, [data]);
+
+  const visibleHosts = useMemo(() => {
+    const hosts = data?.hosts ?? [];
+    const matched = search.trim() ? hosts.filter((h) => matchesSearch(h, search)) : hosts;
+    return sortRows(
+      matched,
+      HOST_SORT_COLUMNS.find((c) => c.key === sortKey),
+      sortDir,
+    );
+  }, [data, search, sortKey, sortDir]);
+
+  const loadedHostCount = data?.hosts.length ?? 0;
+  const effectiveDensity: Density = density ?? (loadedHostCount > AUTO_COMPACT_THRESHOLD ? 'compact' : 'cards');
+
+  const chooseDensity = (next: Density) => {
+    setDensity(next);
+    writePref(DENSITY_KEY, next);
+  };
+
+  const chooseSort = (key: SortKey) => {
+    const natural = SORT_OPTIONS.find((o) => o.key === key)?.natural ?? 'asc';
+    setSortKey(key);
+    setSortDir(natural);
+    writePref(SORT_KEY, key);
+    writePref(SORT_DIR_KEY, natural);
+  };
+
+  const toggleSortDir = () => {
+    const next = sortDir === 'asc' ? 'desc' : 'asc';
+    setSortDir(next);
+    writePref(SORT_DIR_KEY, next);
+  };
 
   const lastUpdated = useMemo(() => {
     let max: string | null = null;
@@ -354,12 +449,115 @@ export function ResourcesPage() {
             />
           </div>
 
-          {/* Host cards */}
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            {data?.hosts.map((h) => (
-              <HostResourceCard key={h.host_id} snapshot={h} onDrainChanged={fetchResources} />
-            ))}
+          {/* Host list toolbar: search, order, density */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="relative">
+                <Search size={14} className="absolute left-2 top-1/2 -translate-y-1/2 text-nord-4" />
+                <input
+                  type="search"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search hosts"
+                  aria-label="Search hosts"
+                  className="bg-nord-2 text-nord-6 border border-nord-3 rounded pl-7 pr-7 py-1 w-56 placeholder:text-nord-4"
+                />
+                {search && (
+                  <button
+                    onClick={() => setSearch('')}
+                    aria-label="Clear search"
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 text-nord-4 hover:text-nord-6"
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+              <span className="text-xs text-nord-4">
+                {visibleHosts.length === loadedHostCount
+                  ? `${visibleHosts.length} host${visibleHosts.length === 1 ? '' : 's'}`
+                  : `${visibleHosts.length} of ${loadedHostCount}`}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1 text-xs text-nord-4">
+                Sort
+                <select
+                  value={sortKey}
+                  onChange={(e) => chooseSort(e.target.value as SortKey)}
+                  aria-label="Sort hosts by"
+                  className="bg-nord-2 text-nord-6 border border-nord-3 rounded px-2 py-1"
+                >
+                  {SORT_OPTIONS.map((o) => (
+                    <option key={o.key} value={o.key}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                onClick={toggleSortDir}
+                aria-label={`Sort direction: ${sortDir === 'asc' ? 'ascending' : 'descending'}`}
+                className="px-2 py-1 bg-nord-2 text-nord-6 border border-nord-3 rounded hover:bg-nord-3 text-xs tabular-nums"
+                title={sortDir === 'asc' ? 'Ascending — click for descending' : 'Descending — click for ascending'}
+              >
+                {sortDir === 'asc' ? '↑' : '↓'}
+              </button>
+              <div className="flex items-center rounded border border-nord-3 overflow-hidden">
+                <button
+                  onClick={() => chooseDensity('compact')}
+                  aria-pressed={effectiveDensity === 'compact'}
+                  className={cn(
+                    'px-2 py-1 flex items-center gap-1 text-xs',
+                    effectiveDensity === 'compact' ? 'bg-nord-10 text-nord-6' : 'bg-nord-2 text-nord-4 hover:bg-nord-3',
+                  )}
+                  title="Compact list — one line per host"
+                >
+                  <List size={14} /> List
+                </button>
+                <button
+                  onClick={() => chooseDensity('cards')}
+                  aria-pressed={effectiveDensity === 'cards'}
+                  className={cn(
+                    'px-2 py-1 flex items-center gap-1 text-xs',
+                    effectiveDensity === 'cards' ? 'bg-nord-10 text-nord-6' : 'bg-nord-2 text-nord-4 hover:bg-nord-3',
+                  )}
+                  title="Full cards"
+                >
+                  <LayoutGrid size={14} /> Cards
+                </button>
+              </div>
+            </div>
           </div>
+
+          {visibleHosts.length === 0 ? (
+            <div className="text-center py-10 text-nord-4">
+              <p>{search.trim() ? `No host matches “${search}”` : 'No hosts to show'}</p>
+            </div>
+          ) : effectiveDensity === 'compact' ? (
+            <div className="bg-nord-1 border border-nord-3 rounded overflow-hidden">
+              {visibleHosts.map((h) => (
+                <div key={h.host_id}>
+                  <HostResourceRow
+                    snapshot={h}
+                    expanded={expandedHost === h.host_id}
+                    onToggle={() => setExpandedHost((prev) => (prev === h.host_id ? null : h.host_id))}
+                  />
+                  {expandedHost === h.host_id && (
+                    <div className="p-3 bg-nord-0/40 border-b border-nord-3">
+                      <HostResourceCard snapshot={h} onDrainChanged={fetchResources} />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              {visibleHosts.map((h) => (
+                <HostResourceCard key={h.host_id} snapshot={h} onDrainChanged={fetchResources} />
+              ))}
+            </div>
+          )}
 
           {/* Legend + semantics footnote */}
           <div className="space-y-2">

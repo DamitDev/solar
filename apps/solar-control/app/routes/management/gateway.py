@@ -48,6 +48,55 @@ async def get_stats(
     }
 
 
+MAX_TIMESERIES_SERIES = 8
+
+
+@router.get("/timeseries")
+async def get_timeseries(
+    from_ts: str | None = Query(None, alias="from"),
+    to_ts: str | None = Query(None, alias="to"),
+    bucket: str = Query("auto", pattern="^(auto|1m|5m|15m|1h|6h|1d|7d)$"),
+    group_by: str = Query("none", pattern="^(none|endpoint|model|host)$"),
+    request_type: str | None = Query(None),
+    model: str | None = None,
+    host_id: str | None = None,
+    endpoint_id: str | None = None,
+) -> dict[str, Any]:
+    """Bucketed gateway traffic for charting: requests, tokens and latency.
+
+    ``group_by`` additionally returns a per-endpoint/model/host breakdown, so a
+    stacked chart costs the same single query as a flat one.
+    """
+    now = datetime.now(timezone.utc)
+    start = _parse_iso(from_ts) or (now - timedelta(days=1))
+    end = _parse_iso(to_ts) or now
+
+    resolved_bucket, points, series = await gateway_logger.read_timeseries(
+        start,
+        end,
+        bucket=bucket,
+        group_by=group_by,
+        request_type=request_type if request_type and request_type != "all" else None,
+        model=model,
+        host_id=host_id,
+        endpoint_id=endpoint_id,
+    )
+
+    # A stacked chart stops being readable long before the long tail runs out,
+    # and the combined `points` series already accounts for everything.
+    truncated = len(series) > MAX_TIMESERIES_SERIES
+
+    return {
+        "from": start.isoformat(),
+        "to": end.isoformat(),
+        "bucket": resolved_bucket,
+        "group_by": group_by,
+        "points": points,
+        "series": series[:MAX_TIMESERIES_SERIES],
+        "series_truncated": truncated,
+    }
+
+
 @router.get("/requests")
 async def list_requests(
     from_ts: str | None = Query(None, alias="from"),
