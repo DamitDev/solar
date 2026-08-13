@@ -338,10 +338,10 @@ class IntentDB:
         *spec_version_seen* is the ``spec_changed_at`` the caller reconciled
         against. Because a whole status document is written at once, a pass
         that read the intent before an edit landed would otherwise erase the
-        marker and the progress reset that edit just wrote — and the edit
-        would be lost for good, since the marker is the only record that the
-        replicas still have to be compared against the new spec. Pass it to
-        keep those two fields whenever the spec changed mid-pass.
+        marker and the resets that edit just wrote — and the edit would be
+        lost for good, since the marker is the only record that the replicas
+        still have to be compared against the new spec. Pass it to keep the
+        spec write's fields whenever the spec changed mid-pass.
         """
         now = datetime.now(timezone.utc)
         async with self._session() as session:
@@ -376,9 +376,22 @@ class IntentDB:
                     not isinstance(spec_version_seen, _Unset)
                     and stored.get("spec_changed_at") != spec_version_seen
                 ):
+                    # Every field the spec write owns comes back off the row,
+                    # not just the marker. This pass counted its drift and
+                    # recorded its error against the *previous* spec, so
+                    # keeping its versions hands the fresh edit the old
+                    # vector's spent breaker — and the reconciler then refuses
+                    # to roll out an edit that has never been attempted once.
                     status_json = dict(status_json)
                     status_json["spec_changed_at"] = stored.get("spec_changed_at")
                     status_json["strategy_progress"] = stored.get("strategy_progress")
+                    status_json["last_error"] = stored.get("last_error")
+                    status_json["drift_replace_attempts"] = stored.get(
+                        "drift_replace_attempts", 0
+                    )
+                    status_json["drift_unsettled_keys"] = stored.get(
+                        "drift_unsettled_keys", []
+                    )
                 row.status_json = status_json
             if last_reconciled_at is not None:
                 row.last_reconciled_at = last_reconciled_at

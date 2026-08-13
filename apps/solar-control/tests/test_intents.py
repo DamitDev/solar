@@ -1147,6 +1147,56 @@ async def test_update_status_keeps_an_edit_that_landed_mid_pass():
 
 
 @pytest.mark.anyio
+async def test_update_status_keeps_the_breaker_reset_of_a_mid_pass_edit():
+    """The edit's drift reset survives the pass that never saw the edit.
+
+    An edit puts the C1 breaker back to zero because the counter and the
+    mismatching keys describe the spec it replaced. A pass still in flight
+    counted those against that old spec, so writing its numbers back starts
+    the new edit at the previous vector's bound: the reconciler reports it
+    unsettled and never attempts the rollout even once.
+    """
+    from app.database.intents import IntentDB
+
+    row = _intent_row(
+        status_json={
+            # What the edit wrote: new marker, breaker wound back.
+            "spec_changed_at": "2026-07-24T02:00:00Z",
+            "strategy_progress": None,
+            "last_error": None,
+            "drift_replace_attempts": 0,
+            "drift_unsettled_keys": [],
+        }
+    )
+    db = IntentDB()
+
+    with patch.object(IntentDB, "_session", return_value=_FakeSession(row)):
+        await db.update_status(
+            row.id,
+            status_json={
+                "spec_changed_at": None,
+                "strategy_progress": None,
+                # What the pass concluded about the previous spec.
+                "last_error": {
+                    "code": "BackendDriftUnsettled",
+                    "message": "max_length",
+                    "at": "2026-07-24T01:59:00Z",
+                },
+                "drift_replace_attempts": 3,
+                "drift_unsettled_keys": ["max_length"],
+                "ready_replicas": 1,
+            },
+            spec_version_seen=None,
+        )
+
+    assert row.status_json["drift_replace_attempts"] == 0
+    assert row.status_json["drift_unsettled_keys"] == []
+    assert row.status_json["last_error"] is None
+    # Fields the spec write does not own still come from the pass.
+    assert row.status_json["ready_replicas"] == 1
+
+
+@pytest.mark.anyio
 async def test_update_status_settles_the_spec_the_pass_reconciled():
     """The pass that did see the edit is the one allowed to clear it."""
     from app.database.intents import IntentDB
