@@ -9,10 +9,11 @@ import pytest
 from app.database.logs import (
     TIMESERIES_BUCKETS,
     TIMESERIES_MAX_POINTS,
+    GatewayLogger,
     fill_buckets,
     resolve_bucket,
 )
-from app.routes.management.gateway import get_timeseries
+from app.routes.management.gateway import MAX_TIMESERIES_SERIES, get_timeseries
 
 START = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
 
@@ -92,10 +93,97 @@ class TestFillBuckets:
         assert len(fill_buckets(START, START, 60, {})) == 1
 
 
+class Row:
+    """Stand-in for a SQLAlchemy result row from the timeseries query."""
+
+    def __init__(
+        self, ts, *, success=0, error=0, missed=0, tin=0, tout=0, dur=0.0, key=None
+    ):
+        self.ts = ts
+        self.success = success
+        self.error = error
+        self.missed = missed
+        self.token_in = tin
+        self.token_out = tout
+        self.duration_s = dur
+        self.group_key = key
+
+
+class TestShapeTimeseries:
+    shape = staticmethod(GatewayLogger._shape_timeseries)
+
+    def test_groups_are_summed_into_the_combined_series(self):
+        rows = [
+            Row(START, success=2, tin=10, tout=5, dur=4.0, key="ep-a"),
+            Row(START, success=3, error=1, tin=20, tout=7, dur=6.0, key="ep-b"),
+        ]
+
+        points, series = self.shape(rows, START, START, 60, grouped=True)
+
+        assert points[0]["success"] == 5
+        assert points[0]["error"] == 1
+        assert points[0]["token_in"] == 30
+        assert {s["key"] for s in series} == {"ep-a", "ep-b"}
+
+    def test_combined_latency_is_weighted_by_volume(self):
+        # A mean of per-group means would over-weight the quiet group.
+        rows = [
+            Row(START, success=1, dur=10.0, key="quiet"),
+            Row(START, success=9, dur=9.0, key="busy"),
+        ]
+
+        points, _ = self.shape(rows, START, START, 60, grouped=True)
+
+        assert points[0]["avg_duration_s"] == pytest.approx(1.9)
+
+    def test_series_are_ordered_by_volume(self):
+        rows = [
+            Row(START, success=1, key="quiet"),
+            Row(START, success=50, key="busy"),
+            Row(START, success=10, key="middling"),
+        ]
+
+        _, series = self.shape(rows, START, START, 60, grouped=True)
+
+        assert [s["key"] for s in series] == ["busy", "middling", "quiet"]
+        assert [s["total"] for s in series] == [50, 10, 1]
+
+    def test_every_group_shares_the_same_bucket_grid(self):
+        # Stacking only lines up if each series spans the whole range.
+        rows = [
+            Row(START, success=1, key="ep-a"),
+            Row(START + timedelta(minutes=3), success=1, key="ep-b"),
+        ]
+
+        points, series = self.shape(
+            rows, START, START + timedelta(minutes=3), 60, grouped=True
+        )
+
+        assert all(len(s["points"]) == len(points) for s in series)
+        assert all(
+            [p["ts"] for p in s["points"]] == [p["ts"] for p in points] for s in series
+        )
+
+    def test_ungrouped_query_returns_no_series(self):
+        points, series = self.shape(
+            [Row(START, success=1)], START, START, 60, grouped=False
+        )
+
+        assert points[0]["success"] == 1
+        assert series == []
+
+    def test_missing_group_key_is_labelled_rather_than_dropped(self):
+        _, series = self.shape(
+            [Row(START, success=1, key=None)], START, START, 60, grouped=True
+        )
+
+        assert [s["key"] for s in series] == ["unknown"]
+
+
 class TestTimeseriesRoute:
     @pytest.mark.asyncio
     async def test_forwards_filters_and_echoes_the_resolved_bucket(self):
-        read = AsyncMock(return_value=("15m", [{"ts": START.isoformat()}]))
+        read = AsyncMock(return_value=("15m", [{"ts": START.isoformat()}], []))
 
         with patch("app.routes.management.gateway.gateway_logger") as logger:
             logger.read_timeseries = read
@@ -103,6 +191,7 @@ class TestTimeseriesRoute:
                 from_ts=START.isoformat(),
                 to_ts=(START + timedelta(days=1)).isoformat(),
                 bucket="auto",
+                group_by="endpoint",
                 request_type="chat",
                 model="qwen3.5:4b",
                 host_id="host-1",
@@ -110,10 +199,12 @@ class TestTimeseriesRoute:
             )
 
         assert result["bucket"] == "15m"
+        assert result["group_by"] == "endpoint"
         assert result["points"] == [{"ts": START.isoformat()}]
 
         kwargs = read.await_args.kwargs
         assert kwargs["bucket"] == "auto"
+        assert kwargs["group_by"] == "endpoint"
         assert kwargs["request_type"] == "chat"
         assert kwargs["model"] == "qwen3.5:4b"
         assert kwargs["host_id"] == "host-1"
@@ -121,7 +212,7 @@ class TestTimeseriesRoute:
 
     @pytest.mark.asyncio
     async def test_request_type_all_is_treated_as_no_filter(self):
-        read = AsyncMock(return_value=("1h", []))
+        read = AsyncMock(return_value=("1h", [], []))
 
         with patch("app.routes.management.gateway.gateway_logger") as logger:
             logger.read_timeseries = read
@@ -131,7 +222,7 @@ class TestTimeseriesRoute:
 
     @pytest.mark.asyncio
     async def test_defaults_to_the_last_day(self):
-        read = AsyncMock(return_value=("15m", []))
+        read = AsyncMock(return_value=("15m", [], []))
 
         with patch("app.routes.management.gateway.gateway_logger") as logger:
             logger.read_timeseries = read
@@ -142,3 +233,27 @@ class TestTimeseriesRoute:
         assert (
             timedelta(hours=23, minutes=59) < end - start < timedelta(days=1, hours=1)
         )
+
+    @pytest.mark.asyncio
+    async def test_long_tail_of_series_is_capped_and_flagged(self):
+        many = [{"key": f"ep-{i}", "total": i, "points": []} for i in range(20)]
+        read = AsyncMock(return_value=("1h", [], many))
+
+        with patch("app.routes.management.gateway.gateway_logger") as logger:
+            logger.read_timeseries = read
+            result = await get_timeseries(group_by="endpoint")
+
+        assert len(result["series"]) == MAX_TIMESERIES_SERIES
+        assert result["series_truncated"] is True
+
+    @pytest.mark.asyncio
+    async def test_short_series_list_is_not_flagged_as_truncated(self):
+        read = AsyncMock(
+            return_value=("1h", [], [{"key": "ep-1", "total": 1, "points": []}])
+        )
+
+        with patch("app.routes.management.gateway.gateway_logger") as logger:
+            logger.read_timeseries = read
+            result = await get_timeseries(group_by="endpoint")
+
+        assert result["series_truncated"] is False

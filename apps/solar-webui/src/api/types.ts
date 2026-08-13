@@ -399,12 +399,26 @@ export interface GatewayTimeseriesPoint {
 
 export type GatewayBucket = '1m' | '5m' | '15m' | '1h' | '6h' | '1d' | '7d';
 
+export type GatewayGroupBy = 'none' | 'endpoint' | 'model' | 'host';
+
+/** One breakdown series. `key` is an endpoint id, model name or host id
+ *  depending on `group_by`; every series shares the combined bucket grid. */
+export interface GatewayTimeseriesSeries {
+  key: string;
+  total: number;
+  points: GatewayTimeseriesPoint[];
+}
+
 export interface GatewayTimeseries {
   from: string;
   to: string;
   /** The bucket the server actually used — 'auto' resolves to one of these. */
   bucket: GatewayBucket;
+  group_by: GatewayGroupBy;
   points: GatewayTimeseriesPoint[];
+  series: GatewayTimeseriesSeries[];
+  /** True when the long tail of groups was dropped to keep the chart readable. */
+  series_truncated: boolean;
 }
 
 export interface GatewayRequestSummary {

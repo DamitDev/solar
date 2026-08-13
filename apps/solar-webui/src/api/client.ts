@@ -10,6 +10,7 @@ import {
   GatewayEventDTO,
   GatewayTimeseries,
   GatewayBucket,
+  GatewayGroupBy,
   ApiEndpoint,
   PullProgressEntry,
   EndpointCreateRequest,
@@ -270,6 +271,7 @@ class SolarClient {
     from?: string;
     to?: string;
     bucket?: GatewayBucket | 'auto';
+    group_by?: GatewayGroupBy;
     request_type?: string;
     model?: string;
     host_id?: string;

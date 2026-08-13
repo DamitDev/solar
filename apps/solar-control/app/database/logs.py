@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import and_, select
+from sqlalchemy import Text, and_, select
 from sqlalchemy import func as sa_func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -720,21 +720,36 @@ class GatewayLogger:
             ],
         }
 
+    def _group_key_expr(self, group_by: str):
+        """Column to break the time series down by, or None for a flat series."""
+        R = GatewayRequestRow
+        if group_by == "endpoint":
+            return sa_func.cast(R.endpoint_id, Text)
+        if group_by == "model":
+            return sa_func.coalesce(R.resolved_model, R.model)
+        if group_by == "host":
+            return R.host_id
+        return None
+
     async def read_timeseries(
         self,
         start: datetime,
         end: datetime,
         *,
         bucket: str | None = None,
+        group_by: str | None = None,
         request_type: str | None = None,
         model: str | None = None,
         host_id: str | None = None,
         endpoint_id: str | None = None,
-    ) -> tuple[str, list[dict[str, Any]]]:
-        """Bucketed request/token/latency counts. Returns (bucket, points).
+    ) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+        """Bucketed request/token/latency counts.
 
-        Empty buckets are filled with zeros so a gap in the chart reads as
-        "no traffic" rather than as a missing sample.
+        Returns ``(bucket, points, series)``. ``points`` is always the combined
+        series; ``series`` holds the per-group breakdown when ``group_by`` is
+        set, so a caller gets both from one query. Empty buckets are filled with
+        zeros so a gap in the chart reads as "no traffic" rather than as an
+        interpolated line.
         """
         await self._flush_all()
 
@@ -744,7 +759,7 @@ class GatewayLogger:
         try:
             session_factory = get_session_factory()
         except RuntimeError:
-            return bucket_name, []
+            return bucket_name, [], []
 
         R = GatewayRequestRow
         conditions = self._build_request_conditions(
@@ -763,45 +778,110 @@ class GatewayLogger:
             * bucket_s
         )
 
+        group_expr = self._group_key_expr(group_by or "none")
+        columns = [
+            bucket_expr.label("ts"),
+            sa_func.count().filter(R.status == "success").label("success"),
+            sa_func.count().filter(R.status == "error").label("error"),
+            sa_func.count().filter(R.status == "missed").label("missed"),
+            sa_func.coalesce(
+                sa_func.sum(R.prompt_tokens).filter(R.status == "success"), 0
+            ).label("token_in"),
+            sa_func.coalesce(
+                sa_func.sum(R.completion_tokens).filter(R.status == "success"), 0
+            ).label("token_out"),
+            sa_func.sum(R.duration_s).filter(R.status == "success").label("duration_s"),
+        ]
+        group_cols: list = [bucket_expr]
+        if group_expr is not None:
+            columns.append(group_expr.label("group_key"))
+            group_cols.append(group_expr)
+
         stmt = (
-            select(
-                bucket_expr.label("ts"),
-                sa_func.count().filter(R.status == "success").label("success"),
-                sa_func.count().filter(R.status == "error").label("error"),
-                sa_func.count().filter(R.status == "missed").label("missed"),
-                sa_func.coalesce(
-                    sa_func.sum(R.prompt_tokens).filter(R.status == "success"), 0
-                ).label("token_in"),
-                sa_func.coalesce(
-                    sa_func.sum(R.completion_tokens).filter(R.status == "success"), 0
-                ).label("token_out"),
-                sa_func.avg(R.duration_s)
-                .filter(R.status == "success")
-                .label("avg_duration_s"),
-            )
+            select(*columns)
             .where(and_(*conditions))
-            .group_by(bucket_expr)
+            .group_by(*group_cols)
             .order_by(bucket_expr)
         )
 
         async with session_factory() as session:
             rows = (await session.execute(stmt)).all()
 
-        aggregates = {
-            int(r.ts.timestamp()): {
-                "success": r.success,
-                "error": r.error,
-                "missed": r.missed,
-                "token_in": int(r.token_in),
-                "token_out": int(r.token_out),
+        return (
+            bucket_name,
+            *self._shape_timeseries(
+                rows, start, end, bucket_s, grouped=group_expr is not None
+            ),
+        )
+
+    @staticmethod
+    def _shape_timeseries(
+        rows,
+        start: datetime,
+        end: datetime,
+        bucket_s: int,
+        *,
+        grouped: bool,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Turn raw SQL rows into a combined series plus per-group series."""
+
+        def blank() -> dict[str, Any]:
+            return {
+                "success": 0,
+                "error": 0,
+                "missed": 0,
+                "token_in": 0,
+                "token_out": 0,
+                "duration_s": 0.0,
+            }
+
+        def accumulate(target: dict[str, Any], row) -> None:
+            target["success"] += row.success
+            target["error"] += row.error
+            target["missed"] += row.missed
+            target["token_in"] += int(row.token_in)
+            target["token_out"] += int(row.token_out)
+            target["duration_s"] += float(row.duration_s or 0.0)
+
+        def finalize(agg: dict[str, Any]) -> dict[str, Any]:
+            # Sum-then-divide keeps the combined average weighted by volume; a
+            # mean of per-group means would over-weight quiet groups.
+            return {
+                **{k: v for k, v in agg.items() if k != "duration_s"},
                 "avg_duration_s": (
-                    float(r.avg_duration_s) if r.avg_duration_s is not None else None
+                    agg["duration_s"] / agg["success"] if agg["success"] else None
                 ),
             }
-            for r in rows
-        }
 
-        return bucket_name, fill_buckets(start, end, bucket_s, aggregates)
+        totals: dict[int, dict[str, Any]] = {}
+        by_group: dict[str, dict[int, dict[str, Any]]] = {}
+
+        for row in rows:
+            epoch = int(row.ts.timestamp())
+            accumulate(totals.setdefault(epoch, blank()), row)
+            if grouped:
+                key = row.group_key or "unknown"
+                accumulate(by_group.setdefault(key, {}).setdefault(epoch, blank()), row)
+
+        points = fill_buckets(
+            start, end, bucket_s, {k: finalize(v) for k, v in totals.items()}
+        )
+
+        series = [
+            {
+                "key": key,
+                "total": sum(
+                    b["success"] + b["error"] + b["missed"] for b in buckets.values()
+                ),
+                "points": fill_buckets(
+                    start, end, bucket_s, {k: finalize(v) for k, v in buckets.items()}
+                ),
+            }
+            for key, buckets in by_group.items()
+        ]
+        series.sort(key=lambda s: s["total"], reverse=True)
+
+        return points, series
 
     async def read_events(
         self,
