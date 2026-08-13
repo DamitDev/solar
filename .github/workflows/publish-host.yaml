@@ -27,6 +27,8 @@ jobs:
       - name: Build package
         working-directory: apps/solar-host
         run: uv build
+      - name: Pull fresh publish action image
+        run: docker pull ghcr.io/pypa/gh-action-pypi-publish:release-v1
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
