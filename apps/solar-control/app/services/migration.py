@@ -18,6 +18,11 @@ migration is rejected if the source host has any active job steps.
 The stop-before-create ordering is explicit and documented. For rolling /
 zero-downtime migrations, the S-042 strategy layer will orchestrate
 create-then-stop on top of this primitive.
+
+Evacuation (host draining, S-043 §4.2 / S-057) deliberately does NOT use
+this ordering: ``execute_evacuation`` creates and starts the replacement
+on the target before stopping and deleting the source, so the alias keeps
+serving throughout a drain.
 """
 
 import asyncio
@@ -572,6 +577,88 @@ async def stop_source_instance(source_host: Host, instance_id: str) -> dict[str,
         )
 
 
+async def start_instance_on_host(host: Host, instance_id: str) -> None:
+    """Start *instance_id* on *host*, blocking until the backend is ready.
+
+    The host parks the start call on its log-gated ready event, so a
+    successful return means the instance is serving. Raises
+    ``HTTPException`` on failure.
+    """
+    from app.config import settings
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"{host.url.rstrip('/')}/instances/{instance_id}/start"
+            headers = {"X-API-Key": host.api_key}
+            async with session.post(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=settings.host_start_timeout_s),
+            ) as response:
+                if response.status == 200:
+                    return
+                text = await response.text()
+                raise HTTPException(status_code=response.status, detail=text)
+    except HTTPException:
+        raise
+    except (
+        aiohttp.ClientConnectionError,
+        aiohttp.ClientConnectorError,
+        asyncio.TimeoutError,
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Host '{host.name}' is unreachable at {host.url} "
+                f"for the start call"
+            ),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cannot reach host '{host.name}': {e}",
+        )
+
+
+async def delete_instance_on_host(host: Host, instance_id: str) -> None:
+    """Delete *instance_id* from *host* (the instance must be stopped).
+
+    Raises ``HTTPException`` on failure.
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"{host.url.rstrip('/')}/instances/{instance_id}"
+            headers = {"X-API-Key": host.api_key}
+            async with session.delete(
+                url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    return
+                text = await response.text()
+                raise HTTPException(status_code=response.status, detail=text)
+    except HTTPException:
+        raise
+    except (
+        aiohttp.ClientConnectionError,
+        aiohttp.ClientConnectorError,
+        asyncio.TimeoutError,
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Host '{host.name}' is unreachable at {host.url} "
+                f"for the delete call"
+            ),
+        )
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cannot reach host '{host.name}': {e}",
+        )
+
+
 # ── Orchestrator ────────────────────────────────────────────────
 
 
@@ -645,6 +732,65 @@ async def _settle_owning_intent(alias: str) -> None:
         return
     if intent is not None:
         reconciler.settle_intent(intent.id, _MIGRATE_SETTLE_S)
+
+
+def _build_target_create(instance_config: dict[str, Any], path: str) -> dict[str, Any]:
+    """Build the create wrapper for a migration/evacuation target.
+
+    Shared by ``execute_migration`` and ``execute_evacuation`` so the
+    target payload can never drift between the two paths: resolved model
+    path from ``ensure_model_on_target``, instance-level fields stripped,
+    and the ownership markers (``managed_by``/``intent_id``, S-037/D-017
+    G3) plus ``priority`` preserved at top level — they are host-level
+    instance fields (S-036), not config keys.
+    """
+    config = instance_config.get("config", instance_config)
+
+    # Remove host-assigned and instance-level fields from the config dict.
+    # managed_by and intent_id are ownership markers that survive migration.
+    _INSTANCE_FIELDS = frozenset(
+        {
+            "id",
+            "status",
+            "port",
+            "pid",
+            "api_key",
+            "supported_endpoints",
+            "created_at",
+            "started_at",
+            "error_message",
+            "retry_count",
+            "busy",
+            "prefill_progress",
+            "active_slots",
+        }
+    )
+    create_payload: dict[str, Any] = {
+        k: v for k, v in config.items() if k not in _INSTANCE_FIELDS
+    }
+    # Set model to the path resolved by ensure_model_on_target so the
+    # host does not need to resolve model_source itself (which would
+    # reject repo:// URIs without the companion host-side fix).
+    # Preserve model_source alongside the resolved path for intent
+    # linking and cross-host operations (S-037/D-017).
+    backend_type = str(create_payload.get("backend_type", "llamacpp"))
+    if backend_type.startswith("huggingface"):
+        create_payload["model_id"] = path
+    else:
+        create_payload["model"] = path
+    # Ensure key fields from captured config are present.
+    for key in ("alias", "backend_type"):
+        if key not in create_payload:
+            val = _config_field(instance_config, key)
+            if val is not None:
+                create_payload[key] = val
+
+    create_wrapper: dict[str, Any] = {"config": create_payload}
+    for field in ("managed_by", "intent_id", "priority"):
+        val = _config_field(instance_config, field)
+        if val is not None:
+            create_wrapper[field] = val
+    return create_wrapper
 
 
 async def execute_migration(
@@ -852,58 +998,9 @@ async def execute_migration(
         )
 
     # ── 7. Create target instance ───────────────────────────────
-    # Build the instance config for the target host.
-    config = instance_config.get("config", instance_config)
-
-    # Remove host-assigned and instance-level fields from the config dict.
-    # managed_by and intent_id are ownership markers that survive migration.
-    _INSTANCE_FIELDS = frozenset(
-        {
-            "id",
-            "status",
-            "port",
-            "pid",
-            "api_key",
-            "supported_endpoints",
-            "created_at",
-            "started_at",
-            "error_message",
-            "retry_count",
-            "busy",
-            "prefill_progress",
-            "active_slots",
-        }
-    )
-    create_payload: dict[str, Any] = {
-        k: v for k, v in config.items() if k not in _INSTANCE_FIELDS
-    }
-    # Set model to the path resolved by ensure_model_on_target so the
-    # host does not need to resolve model_source itself (which would
-    # reject repo:// URIs without the companion host-side fix).
-    # Preserve model_source alongside the resolved path for intent
-    # linking and cross-host operations (S-037/D-017).
-    backend_type = str(create_payload.get("backend_type", "llamacpp"))
-    if backend_type.startswith("huggingface"):
-        create_payload["model_id"] = path
-    else:
-        create_payload["model"] = path
-    # Ensure key fields from captured config are present.
-    for key in ("alias", "backend_type"):
-        if key not in create_payload:
-            val = _config_field(instance_config, key)
-            if val is not None:
-                create_payload[key] = val
-
     target_instance: dict[str, Any]
     try:
-        create_wrapper: dict[str, Any] = {"config": create_payload}
-        # Preserve ownership markers and priority from the source instance
-        # (S-037/D-017 G3): managed_by, intent_id, and priority are all
-        # top-level instance fields on the host (S-036), not config keys.
-        for field in ("managed_by", "intent_id", "priority"):
-            val = _config_field(instance_config, field)
-            if val is not None:
-                create_wrapper[field] = val
+        create_wrapper = _build_target_create(instance_config, path)
         target_instance = await create_instance_on_host(target_host, create_wrapper)
     except HTTPException as e:
         steps.append(
@@ -946,6 +1043,336 @@ async def execute_migration(
 
     logger.info(
         "Migration %s completed: %s/%s (%s) → %s/%s",
+        migration_id,
+        source_host.name,
+        instance_id,
+        alias,
+        target_host.name,
+        target_instance_id,
+    )
+
+    return _build_result(
+        migration_id,
+        source_host,
+        target_host,
+        instance_id,
+        alias,
+        model_source,
+        priority,
+        target_instance_id,
+        steps,
+    )
+
+
+async def execute_evacuation(
+    *,
+    instance_id: str,
+    source_host_id: str,
+    target_host_id: str,
+) -> MigrationResult:
+    """Evacuate *instance_id* off a draining *source_host* (S-043 §4.2).
+
+    Create-then-stop ordering, unlike ``execute_migration``: the
+    replacement is created and started on the target (blocking on
+    log-gated readiness) BEFORE the source is stopped, so the alias keeps
+    serving throughout — a drain never reduces serving capacity on its
+    own (host-draining.md §1). The source is then stopped and deleted.
+    There is no disown step: the source is removed entirely, and staying
+    owned until the delete succeeds keeps a failed delete retryable — the
+    next drain tick's STOP action (stop + delete) picks up the stopped
+    managed replica and finishes the job. A disowned leftover would be
+    invisible to the reconciler and become a permanent manual-instance
+    conflict (host-draining.md §4.2).
+
+    Returns a ``MigrationResult`` with per-step status. On any step
+    failure the result is ``status=\"failed\"`` with the failing step
+    marked; the source is only touched after the target is confirmed
+    running.
+    """
+    migration_id = str(uuid.uuid4())
+    steps: list[MigrationStep] = []
+
+    # ── 1. Validate hosts ───────────────────────────────────────
+    source_host = await host_db.get_host(source_host_id)
+    if not source_host:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Source host '{source_host_id}' not found",
+        )
+
+    target_host = await host_db.get_host(target_host_id)
+    if not target_host:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Target host '{target_host_id}' not found",
+        )
+
+    if source_host_id == target_host_id:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Source and target host are the same ('{source_host.name}'). "
+                f"Evacuation requires two distinct hosts."
+            ),
+        )
+
+    steps.append(MigrationStep(step="validate_hosts", status="ok"))
+
+    # ── 1.5. Check source host has no active training jobs ──────
+    await check_no_active_training(source_host)
+    steps.append(MigrationStep(step="check_training_jobs", status="ok"))
+
+    # ── 2. Capture instance configuration ───────────────────────
+    instance_config = await capture_instance_config(source_host, instance_id)
+
+    alias = _config_field(instance_config, "alias")
+    model_source = _config_field(instance_config, "model_source")
+    priority = _config_field(instance_config, "priority") or "production"
+    source_gpu_type = source_host.gpu_type
+
+    if not alias:
+        raise HTTPException(
+            status_code=422,
+            detail="Instance configuration is missing required 'alias' field",
+        )
+    if not model_source:
+        raise HTTPException(
+            status_code=422,
+            detail="Instance configuration is missing required 'model_source' field",
+        )
+
+    # Validate captured priority before any destructive operations
+    # (S-036/S-037 pattern; a legacy instance with an invalid priority
+    # must fail here, not after the target is up).
+    from app.validation import VALID_PRIORITIES
+
+    if priority not in VALID_PRIORITIES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Captured instance has invalid priority '{priority}'. "
+                f"Must be one of: {', '.join(sorted(VALID_PRIORITIES))}"
+            ),
+        )
+
+    steps.append(
+        MigrationStep(
+            step="capture_config",
+            status="ok",
+            detail={
+                "alias": alias,
+                "model_source": model_source,
+                "priority": priority,
+            },
+        )
+    )
+
+    # Keep the reconciler off this intent while the evacuation runs: a
+    # tick between the target's create and its WS push would observe a
+    # shortfall and race a duplicate CREATE (D-017 pattern).
+    await _settle_owning_intent(alias)
+
+    # ── 3. Validate target fitness ──────────────────────────────
+    # allow_production=True: an operator's drain request is the explicit
+    # policy decision the S-037 production safeguard asks for (§4.2).
+    await validate_target_fitness(
+        target_host,
+        instance_config,
+        allow_production=True,
+        source_gpu_type=source_gpu_type,
+    )
+    steps.append(MigrationStep(step="validate_target", status="ok"))
+
+    # ── 4. Check one-replica-per-host ───────────────────────────
+    await check_one_replica_per_host(target_host, alias)
+    steps.append(MigrationStep(step="check_anti_affinity", status="ok"))
+
+    # ── 5. Ensure model on target ───────────────────────────────
+    # The long step — the source keeps serving throughout it.
+    try:
+        path, cached = await ensure_model_on_target(
+            target_host,
+            model_source,
+            _config_field(instance_config, "file_filters"),
+        )
+        steps.append(
+            MigrationStep(
+                step="ensure_model",
+                status="ok",
+                detail={"path": path, "cached": cached},
+            )
+        )
+    except HTTPException as e:
+        steps.append(
+            MigrationStep(
+                step="ensure_model",
+                status="failed",
+                detail={"error": str(e.detail), "status_code": e.status_code},
+            )
+        )
+        return _build_result(
+            migration_id,
+            source_host,
+            target_host,
+            instance_id,
+            alias,
+            model_source,
+            priority,
+            None,
+            steps,
+            status="failed",
+            error=f"Ensure model failed: {e.detail}",
+        )
+
+    # ── 6. Create target instance FIRST (create-then-stop) ──────
+    # The source is still serving at this point; it only goes down after
+    # the target is confirmed running (step 7).
+    try:
+        create_wrapper = _build_target_create(instance_config, path)
+        target_instance = await create_instance_on_host(target_host, create_wrapper)
+    except HTTPException as e:
+        steps.append(
+            MigrationStep(
+                step="create_target",
+                status="failed",
+                detail={"error": str(e.detail), "status_code": e.status_code},
+            )
+        )
+        return _build_result(
+            migration_id,
+            source_host,
+            target_host,
+            instance_id,
+            alias,
+            model_source,
+            priority,
+            None,
+            steps,
+            status="failed",
+            error=f"Create target failed: {e.detail}",
+        )
+
+    # The host wraps created instances in {"instance": {...}, "message": "..."}
+    created = target_instance.get("instance", target_instance)
+    target_instance_id = created.get("id") or created.get("instance_id") or ""
+    steps.append(
+        MigrationStep(
+            step="create_target",
+            status="ok",
+            detail={"target_instance_id": target_instance_id},
+        )
+    )
+
+    # Refresh the settle so the target's WS push lands in the instance
+    # cache before the next diff observes the two-replica state.
+    await _settle_owning_intent(alias)
+
+    # ── 7. Start target (blocking on log-gated readiness) ───────
+    try:
+        await start_instance_on_host(target_host, target_instance_id)
+        steps.append(MigrationStep(step="start_target", status="ok"))
+    except HTTPException as e:
+        steps.append(
+            MigrationStep(
+                step="start_target",
+                status="failed",
+                detail={"error": str(e.detail), "status_code": e.status_code},
+            )
+        )
+        # A replica the host refused to start is not a replica: delete it
+        # so no dead instance piles up and none counts as observed (CREATE
+        # executor pattern). The source never went down — the drain
+        # stalls (§4.3) and the alias keeps serving.
+        try:
+            await delete_instance_on_host(target_host, target_instance_id)
+        except Exception:
+            logger.warning(
+                "Failed to delete target instance %s on %s after failed start",
+                target_instance_id,
+                target_host.name,
+                exc_info=True,
+            )
+        return _build_result(
+            migration_id,
+            source_host,
+            target_host,
+            instance_id,
+            alias,
+            model_source,
+            priority,
+            None,
+            steps,
+            status="failed",
+            error=f"Start target failed: {e.detail}",
+        )
+
+    # The replacement is running; the source can now be retired. Refresh
+    # the settle once more so a mid-overlap tick cannot surplus-stop the
+    # fresh target (the surplus logic prefers draining-host replicas, but
+    # the settle makes even that unnecessary).
+    await _settle_owning_intent(alias)
+
+    # ── 8. Stop source ──────────────────────────────────────────
+    try:
+        await stop_source_instance(source_host, instance_id)
+        steps.append(MigrationStep(step="stop_source", status="ok"))
+    except HTTPException as e:
+        steps.append(
+            MigrationStep(
+                step="stop_source",
+                status="failed",
+                detail={"error": str(e.detail), "status_code": e.status_code},
+            )
+        )
+        return _build_result(
+            migration_id,
+            source_host,
+            target_host,
+            instance_id,
+            alias,
+            model_source,
+            priority,
+            target_instance_id,
+            steps,
+            status="failed",
+            error=f"Stop source failed: {e.detail}",
+        )
+
+    # ── 9. Delete source ────────────────────────────────────────
+    # The drain contract is that the host ends up genuinely empty
+    # (host-draining.md §4.2). No disown: see the docstring — the stopped
+    # managed replica must stay visible so a failed delete is retried.
+    try:
+        await delete_instance_on_host(source_host, instance_id)
+        steps.append(MigrationStep(step="delete_source", status="ok"))
+    except HTTPException as e:
+        steps.append(
+            MigrationStep(
+                step="delete_source",
+                status="failed",
+                detail={"error": str(e.detail), "status_code": e.status_code},
+            )
+        )
+        return _build_result(
+            migration_id,
+            source_host,
+            target_host,
+            instance_id,
+            alias,
+            model_source,
+            priority,
+            target_instance_id,
+            steps,
+            status="failed",
+            error=f"Delete source failed: {e.detail}",
+        )
+
+    # Refresh the settle so the source's disappearance lands before the
+    # next diff.
+    await _settle_owning_intent(alias)
+
+    logger.info(
+        "Evacuation %s completed: %s/%s (%s) → %s/%s",
         migration_id,
         source_host.name,
         instance_id,

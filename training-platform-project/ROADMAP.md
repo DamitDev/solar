@@ -112,6 +112,7 @@ Enables Solar to autonomously manage resources, migrate instances, and fulfill d
 | S-054 | Update grandfathering for modality rules, path-scoped drift comparison (resolved path keys only, absolute instance values), and `gpu_type` normalization on the reconciler read path. | solar-control | M | S-049, S-052 |
 | S-055 | Recoverable cold-start failures on the inner pull bound. A resolver timeout raised inside the action is marked `recoverable` when Redis pull progress is still fresh, so the webui shows "still working" instead of a hard error. | solar-control | S | S-051 |
 | S-056 | Progress-aware resolver timeouts. Replace the total pull bound in the model resolvers with a read-idle bound so a healthy slow download is not cancelled and a stalled one fails promptly. | solar-control | M | S-055 |
+| S-057 | Zero-downtime drain evacuation. EVACUATE creates and starts the target replica before stopping the source (create-then-stop); `execute_migration` stays stop-before-create for manual moves. | solar-control | M | S-043 |
 
 ---
 
