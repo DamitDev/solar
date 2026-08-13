@@ -47,22 +47,30 @@ export function useTableSort<T>(
     [sortKey, columnsByKey],
   );
 
-  const sorted = useMemo(() => {
-    const column = columnsByKey.get(sortKey);
-    if (!column) return rows;
-
-    const factor = direction === 'asc' ? 1 : -1;
-    return [...rows].sort((a, b) => {
-      const left = column.value(a);
-      const right = column.value(b);
-      // Applied before the direction factor, so flipping the sort never fills
-      // the first screen with blanks.
-      const missing = compareMissing(left, right);
-      return missing !== null ? missing : factor * compareValues(left, right);
-    });
-  }, [rows, columnsByKey, sortKey, direction]);
+  const sorted = useMemo(
+    () => sortRows(rows, columnsByKey.get(sortKey), direction),
+    [rows, columnsByKey, sortKey, direction],
+  );
 
   return { rows: sorted, sortKey, direction, toggle };
+}
+
+/**
+ * The comparison behind the hook, for callers that drive sort state
+ * themselves (a select and a direction button rather than clickable headers).
+ */
+export function sortRows<T>(rows: T[], column: SortColumn<T> | undefined, direction: SortDirection): T[] {
+  if (!column) return rows;
+
+  const factor = direction === 'asc' ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const left = column.value(a);
+    const right = column.value(b);
+    // Applied before the direction factor, so flipping the sort never fills
+    // the first screen with blanks.
+    const missing = compareMissing(left, right);
+    return missing !== null ? missing : factor * compareValues(left, right);
+  });
 }
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
