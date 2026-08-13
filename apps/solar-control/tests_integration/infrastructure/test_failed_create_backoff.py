@@ -16,6 +16,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from fixtures.faults import dead_data_repo
 from fixtures.helpers import wait_for
 from fixtures.intents import create_intent, get_intent, wait_intent_ready
 
@@ -31,26 +32,22 @@ async def test_failed_create_backoff(stack, clean_state):
         headers={"X-API-Key": stack.secrets["management"]},
         timeout=15.0,
     ) as http_control:
-        # Kill data-repo: the reconciler's resolve step fails deterministically.
-        # SIGKILL (not terminate) — a graceful shutdown keeps the port bound
-        # and the resolve's TCP connect succeeds while the dying server never
-        # answers, hanging the reconciler's action ~86-150s past its timeouts.
-        stack.data_repo.kill()
+        # With data-repo down the reconciler's resolve step fails
+        # deterministically; the block exit brings it back.
+        async with dead_data_repo(stack):
+            intent = await create_intent(
+                http_control, alias=f"backoff-{uuid.uuid4().hex[:8]}"
+            )
 
-        intent = await create_intent(
-            http_control, alias=f"backoff-{uuid.uuid4().hex[:8]}"
-        )
+            # The create attempt fails -> last_error / reconcile failed.
+            await wait_for(
+                lambda: _failed_or_erroring(http_control, intent["id"]),
+                timeout=60.0,
+                interval=0.5,
+                description="reconcile failure recorded (backoff)",
+            )
 
-        # The create attempt fails -> last_error / reconcile failed.
-        await wait_for(
-            lambda: _failed_or_erroring(http_control, intent["id"]),
-            timeout=60.0,
-            interval=0.5,
-            description="reconcile failure recorded (backoff)",
-        )
-
-        # Restore data-repo; the next tick's CREATE succeeds -> ready.
-        await stack.respawn_data_repo()
+        # data-repo is back: the next tick's CREATE succeeds -> ready.
         ready = await wait_intent_ready(http_control, intent["id"], timeout=30.0)
         assert ready["status"]["ready_replicas"] == 1
         assert ready["status"]["phase"] == "ready"

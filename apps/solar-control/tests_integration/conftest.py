@@ -64,9 +64,11 @@ from fixtures.helpers import (
 )
 from fixtures.seed import (
     clear_host_drain_state,
+    delete_hosts_except,
     read_test_model_files,
     register_host_via_api,
     register_model_in_data_repo,
+    sync_host_rows,
     truncate_intents,
 )
 from fixtures.stub_harbor import StubHarbor
@@ -455,6 +457,11 @@ class Stack:
         )
 
 
+# The stack whose rows are currently in the shared hosts table — set by the
+# most recent _build_stack. See the assignment there.
+_hosts_owner: Stack | None = None
+
+
 async def _build_stack(
     db_env: dict[str, str],
     stub_harbor: StubHarbor,
@@ -565,6 +572,16 @@ async def _build_stack(
         "HF_HOME": str(tmp_root / "hf-cache"),
         "TOKENIZERS_PARALLELISM": "false",
         "LOG_LEVEL": "INFO",
+        # The C2 start-failure tests use `device: cuda` as their deterministic
+        # failure, which only fails if the host really has no GPU. The
+        # aiops-3 runner does have one, so both tests loaded the model on
+        # cuda and timed out waiting for an error that never came. Hide the
+        # GPUs so the fixture host is CPU-only everywhere, as documented.
+        "CUDA_VISIBLE_DEVICES": "",
+        # C4: pull-progress telemetry throttled tight so the integration
+        # test can observe terminal progress entries without waiting for
+        # the 5 s default.
+        "PULL_PROGRESS_INTERVAL_S": "0.5",
     }
     stack.host_a_env = build_subprocess_env(
         base,
@@ -660,6 +677,13 @@ async def _build_stack(
 
     # Gate: reconciler is blind until both hosts are connected + registered.
     await _wait_hosts_online(stack)
+    # This build truncated and re-registered the shared hosts table, so its
+    # rows are now the baseline clean_state restores to. The wake module
+    # builds a second stack with the same secrets on different ports, and
+    # restoring to the session stack's URLs there would point control at
+    # hosts that are no longer serving it.
+    global _hosts_owner
+    _hosts_owner = stack
     logger.info(
         "stack ready: %s / %s / %s / %s",
         stack.data_repo_url,
@@ -906,12 +930,15 @@ def _wipe_model_caches(stack: Stack) -> None:
     several tests assert cold-cache behavior (first pull / pull counts).
     Instances must already be deleted first — running model servers may
     hold the files open.
+
+    Discovered from disk rather than from the live host list: an extra host
+    that has already been torn down still owns a populated cache dir, and a
+    later host reusing that letter would start warm.
     """
     import shutil
 
-    for letter in ("a", "b") + tuple(stack.extra_host_urls.keys()):
-        models_dir = stack.models_dir(letter)
-        if not models_dir.exists():
+    for models_dir in sorted(stack.tmp_dir.glob("models-*")):
+        if not models_dir.is_dir():
             continue
         for child in models_dir.iterdir():
             if child.is_dir():
@@ -920,17 +947,62 @@ def _wipe_model_caches(stack: Stack) -> None:
                 child.unlink(missing_ok=True)
 
 
+def _restore_host_topology(stack: Stack, *, when: str, nodeid: str) -> None:
+    """Put the session-scoped hosts table back to the two-host baseline.
+
+    Fault injections rotate API keys and add hosts (``fixtures.faults``);
+    each one restores itself in a ``finally``, so reaching this with
+    anything to repair means an injection leaked. That used to be silent
+    and expensive: a leaked ``api_key`` makes control 401 against the host
+    for the rest of the session, and every later test times out waiting
+    for replicas that can never start. Repair it and say so loudly.
+
+    The baseline comes from whichever stack last built the hosts table, not
+    from the session stack: the wake module replaces both rows with its own.
+    """
+    owner = _hosts_owner or stack
+    leaked_hosts = sorted(set(owner.extra_hosts) | set(owner.extra_host_urls))
+    for letter in leaked_hosts:
+        owner.remove_extra_host(letter)
+
+    orphan_rows = delete_hosts_except(owner.db_env["control_db"], ["host-a", "host-b"])
+    repaired = sync_host_rows(
+        owner.db_env["control_db"],
+        {
+            "host-a": {"api_key": owner.secrets["host_a"], "url": owner.host_a_url},
+            "host-b": {"api_key": owner.secrets["host_b"], "url": owner.host_b_url},
+        },
+    )
+    if leaked_hosts or orphan_rows or repaired:
+        logger.warning(
+            "clean_state repaired leaked stack state at %s of %s "
+            "(extra hosts=%s, orphan rows=%s, host columns=%s): a fault "
+            "injection did not restore itself — see fixtures/faults.py",
+            when,
+            nodeid,
+            leaked_hosts,
+            orphan_rows,
+            repaired,
+        )
+
+
 @pytest_asyncio.fixture
-async def clean_state(stack: Stack):
+async def clean_state(stack: Stack, request: pytest.FixtureRequest):
     """Per-test slate: no intents, no instances, no model caches, Redis flushed.
 
     Intents are truncated BEFORE instances are deleted: the session-scoped
     reconciler reacts to instance deletions within one tick (0.5s) and would
     otherwise see a shortfall for the just-deleted intent and start a CREATE
     pull that races the cache wipe (re-creating the model dir after it).
+
+    The host topology is restored before the instances are cleaned up, so
+    the reconciler is working from correct host rows for the rest of the
+    slate — and so a leak is attributed to the test that caused it, in the
+    teardown pass rather than the next test's setup.
     """
     truncate_intents(stack.db_env["control_db"])
     clear_host_drain_state(stack.db_env["control_db"])
+    _restore_host_topology(stack, when="setup", nodeid=request.node.nodeid)
     await _delete_all_instances(stack)
     _wipe_model_caches(stack)
     await _flush_volatile_redis(stack.db_env["redis"])
@@ -939,6 +1011,7 @@ async def clean_state(stack: Stack):
     # Teardown: leave nothing behind for the next test.
     truncate_intents(stack.db_env["control_db"])
     clear_host_drain_state(stack.db_env["control_db"])
+    _restore_host_topology(stack, when="teardown", nodeid=request.node.nodeid)
     await _delete_all_instances(stack)
     _wipe_model_caches(stack)
     await _flush_volatile_redis(stack.db_env["redis"])

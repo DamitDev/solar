@@ -58,6 +58,12 @@ class IntentDB:
                 strategy_progress=status.get("strategy_progress"),
                 last_error=status.get("last_error"),
                 spec_changed_at=status.get("spec_changed_at"),
+                # C1: the drift circuit breaker only counts across ticks if
+                # the persisted counter survives the reload. Without these the
+                # breaker resets to 0 every tick and can never trip.
+                drift_replace_attempts=status.get("drift_replace_attempts", 0),
+                drift_unsettled_keys=status.get("drift_unsettled_keys", []),
+                shortfall_reason=status.get("shortfall_reason"),
                 created_at=row.created_at.isoformat() if row.created_at else None,
                 updated_at=row.updated_at.isoformat() if row.updated_at else None,
                 last_reconciled_at=(
@@ -148,7 +154,10 @@ class IntentDB:
         """
         now = datetime.now(timezone.utc)
         async with self._session() as session:
-            row = await session.get(IntentRow, intent_id)
+            # Locked for the same reason as the status write below: a spec
+            # change rewrites status_json from the copy read here, so an
+            # unserialized read reverts whatever the tick in between recorded.
+            row = await session.get(IntentRow, intent_id, with_for_update=True)
             if row is None or row.deleted_at is not None or row.phase == "deleting":
                 return None
 
@@ -180,6 +189,11 @@ class IntentDB:
                 # The recorded error belongs to the previous spec; the next
                 # pass reports whatever the new one runs into.
                 status["last_error"] = None
+                # A new spec restarts the C1 drift circuit breaker: the
+                # counter and the recorded mismatching keys are about the
+                # *previous* drift vector.
+                status["drift_replace_attempts"] = 0
+                status["drift_unsettled_keys"] = []
                 row.status_json = status
 
             await session.commit()
@@ -324,14 +338,19 @@ class IntentDB:
         *spec_version_seen* is the ``spec_changed_at`` the caller reconciled
         against. Because a whole status document is written at once, a pass
         that read the intent before an edit landed would otherwise erase the
-        marker and the progress reset that edit just wrote — and the edit
-        would be lost for good, since the marker is the only record that the
-        replicas still have to be compared against the new spec. Pass it to
-        keep those two fields whenever the spec changed mid-pass.
+        marker and the resets that edit just wrote — and the edit would be
+        lost for good, since the marker is the only record that the replicas
+        still have to be compared against the new spec. Pass it to keep the
+        spec write's fields whenever the spec changed mid-pass.
         """
         now = datetime.now(timezone.utc)
         async with self._session() as session:
-            row = await session.get(IntentRow, intent_id)
+            # Locked, because the spec_version_seen guard below compares
+            # against a value read here: an unlocked read lets a spec write
+            # commit between it and this transaction's write, so the guard
+            # sees "unchanged" and the whole status document — built before
+            # that edit existed — erases the marker it just stamped.
+            row = await session.get(IntentRow, intent_id, with_for_update=True)
             if row is None:
                 return None
             # Once soft-deleted, status updates are rejected
@@ -357,9 +376,22 @@ class IntentDB:
                     not isinstance(spec_version_seen, _Unset)
                     and stored.get("spec_changed_at") != spec_version_seen
                 ):
+                    # Every field the spec write owns comes back off the row,
+                    # not just the marker. This pass counted its drift and
+                    # recorded its error against the *previous* spec, so
+                    # keeping its versions hands the fresh edit the old
+                    # vector's spent breaker — and the reconciler then refuses
+                    # to roll out an edit that has never been attempted once.
                     status_json = dict(status_json)
                     status_json["spec_changed_at"] = stored.get("spec_changed_at")
                     status_json["strategy_progress"] = stored.get("strategy_progress")
+                    status_json["last_error"] = stored.get("last_error")
+                    status_json["drift_replace_attempts"] = stored.get(
+                        "drift_replace_attempts", 0
+                    )
+                    status_json["drift_unsettled_keys"] = stored.get(
+                        "drift_unsettled_keys", []
+                    )
                 row.status_json = status_json
             if last_reconciled_at is not None:
                 row.last_reconciled_at = last_reconciled_at

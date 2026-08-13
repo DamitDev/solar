@@ -13,7 +13,14 @@ from app.models.intent import (
     ReconcileState,
     ResourceRequirements,
 )
-from app.validation import validate_intent_create, validate_intent_update
+from app.validation import (
+    VALID_GPU_TYPES,
+    canonicalize_intent_backend,
+    normalize_gpu_type,
+    validate_intent_create,
+    validate_intent_update,
+    validate_intent_warnings,
+)
 
 # ── Validation unit tests ──────────────────────────────────────
 
@@ -38,9 +45,11 @@ def test_validate_intent_create_valid_full():
         "priority": "staging",
         "strategy": "immediate",
         "backend": {
-            "backend_type": "llamacpp",
+            "backend_type": "huggingface_causal",
+            "device": "cuda",
             "dtype": "float16",
             "max_length": 512,
+            "use_flash_attention": True,
         },
         "placement": {
             "roles": ["inference"],
@@ -475,6 +484,23 @@ def test_intent_status_defaults():
 # ── Route integration tests (mock IntentDB) ────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _mock_fleet_validation(monkeypatch):
+    """Route tests run without a database — stub the fleet validation layer.
+
+    The fleet layer (host roster + Redis snapshots, C3) is covered by its
+    own unit tests (tests/test_intent_validation_fleet.py) and the
+    integration suite; here it would just trip 'Database not initialized'.
+    """
+
+    async def _noop_fleet(data):
+        return [], []
+
+    monkeypatch.setattr(
+        "app.services.intent_validation.validate_intent_fleet", _noop_fleet
+    )
+
+
 @pytest.fixture
 def valid_intent_create() -> IntentCreate:
     return IntentCreate(
@@ -803,6 +829,66 @@ def test_validate_intent_update_rejects_changed_alias():
     assert "immutable" in errors[0]["message"]
 
 
+def test_validate_intent_update_grandfathers_unchanged_backend_field():
+    """A stored intent must stay editable after the ownership table tightens.
+
+    Every update replays the full spec, so a field the table only started
+    rejecting later would block edits to unrelated fields forever.
+    """
+    stored = {"backend_type": "llamacpp", "device": "cuda", "ctx_size": 4096}
+    payload = _update_payload(
+        backend={"backend_type": "llamacpp", "device": "cuda", "ctx_size": 8192}
+    )
+    errors = validate_intent_update(
+        payload, current_alias="test-model", current_backend=stored
+    )
+    assert errors == []
+
+
+def test_validate_intent_update_still_rejects_newly_added_bad_field():
+    """Grandfathering is per-field: a value the user actually changes is checked."""
+    stored = {"backend_type": "llamacpp", "device": "cuda"}
+    payload = _update_payload(
+        backend={"backend_type": "llamacpp", "device": "mps"},
+    )
+    errors = validate_intent_update(
+        payload, current_alias="test-model", current_backend=stored
+    )
+    assert any(e["field"] == "backend.device" for e in errors)
+
+
+def test_validate_intent_update_grandfathering_does_not_hide_new_contradiction():
+    """Exemption covers ownership, not cross-field value checks.
+
+    device is unchanged, but pointing gpu_type at a different accelerator is a
+    contradiction the user just introduced.
+    """
+    stored = {"backend_type": "huggingface_causal", "device": "mps"}
+    payload = _update_payload(
+        model_source="huggingface://org/model",
+        backend={"backend_type": "huggingface_causal", "device": "mps"},
+        placement={"gpu_type": "nvidia_cuda"},
+    )
+    errors = validate_intent_update(
+        payload, current_alias="test-model", current_backend=stored
+    )
+    assert any(
+        e["field"] == "backend.device" and "nvidia_cuda" in e["message"] for e in errors
+    )
+
+
+def test_validate_intent_update_backend_type_change_drops_grandfathering():
+    """Switching backend_type re-homes every field, so nothing is exempt."""
+    stored = {"backend_type": "llamacpp", "ctx_size": 4096}
+    payload = _update_payload(
+        backend={"backend_type": "huggingface_causal", "ctx_size": 4096}
+    )
+    errors = validate_intent_update(
+        payload, current_alias="test-model", current_backend=stored
+    )
+    assert any(e["field"] == "backend.ctx_size" for e in errors)
+
+
 def test_validate_intent_update_applies_creation_rules():
     """An update must not write a spec that creation would have rejected."""
     errors = validate_intent_update(
@@ -928,6 +1014,7 @@ class _FakeSession:
     def __init__(self, row):
         self._row = row
         self.committed = False
+        self.locked_read = False
 
     async def __aenter__(self):
         return self
@@ -935,7 +1022,8 @@ class _FakeSession:
     async def __aexit__(self, *exc_info):
         return False
 
-    async def get(self, _model, _pk):
+    async def get(self, _model, _pk, *, with_for_update=False):
+        self.locked_read = with_for_update
         return self._row
 
     async def commit(self):
@@ -1035,8 +1123,9 @@ async def test_update_status_keeps_an_edit_that_landed_mid_pass():
         }
     )
     db = IntentDB()
+    session = _FakeSession(row)
 
-    with patch.object(IntentDB, "_session", return_value=_FakeSession(row)):
+    with patch.object(IntentDB, "_session", return_value=session):
         await db.update_status(
             row.id,
             status_json={
@@ -1047,9 +1136,64 @@ async def test_update_status_keeps_an_edit_that_landed_mid_pass():
             spec_version_seen=None,
         )
 
+    # The comparison this test exercises is only sound on a locked read: an
+    # unlocked one lets the edit commit after it, leaving the stored value
+    # looking unchanged so the branch below never runs. See
+    # tests_integration/infrastructure/test_spec_marker_concurrency.py.
+    assert session.locked_read
     assert row.status_json["spec_changed_at"] == "2026-07-24T02:00:00Z"
     assert row.status_json["strategy_progress"] is None
     assert row.status_json["ready_replicas"] == 2
+
+
+@pytest.mark.anyio
+async def test_update_status_keeps_the_breaker_reset_of_a_mid_pass_edit():
+    """The edit's drift reset survives the pass that never saw the edit.
+
+    An edit puts the C1 breaker back to zero because the counter and the
+    mismatching keys describe the spec it replaced. A pass still in flight
+    counted those against that old spec, so writing its numbers back starts
+    the new edit at the previous vector's bound: the reconciler reports it
+    unsettled and never attempts the rollout even once.
+    """
+    from app.database.intents import IntentDB
+
+    row = _intent_row(
+        status_json={
+            # What the edit wrote: new marker, breaker wound back.
+            "spec_changed_at": "2026-07-24T02:00:00Z",
+            "strategy_progress": None,
+            "last_error": None,
+            "drift_replace_attempts": 0,
+            "drift_unsettled_keys": [],
+        }
+    )
+    db = IntentDB()
+
+    with patch.object(IntentDB, "_session", return_value=_FakeSession(row)):
+        await db.update_status(
+            row.id,
+            status_json={
+                "spec_changed_at": None,
+                "strategy_progress": None,
+                # What the pass concluded about the previous spec.
+                "last_error": {
+                    "code": "BackendDriftUnsettled",
+                    "message": "max_length",
+                    "at": "2026-07-24T01:59:00Z",
+                },
+                "drift_replace_attempts": 3,
+                "drift_unsettled_keys": ["max_length"],
+                "ready_replicas": 1,
+            },
+            spec_version_seen=None,
+        )
+
+    assert row.status_json["drift_replace_attempts"] == 0
+    assert row.status_json["drift_unsettled_keys"] == []
+    assert row.status_json["last_error"] is None
+    # Fields the spec write does not own still come from the pass.
+    assert row.status_json["ready_replicas"] == 1
 
 
 @pytest.mark.anyio
@@ -1108,4 +1252,504 @@ async def test_update_intent_db_refuses_deleted_intents(row_overrides):
     with patch.object(IntentDB, "_session", return_value=_FakeSession(row)):
         assert await db.update_intent(row.id, **_update_kwargs(replicas=9)) is None
 
-    assert row.replicas == 2
+
+# ── Status round trip (C1) ─────────────────────────────────────
+
+# One entry per key the reconciler writes into status_json, each holding a
+# value that differs from the model's default. Hydration is proven by the
+# result differing from the default: a key _row_to_response forgets is one
+# Pydantic silently fills in, which is how the drift circuit breaker shipped
+# unable to fire. Adding a status field means adding a sentinel here.
+_STATUS_JSON_SENTINELS: dict[str, object] = {
+    "observed_replicas": 3,
+    "ready_replicas": 2,
+    "updated_replicas": 1,
+    "available": True,
+    "shortfall": 4,
+    "replica_set": [{"instance_id": "inst-1", "host_id": "host-1", "healthy": True}],
+    "conditions": [
+        {
+            "type": "Degraded",
+            "status": True,
+            "reason": "DriftUnsettled",
+            "message": "backend config drift unsettled",
+            "last_transition": "2026-08-06T00:00:00+00:00",
+        }
+    ],
+    "strategy_progress": {"strategy": "rolling", "phase": "stopping"},
+    "last_error": {
+        "code": "BackendDriftUnsettled",
+        "message": "mismatching keys: chat_template_kwargs",
+        "at": "2026-08-06T00:00:00+00:00",
+    },
+    "spec_changed_at": "2026-08-06T00:00:00+00:00",
+    "drift_replace_attempts": 2,
+    "drift_unsettled_keys": ["chat_template_kwargs"],
+    "shortfall_reason": "no host matches gpu_type=mps",
+}
+
+
+@pytest.mark.anyio
+async def test_every_status_json_key_is_hydrated_on_read():
+    """Whatever _update_status persists, _row_to_response must read back.
+
+    The two halves are written independently — one builds a dict, the other
+    an explicit keyword list — so nothing but this test stops a new status
+    field from being persisted and then silently defaulted on every load.
+    """
+    from test_reconciliation import _make_intent, _make_observed
+
+    from app.database.intents import IntentDB
+    from app.services.reconciliation import Reconciler
+
+    intent = _make_intent()
+    with patch("app.database.intents.intent_db") as mock_db:
+        mock_db.update_status = AsyncMock()
+        mock_db.get_intent = AsyncMock(return_value=intent)
+        await Reconciler()._update_status(intent, _make_observed())
+    written = set(mock_db.update_status.call_args.kwargs["status_json"])
+
+    assert written == set(_STATUS_JSON_SENTINELS), (
+        "status_json keys and the sentinel table disagree; add the new field "
+        "to _row_to_response and to _STATUS_JSON_SENTINELS"
+    )
+
+    row = _intent_row(status_json=dict(_STATUS_JSON_SENTINELS))
+    status = IntentDB()._row_to_response(row).status
+
+    defaults = IntentStatus()
+    for key in _STATUS_JSON_SENTINELS:
+        assert getattr(status, key) != getattr(defaults, key), (
+            f"status.{key} came back as its default, so _row_to_response "
+            f"never read it out of status_json"
+        )
+
+
+# ── C3: accelerator vocabulary, field ownership, device contract ──
+
+
+def _llamacpp_backend(**extra) -> dict:
+    return {"backend_type": "llamacpp", **extra}
+
+
+class TestGpuTypeVocabulary:
+    def test_aliases_normalize_to_canonical_tokens(self):
+        assert normalize_gpu_type("nvidia") == "nvidia_cuda"
+        assert normalize_gpu_type("NVIDIA") == "nvidia_cuda"
+        assert normalize_gpu_type("cuda") == "nvidia_cuda"
+        assert normalize_gpu_type("nvidia_cuda") == "nvidia_cuda"
+        assert normalize_gpu_type("mps") == "apple_mps"
+        assert normalize_gpu_type("Metal") == "apple_mps"
+        assert normalize_gpu_type("apple_mps") == "apple_mps"
+        assert normalize_gpu_type("none") == "cpu"
+        assert normalize_gpu_type("cpu") == "cpu"
+
+    def test_unknown_token_returns_none(self):
+        assert normalize_gpu_type("quantum") is None
+        assert normalize_gpu_type(42) is None
+
+    def test_canonical_names_match_without_relying_on_the_alias_table(self):
+        """Both sides of the membership test are folded the same way.
+
+        Folding only the input meant a hyphenated token was compared against
+        underscore-bearing canonical names, so every canonical name round-tripped
+        purely because the alias table happened to list a hyphenated duplicate.
+        """
+        with patch.dict("app.validation._NORMALIZED_GPU_ALIASES", {}, clear=True):
+            for canonical in VALID_GPU_TYPES:
+                assert normalize_gpu_type(canonical) == canonical
+                assert normalize_gpu_type(canonical.replace("_", "-")) == canonical
+                assert normalize_gpu_type(f"  {canonical.upper()}  ") == canonical
+
+    def test_hyphenated_and_underscored_aliases_are_equivalent(self):
+        assert normalize_gpu_type("nvidia-cuda") == "nvidia_cuda"
+        assert normalize_gpu_type("apple-mps") == "apple_mps"
+
+    def test_validation_rejects_unknown_gpu_type(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(model_file="m.gguf"),
+            "placement": {"gpu_type": "quantum"},
+        }
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "placement.gpu_type" and "quantum" in e["message"]
+            for e in errors
+        )
+
+    def test_validation_canonicalizes_gpu_type_in_place(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(model_file="m.gguf"),
+            "placement": {"gpu_type": "NVIDIA"},
+        }
+        assert validate_intent_create(data) == []
+        assert data["placement"]["gpu_type"] == "nvidia_cuda"
+
+
+class TestFieldOwnership:
+    def test_device_on_llamacpp_is_rejected(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(model_file="m.gguf", device="cuda"),
+        }
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "backend.device"
+            and "huggingface" in e["message"]
+            and "n_gpu_layers" in e["message"]
+            for e in errors
+        )
+
+    def test_llamacpp_only_field_on_hf_backend_is_rejected(self):
+        data = {
+            "alias": "t",
+            "model_source": "huggingface://org/model",
+            "backend": {
+                "backend_type": "huggingface_causal",
+                "model_file": "x.gguf",
+                "ctx_size": 4096,
+            },
+        }
+        errors = validate_intent_create(data)
+        assert any(e["field"] == "backend.model_file" for e in errors)
+        assert any(e["field"] == "backend.ctx_size" for e in errors)
+
+    def test_per_type_field_on_wrong_hf_backend_is_rejected(self):
+        data = {
+            "alias": "t",
+            "model_source": "huggingface://org/model",
+            "backend": {
+                "backend_type": "huggingface_causal",
+                "labels": ["a", "b"],
+            },
+        }
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "backend.labels"
+            and "huggingface_classification" in e["message"]
+            for e in errors
+        )
+
+    def test_shared_field_is_legal_for_every_owner(self):
+        """use_flash_attention belongs to causal *and* vision (many-to-many).
+
+        A first-match owner lookup rejects it on whichever type is not first
+        in the table, which is a false 422 on a configuration the host
+        accepts.
+        """
+        for backend_type in ("huggingface_causal", "huggingface_vision"):
+            data = {
+                "alias": "t",
+                "model_source": "huggingface://org/model",
+                "backend": {
+                    "backend_type": backend_type,
+                    "use_flash_attention": True,
+                },
+            }
+            assert validate_intent_create(data) == [], backend_type
+
+    def test_shared_field_on_llamacpp_reports_one_error(self):
+        """Both owners are named, but the field is only reported once."""
+        data = {
+            "alias": "t",
+            "model_source": "repo://test:v1",
+            "backend": {
+                "backend_type": "llamacpp",
+                "use_flash_attention": True,
+            },
+        }
+        errors = validate_intent_create(data)
+        flash = [e for e in errors if e["field"] == "backend.use_flash_attention"]
+        assert len(flash) == 1
+        assert "huggingface_causal" in flash[0]["message"]
+        assert "huggingface_vision" in flash[0]["message"]
+
+    def test_explicit_null_backend_field_is_not_a_rejection(self):
+        """A null configures nothing: the host default is the same as omitting
+        the key, and _validate_device already skips None."""
+        data = {
+            "alias": "t",
+            "model_source": "repo://test:v1",
+            "backend": {
+                "backend_type": "llamacpp",
+                "device": None,
+                "dtype": None,
+                "trust_remote_code": None,
+            },
+        }
+        assert validate_intent_create(data) == []
+
+    def test_llamacpp_device_reports_one_error_not_two(self):
+        """The ownership table and _validate_device both cover device; only the
+        more specific message (which names n_gpu_layers/ot) is shown."""
+        data = {
+            "alias": "t",
+            "model_source": "repo://test:v1",
+            "backend": {"backend_type": "llamacpp", "device": "cuda"},
+        }
+        errors = [
+            e for e in validate_intent_create(data) if e["field"] == "backend.device"
+        ]
+        assert len(errors) == 1
+        assert "n_gpu_layers" in errors[0]["message"]
+
+    def test_hf_common_field_message_names_huggingface_backends(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://test:v1",
+            "backend": {"backend_type": "llamacpp", "dtype": "float16"},
+        }
+        errors = validate_intent_create(data)
+        dtype = [e for e in errors if e["field"] == "backend.dtype"]
+        assert len(dtype) == 1
+        assert "huggingface_*" in dtype[0]["message"]
+
+    def test_hf_backend_with_repo_source_is_accepted(self):
+        """HuggingFace weights in a Harbor artifact are legal — must not be
+        'fixed' into a rejection later."""
+        data = {
+            "alias": "t",
+            "model_source": "repo://org/model:v1",
+            "backend": {
+                "backend_type": "huggingface_causal",
+                "device": "cuda",
+                "dtype": "float16",
+            },
+        }
+        assert validate_intent_create(data) == []
+
+    def test_ownership_table_matches_documented_field_lists(self):
+        """Pins BACKEND_FIELD_OWNERS to the documented sets so a host-side
+        field addition fails loudly.
+
+        Asserted as equality, not containment: a subset check passes when the
+        table gains a field the documented list omits, which is precisely the
+        direction this test exists to catch — the table is control's mirror of
+        the host's config models and a field added on one side only is the bug.
+        """
+        from app.validation import BACKEND_FIELD_OWNERS
+
+        assert BACKEND_FIELD_OWNERS["llamacpp"] == {
+            "model_file",
+            "mmproj",
+            "mmproj_offload",
+            "threads",
+            "n_gpu_layers",
+            "temp",
+            "top_p",
+            "top_k",
+            "min_p",
+            "ctx_size",
+            "chat_template_file",
+            "chat_template_kwargs",
+            "reasoning",
+            "reasoning_budget",
+            "spec_type",
+            "spec_draft_n_max",
+            "cache_type_k",
+            "cache_type_v",
+            "rope_scaling",
+            "rope_scale",
+            "yarn_orig_ctx",
+            "special",
+            "ot",
+            "model_type",
+            "pooling",
+        }
+        assert BACKEND_FIELD_OWNERS["huggingface"] == {
+            "device",
+            "dtype",
+            "max_length",
+            "trust_remote_code",
+        }
+        assert BACKEND_FIELD_OWNERS["huggingface_classification"] == {"labels"}
+        assert BACKEND_FIELD_OWNERS["huggingface_embedding"] == {"normalize_embeddings"}
+        assert BACKEND_FIELD_OWNERS["huggingface_causal"] == {"use_flash_attention"}
+        assert BACKEND_FIELD_OWNERS["huggingface_vision"] == {"use_flash_attention"}
+        # Shared fields belong to no single owner.
+        for owner in BACKEND_FIELD_OWNERS.values():
+            assert "file_filters" not in owner
+            assert "backend_type" not in owner
+
+
+class TestDeviceContract:
+    def test_invalid_device_value_rejected(self):
+        data = {
+            "alias": "t",
+            "model_source": "huggingface://org/model",
+            "backend": {"backend_type": "huggingface_causal", "device": "tpux"},
+        }
+        errors = validate_intent_create(data)
+        assert any(e["field"] == "backend.device" for e in errors)
+
+    def test_device_contradicting_gpu_type_is_rejected(self):
+        """The reported symptom: device mps + gpu_type nvidia_cuda."""
+        data = {
+            "alias": "t",
+            "model_source": "huggingface://org/model",
+            "backend": {"backend_type": "huggingface_causal", "device": "mps"},
+            "placement": {"gpu_type": "nvidia_cuda"},
+        }
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "backend.device"
+            and "apple_mps" in e["message"]
+            and "nvidia_cuda" in e["message"]
+            for e in errors
+        )
+
+    def test_device_consistent_with_gpu_type_passes(self):
+        data = {
+            "alias": "t",
+            "model_source": "huggingface://org/model",
+            "backend": {"backend_type": "huggingface_causal", "device": "mps"},
+            "placement": {"gpu_type": "apple_mps"},
+        }
+        assert validate_intent_create(data) == []
+
+
+class TestModalityRules:
+    def test_mmproj_on_embedding_mode_rejected(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(
+                model_file="m.gguf", mmproj="mmproj.gguf", model_type="embedding"
+            ),
+        }
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "backend.mmproj" and "embedding" in e["message"]
+            for e in errors
+        )
+
+    def test_mmproj_on_llm_mode_accepted(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(model_file="m.gguf", mmproj="mmproj.gguf"),
+        }
+        assert validate_intent_create(data) == []
+
+    def test_pooling_without_embedding_mode_warns_not_errors(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(model_file="m.gguf", pooling="mean"),
+        }
+        assert validate_intent_create(data) == []
+        warnings = validate_intent_warnings(data)
+        assert any(w["field"] == "backend.pooling" for w in warnings)
+
+
+class TestUpdateGrandfathersModalityRules:
+    """Both configurations below were legal before the modality rules landed —
+    the host silently dropped the field — so they exist in stored specs. An
+    update replays the full spec, so without grandfathering the intent becomes
+    permanently uneditable on a field the user is not touching.
+    """
+
+    def _update(self, backend: dict, current: dict, **overrides) -> list[dict]:
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": backend,
+            **overrides,
+        }
+        return validate_intent_update(data, current_alias="t", current_backend=current)
+
+    def test_carried_over_mmproj_on_embedding_mode_is_editable(self):
+        stored = _llamacpp_backend(mmproj="mmproj.gguf", model_type="embedding")
+        errors = self._update(dict(stored), stored, replicas=3)
+        assert errors == []
+
+    def test_newly_introduced_mmproj_on_embedding_mode_is_rejected(self):
+        stored = _llamacpp_backend(model_type="embedding")
+        edited = _llamacpp_backend(mmproj="mmproj.gguf", model_type="embedding")
+        errors = self._update(edited, stored)
+        assert any(
+            e["field"] == "backend.mmproj" and "embedding" in e["message"]
+            for e in errors
+        )
+
+    def test_changed_mmproj_on_embedding_mode_is_rejected(self):
+        """Grandfathering is per value, not per key: touching it re-validates."""
+        stored = _llamacpp_backend(mmproj="old.gguf", model_type="embedding")
+        edited = _llamacpp_backend(mmproj="new.gguf", model_type="embedding")
+        errors = self._update(edited, stored)
+        assert any(e["field"] == "backend.mmproj" for e in errors)
+
+    def test_carried_over_model_file_on_huggingface_is_editable(self):
+        stored = {"backend_type": "huggingface_causal", "model_file": "m.gguf"}
+        errors = self._update(dict(stored), stored, replicas=3)
+        assert errors == []
+
+    def test_newly_introduced_model_file_on_huggingface_is_rejected(self):
+        stored = {"backend_type": "huggingface_causal"}
+        edited = {"backend_type": "huggingface_causal", "model_file": "m.gguf"}
+        errors = self._update(edited, stored)
+        assert any(e["field"] == "backend.model_file" for e in errors)
+
+    def test_file_filters_are_not_grandfathered(self):
+        """file_filters is validated against model_source, which an update can
+        change independently of the backend, so a carried-over value can become
+        newly invalid and must still be reported."""
+        stored = _llamacpp_backend(file_filters=["*Q4*"])
+        errors = self._update(
+            dict(stored), stored, model_source="huggingface://org/model"
+        )
+        assert errors == []
+
+        # Same untouched backend, a model_source the filters cannot apply to.
+        errors = self._update(dict(stored), stored, model_source="repo://x:v1")
+        assert any(e["field"] == "backend.file_filters" for e in errors)
+
+
+class TestChatTemplateKwargsCanonicalization:
+    def test_string_kwargs_canonicalized_to_compact_json(self):
+        backend = {
+            "backend_type": "llamacpp",
+            "chat_template_kwargs": '{"enable_thinking": "true", "depth": 3}',
+        }
+        canonicalize_intent_backend(backend)
+        assert backend["chat_template_kwargs"] == '{"enable_thinking":true,"depth":3}'
+
+    def test_dict_kwargs_canonicalized(self):
+        backend = {
+            "backend_type": "llamacpp",
+            "chat_template_kwargs": {"enable_thinking": True},
+        }
+        canonicalize_intent_backend(backend)
+        assert backend["chat_template_kwargs"] == '{"enable_thinking":true}'
+
+    def test_malformed_json_raises_422(self):
+        from fastapi import HTTPException
+
+        backend = {"backend_type": "llamacpp", "chat_template_kwargs": "{nope"}
+        with pytest.raises(HTTPException) as excinfo:
+            canonicalize_intent_backend(backend)
+        assert excinfo.value.status_code == 422
+        errors = excinfo.value.detail["errors"]
+        assert errors[0]["field"] == "backend.chat_template_kwargs"
+
+    def test_non_object_kwargs_raises_422(self):
+        from fastapi import HTTPException
+
+        backend = {"backend_type": "llamacpp", "chat_template_kwargs": "[1, 2]"}
+        with pytest.raises(HTTPException):
+            canonicalize_intent_backend(backend)
+
+    def test_validation_accepts_canonicalized_round_trip(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(
+                model_file="m.gguf",
+                chat_template_kwargs='{"enable_thinking": "true"}',
+            ),
+        }
+        assert validate_intent_create(data) == []

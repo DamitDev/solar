@@ -1,9 +1,25 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IntentFormModal } from '@/components/IntentFormModal';
 import solarClient from '@/api/client';
 import { Intent } from '@/api/types';
+
+/**
+ * jsdom implements no `scrollIntoView` at all and the modal optional-chains
+ * the call, so the reveal-the-error scroll silently does nothing here unless
+ * the method exists.
+ */
+let scrollIntoView: ReturnType<typeof vi.fn>;
+
+beforeEach(() => {
+  scrollIntoView = vi.fn();
+  Element.prototype.scrollIntoView = scrollIntoView;
+});
+
+afterEach(() => {
+  delete (Element.prototype as Partial<Element>).scrollIntoView;
+});
 
 const intent: Intent = {
   id: 'intent-1',
@@ -196,8 +212,192 @@ describe('IntentFormModal in edit mode', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
     expect(await screen.findByText('Invalid intent')).toBeInTheDocument();
+    // C3: the error renders inline next to the offending field, and exactly
+    // once — the banner lists only fields with no inline slot, so a matched
+    // error does not also appear there and read as two problems.
     expect(screen.getByText(/too many/)).toBeInTheDocument();
+    expect(screen.queryByText('replicas')).not.toBeInTheDocument();
     expect(onSaved).not.toHaveBeenCalled();
+  });
+
+  it('keeps unmatched fields in the banner, since they have no input to sit next to', async () => {
+    vi.spyOn(solarClient, 'updateIntent').mockRejectedValue({
+      response: {
+        status: 422,
+        data: {
+          detail: {
+            detail: 'Invalid intent',
+            errors: [{ field: 'metadata.owner', message: 'reserved key' }],
+          },
+        },
+      },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    renderEdit();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText('Invalid intent')).toBeInTheDocument();
+    expect(screen.getByText('metadata.owner')).toBeInTheDocument();
+    expect(screen.getByText(/reserved key/)).toBeInTheDocument();
+  });
+
+  it('clears the previous attempt errors when submitting again', async () => {
+    const updateIntent = vi
+      .spyOn(solarClient, 'updateIntent')
+      .mockRejectedValueOnce({
+        response: {
+          status: 422,
+          data: { detail: { detail: 'Invalid intent', errors: [{ field: 'replicas', message: 'too many' }] } },
+        },
+      })
+      .mockResolvedValueOnce({ ...intent, replicas: 1 });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    renderEdit();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+    expect(await screen.findByText(/too many/)).toBeInTheDocument();
+
+    const replicasInput = screen.getByDisplayValue('2');
+    await userEvent.clear(replicasInput);
+    await userEvent.type(replicasInput, '1');
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() => expect(updateIntent).toHaveBeenCalledTimes(2));
+    // A stale error would leave the field marked invalid after it was fixed.
+    await waitFor(() => expect(screen.queryByText(/too many/)).not.toBeInTheDocument());
+  });
+
+  it('keeps a 422 visible when the field owns a slot that did not mount', async () => {
+    // backend.mmproj only renders a slot in llm mode, and the server only
+    // rejects mmproj outside llm mode — the two conditions are exclusive, so a
+    // hand-maintained "has an inline slot" list drops the error entirely and
+    // the user gets a red box reading "Invalid intent" and nothing else.
+    vi.spyOn(solarClient, 'updateIntent').mockRejectedValue({
+      response: {
+        status: 422,
+        data: {
+          detail: {
+            detail: 'Invalid intent',
+            errors: [{ field: 'backend.mmproj', message: "mmproj is meaningless for model_type 'embedding'" }],
+          },
+        },
+      },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    renderEdit({ backend: { backend_type: 'llamacpp', model_type: 'embedding', mmproj: 'mmproj.gguf' } });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText('Invalid intent')).toBeInTheDocument();
+    expect(screen.getByText('backend.mmproj')).toBeInTheDocument();
+    expect(screen.getByText(/meaningless for model_type/)).toBeInTheDocument();
+  });
+
+  it('keeps a model_file error visible when the backend is not llama.cpp', async () => {
+    // The model_file slot lives inside the llama.cpp branch, so it does not
+    // mount on a HuggingFace backend — which is the only configuration that
+    // produces the error. Client-side validation gets there before the server
+    // here, and used to set a field error with no slot and no banner, so the
+    // submit button did nothing at all.
+    const updateIntent = vi.spyOn(solarClient, 'updateIntent');
+    renderEdit({ backend: { backend_type: 'huggingface_causal', model_file: 'm.gguf' } });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText('backend.model_file')).toBeInTheDocument();
+    expect(screen.getByText(/only available for the llama\.cpp backend/)).toBeInTheDocument();
+    expect(updateIntent).not.toHaveBeenCalled();
+  });
+
+  it('keeps a 422 on device visible when the backend is llama.cpp', async () => {
+    vi.spyOn(solarClient, 'updateIntent').mockRejectedValue({
+      response: {
+        status: 422,
+        data: {
+          detail: {
+            detail: 'Invalid intent',
+            errors: [{ field: 'backend.device', message: 'device is only supported for huggingface_* backends' }],
+          },
+        },
+      },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    renderEdit({ backend: { backend_type: 'llamacpp', model_type: 'llm', device: 'cuda' } });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText('Invalid intent')).toBeInTheDocument();
+    expect(screen.getByText('backend.device')).toBeInTheDocument();
+    expect(screen.getByText(/only supported for huggingface_\* backends/)).toBeInTheDocument();
+  });
+
+  it('renders an error inline, not in the banner, when its slot did mount', async () => {
+    vi.spyOn(solarClient, 'updateIntent').mockRejectedValue({
+      response: {
+        status: 422,
+        data: {
+          detail: {
+            detail: 'Invalid intent',
+            errors: [{ field: 'backend.mmproj', message: 'mmproj must be a non-empty string' }],
+          },
+        },
+      },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    renderEdit({ backend: { backend_type: 'llamacpp', model_type: 'llm', mmproj: 'mmproj.gguf' } });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText(/must be a non-empty string/)).toBeInTheDocument();
+    // Shown once, next to the input — not also listed in the banner.
+    expect(screen.queryByText('backend.mmproj')).not.toBeInTheDocument();
+  });
+
+  it('opens a collapsed section that holds an error', async () => {
+    vi.spyOn(solarClient, 'updateIntent').mockRejectedValue({
+      response: {
+        status: 422,
+        data: {
+          detail: {
+            detail: 'Invalid intent',
+            errors: [{ field: 'resources.vram_gb', message: 'vram_gb exceeds every host' }],
+          },
+        },
+      },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    // No seeded resources or metadata, so the section starts closed and the
+    // inline error would render into a section the user cannot see.
+    renderEdit({ resources: { vram_gb: null, ram_gb: null } as any, metadata: {} });
+
+    const section = screen.getByText(/Resources & Metadata/).closest('details') as HTMLDetailsElement;
+    expect(section.open).toBe(false);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText(/exceeds every host/)).toBeInTheDocument();
+    await waitFor(() => expect(section.open).toBe(true));
+  });
+
+  it('rejects an unknown gpu_type before the round trip', async () => {
+    const updateIntent = vi.spyOn(solarClient, 'updateIntent');
+    renderEdit({ placement: { roles: ['inference'], gpu_type: 'rocm', host_allow: [], host_deny: [] } as any });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText(/Unknown GPU type 'rocm'/)).toBeInTheDocument();
+    expect(updateIntent).not.toHaveBeenCalled();
+  });
+
+  it('brings the first error into view — the modal scrolls, so one below the fold reads as no feedback', async () => {
+    vi.spyOn(solarClient, 'updateIntent');
+    renderEdit({ placement: { roles: ['inference'], gpu_type: 'rocm', host_allow: [], host_deny: [] } as any });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(await screen.findByText(/Unknown GPU type 'rocm'/)).toBeInTheDocument();
+    await waitFor(() => expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'center' }));
   });
 });
 

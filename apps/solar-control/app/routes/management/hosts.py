@@ -19,6 +19,7 @@ from app.models import (
     HostResponse,
     HostStatus,
 )
+from app.redis_state import host_store
 from app.services import drain
 from app.services.migration import create_instance_on_host
 from app.validation import validate_priority
@@ -100,6 +101,14 @@ async def remove_host(host_id: str):
     if not host:
         raise HTTPException(status_code=404, detail="Host not found")
     await host_db.remove_host(host_id)
+    # The instance cache, resource snapshot and pull-progress entries are all
+    # keyed by host id with no TTL; nothing else would ever reclaim them.
+    try:
+        await host_store.purge_host_state(host_id)
+    except Exception:
+        logger.warning(
+            "Failed to purge Redis state for removed host %s", host_id, exc_info=True
+        )
     return HostResponse(host=host, message=f"Host '{host.name}' removed successfully")
 
 

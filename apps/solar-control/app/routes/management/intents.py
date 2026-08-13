@@ -19,7 +19,12 @@ from app.models.intent import (
     IntentResponse,
     IntentUpdate,
 )
-from app.validation import validate_intent_create, validate_intent_update
+from app.validation import (
+    canonicalize_intent_backend,
+    validate_intent_create,
+    validate_intent_update,
+    validate_intent_warnings,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,23 @@ async def create_intent(request: Request, body: IntentCreate) -> IntentResponse:
             status_code=422,
             detail={"detail": "Invalid intent", "errors": errors},
         )
+
+    # Canonicalize backend values (C1): store chat_template_kwargs in the
+    # same compact canonical form the host produces, so new intents never
+    # start out looking drifted. Raises 422 on malformed JSON.
+    canonicalize_intent_backend(data["backend"])
+
+    # C3: fleet-aware validation — hard errors join the 422, advisory
+    # warnings ride along on the success response.
+    from app.services.intent_validation import validate_intent_fleet
+
+    hard_errors, warnings = await validate_intent_fleet(data)
+    if hard_errors:
+        raise HTTPException(
+            status_code=422,
+            detail={"detail": "Invalid intent", "errors": hard_errors},
+        )
+    warnings = warnings + validate_intent_warnings(data)
 
     # Check alias conflict
     conflict = await intent_db.check_alias_conflict(data["alias"])
@@ -70,7 +92,9 @@ async def create_intent(request: Request, body: IntentCreate) -> IntentResponse:
     from app.services.reconciliation import reconciler
 
     reconciler.wake()
-    return intent
+    # C3: advisory warnings are response-only — never persisted.
+    response = intent.model_copy(update={"warnings": warnings or None})
+    return response
 
 
 @router.get("", response_model=list[IntentResponse])
@@ -119,20 +143,35 @@ async def update_intent(
             status_code=409,
             detail={
                 "detail": (
-                    f"Intent '{existing.alias}' is being deleted and cannot be "
-                    f"updated"
+                    f"Intent '{existing.alias}' is being deleted and cannot be updated"
                 )
             },
         )
 
     data = body.model_dump()
 
-    errors = validate_intent_update(data, current_alias=existing.alias)
+    errors = validate_intent_update(
+        data, current_alias=existing.alias, current_backend=existing.backend
+    )
     if errors:
         raise HTTPException(
             status_code=422,
             detail={"detail": "Invalid intent", "errors": errors},
         )
+
+    # Canonicalize backend values (C1) — see create_intent.
+    canonicalize_intent_backend(data["backend"])
+
+    # C3: fleet-aware validation — see create_intent.
+    from app.services.intent_validation import validate_intent_fleet
+
+    hard_errors, warnings = await validate_intent_fleet(data)
+    if hard_errors:
+        raise HTTPException(
+            status_code=422,
+            detail={"detail": "Invalid intent", "errors": hard_errors},
+        )
+    warnings = warnings + validate_intent_warnings(data)
 
     conflict = await intent_db.check_alias_conflict(
         existing.alias, exclude_id=intent_id
@@ -142,7 +181,7 @@ async def update_intent(
             status_code=409,
             detail={
                 "detail": (
-                    f"An active intent already exists for alias " f"'{existing.alias}'"
+                    f"An active intent already exists for alias '{existing.alias}'"
                 )
             },
         )
@@ -166,7 +205,9 @@ async def update_intent(
     from app.services.reconciliation import reconciler
 
     reconciler.wake()
-    return intent
+    # C3: advisory warnings are response-only — never persisted.
+    response = intent.model_copy(update={"warnings": warnings or None})
+    return response
 
 
 @router.delete(

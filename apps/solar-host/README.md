@@ -11,6 +11,10 @@ A multi-backend process manager for model inference servers with REST API and We
   - HuggingFace AutoModel for embeddings (last hidden state with mean pooling)
 - **Socket.IO control client** - Connects to solar-control’s `/hosts` namespace for registration, heartbeat, and instance lifecycle (start/stop/restart, config updates). Supports pending-host and rejection events with post-approval sync.
 - **Robust instance lifecycle** - Non-blocking process wait, state re-check after startup to avoid start/stop races, and full cleanup of log/state buffers on stop or delete.
+- **Log retention across failures (S-049/C2)** - instance-addressable log files (instance id in the filename) survive process teardown; `GET /instances/{id}/logs` falls back to the on-disk file when the in-memory buffer is empty (even after the instance record is gone); `delete_instance` discards logs while stop retains them; retention bounded by `log_file_retention_s` (the newest file per `(alias, instance_id)` is always kept, so a multi-replica intent keeps a post-mortem for every replica).
+- **Structured start failures (C2)** - a failed start answers `500 {detail, instance_id, exit_code, log_tail}` so control can link the error to its process logs.
+- **Pull progress telemetry (S-051)** - `pull_model` accepts a `progress_cb`; the parent poll loop emits throttled `downloading` events with bytes/speed plus exactly one terminal `completed`/`failed` event, pushed over the WS channel as `pull_progress`.
+- **Full resource snapshot on health push (S-050)** - `host_health` carries the complete resource snapshot (byte-identical to `GET /resources`), alongside the legacy summary keys.
 - Auto-assign ports starting from 3500
 - Persistent configuration with auto-restart on boot
 - Real-time log streaming via WebSocket

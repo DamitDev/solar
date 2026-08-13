@@ -46,6 +46,15 @@ class _URLSession:
         return _RequestContext(self._responses[url])
 
 
+class _RaisingSession:
+    """Connection-level failure — drives poll_host's Redis-cache fallback."""
+
+    closed = False
+
+    def get(self, *args, **kwargs):
+        raise ConnectionError("host unreachable")
+
+
 @pytest.fixture
 def host():
     return Host(
@@ -122,6 +131,7 @@ async def test_refresh_recovers_connected_host_with_empty_instance_cache(host):
 
 @pytest.mark.anyio
 async def test_refresh_keeps_previous_registry_when_polling_fails(host):
+    """The only host is unreachable, so its alias must be carried forward."""
     previous = {
         "model-a": [
             RegistryEntry(
@@ -155,7 +165,146 @@ async def test_refresh_keeps_previous_registry_when_polling_fails(host):
     ):
         await gateway.refresh_model_registry()
 
-    set_registry.assert_not_awaited()
+    # The registry is always written; the carry-forward is what preserves the
+    # alias, so assert on the surviving entry rather than on "we wrote nothing".
+    registry = set_registry.await_args.args[0]
+    assert [e.instance_id for e in registry["model-a"]] == ["inst-1"]
+
+
+@pytest.mark.anyio
+async def test_refresh_drops_stale_alias_on_healthy_host_when_another_host_fails():
+    """A dead host must not freeze de-registration on the hosts that answered.
+
+    The healthy host now reports zero running instances, so its alias is gone
+    for real and has to leave the registry; the unreachable host's alias has
+    no fresh evidence either way and is carried forward.
+    """
+    healthy = Host(
+        id="host-healthy",
+        name="Healthy Host",
+        url="http://healthy-host:8000",
+        api_key="healthy-key",
+        status=HostStatus.ONLINE,
+    )
+    dead = Host(
+        id="host-dead",
+        name="Dead Host",
+        url="http://dead-host:8000",
+        api_key="dead-key",
+        status=HostStatus.ONLINE,
+    )
+    previous = {
+        "model-healthy": [
+            RegistryEntry(
+                host_id="host-healthy",
+                instance_id="inst-healthy",
+                url="http://healthy-host:3500",
+                api_key="key",
+                model_alias="model-healthy",
+            )
+        ],
+        "model-dead": [
+            RegistryEntry(
+                host_id="host-dead",
+                instance_id="inst-dead",
+                url="http://dead-host:3500",
+                api_key="key",
+                model_alias="model-dead",
+            )
+        ],
+    }
+
+    gateway = OpenAIGateway()
+    gateway.session = _URLSession(
+        {
+            "http://healthy-host:8000/instances": _Response(200, []),
+            "http://dead-host:8000/instances": _Response(503),
+        }
+    )
+
+    with (
+        patch(
+            "app.gateway.host_db.get_all_hosts",
+            AsyncMock(return_value=[healthy, dead]),
+        ),
+        patch("app.gateway.host_db.update_host_status", AsyncMock()),
+        patch(
+            "app.socketio_app.host_handlers.is_host_connected",
+            AsyncMock(return_value=False),
+        ),
+        patch(
+            "app.gateway.host_store.get_disconnect_time", AsyncMock(return_value=None)
+        ),
+        patch("app.gateway.host_store.get_host_instances", AsyncMock(return_value=[])),
+        patch("app.gateway.host_store.set_host_instances", AsyncMock()),
+        patch(
+            "app.gateway.registry_store.get_registry", AsyncMock(return_value=previous)
+        ),
+        patch("app.gateway.registry_store.set_registry", AsyncMock()) as set_registry,
+    ):
+        await gateway.refresh_model_registry()
+
+    registry = set_registry.await_args.args[0]
+    assert "model-healthy" not in registry
+    assert [e.instance_id for e in registry["model-dead"]] == ["inst-dead"]
+
+
+@pytest.mark.anyio
+async def test_refresh_does_not_duplicate_carried_forward_entry(host):
+    """A host that fails over to its Redis cache keeps exactly one entry.
+
+    The cache fallback re-emits the instance *and* the host is marked failed,
+    so a carry-forward that ignored ``(host_id, instance_id)`` identity would
+    register the same upstream twice and skew load balancing.
+    """
+    cached = [
+        {
+            "id": "inst-1",
+            "alias": "model-a",
+            "status": "running",
+            "port": 3500,
+            "backend_type": "llamacpp",
+            "api_key": "key",
+        }
+    ]
+    previous = {
+        "model-a": [
+            RegistryEntry(
+                host_id="host-1",
+                instance_id="inst-1",
+                url="http://test-host:3500",
+                api_key="key",
+                model_alias="model-a",
+            )
+        ]
+    }
+
+    gateway = OpenAIGateway()
+    gateway.session = _RaisingSession()
+
+    with (
+        patch("app.gateway.host_db.get_all_hosts", AsyncMock(return_value=[host])),
+        patch("app.gateway.host_db.update_host_status", AsyncMock()),
+        patch(
+            "app.socketio_app.host_handlers.is_host_connected",
+            AsyncMock(return_value=False),
+        ),
+        patch(
+            "app.gateway.host_store.get_disconnect_time", AsyncMock(return_value=None)
+        ),
+        patch(
+            "app.socketio_app.host_handlers.get_host_instances",
+            AsyncMock(return_value=cached),
+        ),
+        patch(
+            "app.gateway.registry_store.get_registry", AsyncMock(return_value=previous)
+        ),
+        patch("app.gateway.registry_store.set_registry", AsyncMock()) as set_registry,
+    ):
+        await gateway.refresh_model_registry()
+
+    registry = set_registry.await_args.args[0]
+    assert [e.instance_id for e in registry["model-a"]] == ["inst-1"]
 
 
 @pytest.mark.anyio

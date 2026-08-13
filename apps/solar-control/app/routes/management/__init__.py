@@ -10,6 +10,7 @@ from . import (
     instances,
     intents,
     models,
+    pulls,
     reservations,
     resources,
     storage,
@@ -29,3 +30,4 @@ router.include_router(intents.router)
 router.include_router(catalog.router)
 router.include_router(storage.router)
 router.include_router(uploads.router)
+router.include_router(pulls.router)

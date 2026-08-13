@@ -61,9 +61,16 @@ format:
 
 # Dockerized cross-service suite (solar-control + solar-host + data-repository).
 # Requires Docker; syncs the host venv with the huggingface extra first (torch).
+#
+# Both venvs are synced up front and the run itself uses --no-sync. A plain
+# `uv run --extra integration` from apps/solar-control re-resolves against that
+# project alone, which prunes data-repository's harbor-oci-client out of the
+# shared workspace venv (the suite then dies at stack build) and rewrites
+# uv.lock mid-run.
 integration:
+	uv sync --all-extras
 	cd apps/solar-host && uv sync --extra huggingface
-	cd apps/solar-control && uv run --extra integration pytest tests_integration/ -v --tb=short
+	cd apps/solar-control && uv run --no-sync --extra integration pytest tests_integration/ -v --tb=short
 
 # Regenerate the Docker requirements.txt files from the uv lockfile.
 # Run after dependabot bumps or manual dependency changes.

@@ -16,7 +16,11 @@ A coordinator for multiple solar-host instances with OpenAI-compatible API gatew
 - **WebUI Socket.IO namespace** - `/webui` for dashboard: real-time host/instance status, gateway events, pending host approval
 - **Pending host approval** - Hosts register first; management API lists and approves/rejects before they join the pool
 - Transparent authentication handling (endpoint API keys for gateway; management API key for WebUI and admin routes)
-- WebSocket log aggregation
+- **WebSocket log aggregation**
+- **WS-first host telemetry (S-050)** — hosts push the full resource snapshot with `host_health`; control serves it cache-first from Redis (`solar:hosts:snapshots`) with HTTP proxying as the degraded fallback (`snapshot_source: ws | http | none`)
+- **Model pull progress (S-051)** — `GET /api/pulls` exposes the latest pull progress per (host, source_uri); the reconciler's cold-start actions wait with progress-aware bounds instead of a raw timeout
+- **Drift-safe intents (S-049)** — backend comparison is JSON-structural with host-mirrored coercion; a churn circuit breaker turns an unsettled spec into a recorded `BackendDriftUnsettled` error
+- **Intent validation (S-052)** — accelerator vocabulary with aliases, per-backend field ownership, device contract, and fleet-aware advisory warnings that never block an edit
 - Docker support with automatic database migrations
 
 ## Supported Backend Types
@@ -174,7 +178,8 @@ Hosts connect via Socket.IO to the `/hosts` namespace; they appear in pending un
 
 ### Resource Queries
 
-- `GET /api/resources` - Aggregated cluster-wide view of host capacity, workloads, and reservations. Supports filters: `role`, `gpu_type`, `min_available_vram_gb`, `min_available_ram_gb`. Each host entry includes finer details for the resource dashboard (U-004): `instances` (inference workload list with aliases), `reservations` (per-reservation details with owner `job_id`, requested vs actual), and `*_training_used_gb` (the portion of in-use capacity consumed by active training job steps)
+- `GET /api/resources` - Aggregated cluster-wide view of host capacity, workloads, and reservations. Supports filters: `role`, `gpu_type`, `min_available_vram_gb`, `min_available_ram_gb`. Each host entry includes finer details for the resource dashboard (U-004): `instances` (inference workload list with aliases), `reservations` (per-reservation details with owner `job_id`, requested vs actual), and `*_training_used_gb` (the portion of in-use capacity consumed by active training job steps). `snapshot_source` reports where the entry came from: `ws` (the Redis read model fed by `host_health`), `http` (the degraded per-host proxy), or `none`
+- `GET /api/pulls` - Latest model pull progress per `{host_id}|{source_uri}` (S-051), so a client that loads mid-download renders it without waiting for the next `pull_progress` event. Each value is `{"at": <iso8601>, "data": {source_uri, phase, bytes_done, bytes_total, speed_bps}}`; `bytes_total` is `null` for `huggingface://` sources, whose size is not known up front. Doubles as the pruner for the hash, which has no TTL: finished pulls are dropped after `PULL_PROGRESS_TERMINAL_GRACE_S`, and unfinished ones once the host has been silent for well past `PULL_PROGRESS_STALE_AFTER_S` (a host that dies mid-pull never sends a terminal event)
 
 ### Instance Proxy (via solar-control to host)
 

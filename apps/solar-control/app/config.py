@@ -88,5 +88,26 @@ class Settings(BaseSettings):
     # the reconciler's cold-start action bound derives from this value.
     model_pull_timeout_s: float = 1800.0
 
+    # C1 churn circuit breaker: consecutive drift-driven REPLACE rounds
+    # before the reconciler stops planning REPLACE for the intent and
+    # records a BackendDriftUnsettled error instead of looping forever.
+    max_drift_replace_attempts: int = 3
+
+    # C5 WS-first resource read model: how old a Redis-cached host resource
+    # snapshot may be (seconds) before _fetch_host_resource_snapshot falls
+    # back to an HTTP call. The host pushes health every 10 s, so 30 s is
+    # three health ticks.
+    host_snapshot_max_age_s: float = 30.0
+
+    # C4 progress-aware cold-start bound: the action wait slices into
+    # action_progress_slice_s chunks and keeps waiting while the host's pull
+    # progress is newer than pull_progress_stale_after_s.
+    action_progress_slice_s: float = 120.0
+    pull_progress_stale_after_s: float = 180.0
+    # How long a finished pull (phase completed/failed) stays readable before
+    # it is pruned. Long enough for a late-joining webui to render the outcome,
+    # short enough that the pulls hash does not grow without bound.
+    pull_progress_terminal_grace_s: float = 300.0
+
 
 settings = Settings()

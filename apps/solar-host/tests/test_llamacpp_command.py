@@ -141,3 +141,42 @@ def test_chat_template_kwargs_invalid_json_raises() -> None:
 
     with pytest.raises(ValueError, match="not valid JSON"):
         build_command(chat_template_kwargs="{enable_thinking: true}")
+
+
+# C1 cross-service pin. Duplicated verbatim in
+# apps/solar-control/tests/test_reconciliation.py — keep the two in step.
+# Control compares an intent's stored backend against what this host writes
+# back, so the two coercions agreeing is what makes a canonicalized value read
+# as "no drift" instead of trapping the intent in a REPLACE-stop loop. Control's
+# test env cannot import solar_host, so identical tables either side is the pin.
+COERCION_PARITY_TABLE: list[tuple[object, object]] = [
+    ({"a": "true", "b": ["false", "x"]}, {"a": True, "b": [False, "x"]}),
+    ({"outer": {"enable_thinking": "True"}}, {"outer": {"enable_thinking": True}}),
+    (" TRUE ", True),
+    ("False", False),
+    ("true", True),
+    ("trueish", "trueish"),
+    ("", ""),
+    (["false"], [False]),
+    ({}, {}),
+    ([], []),
+    (1, 1),
+    (0, 0),
+    (1.5, 1.5),
+    (True, True),
+    (None, None),
+]
+
+
+def test_coerce_template_kwargs_matches_controls_copy() -> None:
+    """The host half of the parity pin; see COERCION_PARITY_TABLE above."""
+    from solar_host.models.llamacpp import _coerce_template_kwargs
+
+    for value, expected in COERCION_PARITY_TABLE:
+        result = _coerce_template_kwargs(value)
+        # Type too, not just equality: True == 1 in Python, so an
+        # equality-only assertion cannot tell a coerced bool from the int it
+        # must not become.
+        assert result == expected and type(result) is type(
+            expected
+        ), f"_coerce_template_kwargs({value!r}) == {result!r}, expected {expected!r}"

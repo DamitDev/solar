@@ -82,6 +82,37 @@ A full run takes roughly 2–3 minutes (one session-scoped 4-process stack is
 reused by every module; per-test state is reset by `clean_state`). The wake
 test builds its own 3600s-interval stack and runs last.
 
+## CI
+
+[`.github/workflows/integration-tests.yaml`](../../../.github/workflows/integration-tests.yaml)
+runs this suite on a self-hosted runner (Docker is required for the Postgres
+and Redis testcontainers). The `detect` job decides whether a PR reaches
+solar-control, solar-host or data-repository; `integration` is skipped when it
+does not.
+
+**This is meant to be a required status check.** That is a repository setting,
+not something the workflow file can declare — enable it under Settings →
+Branches → branch protection for `main`, adding **`Integration Tests /
+integration`** to the required checks. The `pull_request` trigger is
+deliberately *not* path-filtered: a path-filtered workflow never creates its
+check run for an unrelated PR, and branch protection would then block that PR
+forever. A job skipped by the `detect` gate counts as satisfied, so the filter
+has to live in the job condition instead.
+
+On failure the run uploads two artifacts:
+
+- `integration-report` — the JUnit XML (assertion text, timings).
+- `integration-diagnostics` — every service log the stack wrote
+  (`logs/`, `logs-a/`, `logs-b/`) plus any `evidence-*/` directory from
+  `dump_instance_evidence`. These live under pytest's tmp root on the runner
+  and are otherwise lost; the JUnit report alone is rarely enough to tell a
+  product bug from an environment failure.
+
+There is deliberately **no retry-on-failure** (no `pytest-rerunfailures`, no
+`--reruns`). Both failures that motivated wiring this suite into CI were
+deterministic — a leaked ghost host row and an all-or-nothing gateway registry
+guard — and a retry policy would have hidden both.
+
 ## Layout
 
 ```
@@ -92,6 +123,7 @@ tests_integration/
 │   ├── stub_harbor.py     # OCI Distribution v2 stub (TLS, token dance,
 │   │                      # request log, register_model)
 │   ├── helpers.py         # wait_for, free_port, subprocess spawner, certs
+│   ├── faults.py          # scoped fault injection (see "Fault injection")
 │   ├── seed.py            # DB/API seed helpers, host-log request counting
 │   ├── intents.py         # intent payload + readiness polling helpers
 │   ├── constants.py       # shared constants (keys, model URIs, harbor_port)
@@ -114,6 +146,24 @@ cd ~/work/solar/solar-control
 env -u PYTHONPATH ../solar-host/.venv/bin/python \
     tests_integration/fixtures/generate_test_model.py
 ```
+
+## Fault injection
+
+Every deliberate fault goes through a context manager in `fixtures/faults.py`
+— `broken_host_api_key`, `dead_data_repo`, `extra_host` — never through a raw
+call in a test body. All three mutate state the *session* owns (the hosts
+table, the data-repo subprocess, the host topology), so an undo written as a
+plain statement further down the test runs only on the happy path.
+
+That cost a 28-minute red run on 2026-08-12: an assertion failed between
+`update_host_api_key(..., "wrong-key")` and its restore, control 401'd against
+host-b for the remaining 25 minutes, and 13 later tests timed out waiting for
+replicas that could never start. The first failure was the only real one.
+
+`clean_state` re-asserts the baseline (both hosts' `api_key`/`url`, no extra
+hosts) around every test and logs a warning naming the test when it has to
+repair, so the next leak costs one line instead of a session. Adding a fault?
+Add a manager.
 
 ## Design notes / pitfalls encoded in the suite
 

@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { FORBIDDEN_BACKEND_FIELDS, validateIntentRequest, sanitizeIntentBackend } from '@/lib/intentValidation';
+import {
+  FORBIDDEN_BACKEND_FIELDS,
+  normalizeGpuType,
+  unchangedBackendFields,
+  validateIntentRequest,
+  sanitizeIntentBackend,
+} from '@/lib/intentValidation';
 
 const validRequest = {
   alias: 'my-model',
@@ -147,11 +153,166 @@ describe('validateIntentRequest', () => {
         fieldNames({ backend: { backend_type: 'llamacpp', file_filters: ['  '] }, model_source: source }),
       ).toContain('backend.file_filters');
     });
+
+    // Mirrors _validate_device in app/validation.py — every case here is a
+    // hard 422 server-side, so the round trip buys the user nothing.
+    describe('device', () => {
+      const hf = (device: unknown) => ({ backend_type: 'huggingface_causal', device });
+
+      it('rejects a value outside the device vocabulary', () => {
+        const errors = errorsFor({ backend: hf('rocm') });
+        const err = errors.find((e) => e.field === 'backend.device');
+        expect(err).toBeDefined();
+        expect(err!.message).toContain('auto, cpu, cuda, mps');
+      });
+
+      it('accepts every device the server accepts', () => {
+        for (const device of ['auto', 'cuda', 'mps', 'cpu']) {
+          expect(fieldNames({ backend: hf(device) })).not.toContain('backend.device');
+        }
+      });
+
+      it('rejects a device that contradicts the requested accelerator', () => {
+        const errors = errorsFor({ backend: hf('cuda'), placement: { gpu_type: 'apple_mps' } });
+        const err = errors.find((e) => e.field === 'backend.device');
+        expect(err).toBeDefined();
+        expect(err!.message).toContain('nvidia_cuda');
+      });
+
+      it('sees through an alias spelling, as the canonicalizing server does', () => {
+        // gpu_type 'mps' is stored as apple_mps, so comparing the raw token
+        // would let the reported mps-plus-NVIDIA case through to the server.
+        expect(fieldNames({ backend: hf('cuda'), placement: { gpu_type: 'mps' } })).toContain('backend.device');
+        expect(fieldNames({ backend: hf('mps'), placement: { gpu_type: 'NVIDIA' } })).toContain('backend.device');
+      });
+
+      it('lets auto and cpu run on any accelerator', () => {
+        expect(fieldNames({ backend: hf('auto'), placement: { gpu_type: 'apple_mps' } })).not.toContain(
+          'backend.device',
+        );
+        expect(fieldNames({ backend: hf('cpu'), placement: { gpu_type: 'nvidia_cuda' } })).not.toContain(
+          'backend.device',
+        );
+      });
+
+      it('reports one message per bad device, not one per broken rule', () => {
+        const errors = errorsFor({ backend: hf('rocm'), placement: { gpu_type: 'apple_mps' } });
+        expect(errors.filter((e) => e.field === 'backend.device')).toHaveLength(1);
+      });
+
+      it('is a llama.cpp non-field, and says what to use instead', () => {
+        const errors = errorsFor({ backend: { backend_type: 'llamacpp', device: 'cuda' } });
+        const err = errors.find((e) => e.field === 'backend.device');
+        expect(err).toBeDefined();
+        expect(err!.message).toContain('n_gpu_layers');
+      });
+
+      it('leaves a stored llama.cpp device alone, as the server does', () => {
+        // Editing replays the full spec: rejecting a value the user never
+        // touched would make the intent permanently unsaveable here while the
+        // server accepted it.
+        const request = { ...validRequest, backend: { backend_type: 'llamacpp', device: 'cuda' } };
+        expect(validateIntentRequest(request as any, ['device'])).toEqual([]);
+      });
+
+      it('ignores an absent device on any backend', () => {
+        expect(fieldNames({ backend: { backend_type: 'llamacpp' } })).not.toContain('backend.device');
+        expect(fieldNames({ backend: hf(null) })).not.toContain('backend.device');
+      });
+    });
   });
 
   it('rejects empty placement roles', () => {
     expect(fieldNames({ placement: { roles: [] } })).toContain('placement.roles');
     expect(fieldNames({ placement: { roles: ['inference'] } })).not.toContain('placement.roles');
+  });
+
+  describe('placement.gpu_type', () => {
+    it('rejects a token the server would reject too', () => {
+      const errors = errorsFor({ placement: { gpu_type: 'quantum' } });
+      const gpuError = errors.find((e) => e.field === 'placement.gpu_type');
+      expect(gpuError).toBeDefined();
+      // Naming the accepted values beats a bare rejection.
+      expect(gpuError!.message).toContain('nvidia_cuda');
+    });
+
+    it('accepts every canonical token and alias the server accepts', () => {
+      for (const token of ['nvidia_cuda', 'apple_mps', 'cpu', 'nvidia', 'cuda', 'mps', 'metal', 'apple', 'none']) {
+        expect(fieldNames({ placement: { gpu_type: token } })).not.toContain('placement.gpu_type');
+      }
+    });
+
+    it('ignores case and the -/_ spelling, as the server does', () => {
+      for (const token of ['NVIDIA', 'NVIDIA-CUDA', 'nvidia-cuda', ' Apple-MPS ', 'Metal']) {
+        expect(fieldNames({ placement: { gpu_type: token } })).not.toContain('placement.gpu_type');
+      }
+    });
+
+    it('treats an empty gpu_type as "any" rather than invalid', () => {
+      expect(fieldNames({ placement: { gpu_type: '' } })).not.toContain('placement.gpu_type');
+      expect(fieldNames({ placement: { gpu_type: null } })).not.toContain('placement.gpu_type');
+    });
+  });
+
+  describe('placement.host_allow', () => {
+    it('rejects a host that is both allowed and denied', () => {
+      const errors = errorsFor({ placement: { host_allow: ['h1', 'h2'], host_deny: ['h2'] } });
+      const err = errors.find((e) => e.field === 'placement.host_allow');
+      expect(err).toBeDefined();
+      expect(err!.message).toContain('h2');
+    });
+
+    it('accepts disjoint allow and deny lists', () => {
+      expect(fieldNames({ placement: { host_allow: ['h1'], host_deny: ['h2'] } })).not.toContain(
+        'placement.host_allow',
+      );
+    });
+  });
+});
+
+describe('normalizeGpuType', () => {
+  it('mirrors the control-side normalization', () => {
+    // Same canonical tokens and aliases as app/validation.py; the previous
+    // table invented amd_rocm/auto and missed metal/apple/none.
+    expect(normalizeGpuType('nvidia_cuda')).toBe('nvidia_cuda');
+    expect(normalizeGpuType('nvidia-cuda')).toBe('nvidia_cuda');
+    expect(normalizeGpuType('NVIDIA')).toBe('nvidia_cuda');
+    expect(normalizeGpuType('cuda')).toBe('nvidia_cuda');
+    expect(normalizeGpuType('apple_mps')).toBe('apple_mps');
+    expect(normalizeGpuType('apple-mps')).toBe('apple_mps');
+    expect(normalizeGpuType('Metal')).toBe('apple_mps');
+    expect(normalizeGpuType('mps')).toBe('apple_mps');
+    expect(normalizeGpuType('none')).toBe('cpu');
+    expect(normalizeGpuType('cpu')).toBe('cpu');
+  });
+
+  it('returns null for unknown, empty and non-values', () => {
+    expect(normalizeGpuType('rocm')).toBeNull();
+    expect(normalizeGpuType('auto')).toBeNull();
+    expect(normalizeGpuType('')).toBeNull();
+    expect(normalizeGpuType('   ')).toBeNull();
+    expect(normalizeGpuType(null)).toBeNull();
+    expect(normalizeGpuType(undefined)).toBeNull();
+  });
+});
+
+describe('unchangedBackendFields', () => {
+  it('reports the keys an edit carries over untouched', () => {
+    const stored = { backend_type: 'llamacpp', device: 'cuda', threads: 4 };
+    const submitted = { backend_type: 'llamacpp', device: 'cuda', threads: 8 };
+    expect(unchangedBackendFields(submitted, stored).sort()).toEqual(['backend_type', 'device']);
+  });
+
+  it('grandfathers nothing once the backend type changes', () => {
+    // A different backend re-homes every field, so no value is "the one that
+    // was already stored" any more.
+    const stored = { backend_type: 'llamacpp', device: 'cuda' };
+    const submitted = { backend_type: 'huggingface_causal', device: 'cuda' };
+    expect(unchangedBackendFields(submitted, stored)).toEqual([]);
+  });
+
+  it('grandfathers nothing when creating, since there is no stored spec', () => {
+    expect(unchangedBackendFields({ backend_type: 'llamacpp', device: 'cuda' }, undefined)).toEqual([]);
   });
 });
 

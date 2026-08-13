@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from fixtures.faults import extra_host
 from fixtures.helpers import wait_for
 from fixtures.intents import (
     create_intent,
@@ -170,14 +171,12 @@ async def test_shortfall_degraded(http_control, stack, clean_state):
     assert current["status"]["observed_replicas"] == 2
 
     # A 3rd host comes online -> reconciler fills the shortfall to ready.
-    await stack.spawn_extra_host("c")
-    await wait_intent_ready(http_control, intent["id"], ready_replicas=3)
-    final = await get_intent(http_control, intent["id"])
-    assert final is not None
-    assert len(replica_hosts(final)) == 3
-    assert final["status"]["shortfall"] == 0
-
-    # Restore the 2-host topology: the migration tests that follow assume
-    # exactly two hosts (their "no target" displacement scenario must have
-    # no third host for the MIGRATE target search to find).
-    stack.remove_extra_host("c")
+    # The block exit restores the 2-host topology: the migration tests that
+    # follow assume exactly two hosts (their "no target" displacement
+    # scenario must have no third host for the MIGRATE target search).
+    async with extra_host(stack, "c"):
+        await wait_intent_ready(http_control, intent["id"], ready_replicas=3)
+        final = await get_intent(http_control, intent["id"])
+        assert final is not None
+        assert len(replica_hosts(final)) == 3
+        assert final["status"]["shortfall"] == 0

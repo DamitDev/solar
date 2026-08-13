@@ -11,6 +11,7 @@ All connection state is stored in Redis for multi-replica consistency.
 """
 
 import asyncio
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -31,6 +32,8 @@ from app.models.socketio import (
     WSRegistration,
 )
 from app.redis_state import host_store
+from app.redis_state.connection import redis_client
+from app.redis_state.hosts import PULLS_MAP
 from app.services.host_status import build_host_status_payload
 
 from .server import sio
@@ -238,6 +241,18 @@ async def host_disconnect(sid: str):
     if host_id:
         await host_store.set_disconnect_time(host_id)
         await host_db.update_host_status(host_id, HostStatus.OFFLINE)
+        # A pull can only report progress over this socket, so an in-flight
+        # entry is dead the moment the socket is. The instance cache and the
+        # resource snapshot are kept: those still describe the host, and both
+        # are freshness-gated on read (C4).
+        try:
+            await host_store.remove_host_pulls(host_id)
+        except Exception:
+            logger.warning(
+                "Failed to drop pull progress for disconnected host %s",
+                host_id,
+                exc_info=True,
+            )
 
         host = await host_db.get_host(host_id)
         logger.info("Host '%s' (%s) disconnected", host.name if host else "?", host_id)
@@ -446,6 +461,30 @@ async def host_health(sid: str, data: dict[str, Any]):
     if roles is not None:
         await host_db.update_host_roles(host_id, roles)
 
+    # C5: the health push carries the full resource snapshot — store it as
+    # the WS-first read model so _fetch_host_resource_snapshot can serve
+    # cache-first instead of proxying HTTP per tick.
+    resources = health_data.get("resources")
+    if isinstance(resources, dict):
+        try:
+            await host_store.set_host_resource_snapshot(
+                host_id,
+                resources,
+                # Control's receive time, not the host's: freshness is checked
+                # against control's clock, so a host whose clock drifts would
+                # otherwise have its snapshots read as permanently stale (and
+                # trigger the HTTP fallback C5 exists to avoid) or as
+                # permanently fresh.
+                at=datetime.now(timezone.utc).isoformat(),
+                host_at=health_data.get("at") or data.get("timestamp"),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist resource snapshot for host %s",
+                host_id,
+                exc_info=True,
+            )
+
     host = await host_db.get_host(host_id)
     payload = HostHealthPayload(
         host_id=host_id,
@@ -464,6 +503,68 @@ async def host_health(sid: str, data: dict[str, Any]):
     from app.services.reconciliation import reconciler
 
     reconciler.wake()
+
+
+@sio.on("pull_progress", namespace="/hosts")
+async def host_pull_progress(sid: str, data: dict[str, Any]):
+    """Receive pull progress from a host, cache it, rebroadcast to /webui (C4).
+
+    The latest payload per (host, source_uri) is written into the
+    ``solar:hosts:pulls`` Redis hash under ``{host_id}|{source_uri}`` with an
+    ``at`` timestamp. The reconciler's progress-aware action wait
+    (``_await_action_with_progress``) reads it back to extend cold-start
+    bounds, and late-joining webui clients fetch it via ``GET /api/pulls``.
+    """
+    host_id = await host_store.get_host_id_for_sid(sid)
+    if not host_id:
+        return
+
+    payload = data.get("data", data)
+    if not isinstance(payload, dict):
+        return
+    source_uri = payload.get("source_uri")
+    if not source_uri:
+        return
+
+    host = await host_db.get_host(host_id)
+    timestamp = data.get("timestamp", datetime.now(timezone.utc).isoformat())
+
+    try:
+        r = redis_client()
+        await r.hset(
+            PULLS_MAP,
+            f"{host_id}|{source_uri}",
+            # ``at`` is *control's* receive time, not the host's: freshness
+            # gating compares it against control's clock, and a host whose
+            # clock runs behind would otherwise look permanently stale (or,
+            # running ahead, permanently fresh). The host's own timestamp
+            # stays in ``data`` for display.
+            json.dumps(
+                {
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "host_at": timestamp,
+                    "data": payload,
+                }
+            ),
+        )
+    except Exception:
+        logger.warning(
+            "Failed to cache pull progress for %s on %s",
+            source_uri,
+            host_id,
+            exc_info=True,
+        )
+
+    await sio.emit(
+        "pull_progress",
+        {
+            "host_id": host_id,
+            "host_name": host.name if host else None,
+            "timestamp": timestamp,
+            "data": payload,
+        },
+        namespace="/webui",
+    )
 
 
 @sio.on("instances_update", namespace="/hosts")

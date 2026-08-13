@@ -161,7 +161,7 @@ async def test_recreate_failure_records_backoff_and_recovers(
     backoff recorded. Restoring the key lets the next RECREATE restart the
     instance in place (§8.2).
     """
-    from fixtures.seed import update_host_api_key
+    from fixtures.faults import broken_host_api_key
 
     hosts = await _hosts(http_control)
     alias = f"recreate-{uuid.uuid4().hex[:8]}"
@@ -172,27 +172,22 @@ async def test_recreate_failure_records_backoff_and_recovers(
     instance_id = replica["instance_id"]
     host_id = replica["host_id"]
     host_name = next(n for n, h in hosts.items() if h["id"] == host_id)
-    real_key = (
-        stack.secrets["host_a"] if host_name == "host-a" else stack.secrets["host_b"]
-    )
 
     # Drift: stop the instance.
     resp = await http_control.post(f"/api/hosts/{host_id}/instances/{instance_id}/stop")
     assert resp.status_code == 200, resp.text
 
     # Break the start: rotate the host's API key (HTTP calls now 403).
-    update_host_api_key(stack.db_env["control_db"], host_id, "definitely-wrong-key")
+    with broken_host_api_key(stack, host_id, host_name, bad_key="definitely-wrong-key"):
+        # The reconciler's RECREATE start fails -> last_error / backoff recorded.
+        await wait_for(
+            lambda: _last_error_or_failed(http_control, intent["id"]),
+            timeout=30.0,
+            interval=0.5,
+            description="reconcile failure recorded (backoff)",
+        )
 
-    # The reconciler's RECREATE start fails -> last_error / backoff recorded.
-    await wait_for(
-        lambda: _last_error_or_failed(http_control, intent["id"]),
-        timeout=30.0,
-        interval=0.5,
-        description="reconcile failure recorded (backoff)",
-    )
-
-    # Restore the key; the next RECREATE restarts the instance in place.
-    update_host_api_key(stack.db_env["control_db"], host_id, real_key)
+    # Key restored; the next RECREATE restarts the instance in place.
     # Cold start counts against this budget (log-gated readiness).
     final = await wait_intent_ready(http_control, intent["id"], timeout=180.0)
     replicas = final["status"]["replica_set"]

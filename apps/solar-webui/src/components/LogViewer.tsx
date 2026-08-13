@@ -9,9 +9,15 @@ interface LogViewerProps {
   instanceId: string;
   alias: string;
   onClose: () => void;
+  /**
+   * C2: the instance already failed, so this is a post-mortem read. An empty
+   * result then means the host had nothing retained — not that output has yet
+   * to start, which is what an empty live view means.
+   */
+  postMortem?: boolean;
 }
 
-export function LogViewer({ hostId, instanceId, alias, onClose }: LogViewerProps) {
+export function LogViewer({ hostId, instanceId, alias, onClose, postMortem = false }: LogViewerProps) {
   const logContainerRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const [historicalLogs, setHistoricalLogs] = useState<LogMessage[]>([]);
@@ -161,9 +167,11 @@ export function LogViewer({ hostId, instanceId, alias, onClose }: LogViewerProps
             <div className="text-nord-3">Loading historical logs...</div>
           ) : messages.length === 0 ? (
             <div className="text-nord-3">
-              {isConnected
-                ? 'No logs yet. Logs appear when the instance produces output.'
-                : 'Connecting to event stream...'}
+              {postMortem
+                ? 'No logs retained for this instance. The host keeps output from a failed instance for a limited window, and this one has expired or was never captured.'
+                : isConnected
+                  ? 'No logs yet. Logs appear when the instance produces output.'
+                  : 'Connecting to event stream...'}
             </div>
           ) : (
             messages.map((msg) => (

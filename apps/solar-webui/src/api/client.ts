@@ -9,6 +9,7 @@ import {
   GatewayRequestsResponse,
   GatewayEventDTO,
   ApiEndpoint,
+  PullProgressEntry,
   EndpointCreateRequest,
   EndpointUpdateRequest,
   EndpointUsageResponse,
@@ -421,6 +422,12 @@ class SolarClient {
   // API Endpoint management
   async getEndpoints(): Promise<ApiEndpoint[]> {
     const response = await this.client.get('/api/endpoints');
+    return response.data;
+  }
+
+  // C4: latest model pull progress per (host, source_uri).
+  async getPulls(): Promise<Record<string, PullProgressEntry>> {
+    const response = await this.client.get('/api/pulls');
     return response.data;
   }
 

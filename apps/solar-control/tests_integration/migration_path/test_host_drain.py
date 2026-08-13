@@ -227,7 +227,13 @@ async def _drain_preflight_clear(http_control, host_id: str) -> bool:
 
 
 async def test_draining_host_accepts_no_new_instances(http_control, clean_state):
-    """Manual creation bypasses placement, so the route has to refuse it."""
+    """Manual creation bypasses placement, so the route has to refuse it.
+
+    Both out-of-service states refuse. With nothing to evacuate, the drain
+    POST's ``reconciler.wake()`` promotes ``draining`` to ``drained`` within
+    milliseconds (measured: 14ms), so pinning the message to one of the two
+    made this a coin flip — the refusal is what the route owes us here.
+    """
     hosts = (await http_control.get("/api/hosts")).json()
     host_id = hosts[0]["id"]
 
@@ -240,7 +246,9 @@ async def test_draining_host_accepts_no_new_instances(http_control, clean_state)
             json=_instance_payload(f"rejected-{uuid.uuid4().hex[:6]}"),
         )
         assert resp.status_code == 409, resp.text
-        assert "draining" in resp.json()["detail"]
+        detail = resp.json()["detail"]
+        assert "does not accept new instances" in detail, detail
+        assert any(state in detail for state in ("draining", "drained")), detail
 
         # Drain is idempotent while it is in progress.
         resp = await http_control.post(f"/api/hosts/{host_id}/drain")

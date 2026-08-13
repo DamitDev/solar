@@ -14,13 +14,13 @@
  * silently reset to a default.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Plus, Trash2, ChevronDown, AlertTriangle } from 'lucide-react';
 import solarClient from '@/api/client';
 import { Host, Intent, IntentCreateRequest, IntentPriority, IntentStrategy } from '@/api/types';
 import { extractApiError } from '@/lib/apiErrors';
 import { cn } from '@/lib/utils';
-import { validateIntentRequest, sanitizeIntentBackend } from '@/lib/intentValidation';
+import { unchangedBackendFields, validateIntentRequest, sanitizeIntentBackend } from '@/lib/intentValidation';
 import { getDefaultConfig, stripEmptyOptionalFields } from '@/lib/backendConfig';
 import { BackendConfigFields } from './BackendConfigFields';
 
@@ -55,6 +55,16 @@ const PRIORITY_EXPLANATIONS: Record<IntentPriority, string> = {
   staging: 'May be displaced by production; migrates when possible.',
   ephemeral: 'Lowest priority — first to be stopped or migrated when capacity is needed.',
 };
+
+/**
+ * Optional sections that hide their inputs until opened, keyed by the field
+ * prefix they own. An error landing in a closed section is as invisible as one
+ * with no slot at all, so a failed submit opens whichever section holds it.
+ */
+const COLLAPSIBLE_SECTIONS = [
+  { prefix: 'placement.', open: 'placement' },
+  { prefix: 'resources.', open: 'extras' },
+] as const;
 
 export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFormModalProps) {
   const editing = intent != null;
@@ -100,6 +110,19 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
     message: string;
     errors?: Array<{ field: string; message: string }>;
   } | null>(null);
+
+  // Which fields actually rendered an inline slot, collected during the render
+  // pass rather than declared in a list. Several slots are conditional on the
+  // backend mode, and the condition is false in exactly the configuration that
+  // produces the error — a hand-maintained list gets that backwards and drops
+  // the error from the banner with nowhere left to show it.
+  const mountedErrorFields = useRef<Set<string>>(new Set());
+  mountedErrorFields.current = new Set();
+
+  const formRef = useRef<HTMLFormElement>(null);
+  // Bumped on every failed submit; the effect below runs after the errors have
+  // rendered, which is the only point where the first one can be located.
+  const [errorRevision, setErrorRevision] = useState(0);
 
   // Escape closes the modal
   useEffect(() => {
@@ -158,9 +181,45 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
     setMetadataRows((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
   const handleMetadataRemove = (index: number) => setMetadataRows((prev) => prev.filter((_, i) => i !== index));
 
+  // The modal scrolls, so an inline error below the fold reads as no feedback
+  // at all. Runs after the failed submit has rendered its errors.
+  useEffect(() => {
+    if (errorRevision === 0) return;
+    const first = formRef.current?.querySelector('[data-error-anchor]');
+    first?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+  }, [errorRevision]);
+
+  /**
+   * Route each error to somewhere the user can actually see it: inline when
+   * its slot mounted, in the banner when it did not, with any collapsed
+   * section holding one opened. Both the client-side and the server-side
+   * paths go through here so neither can lose an error.
+   */
+  const revealErrors = (errors: Array<{ field: string; message: string }>, bannerMessage: string) => {
+    const grouped: Record<string, string> = {};
+    for (const err of errors) {
+      if (!grouped[err.field]) grouped[err.field] = err.message;
+    }
+    setFieldErrors((prev) => ({ ...prev, ...grouped }));
+
+    const unmounted = errors.filter((err) => !mountedErrorFields.current.has(err.field));
+    if (unmounted.length > 0) setServerError({ message: bannerMessage, errors: unmounted });
+
+    for (const section of COLLAPSIBLE_SECTIONS) {
+      if (!errors.some((err) => err.field.startsWith(section.prefix))) continue;
+      if (section.open === 'placement') setPlacementOpen(true);
+      else setExtrasOpen(true);
+    }
+    setErrorRevision((n) => n + 1);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setServerError(null);
+    // Errors from the previous attempt are about the previous values; keeping
+    // them would leave a fixed field marked invalid until it happened to fail
+    // again.
+    setFieldErrors({});
 
     const metadata: Record<string, string> = {};
     for (const row of metadataRows) {
@@ -192,13 +251,11 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
       metadata,
     };
 
-    const errors = validateIntentRequest(request);
+    // Editing replays the whole spec, so a field the user never touched must
+    // not be rejected here when the server would grandfather it.
+    const errors = validateIntentRequest(request, unchangedBackendFields(submittedBackend, intent?.backend));
     if (errors.length > 0) {
-      const grouped: Record<string, string> = {};
-      for (const err of errors) {
-        if (!grouped[err.field]) grouped[err.field] = err.message;
-      }
-      setFieldErrors(grouped);
+      revealErrors(errors, 'Fix the following before saving');
       return;
     }
 
@@ -219,16 +276,29 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
         setServerError({
           message: editing ? detail.message : `Alias already claimed by an active intent — "${detail.message}"`,
         });
+        setErrorRevision((n) => n + 1);
       } else {
-        setServerError({ message: detail.message, errors: detail.errors });
+        // C3: server validation errors (field-level) also surface inline,
+        // next to the client-side ones — the server is authoritative. The
+        // banner always carries the message, and lists only the fields whose
+        // slot did not mount, so an error is shown exactly once and can never
+        // fall between the two.
+        setServerError({ message: detail.message });
+        revealErrors(detail.errors ?? [], detail.message);
       }
     } finally {
       setLoading(false);
     }
   };
 
-  const fieldError = (field: string) =>
-    fieldErrors[field] ? <p className="text-xs text-nord-11 mt-1">{fieldErrors[field]}</p> : null;
+  const fieldError = (field: string) => {
+    mountedErrorFields.current.add(field);
+    return fieldErrors[field] ? (
+      <p data-error-anchor className="text-xs text-nord-11 mt-1">
+        {fieldErrors[field]}
+      </p>
+    ) : null;
+  };
 
   const inputClass =
     'w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent';
@@ -246,7 +316,7 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-6 space-y-6">
+        <form ref={formRef} onSubmit={handleSubmit} className="p-6 space-y-6">
           {editing && (
             <div className="rounded-md border border-nord-3 bg-nord-2 p-3 space-y-1">
               <p className="text-sm text-nord-4">
@@ -266,7 +336,7 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
           )}
 
           {serverError && (
-            <div className="rounded-md border border-nord-11 bg-nord-11 bg-opacity-10 p-3">
+            <div data-error-anchor className="rounded-md border border-nord-11 bg-nord-11 bg-opacity-10 p-3">
               <p className="text-sm font-medium text-nord-11">{serverError.message}</p>
               {serverError.errors && serverError.errors.length > 0 && (
                 <ul className="mt-2 space-y-1 text-xs text-nord-11">
@@ -466,11 +536,8 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
           {/* Section 2: Backend */}
           <div>
             <h3 className="text-xs font-semibold text-nord-4 uppercase tracking-wide mb-3">Backend</h3>
-            <BackendConfigFields value={backend} onChange={setBackend} forIntent />
+            <BackendConfigFields value={backend} onChange={setBackend} forIntent fieldError={fieldError} />
             {fieldError('backend')}
-            {fieldError('backend.model_file')}
-            {fieldError('backend.spec_type')}
-            {fieldError('backend.spec_draft_model')}
           </div>
 
           {/* Section 3: Placement (optional) */}
@@ -519,6 +586,7 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
                     </option>
                   ))}
                 </select>
+                {fieldError('placement.gpu_type')}
               </div>
 
               <div>
@@ -547,6 +615,7 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
                   </div>
                 )}
                 <p className="text-xs text-nord-4 mt-1">If any are selected, placement is restricted to them.</p>
+                {fieldError('placement.host_allow')}
               </div>
 
               <div>
@@ -601,6 +670,7 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
                     placeholder="Estimated VRAM per replica"
                     className={inputClass}
                   />
+                  {fieldError('resources.vram_gb')}
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-nord-4 mb-1">RAM (GB)</label>
@@ -613,6 +683,7 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
                     placeholder="Estimated system RAM"
                     className={inputClass}
                   />
+                  {fieldError('resources.ram_gb')}
                 </div>
               </div>
 

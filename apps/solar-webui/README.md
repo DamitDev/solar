@@ -23,6 +23,9 @@ Manage all your hosts and model instances from a beautiful, unified interface.
 - **Live log streaming** - Real-time WebSocket log viewer for each instance
 - **Instance management** - Start, stop, restart, create, edit, and delete instances
 - **Declarative intents** - Submit, edit, and delete deployment intents; solar-control decides placement
+- **Diagnosable failures** - A failed start shows its process log tail inline and links straight to the log viewer, even after the instance is gone
+- **Cold-start progress** - Model downloads report bytes, percentage, and speed while an intent is converging
+- **Field-level validation** - Impossible configurations are rejected before creation, with each message under the input that caused it
 - **Host management** - Add, remove, and monitor solar-host connections
 - **Host draining** - Take a host out of service for maintenance: its intent-managed replicas are migrated away and it stops accepting new instances
 - **Backend-aware UI** - Visual distinction between backend types with icons and colors
@@ -222,6 +225,32 @@ The **Edit** button on the Intents list and on an intent's detail page reopens t
 - The **alias** cannot be changed: it is the served model name and the deployment's identity. Serving a different name means a new intent.
 - The **strategy** in the saved configuration decides how the replicas are converted: `rolling` replaces them one at a time and the alias keeps serving; `immediate` stops them all before the replacements start, so the alias briefly serves nothing.
 - If an update is already running, the form says so. Saving abandons it and re-plans against the new configuration.
+
+## Diagnosing a Failed Intent
+
+When a replica fails to start, the intent detail page shows the error together with the evidence for it, so the answer to "why did it exit?" is on the page rather than on the host:
+
+- The **log tail** the host attached to the failure renders directly under the message — usually the last twenty lines, which is where the reason normally is.
+- **View process logs** opens the full log viewer for that instance. It works after the reconciler has deleted the failed instance: the host keeps the output on disk under a filename containing the instance id, and serves it from there once the in-memory buffer is gone. Past that retention window the viewer says the logs expired instead of showing an empty box.
+
+Not every error means something broke. A failure the reconciler expects to resolve itself — it stopped waiting on a cold start while the host was still downloading — appears as an amber **still working** notice instead of the red error block. Nothing is required; the next reconcile picks it up.
+
+## Cold Starts and Download Progress
+
+Deploying a model a host does not have yet takes as long as the download does, which for a multi-gigabyte model is minutes. While that runs, the intent shows what the host is actually doing rather than sitting on a bare "reconciling" badge:
+
+- A **Model pull** row on the detail page with a progress bar and percentage when the total size is known (`repo://` sources), or a running byte count and speed when it is not (`huggingface://`, whose total is not known up front).
+- The rollout message under the phase badge in the intents list.
+
+Progress is pushed over the event stream, and also fetched once on mount — so opening or reloading the page mid-download shows the current state immediately rather than waiting for the next update. The row disappears shortly after the pull ends, since by then the replica table or the error block is the more useful answer.
+
+## Validation Errors and Warnings
+
+The intent form distinguishes configurations that cannot work from ones that merely look unlikely today.
+
+**Rejected (the save does not go through).** These rest on durable facts, so waiting will not help: an unknown GPU type, a `host_allow` entry that is not a real host id, a backend field belonging to a different backend type (`device` on a llama.cpp intent, for example — llama.cpp has no such setting and used to discard it silently), or a device that contradicts the chosen GPU type. Each message is placed under the input it belongs to; anything with no matching input stays in the banner at the top of the form.
+
+**Saved with warnings.** These depend on the fleet as it happens to be right now — more replicas than eligible hosts, a memory request above any current host, every eligible host draining. A temporarily offline host must not make a production intent uneditable, so the save succeeds and the caveat appears as a dismissible amber notice on the detail page.
 
 ## Draining a Host
 

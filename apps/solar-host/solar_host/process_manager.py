@@ -10,7 +10,7 @@ import subprocess
 import threading
 import time
 import uuid
-from collections import deque
+from collections import OrderedDict, deque
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 
 FLUSH_INTERVAL_S = 0.1
 WATCHDOG_INTERVAL_S = 15.0
+# How often a start parked on the ready event re-reads the instance record,
+# so a lost wake costs a second rather than the whole readiness timeout.
+READY_RECHECK_INTERVAL_S = 1.0
 MAX_QUEUE_SIZE = 10_000
 _HAS_STDBUF = shutil.which("stdbuf") is not None
 
@@ -94,6 +97,16 @@ class ProcessManager:
         self._flush_task: asyncio.Task | None = None
         self._child_exit_lock = threading.Lock()
 
+        # C2: log buffers of dead instances are retained (keep_logs=True from
+        # _handle_child_exit / stop_instance) so the logs that explain a start
+        # failure survive the process death. Ordered registry of retained ids
+        # so the oldest buffers beyond settings.retained_log_buffers can be
+        # evicted — each buffer is maxlen-bounded, so the worst case is
+        # bounded at retained_log_buffers * log_buffer_size lines.
+        self._retained_log_ids: OrderedDict[str, None] = OrderedDict()
+        # Last child exit code per instance (C2 structured failure payload).
+        self.last_exit_codes: dict[str, int] = {}
+
         # Readiness signalling: a start attempt parks on an asyncio.Event
         # that the log thread sets when the backend logs its ready line.
         self.ready_events: dict[str, asyncio.Event] = {}
@@ -141,21 +154,51 @@ class ProcessManager:
         return port
 
     def _purge_instance_resources(
-        self, instance_id: str, *, call_runner_on_stop: bool = True
+        self,
+        instance_id: str,
+        *,
+        call_runner_on_stop: bool = True,
+        keep_logs: bool = False,
     ) -> None:
-        """Remove in-memory runners, buffers, and threads for an instance."""
+        """Remove in-memory runners, buffers, and threads for an instance.
+
+        With *keep_logs* the log buffer and sequence survive (C2): the
+        logs that explain a start failure are exactly what the user needs
+        at the moment of failure, and the retained buffers are bounded by
+        ``settings.retained_log_buffers`` via :meth:`_retain_dead_logs`.
+        """
         runner = self.instance_runners.get(instance_id)
         if runner and call_runner_on_stop:
             context = self.instance_contexts.get(instance_id, {})
             runner.on_process_stopped(instance_id, context)
         self.instance_runners.pop(instance_id, None)
         self.instance_contexts.pop(instance_id, None)
-        self.log_buffers.pop(instance_id, None)
-        self.log_sequences.pop(instance_id, None)
+        if not keep_logs:
+            self.log_buffers.pop(instance_id, None)
+            self.log_sequences.pop(instance_id, None)
+        else:
+            self._retain_dead_logs(instance_id)
         self.log_threads.pop(instance_id, None)
         self.state_buffers.pop(instance_id, None)
         self.state_sequences.pop(instance_id, None)
         self.ready_events.pop(instance_id, None)
+
+    def _retain_dead_logs(self, instance_id: str) -> None:
+        """Register a retained dead-instance log buffer, evicting the oldest."""
+        self._retained_log_ids.pop(instance_id, None)
+        self._retained_log_ids[instance_id] = None
+        for candidate in list(self._retained_log_ids):
+            if len(self._retained_log_ids) <= settings.retained_log_buffers:
+                break
+            # A stop/start cycle leaves the id registered here while the
+            # instance runs again. Dropping a live buffer would also reset
+            # log_sequences to 0 on the next line, breaking the
+            # seq:timestamp dedup the webui LogViewer relies on.
+            if candidate in self.processes:
+                continue
+            self._retained_log_ids.pop(candidate, None)
+            self.log_buffers.pop(candidate, None)
+            self.log_sequences.pop(candidate, None)
 
     def _handle_child_exit(self, instance_id: str, process: subprocess.Popen) -> None:
         """Mark instance FAILED when the child process exits unexpectedly.
@@ -191,6 +234,7 @@ class ProcessManager:
                 return
 
             del self.processes[instance_id]
+            self.last_exit_codes[instance_id] = exit_code
 
             instance.status = InstanceStatus.FAILED
             instance.error_message = (
@@ -200,12 +244,19 @@ class ProcessManager:
             instance.started_at = None
             config_manager.update_instance(instance_id, instance)
 
-            self._purge_instance_resources(instance_id, call_runner_on_stop=True)
-            self._push_instances_update()
-
             # Wake an awaiter parked in _try_start_instance so it re-reads
             # the failed status instead of burning the whole ready timeout.
+            # MUST happen before the purge: _purge_instance_resources pops
+            # the ready event, which would lose the wake (the start would
+            # then report the timeout message instead of the exit reason).
             self._signal_ready(instance_id)
+
+            # Keep the log buffer: the exact lines that explain the exit are
+            # the ones the user needs (C2). delete_instance purges it.
+            self._purge_instance_resources(
+                instance_id, call_runner_on_stop=True, keep_logs=True
+            )
+            self._push_instances_update()
 
     def _signal_ready(self, instance_id: str) -> None:
         """Wake an awaiter parked in _try_start_instance (thread-safe)."""
@@ -217,6 +268,43 @@ class ProcessManager:
             loop.call_soon_threadsafe(event.set)
         else:
             event.set()
+
+    async def _await_ready_signal(
+        self, instance_id: str, ready_event: asyncio.Event
+    ) -> None:
+        """Wait for readiness, returning as soon as the start is decided.
+
+        The wake is best-effort: ``_signal_ready`` looks the event up in
+        ``ready_events``, and a concurrent stop or delete purges that entry,
+        so a wake raised between the child's death and the purge reaches
+        nobody. Re-reading the record in slices makes the wait
+        self-sufficient — any status other than ``starting``, or a record
+        that is gone, ends it and the caller re-reads the outcome as usual.
+
+        Without this, a start whose instance is removed underneath parks for
+        the whole ``instance_ready_timeout_s``. solar-control awaits this call
+        one reconciler action at a time, so a single lost wake stalled every
+        intent on the fleet for 600 s.
+
+        Raises ``TimeoutError`` when the backend genuinely never reports
+        readiness, which is the caller's failure path.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + settings.instance_ready_timeout_s
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError
+            try:
+                await asyncio.wait_for(
+                    ready_event.wait(),
+                    timeout=min(READY_RECHECK_INTERVAL_S, remaining),
+                )
+                return
+            except TimeoutError:
+                instance = config_manager.get_instance(instance_id)
+                if instance is None or instance.status != InstanceStatus.STARTING:
+                    return
 
     def _mark_instance_ready(self, instance_id: str, process: subprocess.Popen) -> None:
         """Promote an instance from ``starting`` to ``running`` (thread-safe).
@@ -526,6 +614,18 @@ class ProcessManager:
 
         instance.port = self._get_available_port()
 
+        # A readiness timeout records no exit code of its own, so a stale one
+        # from an earlier attempt would be reported as this failure's cause
+        # (C2).
+        self.last_exit_codes.pop(instance_id, None)
+        # On a retry, drop the previous attempt's lines so log_tail describes
+        # the attempt that actually failed. Only on a retry: a first attempt
+        # after a stop would otherwise discard the retained buffer the user
+        # may still be reading.
+        if attempt > 0:
+            self.log_buffers.pop(instance_id, None)
+            self.log_sequences.pop(instance_id, None)
+
         runner = get_runner_for_config(instance.config)
         self.instance_runners[instance_id] = runner
         self.instance_contexts[instance_id] = runner.initialize_context()
@@ -562,7 +662,11 @@ class ProcessManager:
             cmd = runner.build_command(instance)
 
             alias_safe = instance.config.alias.replace(":", "-").replace("/", "-")
-            log_file = self.log_dir / f"{alias_safe}_{int(time.time())}.log"
+            # Instance-addressable log file (C2): the id in the name makes
+            # the file findable after the instance record is gone.
+            log_file = self.log_dir / (
+                f"{alias_safe}_{instance_id}_{int(time.time())}.log"
+            )
 
             run_env = os.environ.copy()
             run_env["PYTHONUNBUFFERED"] = "1"
@@ -577,6 +681,10 @@ class ProcessManager:
             )
 
             self.processes[instance_id] = process
+            # No longer a dead instance: holding a retention slot would let a
+            # later eviction drop this live instance's log buffer. A failure
+            # from here on re-retains it via _purge_instance_resources.
+            self._retained_log_ids.pop(instance_id, None)
 
             log_thread = threading.Thread(
                 target=self._read_logs,
@@ -587,23 +695,29 @@ class ProcessManager:
             self.log_threads[instance_id] = log_thread
 
             try:
-                await asyncio.wait_for(
-                    ready_event.wait(),
-                    timeout=settings.instance_ready_timeout_s,
-                )
+                await self._await_ready_signal(instance_id, ready_event)
             except TimeoutError:
                 # The backend never reported readiness — kill it and fail.
                 proc = self.processes.pop(instance_id, None)
+                exit_code: int | None = None
                 if proc is not None:
                     try:
                         proc.terminate()
                     except OSError:
                         pass
                     try:
-                        await asyncio.to_thread(proc.wait, 10)
+                        exit_code = await asyncio.to_thread(proc.wait, 10)
                     except subprocess.TimeoutExpired:
                         proc.kill()
-                        await asyncio.to_thread(proc.wait)
+                        exit_code = await asyncio.to_thread(proc.wait)
+                if exit_code is not None:
+                    # Popping the process above stops _handle_child_exit from
+                    # claiming this one, so without recording it here the
+                    # start-failure payload reports exit_code: null (C2). The
+                    # value is negative — killed by our own signal, not a crash
+                    # of the backend's own making — which is exactly what
+                    # distinguishes a readiness timeout from a failed start.
+                    self.last_exit_codes[instance_id] = exit_code
 
                 instance = config_manager.get_instance(instance_id)
                 if instance is None:
@@ -691,7 +805,11 @@ class ProcessManager:
             if log_thread and log_thread.is_alive():
                 log_thread.join(timeout=5)
 
-            self._purge_instance_resources(instance_id, call_runner_on_stop=True)
+            # Keep the logs across a manual stop (C2): a stopped instance's
+            # buffer stays readable until the instance is deleted.
+            self._purge_instance_resources(
+                instance_id, call_runner_on_stop=True, keep_logs=True
+            )
 
             instance.status = InstanceStatus.STOPPED
             instance.pid = None
@@ -711,14 +829,49 @@ class ProcessManager:
             return False
 
     async def _cleanup_old_logs(self, alias: str):
-        """Clean up old log files for stopped instances."""
+        """Clean up old log files for stopped instances (C2).
+
+        Files older than ``settings.log_file_retention_s`` are unlinked. The
+        most recent file per *(alias, instance_id)* is always kept regardless
+        of age: keeping only the newest per alias would leave a multi-replica
+        intent with a single post-mortem, discarding every other replica's.
+        """
         try:
             alias_safe = alias.replace(":", "-").replace("/", "-")
             pattern = f"{alias_safe}_*.log"
+            files: list[tuple[Path, float, str]] = []
             for log_file in self.log_dir.glob(pattern):
-                # Keep only the most recent log
-                if log_file.stat().st_mtime < time.time() - 300:  # 5 minutes old
+                try:
+                    mtime = log_file.stat().st_mtime
+                except OSError:
+                    continue
+                # {alias_safe}_{instance_id}_{ts}.log — the alias prefix is
+                # known, and the timestamp is the last component, so what is
+                # left in between is the instance id. Files predating the
+                # instance-id naming yield "" and share one group.
+                remainder = log_file.stem[len(alias_safe) + 1 :]
+                instance_id = remainder.rpartition("_")[0]
+                files.append((log_file, mtime, instance_id))
+
+            newest_per_instance: dict[str, Path] = {}
+            newest_mtimes: dict[str, float] = {}
+            for log_file, mtime, instance_id in files:
+                if mtime > newest_mtimes.get(instance_id, -1.0):
+                    newest_per_instance[instance_id] = log_file
+                    newest_mtimes[instance_id] = mtime
+
+            cutoff = time.time() - settings.log_file_retention_s
+            for log_file, mtime, instance_id in files:
+                # Path equality by value: glob() yields fresh Path objects on
+                # every call, so identity comparison would never match.
+                if log_file == newest_per_instance.get(instance_id):
+                    continue
+                if mtime >= cutoff:
+                    continue
+                try:
                     log_file.unlink()
+                except OSError:
+                    continue
         except Exception as e:  # noqa: BLE001
             logger.warning("Error cleaning up logs: %s", e)
 
@@ -790,6 +943,13 @@ class ProcessManager:
             return list(self.log_buffers[instance_id])
         return []
 
+    def get_last_exit_code(self, instance_id: str) -> int | None:
+        """Return the last recorded child exit code for *instance_id* (C2).
+
+        Set by :meth:`_handle_child_exit`; cleared by ``delete_instance``.
+        """
+        return self.last_exit_codes.get(instance_id)
+
     def get_next_sequence(self, instance_id: str) -> int:
         """Get next sequence number for an instance."""
         return self.log_sequences.get(instance_id, 0)
@@ -848,6 +1008,10 @@ class ProcessManager:
             log_thread.join(timeout=3)
 
         self._purge_instance_resources(instance_id, call_runner_on_stop=False)
+        # Delete is the one operation that genuinely discards the logs
+        # (C2): the retained buffer registry and exit-code record go too.
+        self._retained_log_ids.pop(instance_id, None)
+        self.last_exit_codes.pop(instance_id, None)
 
         self._push_instances_update()
 

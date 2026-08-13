@@ -27,6 +27,45 @@ def _has_roles(host: Host, required_roles: list[str]) -> bool:
     return all(r in host_roles for r in required_roles)
 
 
+def filter_durable_hosts(
+    hosts: list[Host],
+    *,
+    roles: list[str],
+    gpu_type: str | None = None,
+    host_allow: list[str] | None = None,
+    host_deny: list[str] | None = None,
+) -> list[Host]:
+    """Hosts passing the durable placement filters (roles/gpu_type/allow/deny).
+
+    Draining, reachability and resource fit are deliberately NOT part of
+    this filter — they are dynamic fleet state that intent validation
+    (``app.services.intent_validation``) reports as advisory warnings, never
+    as hard errors. ``find_candidates`` applies them afterwards, so both
+    paths share one filter chain.
+    """
+    host_allow_set = set(host_allow) if host_allow else None
+    host_deny_set = set(host_deny) if host_deny else None
+
+    result: list[Host] = []
+    for host in hosts:
+        # Role filter
+        if not _has_roles(host, roles):
+            continue
+
+        # GPU type filter
+        if gpu_type is not None and host.gpu_type != gpu_type:
+            continue
+
+        # Allow/deny lists
+        if host_allow_set is not None and host.id not in host_allow_set:
+            continue
+        if host_deny_set is not None and host.id in host_deny_set:
+            continue
+
+        result.append(host)
+    return result
+
+
 def fits_resources(
     snapshot: HostResourceSnapshot,
     vram_gb: float,
@@ -89,31 +128,24 @@ async def find_candidates(
     Implements deployment-intent.md §8.4 placement policy, including the
     draining-host exclusion from host-draining.md §4.1.
     """
-    host_allow_set = set(host_allow) if host_allow else None
-    host_deny_set = set(host_deny) if host_deny else None
-
     candidates: list[tuple[Host, HostResourceSnapshot]] = []
 
-    for host in hosts:
+    # Durable filters first (shared with intent validation via
+    # filter_durable_hosts), then the dynamic ones.
+    durable = filter_durable_hosts(
+        hosts,
+        roles=roles,
+        gpu_type=gpu_type,
+        host_allow=host_allow,
+        host_deny=host_deny,
+    )
+
+    for host in durable:
         # Draining hosts are being emptied — never place new work there,
         # and never make one the target of another host's evacuation
         # (host-draining.md §4.1). Applied here so intent reconciliation and
         # the S-038 reservation coordinator share the same rule.
         if host.drain_state is not None:
-            continue
-
-        # Role filter
-        if not _has_roles(host, roles):
-            continue
-
-        # GPU type filter
-        if gpu_type is not None and host.gpu_type != gpu_type:
-            continue
-
-        # Allow/deny lists
-        if host_allow_set is not None and host.id not in host_allow_set:
-            continue
-        if host_deny_set is not None and host.id in host_deny_set:
             continue
 
         # Need a resource snapshot
