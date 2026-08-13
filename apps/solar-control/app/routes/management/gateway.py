@@ -48,6 +48,39 @@ async def get_stats(
     }
 
 
+@router.get("/timeseries")
+async def get_timeseries(
+    from_ts: str | None = Query(None, alias="from"),
+    to_ts: str | None = Query(None, alias="to"),
+    bucket: str = Query("auto", pattern="^(auto|1m|5m|15m|1h|6h|1d|7d)$"),
+    request_type: str | None = Query(None),
+    model: str | None = None,
+    host_id: str | None = None,
+    endpoint_id: str | None = None,
+) -> dict[str, Any]:
+    """Bucketed gateway traffic for charting: requests, tokens and latency."""
+    now = datetime.now(timezone.utc)
+    start = _parse_iso(from_ts) or (now - timedelta(days=1))
+    end = _parse_iso(to_ts) or now
+
+    resolved_bucket, points = await gateway_logger.read_timeseries(
+        start,
+        end,
+        bucket=bucket,
+        request_type=request_type if request_type and request_type != "all" else None,
+        model=model,
+        host_id=host_id,
+        endpoint_id=endpoint_id,
+    )
+
+    return {
+        "from": start.isoformat(),
+        "to": end.isoformat(),
+        "bucket": resolved_bucket,
+        "points": points,
+    }
+
+
 @router.get("/requests")
 async def list_requests(
     from_ts: str | None = Query(None, alias="from"),

@@ -25,6 +25,64 @@ logger = logging.getLogger(__name__)
 
 INFLIGHT_MAX_AGE_S = 900
 
+# Bucket ladder for gateway time series, in seconds. `auto` walks it in order
+# and takes the first bucket that keeps a range under TIMESERIES_MAX_POINTS.
+TIMESERIES_BUCKETS: dict[str, int] = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "1h": 3600,
+    "6h": 21600,
+    "1d": 86400,
+    "7d": 604800,
+}
+TIMESERIES_MAX_POINTS = 180
+
+
+def resolve_bucket(start: datetime, end: datetime, requested: str | None) -> str:
+    """Pick a bucket size for a range, honouring an explicit request."""
+    if requested and requested != "auto" and requested in TIMESERIES_BUCKETS:
+        return requested
+
+    span_s = max(0.0, (end - start).total_seconds())
+    for name, seconds in TIMESERIES_BUCKETS.items():
+        if span_s / seconds <= TIMESERIES_MAX_POINTS:
+            return name
+    return "7d"
+
+
+def fill_buckets(
+    start: datetime,
+    end: datetime,
+    bucket_s: int,
+    aggregates: dict[int, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Expand sparse per-bucket aggregates into a gap-free series.
+
+    A missing bucket means no traffic, so it has to be emitted as zeros --
+    otherwise a chart silently interpolates across an outage.
+    """
+    points: list[dict[str, Any]] = []
+    epoch = int(start.timestamp()) // bucket_s * bucket_s
+    last = int(end.timestamp())
+
+    while epoch <= last:
+        agg = aggregates.get(epoch)
+        points.append(
+            {
+                "ts": datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat(),
+                "success": agg["success"] if agg else 0,
+                "error": agg["error"] if agg else 0,
+                "missed": agg["missed"] if agg else 0,
+                "token_in": agg["token_in"] if agg else 0,
+                "token_out": agg["token_out"] if agg else 0,
+                "avg_duration_s": agg["avg_duration_s"] if agg else None,
+            }
+        )
+        epoch += bucket_s
+
+    return points
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -661,6 +719,89 @@ class GatewayLogger:
                 for r in host_rows
             ],
         }
+
+    async def read_timeseries(
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        bucket: str | None = None,
+        request_type: str | None = None,
+        model: str | None = None,
+        host_id: str | None = None,
+        endpoint_id: str | None = None,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """Bucketed request/token/latency counts. Returns (bucket, points).
+
+        Empty buckets are filled with zeros so a gap in the chart reads as
+        "no traffic" rather than as a missing sample.
+        """
+        await self._flush_all()
+
+        bucket_name = resolve_bucket(start, end, bucket)
+        bucket_s = TIMESERIES_BUCKETS[bucket_name]
+
+        try:
+            session_factory = get_session_factory()
+        except RuntimeError:
+            return bucket_name, []
+
+        R = GatewayRequestRow
+        conditions = self._build_request_conditions(
+            start,
+            end,
+            request_type=request_type,
+            model=model,
+            host_id=host_id,
+            endpoint_id=endpoint_id,
+        )
+
+        # date_trunc only handles calendar units, so floor the epoch instead --
+        # that covers every entry in the ladder with one expression.
+        bucket_expr = sa_func.to_timestamp(
+            sa_func.floor(sa_func.extract("epoch", R.end_timestamp) / bucket_s)
+            * bucket_s
+        )
+
+        stmt = (
+            select(
+                bucket_expr.label("ts"),
+                sa_func.count().filter(R.status == "success").label("success"),
+                sa_func.count().filter(R.status == "error").label("error"),
+                sa_func.count().filter(R.status == "missed").label("missed"),
+                sa_func.coalesce(
+                    sa_func.sum(R.prompt_tokens).filter(R.status == "success"), 0
+                ).label("token_in"),
+                sa_func.coalesce(
+                    sa_func.sum(R.completion_tokens).filter(R.status == "success"), 0
+                ).label("token_out"),
+                sa_func.avg(R.duration_s)
+                .filter(R.status == "success")
+                .label("avg_duration_s"),
+            )
+            .where(and_(*conditions))
+            .group_by(bucket_expr)
+            .order_by(bucket_expr)
+        )
+
+        async with session_factory() as session:
+            rows = (await session.execute(stmt)).all()
+
+        aggregates = {
+            int(r.ts.timestamp()): {
+                "success": r.success,
+                "error": r.error,
+                "missed": r.missed,
+                "token_in": int(r.token_in),
+                "token_out": int(r.token_out),
+                "avg_duration_s": (
+                    float(r.avg_duration_s) if r.avg_duration_s is not None else None
+                ),
+            }
+            for r in rows
+        }
+
+        return bucket_name, fill_buckets(start, end, bucket_s, aggregates)
 
     async def read_events(
         self,

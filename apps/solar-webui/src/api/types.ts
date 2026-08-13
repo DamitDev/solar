@@ -384,6 +384,29 @@ export interface GatewayStats {
   }>;
 }
 
+/** One bucket of the gateway time series. Empty buckets are zero-filled by
+ *  the API, so a flat stretch means no traffic rather than a missing sample. */
+export interface GatewayTimeseriesPoint {
+  ts: string;
+  success: number;
+  error: number;
+  missed: number;
+  token_in: number;
+  token_out: number;
+  /** Null when the bucket had no successful request to measure. */
+  avg_duration_s: number | null;
+}
+
+export type GatewayBucket = '1m' | '5m' | '15m' | '1h' | '6h' | '1d' | '7d';
+
+export interface GatewayTimeseries {
+  from: string;
+  to: string;
+  /** The bucket the server actually used — 'auto' resolves to one of these. */
+  bucket: GatewayBucket;
+  points: GatewayTimeseriesPoint[];
+}
+
 export interface GatewayRequestSummary {
   request_id: string;
   request_type?: string; // chat, completion, embedding, classification, etc.
