@@ -6,7 +6,7 @@
 | Status      | Draft                          |
 | Created     | 2026-08-04                     |
 | Depends on  | S-037, S-038, S-041            |
-| Depended by | U-005                          |
+| Depended by | U-005, S-057                   |
 
 ## 1. Overview
 
@@ -85,14 +85,14 @@ The reconciler already enumerates the managed instances of each intent and the h
 
 | Observed | Action | Rationale |
 |----------|--------|-----------|
-| Managed replica **running** on a draining host | `evacuate` — migrate to the best remaining placement candidate via S-037, then delete the source | Preserves the replica; the alias keeps serving from the target. |
+| Managed replica **running** on a draining host | `evacuate` — create and start the replacement on the best remaining placement candidate, wait for log-gated readiness, then stop and delete the source | Preserves the replica; the alias keeps serving from the target. |
 | Managed replica **not running** (`failed`/`stopped`/`error`) on a draining host | `stop` (stop and delete) instead of the usual `recreate` | `recreate` restarts it on the same host, which fights the drain. Deleting it drops `observed_replicas`, and the next tick's `create` places a fresh replica elsewhere, because placement now excludes this host. |
 
 A replica that is already being replaced for drift (`replace`, or an in-flight strategy step) is left to that path: the rollout stops the old replica and places its replacement through placement, which excludes the draining host, so the drain progresses without a second mechanism acting on the same instance. It also means **an in-flight rollout finishes before evacuation starts** for that intent, which is intentional — two concurrent replacement mechanisms on one alias is how you get a capacity dip.
 
 `evacuate` targets the intent's existing placement candidates, so the target satisfies the intent's own roles, GPU type, allow/deny lists, resource hints, and the one-replica-per-host rule. Evacuation passes `allow_production = true` to the migration: the S-037 production safeguard exists to stop *automated* flows from moving production replicas casually, and an operator's drain request is exactly the explicit policy decision the safeguard asks for.
 
-Evacuation **deletes the source instance** once the migration completes, which is where it departs from S-037. A migration leaves the source stopped and disowned so an operator can inspect or restart it after a one-off move (D-017); a drain cannot afford that, because the leftover still carries the alias in the host's instance list. Placement would then exclude this host for that intent (§8.4 `exclude_alias`), so the replica could never come back, a later drain of its new host would stall with "no existing replica", and the intent would report a permanent manual-instance conflict. The host a drain empties has to be genuinely empty.
+Evacuation **creates and starts the replacement before touching the source**, and **deletes the source instance** once the target is running — two departures from S-037. `execute_migration` is stop-before-create and leaves the source stopped and disowned so an operator can inspect or restart it after a one-off move (D-017); a drain can afford neither. Stopping first would cost serving capacity (the target is created in `STOPPED` state and only serves after its start completes), and a leftover source still carries the alias in the host's instance list. Placement would then exclude this host for that intent (§8.4 `exclude_alias`), so the replica could never come back, a later drain of its new host would stall with "no existing replica", and the intent would report a permanent manual-instance conflict. The host a drain empties has to be genuinely empty, and the source is deleted rather than disowned precisely so a failed delete stays visible to the reconciler and is retried by the next tick.
 
 Evacuation is a normal reconciler action: one per tick, subject to the per-intent Redis lock, and re-derived from observed state on every pass. Nothing about a drain is held in memory.
 

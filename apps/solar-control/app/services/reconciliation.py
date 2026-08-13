@@ -1939,7 +1939,7 @@ class Reconciler:
             if not action.instance_id or not action.host_id:
                 return None
             from app.services import drain as drain_service
-            from app.services.migration import execute_migration
+            from app.services.migration import execute_evacuation
 
             if not action.target_host_id:
                 # Nowhere to go: the replica keeps serving and the drain stays
@@ -1966,21 +1966,19 @@ class Reconciler:
                 action.target_host_name or action.target_host_id,
             )
             # Hold the intent's estimated VRAM on the target while the
-            # migration's pull + start run there.
+            # pull + start run there. The source keeps serving during the
+            # overlap, so the reservation covers the whole window.
             if action.target_host_id:
                 await self._reserve_cold_start(intent, action.target_host_id)
-            # Leave this intent alone while the migration disowns the source
-            # and brings the target up — otherwise the next diff sees neither
-            # and races a duplicate CREATE.
+            # Leave this intent alone while the evacuation brings the
+            # target up and retires the source — otherwise the next diff
+            # sees the two-replica overlap and acts on it (D-017 pattern).
             self._settle_until[intent.id] = time.monotonic() + _MIGRATE_SETTLE_S
             try:
-                result = await execute_migration(
+                result = await execute_evacuation(
                     instance_id=action.instance_id,
                     source_host_id=action.host_id,
                     target_host_id=action.target_host_id,
-                    # An operator's drain request is the explicit policy
-                    # decision the S-037 production safeguard asks for.
-                    allow_production=True,
                 )
             except Exception:
                 logger.exception(
@@ -1989,26 +1987,21 @@ class Reconciler:
                     action.host_id,
                     action.target_host_id,
                 )
-                raise
-            if result.status != "completed":
-                message = result.error or "migration did not complete"
                 await drain_service.record_stall(
-                    action.host_id, action.instance_id, f"Migration failed: {message}"
+                    action.host_id,
+                    action.instance_id,
+                    "Evacuation raised an unexpected error",
                 )
-                raise RuntimeError(f"Evacuation failed: {message}")
+                # No raise: a stalled drain re-evaluates every tick (§4.3)
+                # and must not accumulate exponential backoff.
+                return None
+            if result.status != "completed":
+                message = result.error or "evacuation did not complete"
+                await drain_service.record_stall(
+                    action.host_id, action.instance_id, f"Evacuation failed: {message}"
+                )
+                return None
             await drain_service.clear_stall(action.host_id, action.instance_id)
-
-            # S-037 leaves the source stopped and disowned, which is right for
-            # an operator's one-off move but wrong for a drain: the leftover
-            # still serves the alias in the host's instance list, so placement
-            # excludes this host for the intent from then on (exclude_alias).
-            # The replica could never come back, a later drain of its new host
-            # would stall with "no existing replica of <alias>", and the intent
-            # would carry a permanent ManualInstanceConflict condition. The
-            # drain contract is that the host ends up empty, so remove it.
-            source_host = await host_db.get_host(action.host_id)
-            if source_host is not None:
-                await self._delete_instance(source_host, action.instance_id)
 
             return {"migration_id": result.migration_id, "status": result.status}
 

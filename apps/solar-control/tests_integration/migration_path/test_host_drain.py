@@ -11,6 +11,7 @@ Specification: training-platform-project/docs/specs/host-draining.md
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import pytest
@@ -53,11 +54,41 @@ async def _other_host_id(http_control, host_id: str) -> str:
     return next(h["id"] for h in hosts if h["id"] != host_id)
 
 
+async def _sample_alias_running(
+    http_control, host_ids: list[str], alias: str, stop: asyncio.Event
+) -> list[int]:
+    """Record how many instances serve *alias* across *host_ids* until
+    *stop* is set; return the per-sample running counts.
+
+    S-057 continuity check: a drain must never reduce serving capacity,
+    so no sample may read zero running instances.
+    """
+    counts: list[int] = []
+    while not stop.is_set():
+        running = 0
+        for host_id in host_ids:
+            resp = await http_control.get(f"/api/hosts/{host_id}/instances")
+            if resp.status_code == 200:
+                for i in resp.json():
+                    cfg = i.get("config") or {}
+                    inst_alias = cfg.get("alias") or i.get("alias")
+                    if inst_alias == alias and i.get("status") == "running":
+                        running += 1
+        counts.append(running)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=0.25)
+        except asyncio.TimeoutError:
+            pass
+    return counts
+
+
 async def test_drain_evacuates_replica_and_completes(http_control, stack, clean_state):
     """Drain -> replica migrated to the other host, host reaches drained.
 
-    The replica is the intent's only one, so this also proves the drain does
-    not cost serving capacity: the intent is ready again on the target.
+    The replica is the intent's only one, so this also proves the drain
+    does not cost serving capacity: the alias keeps at least one running
+    instance at every sampled point of the evacuation (S-057
+    create-then-stop), and the intent is ready again on the target.
     """
     alias = f"drain-{uuid.uuid4().hex[:8]}"
     intent = await create_intent(http_control, alias=alias)
@@ -65,6 +96,18 @@ async def test_drain_evacuates_replica_and_completes(http_control, stack, clean_
     source_host_id = ready["status"]["replica_set"][0]["host_id"]
     source_instance_id = ready["status"]["replica_set"][0]["instance_id"]
     target_host_id = await _other_host_id(http_control, source_host_id)
+
+    # S-057: sample the alias's running count across the fleet while the
+    # drain runs. A drain must never reduce serving capacity — the alias
+    # has to keep at least one running instance at every sample point.
+    # (The pre-fix implementation stopped the source before the target
+    # was up; the gap is exactly what these samples catch.)
+    stop_sampling = asyncio.Event()
+    sampler = asyncio.create_task(
+        _sample_alias_running(
+            http_control, [source_host_id, target_host_id], alias, stop_sampling
+        )
+    )
 
     resp = await http_control.post(f"/api/hosts/{source_host_id}/drain")
     assert resp.status_code == 202, resp.text
@@ -97,6 +140,15 @@ async def test_drain_evacuates_replica_and_completes(http_control, stack, clean_
             f"replica never left the draining host; drain={status} "
             f"intent={state}\n{stack.tail()}"
         ) from exc
+    finally:
+        stop_sampling.set()
+        continuity = await sampler
+
+    # The alias kept serving at every sampled point: the drain never cost
+    # serving capacity (S-057 — create-then-stop evacuation).
+    assert all(
+        c >= 1 for c in continuity
+    ), f"alias '{alias}' had zero running instances during the drain: {continuity}"
 
     # The sweep promotes the emptied host once nothing managed remains.
     await wait_for(
@@ -122,7 +174,11 @@ async def test_drain_evacuates_replica_and_completes(http_control, stack, clean_
     # intent and the replica could never come back.
     resp = await http_control.get(f"/api/hosts/{source_host_id}/instances")
     assert resp.status_code == 200, resp.text
-    left_behind = [i for i in resp.json() if i.get("alias") == alias]
+    left_behind = [
+        i
+        for i in resp.json()
+        if ((i.get("config") or {}).get("alias") or i.get("alias")) == alias
+    ]
     assert left_behind == [], f"drain left instances behind: {left_behind}"
 
     # Back to service: the drain state clears and placement may use it again.

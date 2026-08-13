@@ -1627,7 +1627,8 @@ class TestCreateThatCannotStart:
 
 
 class TestActEvacuate:
-    """_act EVACUATE: drain evacuation must leave the source host empty."""
+    """_act EVACUATE: drain evacuation runs create-then-stop and leaves
+    the source host empty (S-043 §4.2, S-057)."""
 
     def _action(self, target_host_id: str | None = "h2") -> Action:
         return Action(
@@ -1643,38 +1644,32 @@ class TestActEvacuate:
         )
 
     @pytest.mark.anyio
-    async def test_deletes_the_disowned_source_instance(self):
-        """S-037 leaves the source stopped; a drain must remove it.
-
-        The leftover keeps serving the alias in the host's instance list, so
-        placement would exclude this host for the intent from then on — the
-        replica could never return and the next drain would stall on it.
-        """
+    async def test_delegates_to_execute_evacuation_and_clears_stall(self):
+        """The executor delegates to execute_evacuation (create-then-stop);
+        the source deletion happens inside it, not here."""
         reconciler = Reconciler()
-        host = _HostStub(id="h1", name="h1")
         migration = SimpleNamespace(
             migration_id="mig-1", status="completed", error=None
         )
 
         with (
-            patch("app.database.hosts.host_db") as mock_db,
             patch(
-                "app.services.migration.execute_migration",
+                "app.services.migration.execute_evacuation",
                 new=AsyncMock(return_value=migration),
-            ) as mock_migrate,
+            ) as mock_evacuate,
             patch("app.services.drain.clear_stall", new=AsyncMock()) as mock_clear,
             patch("app.services.drain.record_stall", new=AsyncMock()) as mock_stall,
             patch.object(
                 reconciler, "_delete_instance", new=AsyncMock()
             ) as mock_delete,
         ):
-            mock_db.get_host = AsyncMock(return_value=host)
-
             result = await reconciler._act(_make_intent(), self._action())
 
         assert result == {"migration_id": "mig-1", "status": "completed"}
-        assert mock_migrate.await_args.kwargs["target_host_id"] == "h2"
-        mock_delete.assert_awaited_once_with(host, "inst-1")
+        assert mock_evacuate.await_args.kwargs["target_host_id"] == "h2"
+        assert mock_evacuate.await_args.kwargs["source_host_id"] == "h1"
+        # execute_evacuation stops and deletes the source itself.
+        mock_delete.assert_not_called()
         mock_clear.assert_awaited_once_with("h1", "inst-1")
         mock_stall.assert_not_called()
 
@@ -1684,37 +1679,36 @@ class TestActEvacuate:
         reconciler = Reconciler()
 
         with (
-            patch("app.database.hosts.host_db") as mock_db,
             patch(
-                "app.services.migration.execute_migration", new=AsyncMock()
-            ) as mock_migrate,
+                "app.services.migration.execute_evacuation", new=AsyncMock()
+            ) as mock_evacuate,
             patch("app.services.drain.record_stall", new=AsyncMock()) as mock_stall,
             patch.object(
                 reconciler, "_delete_instance", new=AsyncMock()
             ) as mock_delete,
         ):
-            mock_db.get_host = AsyncMock(return_value=_HostStub(id="h1"))
-
             result = await reconciler._act(
                 _make_intent(), self._action(target_host_id=None)
             )
 
         assert result is None
-        mock_migrate.assert_not_called()
+        mock_evacuate.assert_not_called()
         mock_delete.assert_not_called()
         mock_stall.assert_awaited_once()
 
     @pytest.mark.anyio
-    async def test_incomplete_migration_stalls_and_keeps_the_source(self):
+    async def test_incomplete_evacuation_stalls_without_raising_or_backoff(self):
+        """A failed evacuation is a stall, not an error: it re-evaluates
+        every tick (§4.3) and must not accumulate exponential backoff."""
         reconciler = Reconciler()
         migration = SimpleNamespace(
             migration_id="mig-1", status="failed", error="pull failed"
         )
+        intent = _make_intent()
 
         with (
-            patch("app.database.hosts.host_db") as mock_db,
             patch(
-                "app.services.migration.execute_migration",
+                "app.services.migration.execute_evacuation",
                 new=AsyncMock(return_value=migration),
             ),
             patch("app.services.drain.record_stall", new=AsyncMock()) as mock_stall,
@@ -1722,13 +1716,38 @@ class TestActEvacuate:
                 reconciler, "_delete_instance", new=AsyncMock()
             ) as mock_delete,
         ):
-            mock_db.get_host = AsyncMock(return_value=_HostStub(id="h1"))
+            result = await reconciler._act(intent, self._action())
 
-            with pytest.raises(RuntimeError, match="pull failed"):
-                await reconciler._act(_make_intent(), self._action())
-
+        assert result is None
         mock_delete.assert_not_called()
-        assert "pull failed" in mock_stall.await_args.args[2]
+        assert "Evacuation failed: pull failed" in mock_stall.await_args.args[2]
+        assert reconciler._backoff_active(intent.id) is False
+
+    @pytest.mark.anyio
+    async def test_unexpected_exception_stalls_without_raising(self):
+        """Even an unexpected exception records a stall and returns; the
+        drain re-evaluates next tick instead of backing off."""
+        reconciler = Reconciler()
+        intent = _make_intent()
+
+        with (
+            patch(
+                "app.services.migration.execute_evacuation",
+                new=AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+            patch("app.services.drain.record_stall", new=AsyncMock()) as mock_stall,
+            patch.object(
+                reconciler, "_delete_instance", new=AsyncMock()
+            ) as mock_delete,
+        ):
+            result = await reconciler._act(intent, self._action())
+
+        assert result is None
+        mock_delete.assert_not_called()
+        mock_stall.assert_awaited_once_with(
+            "h1", "inst-1", "Evacuation raised an unexpected error"
+        )
+        assert reconciler._backoff_active(intent.id) is False
 
 
 class TestUpdateStatusConditions:
