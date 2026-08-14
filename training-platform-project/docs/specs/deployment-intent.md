@@ -235,13 +235,14 @@ The S-040 API must reject invalid intents with `400`/`422` (Section 12.5):
 - `replicas >= 0`.
 - `priority` ∈ {`production`, `staging`, `ephemeral`}.
 - `strategy` ∈ {`rolling`, `immediate`}.
-- `backend.backend_type` ∈ the supported backend types (`llamacpp`, `huggingface_causal`, `huggingface_classification`, `huggingface_embedding`, `huggingface_vision`).
-- `backend` must not contain `alias`, `model_source`, `host`, `port`, or `api_key` (these are server-derived).
+- `backend.backend_type` ∈ the supported backend types (`llamacpp`, `huggingface_causal`, `huggingface_classification`, `huggingface_embedding`, `huggingface_vision`, `sglang`).
+- `backend` must not contain `alias`, `model_source`, `host`, `port`, `api_key`, or `model_path` (these are server-derived).
 - `backend.model_file` (if set) requires `backend_type == "llamacpp"` and must be a non-empty string.
 - `backend.file_filters` (if set) must be a list of non-empty patterns, and a non-empty list requires a `huggingface://` `model_source`.
 - `backend.spec_type` (if set) requires `backend_type == "llamacpp"` and must be `draft-mtp` or `draft-dspark`.
 - `backend.spec_draft_model` is required by `spec_type == "draft-dspark"` and rejected for every other type; `backend.spec_draft_conf_min` is `draft-dspark`-only and must be between 0 and 1.
 - `placement.roles` non-empty; `gpu_type` (if set) is a known type.
+- `backend_type == "sglang"` requires `placement.gpu_type == "nvidia_cuda"`; an unset value is pinned to it on save and any other accelerator is a 422 (Section 4.7.5).
 
 #### 4.7.1 Accelerator vocabulary and field ownership (S-052)
 
@@ -338,6 +339,34 @@ Resolution happens on Solar Host, which owns the filesystem — see [model-sourc
 
 A DSpark drafter is trained for one specific target model, so it lives beside the model it drafts for — which means the download filters have to let it through as well.
 
+#### 4.7.5 SGLang backend
+
+`sglang` serves generation models through `sglang serve` and has no model-type variants, so `backend_type: "sglang"` is the whole selection. It differs from the other backends in three ways:
+
+- **CUDA-only placement.** SGLang's kernels require NVIDIA hardware, so `placement.gpu_type` is pinned to `nvidia_cuda` when unset and a contradiction is a 422. Solar Host advertises `sglang` in its `supported_backends` only on an NVIDIA host where the executable resolves, and placement drops hosts that advertise a list without it — a host that advertises nothing is treated as having no opinion, so an un-upgraded fleet keeps working.
+- **`model_path`, not `model`/`model_id`.** The resolver hands SGLang the model *directory*, written into `backend.model_path` per host. Like `model`/`model_id` it is server-derived and rejected inside an intent's `backend`.
+- **Typed fields plus escape hatches.** The common knobs (`tp_size`, `dp_size`, `context_length`, `mem_fraction_static`, `chunked_prefill_size`, `max_running_requests`, `cuda_graph_max_bs`, `cuda_graph_max_bs_decode`, `swa_full_tokens_ratio`, `dtype`, `quantization`, `kv_cache_dtype`, `moe_runner_backend`, `speculative_algorithm`, `trust_remote_code`, and the `hicache_*` cache settings) each map to one CLI flag. `extra_args` (argv entries) and `extra_env` (environment variables) carry everything else, because SGLang's flag surface moves faster than this contract. `extra_args` is appended last, so an entry there overrides the typed flag above it, and it may not set `--host`, `--port`, `--api-key`, `--model-path` or `--served-model-name` — those are host-derived, and overriding them would break routing or auth.
+
+```json
+{
+  "alias": "deepseek-v4:flash",
+  "model_source": "repo://deepseek-v4:flash",
+  "backend": {
+    "backend_type": "sglang",
+    "tp_size": 8,
+    "mem_fraction_static": 0.85,
+    "kv_cache_dtype": "fp8_e4m3",
+    "enable_hierarchical_cache": true,
+    "hicache_ratio": 30,
+    "hicache_storage_backend": "file",
+    "extra_env": { "SGLANG_DSV4_COMPRESS_STATE_DTYPE": "bf16" }
+  },
+  "placement": { "gpu_type": "nvidia_cuda" }
+}
+```
+
+The file-backed prompt cache directory is host configuration (`SGLANG_PROMPT_CACHE_DIR`), not part of the intent: Solar Host gives each instance its own subdirectory under it and drops the `--hicache-storage-*` flags when the root is unset. `hicache_storage_backend_extra_config` is canonicalized at the API boundary like `chat_template_kwargs` (Section 8.2.1), so reformatting the JSON is not drift.
+
 ---
 
 ## 5. Ownership Model
@@ -391,6 +420,7 @@ The reconciler composes a concrete Solar Host `InstanceConfig` for each replica 
 | `backend_type` | `intent.backend.backend_type` |
 | `alias` | `intent.alias` |
 | `model_source` | `intent.model_source` (resolved per Section 9 before instance creation) |
+| `model` / `model_id` / `model_path` | the resolved local path, written into the field the backend reads: `model` for `llamacpp`, `model_id` for the HuggingFace backends, `model_path` for `sglang` |
 | `priority` | `intent.priority` (S-036) |
 | `managed_by` | `"intent"` (Section 5) |
 | `intent_id` | `intent.id` |
@@ -401,7 +431,7 @@ The reconciler composes a concrete Solar Host `InstanceConfig` for each replica 
 
 Notes:
 
-- Intents use `model_source` **exclusively**. The legacy raw `model` / `model_id` path fields are not part of the intent contract (they remain for manual/backward-compatible flows only). `backend.model_file` is the intent-level way to pick a file inside the resolved source (Section 4.7.3).
+- Intents use `model_source` **exclusively**. The legacy raw `model` / `model_id` / `model_path` fields are not part of the intent contract (they remain for manual/backward-compatible flows only). `backend.model_file` is the intent-level way to pick a file inside the resolved source (Section 4.7.3).
 - The `backend` template is validated against the matching backend config model at submit time (best-effort) and again when the instance is created on the host (authoritative).
 - Backend-specific required fields (e.g. `model_type` for llama.cpp embedding vs. reranker) travel inside `backend`. The intent layer does not enumerate them; it defers to the existing per-backend config models.
 

@@ -22,6 +22,15 @@ from app.validation import normalize_gpu_type
 logger = logging.getLogger(__name__)
 
 
+def _backend_type(data: dict[str, Any]) -> str | None:
+    """The payload's ``backend.backend_type``, or None when it is not set."""
+    backend = data.get("backend")
+    if not isinstance(backend, dict):
+        return None
+    backend_type = backend.get("backend_type")
+    return backend_type if isinstance(backend_type, str) and backend_type else None
+
+
 async def _fleet_state(
     data: dict[str, Any],
     hosts: list[Any],
@@ -49,6 +58,7 @@ async def _fleet_state(
     roles = list(placement.get("roles") or ["inference"])
     host_allow = list(placement.get("host_allow") or []) or None
     host_deny = list(placement.get("host_deny") or []) or None
+    backend_type = _backend_type(data)
 
     snapshots = {
         s.host_id: s
@@ -62,6 +72,7 @@ async def _fleet_state(
         gpu_type=gpu_type,
         host_allow=host_allow,
         host_deny=host_deny,
+        backend_type=backend_type,
     )
     candidates = await find_candidates(
         hosts,
@@ -70,6 +81,7 @@ async def _fleet_state(
         gpu_type=gpu_type,
         host_allow=host_allow,
         host_deny=host_deny,
+        backend_type=backend_type,
         vram_gb=float(resources.get("vram_gb") or 0),
         ram_gb=(
             float(resources["ram_gb"]) if resources.get("ram_gb") is not None else None
@@ -254,11 +266,14 @@ async def validate_intent_fleet(
             )
 
     # a valid gpu_type that no connected host currently reports
-    if gpu_type:
+    connected_ids: set[str] = set()
+    if gpu_type or _backend_type(data):
         try:
             connected_ids = set(await host_store.get_connected_host_ids())
         except Exception:  # noqa: BLE001
             connected_ids = set()
+
+    if gpu_type:
         reported = {h.gpu_type for h in hosts if h.id in connected_ids}
         if gpu_type not in reported:
             warnings.append(
@@ -266,6 +281,28 @@ async def validate_intent_fleet(
                     "field": "placement.gpu_type",
                     "message": (
                         f"gpu_type '{gpu_type}' is not reported by any "
+                        "currently connected host"
+                    ),
+                }
+            )
+
+    # a backend no connected host advertises (SGLang is a separate install, so
+    # this is the common way an otherwise valid intent stays unplaced). Hosts
+    # that advertise nothing are skipped: their silence is not a denial.
+    backend_type = _backend_type(data)
+    if backend_type:
+        advertised = {
+            backend
+            for h in hosts
+            if h.id in connected_ids
+            for backend in (h.supported_backends or [])
+        }
+        if advertised and backend_type not in advertised:
+            warnings.append(
+                {
+                    "field": "backend.backend_type",
+                    "message": (
+                        f"backend '{backend_type}' is not supported by any "
                         "currently connected host"
                     ),
                 }

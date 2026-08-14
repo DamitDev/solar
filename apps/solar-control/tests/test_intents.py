@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
 
 from app.models.intent import (
     IntentCreate,
@@ -1574,10 +1575,183 @@ class TestFieldOwnership:
         assert BACKEND_FIELD_OWNERS["huggingface_embedding"] == {"normalize_embeddings"}
         assert BACKEND_FIELD_OWNERS["huggingface_causal"] == {"use_flash_attention"}
         assert BACKEND_FIELD_OWNERS["huggingface_vision"] == {"use_flash_attention"}
+        assert BACKEND_FIELD_OWNERS["sglang"] == {
+            # Shared with huggingface — ownership is many-to-many.
+            "dtype",
+            "trust_remote_code",
+            "tp_size",
+            "dp_size",
+            "context_length",
+            "mem_fraction_static",
+            "chunked_prefill_size",
+            "max_running_requests",
+            "cuda_graph_max_bs",
+            "cuda_graph_max_bs_decode",
+            "swa_full_tokens_ratio",
+            "quantization",
+            "kv_cache_dtype",
+            "moe_runner_backend",
+            "speculative_algorithm",
+            "enable_hierarchical_cache",
+            "hicache_ratio",
+            "hicache_mem_layout",
+            "hicache_io_backend",
+            "hicache_storage_backend",
+            "hicache_storage_backend_extra_config",
+            "hicache_storage_prefetch_policy",
+            "extra_args",
+            "extra_env",
+        }
         # Shared fields belong to no single owner.
         for owner in BACKEND_FIELD_OWNERS.values():
             assert "file_filters" not in owner
             assert "backend_type" not in owner
+
+
+class TestSglangContract:
+    """The SGLang backend's own rules (NVIDIA-only, escape hatches)."""
+
+    @staticmethod
+    def _intent(**backend_overrides):
+        return {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": {"backend_type": "sglang", **backend_overrides},
+        }
+
+    def test_a_minimal_sglang_intent_is_accepted(self):
+        assert validate_intent_create(self._intent(tp_size=8)) == []
+
+    def test_gpu_type_is_pinned_to_nvidia_when_left_open(self):
+        data = self._intent()
+
+        assert validate_intent_create(data) == []
+        assert data["placement"]["gpu_type"] == "nvidia_cuda"
+
+    def test_a_contradicting_gpu_type_is_rejected(self):
+        data = self._intent()
+        data["placement"] = {"gpu_type": "apple_mps"}
+
+        errors = validate_intent_create(data)
+
+        assert any(
+            e["field"] == "placement.gpu_type"
+            and "nvidia_cuda" in e["message"]
+            and "apple_mps" in e["message"]
+            for e in errors
+        )
+
+    def test_model_path_inside_backend_is_rejected(self):
+        """It is resolved from model_source, per host."""
+        errors = validate_intent_create(self._intent(model_path="/models/x"))
+
+        assert any(
+            e["field"] == "backend.model_path" and "server-derived" in e["message"]
+            for e in errors
+        )
+
+    def test_an_sglang_field_on_a_llamacpp_intent_is_rejected(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(model_file="m.gguf", tp_size=8),
+        }
+
+        errors = validate_intent_create(data)
+
+        assert any(
+            e["field"] == "backend.tp_size" and "sglang" in e["message"] for e in errors
+        )
+
+    def test_extra_args_must_be_non_empty_strings(self):
+        errors = validate_intent_create(self._intent(extra_args=["--fine", ""]))
+
+        assert any(e["field"] == "backend.extra_args" for e in errors)
+
+    def test_extra_args_reject_host_managed_flags(self):
+        for arg in ("--port", "--api-key=leaked", "--served-model-name"):
+            errors = validate_intent_create(self._intent(extra_args=[arg]))
+            assert any(
+                e["field"] == "backend.extra_args"
+                and "managed by solar-host" in e["message"]
+                for e in errors
+            ), arg
+
+    def test_extra_args_pass_through_when_they_are_not_reserved(self):
+        assert (
+            validate_intent_create(
+                self._intent(extra_args=["--dist-init-addr", "10.0.0.1:5000"])
+            )
+            == []
+        )
+
+    def test_extra_env_must_be_a_flat_string_map(self):
+        errors = validate_intent_create(self._intent(extra_env=["A=1"]))
+
+        assert any(e["field"] == "backend.extra_env" for e in errors)
+
+    def test_hicache_extra_config_is_canonicalized_for_drift_detection(self):
+        backend = {
+            "backend_type": "sglang",
+            "hicache_storage_backend_extra_config": '{ "max_size": "256G", "eviction_ratio": 0.9 }',
+        }
+
+        canonicalize_intent_backend(backend)
+
+        assert (
+            backend["hicache_storage_backend_extra_config"]
+            == '{"max_size":"256G","eviction_ratio":0.9}'
+        )
+
+
+class TestManualInstanceBackendSupport:
+    """Manual creation names its host, so placement never vets the fit."""
+
+    @staticmethod
+    def _host(gpu_type="nvidia_cuda", supported_backends=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            name="h1", gpu_type=gpu_type, supported_backends=supported_backends
+        )
+
+    def test_sglang_on_an_nvidia_host_that_advertises_it_is_allowed(self):
+        from app.validation import validate_host_supports_backend
+
+        validate_host_supports_backend(
+            self._host(supported_backends=["llamacpp", "sglang"]), "sglang"
+        )
+
+    def test_sglang_on_a_non_nvidia_host_is_rejected(self):
+        from app.validation import validate_host_supports_backend
+
+        with pytest.raises(HTTPException) as exc:
+            validate_host_supports_backend(
+                self._host(gpu_type="apple_mps", supported_backends=["sglang"]),
+                "sglang",
+            )
+
+        assert exc.value.status_code == 422
+        assert "NVIDIA" in exc.value.detail
+
+    def test_a_backend_the_host_does_not_advertise_is_rejected(self):
+        from app.validation import validate_host_supports_backend
+
+        with pytest.raises(HTTPException) as exc:
+            validate_host_supports_backend(
+                self._host(supported_backends=["llamacpp"]), "sglang"
+            )
+
+        assert exc.value.status_code == 422
+        assert "does not support" in exc.value.detail
+
+    def test_a_host_advertising_nothing_is_not_second_guessed(self):
+        """A host predating advertisement says nothing; only the accelerator
+        contract applies, so upgrading control alone cannot break creation."""
+        from app.validation import validate_host_supports_backend
+
+        validate_host_supports_backend(self._host(supported_backends=None), "sglang")
+        validate_host_supports_backend(self._host(supported_backends=[]), "llamacpp")
 
 
 class TestDeviceContract:

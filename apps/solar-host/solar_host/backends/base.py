@@ -83,6 +83,21 @@ class BackendRunner(ABC):
             The backend type string (e.g., "llamacpp", "huggingface_causal").
         """
 
+    def build_env(self, instance: Any) -> dict[str, str]:
+        """Extra environment variables for the backend process.
+
+        Merged over the inherited environment at spawn time. Override for
+        backends configured through the environment rather than argv (e.g.
+        SGLang's venv activation and prompt cache directory).
+
+        Args:
+            instance: The Instance object containing config and runtime info.
+
+        Returns:
+            Mapping of variable name to value; empty by default.
+        """
+        return {}
+
     def initialize_context(self) -> dict[str, Any]:
         """Initialize the parsing context for a new instance.
 

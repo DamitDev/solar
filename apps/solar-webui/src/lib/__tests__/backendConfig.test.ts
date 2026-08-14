@@ -4,8 +4,12 @@ import {
   DTYPE_OPTIONS,
   SPLIT_MODE_OPTIONS,
   applySpecType,
+  formatExtraArgs,
+  formatExtraEnv,
   getBackendTypeFromSelection,
   getDefaultConfig,
+  parseExtraArgs,
+  parseExtraEnv,
   stripEmptyOptionalFields,
 } from '@/lib/backendConfig';
 
@@ -23,6 +27,11 @@ describe('getBackendTypeFromSelection', () => {
 
   it('defaults unknown huggingface modes to causal', () => {
     expect(getBackendTypeFromSelection('huggingface', 'quantum')).toBe('huggingface_causal');
+  });
+
+  it('maps sglang to sglang, which has no modes', () => {
+    expect(getBackendTypeFromSelection('sglang', '')).toBe('sglang');
+    expect(getBackendTypeFromSelection('sglang', 'causal')).toBe('sglang');
   });
 });
 
@@ -59,6 +68,22 @@ describe('getDefaultConfig', () => {
   it('returns the huggingface shape for huggingface backends', () => {
     const cfg = getDefaultConfig('huggingface', 'classifier', true);
     expect(cfg.backend_type).toBe('huggingface_classification');
+  });
+
+  it('asks an sglang instance for a model path, and an intent for none', () => {
+    expect(getDefaultConfig('sglang', '').model_path).toBe('');
+    expect(getDefaultConfig('sglang', '', true).model_path).toBeUndefined();
+    expect(getDefaultConfig('sglang', '', true).backend_type).toBe('sglang');
+  });
+
+  it('leaves the sglang flags it does not seed empty so SGLang keeps its defaults', () => {
+    const cfg = getDefaultConfig('sglang', '', true);
+    expect(cfg.tp_size).toBe(1);
+    expect(cfg.mem_fraction_static).toBe(0.9);
+    expect(cfg.context_length).toBeUndefined();
+    expect(cfg.quantization).toBe('');
+    expect(cfg.extra_args).toEqual([]);
+    expect(cfg.extra_env).toEqual({});
   });
 });
 
@@ -133,6 +158,36 @@ describe('stripEmptyOptionalFields', () => {
     });
   });
 
+  it('drops the blank sglang flags and keeps the filled ones', () => {
+    expect(
+      stripEmptyOptionalFields({
+        backend_type: 'sglang',
+        quantization: '',
+        kv_cache_dtype: 'fp8_e4m3',
+        hicache_mem_layout: '',
+        hicache_storage_backend: 'file',
+      }),
+    ).toEqual({ backend_type: 'sglang', kv_cache_dtype: 'fp8_e4m3', hicache_storage_backend: 'file' });
+  });
+
+  it("drops an empty sglang dtype but keeps huggingface's 'auto'", () => {
+    expect(stripEmptyOptionalFields({ backend_type: 'sglang', dtype: '' })).toEqual({ backend_type: 'sglang' });
+    expect(stripEmptyOptionalFields({ backend_type: 'huggingface_causal', dtype: 'auto' }).dtype).toBe('auto');
+  });
+
+  it('drops the empty escape hatches so the host sees no override at all', () => {
+    expect(stripEmptyOptionalFields({ backend_type: 'sglang', extra_args: [], extra_env: {} })).toEqual({
+      backend_type: 'sglang',
+    });
+    const kept = stripEmptyOptionalFields({
+      backend_type: 'sglang',
+      extra_args: ['--dist-init-addr', '10.0.0.1:5000'],
+      extra_env: { SGLANG_DSV4_COMPRESS_STATE_DTYPE: 'bf16' },
+    });
+    expect(kept.extra_args).toEqual(['--dist-init-addr', '10.0.0.1:5000']);
+    expect(kept.extra_env).toEqual({ SGLANG_DSV4_COMPRESS_STATE_DTYPE: 'bf16' });
+  });
+
   it('drops speculative decoding for non-generation models', () => {
     expect(
       stripEmptyOptionalFields({
@@ -174,6 +229,40 @@ describe('applySpecType', () => {
     expect(applySpecType({ backend_type: 'llamacpp', spec_type: 'draft-mtp', spec_draft_n_max: 2 }, '')).toEqual({
       backend_type: 'llamacpp',
     });
+  });
+});
+
+describe('sglang extra args and env editors', () => {
+  it('splits a flag and its value into separate argv entries', () => {
+    expect(parseExtraArgs('--dist-init-addr 10.0.0.1:5000\n--enable-metrics')).toEqual([
+      '--dist-init-addr',
+      '10.0.0.1:5000',
+      '--enable-metrics',
+    ]);
+  });
+
+  it('ignores blank lines and stray whitespace', () => {
+    expect(parseExtraArgs('\n  --enable-metrics   \n\n')).toEqual(['--enable-metrics']);
+  });
+
+  it('round-trips an argv list through the textarea form', () => {
+    const args = ['--dist-init-addr', '10.0.0.1:5000'];
+    expect(parseExtraArgs(formatExtraArgs(args))).toEqual(args);
+    expect(formatExtraArgs(undefined)).toBe('');
+  });
+
+  it('parses NAME=value lines and keeps values containing an equals sign', () => {
+    expect(parseExtraEnv('A=1\nB=x=y')).toEqual({ A: '1', B: 'x=y' });
+  });
+
+  it('skips comments, blanks and lines with no name', () => {
+    expect(parseExtraEnv('# a comment\n\n=orphan\nA=1')).toEqual({ A: '1' });
+  });
+
+  it('round-trips an environment map through the textarea form', () => {
+    const env = { SGLANG_DSV4_COMPRESS_STATE_DTYPE: 'bf16', OTHER: '2' };
+    expect(parseExtraEnv(formatExtraEnv(env))).toEqual(env);
+    expect(formatExtraEnv(undefined)).toBe('');
   });
 });
 

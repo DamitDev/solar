@@ -15,7 +15,7 @@
  */
 
 import { useState, type ReactNode } from 'react';
-import { Cpu, Brain } from 'lucide-react';
+import { Cpu, Brain, Zap } from 'lucide-react';
 import {
   PrimaryBackend,
   LlamaCppMode,
@@ -28,6 +28,7 @@ import {
   SPLIT_MODE_OPTIONS,
   getDefaultConfig,
 } from '@/lib/backendConfig';
+import { SglangConfigFields } from './SglangConfigFields';
 import { SpeculativeDecodingFields } from './SpeculativeDecodingFields';
 
 export type { PrimaryBackend, LlamaCppMode, HuggingFaceMode, ModeOption };
@@ -53,11 +54,18 @@ interface BackendConfigFieldsProps {
    * owns the error state, so it supplies the renderer.
    */
   fieldError?: (field: string) => ReactNode;
+  /**
+   * Backends the target host cannot run (SGLang needs an NVIDIA host with
+   * SGLang installed). Rendered disabled with *disabledReason* as the tooltip.
+   */
+  disabledBackends?: PrimaryBackend[];
+  disabledReason?: string;
 }
 
 /** Derive the initial tab/mode selection from an existing backend object. */
 function getInitialSelection(value: Record<string, any>): { primary: PrimaryBackend; mode: string } {
   const backendType = value?.backend_type;
+  if (backendType === 'sglang') return { primary: 'sglang', mode: '' };
   if (backendType === 'huggingface_causal') return { primary: 'huggingface', mode: 'causal' };
   if (backendType === 'huggingface_classification') return { primary: 'huggingface', mode: 'classifier' };
   if (backendType === 'huggingface_embedding') return { primary: 'huggingface', mode: 'embedding' };
@@ -76,6 +84,8 @@ export function BackendConfigFields({
   aliasValue,
   onAliasChange,
   fieldError = () => null,
+  disabledBackends = [],
+  disabledReason,
 }: BackendConfigFieldsProps) {
   const initial = getInitialSelection(value);
   const [primaryBackend, setPrimaryBackend] = useState<PrimaryBackend>(initial.primary);
@@ -120,14 +130,17 @@ export function BackendConfigFields({
     });
   };
 
-  const modeOptions = primaryBackend === 'llamacpp' ? LLAMACPP_MODES : HUGGINGFACE_MODES;
+  // SGLang serves generation models only, so it contributes no mode cards.
+  const modeOptions =
+    primaryBackend === 'sglang' ? [] : primaryBackend === 'llamacpp' ? LLAMACPP_MODES : HUGGINGFACE_MODES;
+  const sglangDisabled = disabledBackends.includes('sglang');
 
   return (
     <div className="space-y-6">
       {/* Step 1: Primary Backend Selection */}
       <div>
         <label className="block text-sm font-medium text-nord-4 mb-3">Backend</label>
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-3 gap-3">
           {/* Llama.cpp */}
           <button
             type="button"
@@ -181,61 +194,107 @@ export function BackendConfigFields({
               </div>
             </div>
           </button>
+
+          {/* SGLang */}
+          <button
+            type="button"
+            onClick={() => handlePrimaryBackendChange('sglang')}
+            disabled={sglangDisabled}
+            title={sglangDisabled ? disabledReason : undefined}
+            className={`p-4 rounded-lg border-2 transition-all text-left ${
+              sglangDisabled
+                ? 'border-nord-3 bg-nord-2 opacity-50 cursor-not-allowed'
+                : primaryBackend === 'sglang'
+                  ? 'border-nord-7 bg-nord-7 bg-opacity-15'
+                  : 'border-nord-3 hover:border-nord-4 bg-nord-2'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <div
+                className={`p-2 rounded-lg ${primaryBackend === 'sglang' ? 'bg-nord-7 bg-opacity-20' : 'bg-nord-3'}`}
+              >
+                <Zap size={24} className={primaryBackend === 'sglang' ? 'text-nord-7' : 'text-nord-4'} />
+              </div>
+              <div>
+                <div
+                  className={`text-base font-semibold ${primaryBackend === 'sglang' ? 'text-nord-7' : 'text-nord-6'}`}
+                >
+                  SGLang
+                </div>
+                <div className="text-xs text-nord-4">
+                  {sglangDisabled ? (disabledReason ?? 'Unavailable') : 'High-throughput CUDA serving'}
+                </div>
+              </div>
+            </div>
+          </button>
         </div>
       </div>
 
-      {/* Step 2: Mode Selection */}
-      <div>
-        <label className="block text-sm font-medium text-nord-4 mb-3">Mode</label>
-        <div className="grid grid-cols-3 gap-3">
-          {modeOptions.map((option) => {
-            const Icon = option.icon;
-            const isSelected = currentMode === option.value;
-            const accentColor = primaryBackend === 'llamacpp' ? 'nord-10' : 'nord-14';
-            return (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => handleModeChange(option.value)}
-                className={`p-3 rounded-lg border-2 transition-all text-center ${
-                  isSelected
-                    ? `border-${accentColor} bg-${accentColor} bg-opacity-10`
-                    : 'border-nord-3 hover:border-nord-4 bg-nord-2'
-                }`}
-                style={
-                  isSelected
-                    ? {
-                        borderColor: primaryBackend === 'llamacpp' ? '#81A1C1' : '#A3BE8C',
-                        backgroundColor:
-                          primaryBackend === 'llamacpp' ? 'rgba(129, 161, 193, 0.1)' : 'rgba(163, 190, 140, 0.1)',
-                      }
-                    : {}
-                }
-              >
-                <Icon
-                  size={22}
-                  className={`mx-auto ${
-                    isSelected ? (primaryBackend === 'llamacpp' ? 'text-nord-10' : 'text-nord-14') : 'text-nord-4'
+      {/* Step 2: Mode Selection — only for backends that serve more than one */}
+      {modeOptions.length > 1 && (
+        <div>
+          <label className="block text-sm font-medium text-nord-4 mb-3">Mode</label>
+          <div className="grid grid-cols-3 gap-3">
+            {modeOptions.map((option) => {
+              const Icon = option.icon;
+              const isSelected = currentMode === option.value;
+              const accentColor = primaryBackend === 'llamacpp' ? 'nord-10' : 'nord-14';
+              return (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => handleModeChange(option.value)}
+                  className={`p-3 rounded-lg border-2 transition-all text-center ${
+                    isSelected
+                      ? `border-${accentColor} bg-${accentColor} bg-opacity-10`
+                      : 'border-nord-3 hover:border-nord-4 bg-nord-2'
                   }`}
-                />
-                <div
-                  className={`mt-2 text-sm font-medium ${
-                    isSelected ? (primaryBackend === 'llamacpp' ? 'text-nord-10' : 'text-nord-14') : 'text-nord-6'
-                  }`}
+                  style={
+                    isSelected
+                      ? {
+                          borderColor: primaryBackend === 'llamacpp' ? '#81A1C1' : '#A3BE8C',
+                          backgroundColor:
+                            primaryBackend === 'llamacpp' ? 'rgba(129, 161, 193, 0.1)' : 'rgba(163, 190, 140, 0.1)',
+                        }
+                      : {}
+                  }
                 >
-                  {option.label}
-                </div>
-                <div className="text-xs text-nord-4 mt-1">{option.description}</div>
-              </button>
-            );
-          })}
+                  <Icon
+                    size={22}
+                    className={`mx-auto ${
+                      isSelected ? (primaryBackend === 'llamacpp' ? 'text-nord-10' : 'text-nord-14') : 'text-nord-4'
+                    }`}
+                  />
+                  <div
+                    className={`mt-2 text-sm font-medium ${
+                      isSelected ? (primaryBackend === 'llamacpp' ? 'text-nord-10' : 'text-nord-14') : 'text-nord-6'
+                    }`}
+                  >
+                    {option.label}
+                  </div>
+                  <div className="text-xs text-nord-4 mt-1">{option.description}</div>
+                </button>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Configuration Fields */}
       <div className="border-t border-nord-3 pt-4">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {primaryBackend === 'llamacpp' ? (
+          {primaryBackend === 'sglang' ? (
+            <SglangConfigFields
+              value={value}
+              onChange={onChange}
+              showAlias={showAlias}
+              showModelFields={showModelFields}
+              aliasValue={aliasValue}
+              onAliasChange={onAliasChange}
+              fieldError={fieldError}
+              idPrefix={forIntent ? 'intent-sglang' : 'add-sglang'}
+            />
+          ) : primaryBackend === 'llamacpp' ? (
             /* llama.cpp specific fields */
             <>
               {/* Model Path */}

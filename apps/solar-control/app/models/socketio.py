@@ -44,6 +44,9 @@ class WSRegistration(BaseModel):
     instances: list[dict[str, Any]] = Field(default_factory=list)
     gpu_type: str | None = None
     roles: list[str] = Field(default_factory=list)
+    # Absent from hosts that predate backend advertisement, which is why the
+    # default is None rather than an empty list.
+    supported_backends: list[str] | None = None
     version: str | None = None
 
 

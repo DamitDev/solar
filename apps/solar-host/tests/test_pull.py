@@ -419,6 +419,21 @@ class TestGgufSelection:
         assert resp.status_code == 200
         assert resp.json()["path"].endswith("repo--iris-osl--v3")
 
+    def test_sglang_keeps_the_directory(self, client: TestClient, _isolated_env: Path):
+        """SGLang serves a model directory, so selection must not fire for it —
+        --model-path pointed at a single file would fail at load."""
+        with patch(
+            "solar_host.models_manager._pull_harbor",
+            side_effect=self._mock_pull_files(
+                {"model.safetensors": b"x" * 1024, "config.json": b"{}"}
+            ),
+        ):
+            body = _harbor_body(backend_type="sglang")
+            resp = client.post("/models/pull", json=body, headers=_headers())
+
+        assert resp.status_code == 200
+        assert resp.json()["path"].endswith("repo--iris-osl--v3")
+
     def test_hf_source_with_llamacpp_keeps_directory(
         self, client: TestClient, _isolated_env: Path
     ):

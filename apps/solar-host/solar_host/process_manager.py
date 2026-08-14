@@ -18,6 +18,7 @@ from typing import Any
 from solar_host.backends.base import BackendRunner
 from solar_host.backends.huggingface import HuggingFaceRunner
 from solar_host.backends.llamacpp import LlamaCppRunner
+from solar_host.backends.sglang import SglangRunner
 from solar_host.config import config_manager, parse_instance_config, settings
 from solar_host.models import (
     BackendType,
@@ -53,6 +54,8 @@ def get_runner_for_config(config) -> BackendRunner:
 
     if backend_type == BackendType.LLAMACPP or backend_type == "llamacpp":
         return LlamaCppRunner()
+    elif backend_type == BackendType.SGLANG or backend_type == "sglang":
+        return SglangRunner()
     elif backend_type in (
         BackendType.HUGGINGFACE_CAUSAL,
         BackendType.HUGGINGFACE_CLASSIFICATION,
@@ -670,6 +673,7 @@ class ProcessManager:
 
             run_env = os.environ.copy()
             run_env["PYTHONUNBUFFERED"] = "1"
+            run_env.update(runner.build_env(instance))
             run_cmd = ["stdbuf", "-oL"] + cmd if _HAS_STDBUF else cmd
 
             process = subprocess.Popen(  # noqa: ASYNC220 — spawn is non-blocking; logs are drained by a dedicated thread (_read_logs), never in the event loop

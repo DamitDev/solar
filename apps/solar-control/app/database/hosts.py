@@ -26,6 +26,10 @@ class HostDB:
         if isinstance(row.roles, list):
             roles = row.roles
 
+        supported_backends: list[str] = []
+        if isinstance(row.supported_backends, list):
+            supported_backends = row.supported_backends
+
         return Host(
             id=row.id,
             name=row.name,
@@ -36,6 +40,7 @@ class HostDB:
             memory=memory,
             gpu_type=row.gpu_type,
             roles=roles,
+            supported_backends=supported_backends,
             disk_total_gb=row.disk_total_gb,
             disk_used_gb=row.disk_used_gb,
             disk_available_gb=row.disk_available_gb,
@@ -57,6 +62,9 @@ class HostDB:
             "memory": host.memory.model_dump() if host.memory else None,
             "gpu_type": host.gpu_type,
             "roles": host.roles or [],
+            # None, not [], so a host registering without the field does not
+            # look like a host that supports nothing.
+            "supported_backends": host.supported_backends or None,
             "disk_total_gb": host.disk_total_gb,
             "disk_used_gb": host.disk_used_gb,
             "disk_available_gb": host.disk_available_gb,
@@ -216,20 +224,35 @@ class HostDB:
             )
             return [self._row_to_host(row) for row in result.scalars()]
 
+    async def update_host_supported_backends(
+        self, host_id: str, supported_backends: list[str]
+    ) -> bool:
+        async with self._session() as session:
+            result = await session.execute(
+                update(HostRow)
+                .where(HostRow.id == host_id)
+                .values(supported_backends=supported_backends)
+            )
+            await session.commit()
+            return result.rowcount == 1
+
     async def update_host_registration(
         self,
         host_id: str,
         *,
         gpu_type: str | None = None,
         roles: list[str] | None = None,
+        supported_backends: list[str] | None = None,
         version: str | None = None,
     ) -> bool:
-        """Persist gpu_type, roles, and version from a registration event."""
+        """Persist the capability fields from a registration event."""
         values: dict[str, Any] = {}
         if gpu_type is not None:
             values["gpu_type"] = gpu_type
         if roles is not None:
             values["roles"] = roles
+        if supported_backends is not None:
+            values["supported_backends"] = supported_backends
         if version is not None:
             values["version"] = version
         if not values:

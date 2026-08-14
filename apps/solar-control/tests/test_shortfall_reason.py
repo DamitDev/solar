@@ -99,6 +99,38 @@ def test_a_stored_gpu_type_alias_matches_the_canonical_host_token():
     assert _shortfall_reason(intent, observed) is None
 
 
+def test_no_host_supports_the_backend():
+    """SGLang pins gpu_type, so a missing install must not be reported as a
+    gpu_type mismatch — the operator would go looking at the wrong thing."""
+    intent = _make_intent(
+        replicas=1,
+        backend={"backend_type": "sglang"},
+        placement=PlacementConstraints(gpu_type="nvidia_cuda"),
+    )
+    observed = _make_observed(
+        hosts=[
+            _HostStub(id="h1", gpu_type="nvidia_cuda", supported_backends=["llamacpp"])
+        ],
+        snapshots={"h1": _SnapshotStub(host_id="h1", vram_available_gb=100.0)},
+    )
+    assert _shortfall_reason(intent, observed) == "no host supports backend=sglang"
+
+
+def test_a_host_advertising_the_backend_is_not_reported():
+    intent = _make_intent(
+        replicas=1,
+        backend={"backend_type": "sglang"},
+        placement=PlacementConstraints(gpu_type="nvidia_cuda"),
+    )
+    observed = _make_observed(
+        hosts=[
+            _HostStub(id="h1", gpu_type="nvidia_cuda", supported_backends=["sglang"])
+        ],
+        snapshots={"h1": _SnapshotStub(host_id="h1", vram_available_gb=100.0)},
+    )
+    assert _shortfall_reason(intent, observed) is None
+
+
 def test_an_unknown_gpu_type_still_matches_nothing():
     intent = _make_intent(replicas=1, placement=PlacementConstraints(gpu_type="rocm"))
     observed = _make_observed(hosts=[_HostStub(id="h1", gpu_type="nvidia_cuda")])

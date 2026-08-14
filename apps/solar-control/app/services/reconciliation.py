@@ -1277,6 +1277,7 @@ class Reconciler:
             gpu_type=req_gpu,
             host_allow=req_allow,
             host_deny=req_deny,
+            backend_type=_intent_backend_type(intent),
             vram_gb=req_vram,
             ram_gb=req_ram,
             exclude_alias=alias,
@@ -2009,6 +2010,7 @@ class Reconciler:
             # Migrate = use S-037 to move instance off this host, freeing capacity
             if not action.instance_id or not action.host_id:
                 return None
+            from app.redis_state import host_store
             from app.routes.management.resources import _fetch_host_resource_snapshot
             from app.services.migration import execute_migration
             from app.services.placement import find_candidates
@@ -2023,6 +2025,15 @@ class Reconciler:
                 else ["inference"]
             )
             host_gpu = source_host.gpu_type if source_host else None
+            # The moved instance keeps its backend, so a host without that
+            # backend installed is not an eligible target (the flat WS cache
+            # carries backend_type, which is all this needs).
+            instance_backend: str | None = None
+            for inst in await host_store.get_host_instances(action.host_id):
+                if inst.get("id") == action.instance_id:
+                    raw = inst.get("config", inst).get("backend_type")
+                    instance_backend = raw if isinstance(raw, str) else None
+                    break
 
             # Select a target host using placement policy
             all_hosts = await host_db.get_all_hosts()
@@ -2036,6 +2047,7 @@ class Reconciler:
                 snapshots_map,
                 roles=host_roles,
                 gpu_type=host_gpu,
+                backend_type=instance_backend,
                 vram_gb=0.0,
                 exclude_alias=action.alias,
             )
@@ -2807,16 +2819,24 @@ def _shortfall_reason(intent: Any, observed: dict[str, Any]) -> str | None:
     hosts = observed.get("hosts", [])
     snapshots = observed.get("snapshots", {})
 
-    from app.services.placement import filter_durable_hosts
+    from app.services.placement import filter_durable_hosts, supports_backend
 
-    durable = filter_durable_hosts(
+    backend_type = _intent_backend_type(intent)
+    # Filtered in two steps so the message can name the backend rather than
+    # the accelerator: an SGLang intent always carries a gpu_type (the
+    # validator pins it), so a missing SGLang install would otherwise be
+    # reported as a gpu_type mismatch.
+    durable_any_backend = filter_durable_hosts(
         hosts,
         roles=roles,
         gpu_type=gpu_type,
         host_allow=host_allow or None,
         host_deny=host_deny or None,
     )
+    durable = [h for h in durable_any_backend if supports_backend(h, backend_type)]
     if not durable:
+        if durable_any_backend and backend_type:
+            return f"no host supports backend={backend_type}"
         if gpu_type:
             return f"no host matches gpu_type={gpu_type}"
         return f"no host matches roles {roles}"
@@ -2846,6 +2866,19 @@ def _shortfall_reason(intent: Any, observed: dict[str, Any]) -> str | None:
             )
 
     return None
+
+
+def _intent_backend_type(intent: Any) -> str | None:
+    """The intent's ``backend.backend_type``, or None when it is not set.
+
+    Placement uses it to skip hosts that do not provide the backend; None
+    means "unconstrained", which is the right reading for a spec without one.
+    """
+    backend = getattr(intent, "backend", None)
+    if not isinstance(backend, dict):
+        return None
+    backend_type = backend.get("backend_type")
+    return backend_type if isinstance(backend_type, str) and backend_type else None
 
 
 def _requested_gpu_type(placement: Any) -> str | None:
@@ -2933,6 +2966,7 @@ def _detect_backend_drift(intent: Any, instance_config: dict[str, Any]) -> list[
         "intent_id",
         "model",
         "model_id",
+        "model_path",
     }
     drifted: list[str] = []
     for key, value in intent_backend.items():

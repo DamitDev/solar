@@ -50,6 +50,13 @@ class Host(BaseModel):
     memory: MemoryInfo | None = None
     gpu_type: str | None = None
     roles: list[str] = Field(default_factory=list)
+    supported_backends: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Backend types the host reports it can run. Empty means the host "
+            "has not advertised any (placement reads that as 'no opinion')"
+        ),
+    )
     disk_total_gb: float | None = None
     disk_used_gb: float | None = None
     disk_available_gb: float | None = None
