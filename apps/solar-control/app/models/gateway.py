@@ -23,6 +23,12 @@ class RegistryEntry(BaseModel):
     supported_endpoints: list[str] = Field(default_factory=list)
     backend_type: str = "llamacpp"
     context_size: int | None = None
+    # The name the backend process was actually launched with, as reported by
+    # the host. Differs from the alias only where a backend cannot serve it
+    # verbatim (SGLang reads ``:`` as its LoRA separator). None means the
+    # backend serves the alias, so nothing needs translating — the host is the
+    # only authority here, since it is what ran the command.
+    served_model_name: str | None = None
 
     DEFAULT_ENDPOINTS: ClassVar[list[str]] = [
         "/v1/chat/completions",
@@ -75,6 +81,7 @@ class RegistryEntry(BaseModel):
             ),
             backend_type=instance.get("backend_type", "llamacpp"),
             context_size=cls._extract_context_size(instance),
+            served_model_name=instance.get("served_model_name"),
         )
 
     @classmethod
@@ -106,4 +113,7 @@ class RegistryEntry(BaseModel):
             ),
             backend_type=config.get("backend_type", "llamacpp"),
             context_size=cls._extract_context_size(instance),
+            # Runtime detail of the process, so it sits beside supported_endpoints
+            # on the instance rather than inside its config.
+            served_model_name=instance.get("served_model_name"),
         )

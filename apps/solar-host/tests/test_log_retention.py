@@ -61,16 +61,16 @@ def _log_msg(seq: int, line: str) -> LogMessage:
     return LogMessage(seq=seq, timestamp="2026-08-06T00:00:00+00:00", line=line)
 
 
-async def _run_to_failure(manager, instance_id="inst-1") -> ProcessManager:
+async def _run_to_failure(manager, monkeypatch, instance_id="inst-1") -> ProcessManager:
     """Start an instance whose script prints known lines and exits non-zero."""
     _make_instance(instance_id)
     runner = _ScriptRunner(
         "print('line one', flush=True); print('line two', flush=True); "
         "import sys; sys.exit(3)"
     )
-    import solar_host.process_manager as pm
-
-    pm.get_runner_for_config = lambda cfg: runner
+    monkeypatch.setattr(
+        "solar_host.process_manager.get_runner_for_config", lambda cfg: runner
+    )
     manager.instance_runners[instance_id] = runner
     await manager.start_instance(instance_id)
     return manager
@@ -127,7 +127,7 @@ class TestBufferSurvival:
     @pytest.mark.anyio
     async def test_delete_clears_buffer_and_exit_code(self, _isolated_env, monkeypatch):
         manager = ProcessManager()
-        await _run_to_failure(manager)
+        await _run_to_failure(manager, monkeypatch)
         assert manager.get_log_buffer("inst-1")
 
         manager.delete_instance("inst-1")

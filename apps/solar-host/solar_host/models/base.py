@@ -147,6 +147,12 @@ class Instance(BaseModel):
     # Supported API endpoints for this instance (populated by backend runner)
     supported_endpoints: list[str] = Field(default_factory=list)
 
+    # Name the backend process actually serves the model under (populated by the
+    # backend runner). Equals the alias for every backend that can serve it
+    # verbatim; SGLang cannot, so control routes on the alias and rewrites the
+    # request's model field to this. None means "same as the alias".
+    served_model_name: str | None = Field(default=None)
+
     # Ephemeral runtime fields (not persisted to disk)
     busy: bool = Field(default=False, exclude=True)
     prefill_progress: float | None = Field(default=None, exclude=True)
