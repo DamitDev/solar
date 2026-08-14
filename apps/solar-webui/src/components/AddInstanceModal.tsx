@@ -5,6 +5,7 @@ import {
   LlamaCppConfig,
   HuggingFaceCausalConfig,
   HuggingFaceClassificationConfig,
+  SglangConfig,
   getBackendLabel,
 } from '@/api/types';
 import { BackendConfigFields } from './BackendConfigFields';
@@ -13,18 +14,33 @@ import { getBackendTypeFromSelection, getDefaultConfig, stripEmptyOptionalFields
 interface AddInstanceModalProps {
   hostId: string;
   hostName: string;
+  /** Accelerator the host reports; SGLang needs 'nvidia_cuda'. */
+  hostGpuType?: string;
+  /** Backends the host advertises; empty means it has not said (no opinion). */
+  hostSupportedBackends?: string[];
   onClose: () => void;
   onCreate: (hostId: string, config: InstanceConfig) => Promise<void>;
 }
 
-export function AddInstanceModal({ hostId, hostName, onClose, onCreate }: AddInstanceModalProps) {
+export function AddInstanceModal({
+  hostId,
+  hostName,
+  hostGpuType,
+  hostSupportedBackends,
+  onClose,
+  onCreate,
+}: AddInstanceModalProps) {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState<Partial<InstanceConfig>>(
     getDefaultConfig('llamacpp', 'llm') as Partial<InstanceConfig>,
   );
 
   const backendType = getBackendTypeFromSelection(
-    (formData.backend_type ?? 'llamacpp').startsWith('huggingface') ? 'huggingface' : 'llamacpp',
+    formData.backend_type === 'sglang'
+      ? 'sglang'
+      : (formData.backend_type ?? 'llamacpp').startsWith('huggingface')
+        ? 'huggingface'
+        : 'llamacpp',
     formData.backend_type === 'huggingface_causal'
       ? 'causal'
       : formData.backend_type === 'huggingface_classification'
@@ -34,6 +50,17 @@ export function AddInstanceModal({ hostId, hostName, onClose, onCreate }: AddIns
           : ((formData as Partial<LlamaCppConfig>).model_type ?? 'llm'),
   );
 
+  // SGLang runs on CUDA only, and it is a separate install the host has to
+  // advertise — the server rejects the mismatch, so the button is disabled
+  // rather than offered and refused.
+  const sglangUnavailable =
+    hostGpuType !== 'nvidia_cuda' ||
+    (hostSupportedBackends !== undefined &&
+      hostSupportedBackends.length > 0 &&
+      !hostSupportedBackends.includes('sglang'));
+  const sglangReason =
+    hostGpuType !== 'nvidia_cuda' ? 'Requires an NVIDIA host' : `SGLang is not installed on ${hostName}`;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -41,6 +68,12 @@ export function AddInstanceModal({ hostId, hostName, onClose, onCreate }: AddIns
     if (backendType === 'llamacpp') {
       const config = formData as Partial<LlamaCppConfig>;
       if (!config.model || !config.alias) {
+        alert('Model Path and Alias are required');
+        return;
+      }
+    } else if (backendType === 'sglang') {
+      const config = formData as Partial<SglangConfig>;
+      if (!config.model_path || !config.alias) {
         alert('Model Path and Alias are required');
         return;
       }
@@ -88,6 +121,8 @@ export function AddInstanceModal({ hostId, hostName, onClose, onCreate }: AddIns
             showModelFields
             aliasValue={formData.alias}
             onAliasChange={(v) => setFormData((prev) => ({ ...prev, alias: v }))}
+            disabledBackends={sglangUnavailable ? ['sglang'] : []}
+            disabledReason={sglangReason}
           />
 
           {/* Actions */}

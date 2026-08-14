@@ -256,6 +256,62 @@ async def test_find_candidates_gpu_filter(host_a100, host_mps):
 
 
 @pytest.mark.anyio
+async def test_find_candidates_backend_filter(host_a100, host_mps):
+    """A host that advertises its backends is skipped when it lacks the one asked for."""
+    host_a100.supported_backends = ["llamacpp", "sglang"]
+    host_mps.supported_backends = ["llamacpp"]
+    hosts = [host_a100, host_mps]
+    snapshots = {
+        host_a100.id: _make_snap(host_a100),
+        host_mps.id: _make_snap(host_mps),
+    }
+
+    with patch("app.services.placement.host_store") as mock_store:
+        mock_store.get_host_instances = AsyncMock(return_value=[])
+
+        candidates = await find_candidates(
+            hosts,
+            snapshots,
+            roles=["inference"],
+            backend_type="sglang",
+            vram_gb=6.0,
+        )
+
+        assert [h.id for h, _ in candidates] == ["h-a100"]
+
+
+@pytest.mark.anyio
+async def test_find_candidates_keeps_hosts_that_advertise_nothing(host_a100):
+    """A host that predates advertisement has no opinion, so it stays eligible."""
+    assert host_a100.supported_backends == []
+    snapshots = {host_a100.id: _make_snap(host_a100)}
+
+    with patch("app.services.placement.host_store") as mock_store:
+        mock_store.get_host_instances = AsyncMock(return_value=[])
+
+        candidates = await find_candidates(
+            [host_a100],
+            snapshots,
+            roles=["inference"],
+            backend_type="sglang",
+            vram_gb=6.0,
+        )
+
+        assert [h.id for h, _ in candidates] == ["h-a100"]
+
+
+def test_supports_backend_reads_an_empty_list_as_no_opinion(host_a100):
+    from app.services.placement import supports_backend
+
+    assert supports_backend(host_a100, "sglang") is True
+    assert supports_backend(host_a100, None) is True
+
+    host_a100.supported_backends = ["llamacpp"]
+    assert supports_backend(host_a100, "sglang") is False
+    assert supports_backend(host_a100, "llamacpp") is True
+
+
+@pytest.mark.anyio
 async def test_find_candidates_insufficient_vram(host_a100, host_mps):
     hosts = [host_a100, host_mps]
     snapshots = {

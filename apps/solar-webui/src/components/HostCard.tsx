@@ -52,6 +52,7 @@ interface HostCardProps {
     memory?: MemoryInfo;
     gpu_type?: string;
     roles?: string[];
+    supported_backends?: string[];
     disk_total_gb?: number;
     disk_used_gb?: number;
     disk_available_gb?: number;
@@ -423,6 +424,8 @@ export function HostCard({
         <AddInstanceModal
           hostId={host.id}
           hostName={host.name}
+          hostGpuType={host.gpu_type}
+          hostSupportedBackends={host.supported_backends}
           onClose={() => setShowAddModal(false)}
           onCreate={onCreateInstance}
         />

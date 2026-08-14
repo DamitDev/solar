@@ -19,6 +19,7 @@ from solar_host.models.huggingface import (
     HuggingFaceVisionConfig,
 )
 from solar_host.models.llamacpp import LlamaCppConfig
+from solar_host.models.sglang import SglangConfig
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,15 @@ class Settings(BaseSettings):
         default_factory=lambda: os.environ.get("HF_HOME")
         or str(Path.home() / ".cache" / "huggingface")
     )
+
+    # SGLang backend (optional, NVIDIA hosts only). sglang_venv_path is the
+    # virtualenv SGLang is installed into (the directory holding bin/sglang);
+    # when empty the runner falls back to `sglang` on PATH, and when neither
+    # resolves the host does not advertise the backend at all.
+    sglang_venv_path: str = ""
+    # Root for SGLang's file-backed prompt cache. Each instance gets its own
+    # subdirectory under it; when empty the file storage backend is skipped.
+    sglang_prompt_cache_dir: str = ""
 
 
 settings = Settings()
@@ -267,10 +277,13 @@ def parse_instance_config(config_data: dict[str, Any], strict: bool = True) -> A
         model_source
         and not config_data.get("model")
         and not config_data.get("model_id")
+        and not config_data.get("model_path")
     ):
         resolved_path = resolve_model_source(model_source)
         if backend_type == "llamacpp":
             config_data["model"] = resolved_path
+        elif backend_type == "sglang":
+            config_data["model_path"] = resolved_path
         else:
             # All HuggingFace types use model_id
             config_data["model_id"] = resolved_path
@@ -286,6 +299,8 @@ def parse_instance_config(config_data: dict[str, Any], strict: bool = True) -> A
         return HuggingFaceEmbeddingConfig(**config_data)
     elif backend_type == "huggingface_vision":
         return HuggingFaceVisionConfig(**config_data)
+    elif backend_type == "sglang":
+        return SglangConfig(**config_data)
     else:
         raise ValueError(f"Unknown backend_type: {backend_type!r}")
 

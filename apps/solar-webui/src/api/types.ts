@@ -11,7 +11,12 @@ export type HostStatus = 'online' | 'offline' | 'error';
 export type DrainState = 'draining' | 'drained';
 
 export type BackendType =
-  'llamacpp' | 'huggingface_causal' | 'huggingface_classification' | 'huggingface_embedding' | 'huggingface_vision';
+  | 'llamacpp'
+  | 'huggingface_causal'
+  | 'huggingface_classification'
+  | 'huggingface_embedding'
+  | 'huggingface_vision'
+  | 'sglang';
 
 /**
  * Speculative decoding implementations solar supports (llama-server --spec-type).
@@ -129,9 +134,57 @@ export interface HuggingFaceEmbeddingConfig extends BaseInstanceConfig {
   trust_remote_code?: boolean;
 }
 
+/**
+ * SGLang config. Typed fields cover the knobs that are stable across SGLang
+ * releases; `extra_args` / `extra_env` carry everything else, since SGLang's
+ * flag surface moves faster than this type can.
+ *
+ * The host owns `--port`, `--api-key` and `--served-model-name`, and resolves
+ * `model_path` from `model_source` for intents.
+ */
+export interface SglangConfig extends BaseInstanceConfig {
+  backend_type: 'sglang';
+  /** Local path to the served model directory (sglang --model-path) */
+  model_path: string;
+  model_source?: string | null;
+  // Parallelism and memory
+  tp_size?: number;
+  dp_size?: number;
+  context_length?: number;
+  mem_fraction_static?: number;
+  chunked_prefill_size?: number;
+  max_running_requests?: number;
+  cuda_graph_max_bs?: number;
+  cuda_graph_max_bs_decode?: number;
+  swa_full_tokens_ratio?: number;
+  // Model and kernels
+  dtype?: string;
+  quantization?: string;
+  kv_cache_dtype?: string;
+  moe_runner_backend?: string;
+  speculative_algorithm?: string;
+  trust_remote_code?: boolean;
+  // Hierarchical (prompt) cache
+  enable_hierarchical_cache?: boolean;
+  hicache_ratio?: number;
+  hicache_mem_layout?: string;
+  hicache_io_backend?: string;
+  hicache_storage_backend?: string;
+  /** JSON object string, e.g. '{"max_size":"256G","eviction_ratio":0.9}' */
+  hicache_storage_backend_extra_config?: string;
+  hicache_storage_prefetch_policy?: string;
+  // Escape hatches
+  extra_args?: string[];
+  extra_env?: Record<string, string>;
+}
+
 // Union type for all config types
 export type InstanceConfig =
-  LlamaCppConfig | HuggingFaceCausalConfig | HuggingFaceClassificationConfig | HuggingFaceEmbeddingConfig;
+  | LlamaCppConfig
+  | HuggingFaceCausalConfig
+  | HuggingFaceClassificationConfig
+  | HuggingFaceEmbeddingConfig
+  | SglangConfig;
 
 // Helper to check backend type
 export function isLlamaCppConfig(config: InstanceConfig): config is LlamaCppConfig {
@@ -148,6 +201,10 @@ export function isHuggingFaceClassificationConfig(config: InstanceConfig): confi
 
 export function isHuggingFaceEmbeddingConfig(config: InstanceConfig): config is HuggingFaceEmbeddingConfig {
   return config.backend_type === 'huggingface_embedding';
+}
+
+export function isSglangConfig(config: InstanceConfig): config is SglangConfig {
+  return config.backend_type === 'sglang';
 }
 
 export function getBackendType(config: InstanceConfig): BackendType {
@@ -168,6 +225,8 @@ export function getBackendLabel(backendType: BackendType): string {
       return 'HF Classifier';
     case 'huggingface_embedding':
       return 'HF Embedding';
+    case 'sglang':
+      return 'SGLang';
     default:
       return backendType;
   }
@@ -183,6 +242,8 @@ export function getBackendColor(backendType: BackendType): string {
       return 'bg-nord-13 text-nord-0'; // Yellow
     case 'huggingface_embedding':
       return 'bg-nord-15 text-nord-6'; // Purple
+    case 'sglang':
+      return 'bg-nord-7 text-nord-0'; // Teal
     default:
       return 'bg-nord-3 text-nord-4';
   }
@@ -265,6 +326,8 @@ export function getFullModelHexColor(config: InstanceConfig): string {
       return '#EBCB8B'; // Yellow
     case 'huggingface_embedding':
       return '#B48EAD'; // Purple
+    case 'sglang':
+      return '#8FBCBB'; // Teal
     default:
       return '#4C566A';
   }
@@ -301,6 +364,8 @@ export interface Host {
   memory?: MemoryInfo;
   gpu_type?: string;
   roles?: string[];
+  /** Backend types the host reports it can run; empty/absent means unknown */
+  supported_backends?: string[];
   disk_total_gb?: number;
   disk_used_gb?: number;
   disk_available_gb?: number;

@@ -22,7 +22,7 @@ from app.models import (
 from app.redis_state import host_store
 from app.services import drain
 from app.services.migration import create_instance_on_host
-from app.validation import validate_priority
+from app.validation import validate_host_supports_backend, validate_priority
 
 logger = logging.getLogger(__name__)
 
@@ -382,6 +382,9 @@ async def create_instance(host_id: str, instance_data: dict[str, Any]):
                 f"accept new instances. Resume the host first."
             ),
         )
+    config = instance_data.get("config", instance_data)
+    if isinstance(config, dict):
+        validate_host_supports_backend(host, config.get("backend_type"))
     return await create_instance_on_host(host, instance_data)
 
 

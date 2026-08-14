@@ -7,6 +7,7 @@ import pytest
 from solar_host.config import parse_instance_config, resolve_model_source
 from solar_host.models.huggingface import HuggingFaceCausalConfig
 from solar_host.models.llamacpp import LlamaCppConfig
+from solar_host.models.sglang import SglangConfig
 
 
 @pytest.fixture
@@ -80,6 +81,19 @@ class TestParseInstanceConfigWithModelSource:
         assert isinstance(config, HuggingFaceCausalConfig)
         assert config.model_id == str((mock_models_dir / "hf-model").resolve())
         assert config.model_source == "local://hf-model"
+
+    def test_sglang_with_model_source(self, mock_models_dir):
+        config_data = {
+            "backend_type": "sglang",
+            "model_source": "local://sglang-model",
+            "alias": "sglang-alias",
+        }
+        config = parse_instance_config(config_data)
+        assert isinstance(config, SglangConfig)
+        # SGLang serves a directory through --model-path, not model/model_id.
+        assert config.model_path == str((mock_models_dir / "sglang-model").resolve())
+        assert config.model_source == "local://sglang-model"
+        assert not hasattr(config, "model_id")
 
     def test_backward_compatibility_llamacpp(self):
         config_data = {

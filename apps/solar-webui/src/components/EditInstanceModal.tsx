@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { X, MessageSquare, Tags, Binary, Search } from 'lucide-react';
+import { X, MessageSquare, Tags, Binary, Search, Zap } from 'lucide-react';
 import {
   Instance,
   InstanceConfig,
@@ -9,12 +9,15 @@ import {
   isHuggingFaceCausalConfig,
   isHuggingFaceClassificationConfig,
   isHuggingFaceEmbeddingConfig,
+  isSglangConfig,
   LlamaCppConfig,
   HuggingFaceCausalConfig,
   HuggingFaceClassificationConfig,
   HuggingFaceEmbeddingConfig,
+  SglangConfig,
 } from '@/api/types';
 import { SPLIT_MODE_OPTIONS, stripEmptyOptionalFields } from '@/lib/backendConfig';
+import { SglangConfigFields } from './SglangConfigFields';
 import { SpeculativeDecodingFields } from './SpeculativeDecodingFields';
 
 interface EditInstanceModalProps {
@@ -49,6 +52,8 @@ const BackendIcon = ({ config }: { config: InstanceConfig }) => {
       return <Tags size={18} className="text-nord-13" />;
     case 'huggingface_embedding':
       return <Binary size={18} className="text-nord-15" />;
+    case 'sglang':
+      return <Zap size={18} className="text-nord-7" />;
     default:
       return <MessageSquare size={18} className="text-nord-4" />;
   }
@@ -82,7 +87,12 @@ export function EditInstanceModal({ instance, hostId, onClose, onUpdate }: EditI
     e.preventDefault();
 
     // Validate required fields based on backend type
-    if (isLlamaCppConfig(formData)) {
+    if (isSglangConfig(formData)) {
+      if (!(formData as SglangConfig).model_path || !formData.alias) {
+        alert('Model Path and Alias are required');
+        return;
+      }
+    } else if (isLlamaCppConfig(formData)) {
       if (!(formData as LlamaCppConfig).model || !formData.alias) {
         alert('Model Path and Alias are required');
         return;
@@ -106,7 +116,7 @@ export function EditInstanceModal({ instance, hostId, onClose, onUpdate }: EditI
     // Strip empty strings from optional fields so the backend receives None
     // and llama.cpp uses its own defaults. Shared with the add/intent form so
     // the two editors cannot submit differently shaped configs.
-    if (isLlamaCppConfig(formData)) {
+    if (isLlamaCppConfig(formData) || isSglangConfig(formData)) {
       finalConfig = stripEmptyOptionalFields(finalConfig as Record<string, any>) as InstanceConfig;
     }
 
@@ -158,7 +168,15 @@ export function EditInstanceModal({ instance, hostId, onClose, onUpdate }: EditI
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {/* Backend-specific fields */}
-            {isLlamaCppConfig(formData) ? (
+            {isSglangConfig(formData) ? (
+              <SglangConfigFields
+                value={formData as Record<string, any>}
+                onChange={(next) => setFormData(next as InstanceConfig)}
+                showAlias
+                showModelFields
+                idPrefix="edit-sglang"
+              />
+            ) : isLlamaCppConfig(formData) ? (
               /* llama.cpp specific fields */
               <>
                 {/* Model Path */}

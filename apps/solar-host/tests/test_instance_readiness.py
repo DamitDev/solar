@@ -16,8 +16,9 @@ import pytest
 
 from solar_host.backends.huggingface import HuggingFaceRunner
 from solar_host.backends.llamacpp import LlamaCppRunner
+from solar_host.backends.sglang import SglangRunner
 from solar_host.config import config_manager, settings
-from solar_host.models.base import Instance, InstanceStatus
+from solar_host.models.base import Instance, InstancePhase, InstanceStatus
 from solar_host.models.llamacpp import LlamaCppConfig
 from solar_host.process_manager import ProcessManager
 
@@ -114,6 +115,90 @@ class TestHuggingFaceReadyLine:
     )
     def test_rejects_non_listening_banners(self, line):
         assert not HuggingFaceRunner().is_ready_line(line)
+
+
+class TestSglangReadyLine:
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "[2026-08-14 12:00:00] The server is fired up and ready to roll!",
+            "INFO:     Uvicorn running on http://0.0.0.0:8100 (Press CTRL+C to quit)",
+        ],
+    )
+    def test_accepts_the_warmup_banner_and_uvicorn(self, line):
+        assert SglangRunner().is_ready_line(line)
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "[2026-08-14 12:00:00] Load weight end. type=DeepseekV3ForCausalLM",
+            "[2026-08-14 12:00:00] Capture cuda graph begin.",
+            "[2026-08-14 12:00:00] Prefill batch. #new-seq: 1, #new-token: 512",
+        ],
+    )
+    def test_rejects_startup_progress(self, line):
+        assert not SglangRunner().is_ready_line(line)
+
+
+class TestSglangLogParsing:
+    def test_a_prefill_batch_marks_the_instance_busy(self):
+        runner = SglangRunner()
+        context = runner.initialize_context()
+
+        update = runner.parse_log_line(
+            "inst-1",
+            "[2026-08-14 12:00:00] Prefill batch. #new-seq: 1, #new-token: 512, "
+            "#cached-token: 0, #running-req: 1",
+            context,
+        )
+
+        assert update is not None
+        assert update.busy is True
+        assert update.phase == InstancePhase.PREFILL
+
+    def test_decode_throughput_is_reported(self):
+        runner = SglangRunner()
+        context = runner.initialize_context()
+
+        update = runner.parse_log_line(
+            "inst-1",
+            "[2026-08-14 12:00:01] Decode batch. #running-req: 2, "
+            "gen throughput (token/s): 84.21, #queue-req: 0",
+            context,
+        )
+
+        assert update is not None
+        assert update.busy is True
+        assert update.phase == InstancePhase.GENERATING
+        assert update.decode_tps == pytest.approx(84.21)
+        assert runner.get_last_generation(context).decode_tps == pytest.approx(84.21)
+
+    def test_a_drained_queue_goes_idle(self):
+        runner = SglangRunner()
+        context = runner.initialize_context()
+        runner.parse_log_line(
+            "inst-1",
+            "[2026-08-14 12:00:01] Decode batch. #running-req: 2, "
+            "gen throughput (token/s): 84.21",
+            context,
+        )
+
+        update = runner.parse_log_line(
+            "inst-1",
+            "[2026-08-14 12:00:02] Decode batch. #running-req: 0, "
+            "gen throughput (token/s): 0.00",
+            context,
+        )
+
+        assert update is not None
+        assert update.busy is False
+        assert update.phase == InstancePhase.IDLE
+
+    def test_unrelated_lines_produce_no_update(self):
+        runner = SglangRunner()
+        context = runner.initialize_context()
+
+        assert runner.parse_log_line("inst-1", "Load weight end.", context) is None
 
 
 # ---------------------------------------------------------------------------

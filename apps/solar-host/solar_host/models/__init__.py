@@ -29,6 +29,7 @@ from solar_host.models.huggingface import (
 
 # Import config models
 from solar_host.models.llamacpp import LlamaCppConfig
+from solar_host.models.sglang import SglangConfig
 
 # Create the discriminated union type for InstanceConfig
 InstanceConfig = Annotated[
@@ -36,7 +37,8 @@ InstanceConfig = Annotated[
     | HuggingFaceCausalConfig
     | HuggingFaceClassificationConfig
     | HuggingFaceEmbeddingConfig
-    | HuggingFaceVisionConfig,
+    | HuggingFaceVisionConfig
+    | SglangConfig,
     Field(discriminator="backend_type"),
 ]
 
@@ -65,4 +67,5 @@ __all__ = [
     "LogMessage",
     # Other
     "MemoryInfo",
+    "SglangConfig",
 ]

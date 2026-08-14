@@ -19,6 +19,7 @@ export const INTENT_BACKEND_TYPES = [
   'huggingface_classification',
   'huggingface_embedding',
   'huggingface_vision',
+  'sglang',
 ] as const;
 
 export const INTENT_PRIORITIES = ['production', 'staging', 'ephemeral'] as const;
@@ -56,7 +57,42 @@ export function normalizeGpuType(value: string | null | undefined): string | nul
 }
 
 /** Fields that must NOT appear inside `backend` — they are server-derived (§4.7). */
-export const FORBIDDEN_BACKEND_FIELDS = ['alias', 'model_source', 'host', 'port', 'api_key'];
+export const FORBIDDEN_BACKEND_FIELDS = ['alias', 'model_source', 'host', 'port', 'api_key', 'model_path'];
+
+/** SGLang only runs on CUDA, mirroring the server's SGLANG_GPU_TYPE. */
+export const SGLANG_GPU_TYPE = 'nvidia_cuda';
+
+/** CLI flags solar-host derives itself, mirroring RESERVED_SGLANG_ARGS. */
+export const RESERVED_SGLANG_ARGS = ['--host', '--port', '--api-key', '--model-path', '--served-model-name'];
+
+/**
+ * Backend fields only SGLang accepts, mirroring the server's `_SGLANG_FIELDS`
+ * minus `dtype`/`trust_remote_code`, which HuggingFace shares.
+ */
+export const SGLANG_ONLY_FIELDS = [
+  'tp_size',
+  'dp_size',
+  'context_length',
+  'mem_fraction_static',
+  'chunked_prefill_size',
+  'max_running_requests',
+  'cuda_graph_max_bs',
+  'cuda_graph_max_bs_decode',
+  'swa_full_tokens_ratio',
+  'quantization',
+  'kv_cache_dtype',
+  'moe_runner_backend',
+  'speculative_algorithm',
+  'enable_hierarchical_cache',
+  'hicache_ratio',
+  'hicache_mem_layout',
+  'hicache_io_backend',
+  'hicache_storage_backend',
+  'hicache_storage_backend_extra_config',
+  'hicache_storage_prefetch_policy',
+  'extra_args',
+  'extra_env',
+];
 
 /**
  * The accelerator each `device` demands, mirroring the server's
@@ -142,6 +178,73 @@ function validateMultiGpu(backend: Record<string, any>): IntentFieldError[] {
         });
         break;
       }
+    }
+  }
+
+  return errors;
+}
+
+/**
+ * Mirror the server's `_validate_sglang`: field ownership, the NVIDIA-only
+ * placement contract, and the `extra_args`/`extra_env` escape hatches.
+ *
+ * The form pins `placement.gpu_type` for SGLang, so a contradiction here means
+ * the user changed the backend after the fact — worth saying plainly rather
+ * than as a 422 from the server.
+ */
+function validateSglang(
+  backend: Record<string, any>,
+  placement: IntentCreateRequest['placement'],
+  unchanged: readonly string[],
+): IntentFieldError[] {
+  const errors: IntentFieldError[] = [];
+  const isSglang = backend.backend_type === 'sglang';
+
+  if (!isSglang) {
+    for (const field of SGLANG_ONLY_FIELDS) {
+      const value = backend[field];
+      if (value === undefined || value === null || value === '' || value === false) continue;
+      if (Array.isArray(value) && value.length === 0) continue;
+      if (unchanged.includes(field)) continue;
+      errors.push({ field: `backend.${field}`, message: `${field} is only supported for the sglang backend` });
+    }
+    return errors;
+  }
+
+  const gpuType = placement?.gpu_type;
+  const canonical = gpuType ? (normalizeGpuType(gpuType) ?? gpuType) : null;
+  if (canonical && canonical !== SGLANG_GPU_TYPE) {
+    errors.push({
+      field: 'placement.gpu_type',
+      message: `the sglang backend requires gpu_type '${SGLANG_GPU_TYPE}', but placement.gpu_type is '${canonical}'`,
+    });
+  }
+
+  const extraArgs = backend.extra_args;
+  if (extraArgs !== undefined && extraArgs !== null) {
+    if (!Array.isArray(extraArgs) || extraArgs.some((a) => typeof a !== 'string' || !a.trim())) {
+      errors.push({ field: 'backend.extra_args', message: 'Every extra argument must be a non-empty string' });
+    } else {
+      for (const arg of extraArgs) {
+        const flag = arg.trim().split('=')[0];
+        if (RESERVED_SGLANG_ARGS.includes(flag)) {
+          errors.push({
+            field: 'backend.extra_args',
+            message: `'${flag}' is managed by solar-host and must not be set through extra args`,
+          });
+        }
+      }
+    }
+  }
+
+  const extraEnv = backend.extra_env;
+  if (extraEnv !== undefined && extraEnv !== null) {
+    const isFlatMap =
+      typeof extraEnv === 'object' &&
+      !Array.isArray(extraEnv) &&
+      Object.entries(extraEnv).every(([k, v]) => k.trim() && typeof v === 'string');
+    if (!isFlatMap) {
+      errors.push({ field: 'backend.extra_env', message: 'Every environment entry must be NAME=value with a name' });
     }
   }
 
@@ -283,6 +386,7 @@ export function validateIntentRequest(
 
     errors.push(...validateMultiGpu(req.backend));
     errors.push(...validateDevice(req.backend, req.placement, unchangedFields));
+    errors.push(...validateSglang(req.backend, req.placement, unchangedFields));
   }
 
   if (req.placement?.roles !== undefined && req.placement.roles.length === 0) {

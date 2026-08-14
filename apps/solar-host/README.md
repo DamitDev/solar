@@ -9,6 +9,7 @@ A multi-backend process manager for model inference servers with REST API and We
   - HuggingFace AutoModelForCausalLM for text generation
   - HuggingFace AutoModelForSequenceClassification for classification
   - HuggingFace AutoModel for embeddings (last hidden state with mean pooling)
+  - SGLang for high-throughput CUDA serving (NVIDIA hosts only, launched from its own virtualenv)
 - **Socket.IO control client** - Connects to solar-control’s `/hosts` namespace for registration, heartbeat, and instance lifecycle (start/stop/restart, config updates). Supports pending-host and rejection events with post-approval sync.
 - **Robust instance lifecycle** - Non-blocking process wait, state re-check after startup to avoid start/stop races, and full cleanup of log/state buffers on stop or delete.
 - **Log retention across failures (S-049/C2)** - instance-addressable log files (instance id in the filename) survive process teardown; `GET /instances/{id}/logs` falls back to the on-disk file when the in-memory buffer is empty (even after the instance record is gone); `delete_instance` discards logs while stop retains them; retention bounded by `log_file_retention_s` (the newest file per `(alias, instance_id)` is always kept, so a multi-replica intent keeps a post-mortem for every replica).
@@ -48,6 +49,10 @@ pip install -e ".[all,dev]"
 **For HuggingFace backends:**
 - Install with the `huggingface` extra: `pip install solar-host[huggingface]`
 
+**For the SGLang backend:**
+- NVIDIA CUDA host only — the host does not advertise the backend anywhere else, so solar-control never places an SGLang instance on a CPU or Apple host.
+- SGLang lives in its own virtualenv (its dependency set conflicts with solar-host's), pointed at by `SGLANG_VENV_PATH`. Without that variable the runner falls back to a `sglang` on `PATH`; with neither, the backend is simply not advertised.
+
 ## Setup
 
 ### 1. Create .env file
@@ -63,12 +68,18 @@ MODELS_DIR=./models
 # Solar-control connection (for Socket.IO registration and lifecycle)
 SOLAR_CONTROL_URL=http://localhost:8000
 SOLAR_CONTROL_API_KEY=your-solar-control-management-api-key
+
+# SGLang backend (optional, NVIDIA hosts only)
+SGLANG_VENV_PATH=/opt/venvs/sglang
+SGLANG_PROMPT_CACHE_DIR=/var/cache/sglang
 ```
 
 - **API_KEY** - Used by solar-control (and other callers) to access this host’s REST API.
 - **MODELS_DIR** - Path to the models directory. Used for disk space reporting in the `/health` endpoint. Defaults to `./models`.
 - **SOLAR_CONTROL_URL** - Base URL of solar-control (HTTP; Socket.IO connects to the same origin).
 - **SOLAR_CONTROL_API_KEY** - Management API key from solar-control. The host uses it to connect to the `/hosts` namespace; it must be approved via the management API or WebUI before it appears in the gateway pool.
+- **SGLANG_VENV_PATH** - Virtualenv SGLang is installed into (the directory holding `bin/sglang`). The host launches the executable from it directly, setting `VIRTUAL_ENV` and prepending `bin/` to `PATH` the way `activate` would. Leave empty to use a `sglang` on `PATH`; with neither, `sglang` is dropped from the advertised backends.
+- **SGLANG_PROMPT_CACHE_DIR** - Root of SGLang's file-backed prompt cache. Each instance gets its own `<root>/<alias>-<instance_id>` subdirectory, exported as `SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR`. When it is empty the `--hicache-storage-*` flags are dropped with a warning (the in-memory hierarchical cache still works).
 
 ### 2. Start the server
 
@@ -103,7 +114,7 @@ Open your browser to: **http://localhost:8001/docs**
 
 ## Backend Types
 
-Solar Host supports four backend types:
+Solar Host supports five backend types:
 
 | Backend Type | Model Type | Endpoints Supported |
 |--------------|------------|---------------------|
@@ -111,6 +122,9 @@ Solar Host supports four backend types:
 | `huggingface_causal` | HuggingFace AutoModelForCausalLM | `/v1/chat/completions`, `/v1/completions` |
 | `huggingface_classification` | HuggingFace AutoModelForSequenceClassification | `/v1/classify` |
 | `huggingface_embedding` | HuggingFace AutoModel (last hidden state) | `/v1/embeddings` |
+| `sglang` | Safetensors models via `sglang serve` (NVIDIA only) | `/v1/chat/completions`, `/v1/completions` |
+
+`GET /` reports which of them this host can actually run as `supported_backends`, and the WS registration and health pushes carry the same list. `sglang` only appears there on an NVIDIA host where the executable resolves, which is how solar-control keeps SGLang replicas off hosts without it.
 
 ## Managing Instances
 
@@ -201,6 +215,32 @@ curl -X POST http://localhost:8001/instances \
     }
   }'
 ```
+
+### Creating an SGLang Instance
+
+```bash
+curl -X POST http://localhost:8001/instances \
+  -H "X-API-Key: your-secret-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "backend_type": "sglang",
+      "model_path": "/path/to/model-directory",
+      "alias": "deepseek-v4:flash",
+      "tp_size": 8,
+      "mem_fraction_static": 0.85,
+      "context_length": 131072,
+      "kv_cache_dtype": "fp8_e4m3",
+      "enable_hierarchical_cache": true,
+      "hicache_ratio": 30,
+      "hicache_storage_backend": "file",
+      "extra_args": ["--dist-init-addr", "10.0.0.1:5000"],
+      "extra_env": {"SGLANG_DSV4_COMPRESS_STATE_DTYPE": "bf16"}
+    }
+  }'
+```
+
+`--host`, `--port`, `--api-key` and `--served-model-name` are not config fields: the host binds the port from its own allocator, authenticates with its own API key, and serves the model under `alias` so the gateway can route on it. `extra_args` is rejected when it tries to set one of them.
 
 ### Starting an Instance
 
@@ -334,6 +374,42 @@ All requests require an `X-API-Key` header with your configured API key from the
 | `host` | No | "0.0.0.0" | Host to bind to |
 | `port` | No | auto | Port (auto-assigned if not specified) |
 | `api_key` | Yes | - | API key for this instance |
+
+### SGLang Config Parameters
+
+Every optional flag defaults to "omitted", so SGLang's own default applies. The typed fields below cover the knobs that are stable across releases; anything else goes into `extra_args` / `extra_env`, which is what keeps this backend usable as SGLang's flag surface moves.
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `backend_type` | Yes | - | Must be `"sglang"` |
+| `model_path` | Yes | - | Local directory of the model weights (`--model-path`); derived from `model_source` when the instance is created through solar-control |
+| `alias` | Yes | - | Model alias for routing, also passed as `--served-model-name` |
+| `tp_size` | No | - | Tensor parallel size (`--tp-size`) |
+| `dp_size` | No | - | Data parallel size (`--dp-size`) |
+| `context_length` | No | - | Maximum context length (`--context-length`) |
+| `mem_fraction_static` | No | - | GPU memory fraction for weights and the KV pool (`--mem-fraction-static`) |
+| `chunked_prefill_size` | No | - | Prefill chunk in tokens (`--chunked-prefill-size`) |
+| `max_running_requests` | No | - | Scheduler concurrency cap (`--max-running-requests`) |
+| `cuda_graph_max_bs` | No | - | Largest batch size captured into a CUDA graph (`--cuda-graph-max-bs`) |
+| `cuda_graph_max_bs_decode` | No | - | Largest decode batch size captured (`--cuda-graph-max-bs-decode`) |
+| `swa_full_tokens_ratio` | No | - | Full-attention share for hybrid sliding-window models (`--swa-full-tokens-ratio`) |
+| `dtype` | No | - | Weight dtype, e.g. `"bfloat16"` (`--dtype`) |
+| `quantization` | No | - | Quantization method, e.g. `"fp8"` (`--quantization`) |
+| `kv_cache_dtype` | No | - | KV cache dtype, e.g. `"fp8_e4m3"` (`--kv-cache-dtype`) |
+| `moe_runner_backend` | No | - | MoE kernel backend, e.g. `"flashinfer_mxfp4"` (`--moe-runner-backend`) |
+| `speculative_algorithm` | No | - | Speculative decoding algorithm, e.g. `"EAGLE"` (`--speculative-algorithm`) |
+| `trust_remote_code` | No | false | Allow the model repo's own modelling code (`--trust-remote-code`) |
+| `enable_hierarchical_cache` | No | false | Keep evicted prefixes in host memory (`--enable-hierarchical-cache`) |
+| `hicache_ratio` | No | - | Host-to-device cache size ratio (`--hicache-ratio`) |
+| `hicache_mem_layout` | No | - | Host cache layout, e.g. `"page_first_direct"` (`--hicache-mem-layout`) |
+| `hicache_io_backend` | No | - | Host cache transfer backend, e.g. `"direct"` (`--hicache-io-backend`) |
+| `hicache_storage_backend` | No | - | Persistent cache backend, e.g. `"file"` (`--hicache-storage-backend`); needs `SGLANG_PROMPT_CACHE_DIR` |
+| `hicache_storage_backend_extra_config` | No | - | JSON object of storage options, e.g. `{"max_size":"256G"}` (`--hicache-storage-backend-extra-config`) |
+| `hicache_storage_prefetch_policy` | No | - | Prefetch policy, e.g. `"wait_complete"` (`--hicache-storage-prefetch-policy`) |
+| `extra_args` | No | - | Raw argv entries appended after the typed flags, so an entry here overrides one above it |
+| `extra_env` | No | - | Extra environment variables for the SGLang process |
+| `host` | No | "0.0.0.0" | Host to bind to |
+| `port` | No | auto | Port (auto-assigned if not specified) |
 
 ### Device Options
 

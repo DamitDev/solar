@@ -94,6 +94,7 @@ async def approve_pending_host(pending_id: str, name: str, url: str) -> str | No
         status=HostStatus.ONLINE,
         gpu_type=gpu_type,
         roles=roles,
+        supported_backends=p.get("supported_backends") or [],
         version=p.get("version"),
     )
     await host_db.add_host(host)
@@ -275,7 +276,7 @@ async def host_disconnect(sid: str):
 
 @sio.on("registration", namespace="/hosts")
 async def host_registration(sid: str, data: dict[str, Any]):
-    """Receive initial instance list, gpu_type, and roles from host."""
+    """Receive initial instance list, gpu_type, roles, and backends from host."""
     reg = WSRegistration.model_validate(data)
 
     host_id = await host_store.get_host_id_for_sid(sid)
@@ -283,17 +284,19 @@ async def host_registration(sid: str, data: dict[str, Any]):
         await host_store.set_host_instances(host_id, reg.instances)
 
         logger.info(
-            "Registration from %s: gpu_type=%s, roles=%s, instances=%d",
+            "Registration from %s: gpu_type=%s, roles=%s, backends=%s, instances=%d",
             host_id,
             reg.gpu_type,
             reg.roles,
+            reg.supported_backends,
             len(reg.instances),
         )
-        if reg.gpu_type or reg.roles or reg.version:
+        if reg.gpu_type or reg.roles or reg.version or reg.supported_backends:
             await host_db.update_host_registration(
                 host_id,
                 gpu_type=reg.gpu_type,
                 roles=reg.roles or None,
+                supported_backends=reg.supported_backends or None,
                 version=reg.version,
             )
 
@@ -319,6 +322,7 @@ async def host_registration(sid: str, data: dict[str, Any]):
             p["instances"] = reg.instances
             p["gpu_type"] = reg.gpu_type
             p["roles"] = reg.roles
+            p["supported_backends"] = reg.supported_backends
             p["version"] = reg.version
             await host_store.update_pending(pending_id, p)
 
@@ -460,6 +464,10 @@ async def host_health(sid: str, data: dict[str, Any]):
 
     if roles is not None:
         await host_db.update_host_roles(host_id, roles)
+
+    supported_backends = health_data.get("supported_backends")
+    if supported_backends:
+        await host_db.update_host_supported_backends(host_id, supported_backends)
 
     # C5: the health push carries the full resource snapshot — store it as
     # the WS-first read model so _fetch_host_resource_snapshot can serve

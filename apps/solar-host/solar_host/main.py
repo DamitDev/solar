@@ -9,11 +9,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from solar_host import __version__
+from solar_host.backends import supported_backend_types
 from solar_host.config import settings
 from solar_host.jobs import JobExecutor, cleanup_loop, job_store
 from solar_host.jobs.step_log_buffer import step_log_flush_loop
 from solar_host.jobs.workspace import ensure_jobs_dir
-from solar_host.models.base import BackendType
 from solar_host.models_manager import ensure_models_dir, get_models_dir
 from solar_host.process_manager import process_manager
 from solar_host.routes import instances, jobs, models, resources, websockets
@@ -337,8 +337,11 @@ async def root():
     return {
         "service": "solar-host",
         "version": __version__,
-        "description": "Process manager for model inference backends (llama.cpp, HuggingFace)",
-        "supported_backends": [bt.value for bt in BackendType],
+        "description": (
+            "Process manager for model inference backends "
+            "(llama.cpp, HuggingFace, SGLang)"
+        ),
+        "supported_backends": await asyncio.to_thread(supported_backend_types),
     }
 
 

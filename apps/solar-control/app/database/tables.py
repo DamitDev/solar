@@ -54,6 +54,9 @@ class HostRow(Base):
     memory: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     gpu_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     roles: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=list)
+    # Backend types the host reports it can run. NULL/empty means the host
+    # predates backend advertisement, which placement reads as "no opinion".
+    supported_backends: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     disk_total_gb: Mapped[float | None] = mapped_column(Double, nullable=True)
     disk_used_gb: Mapped[float | None] = mapped_column(Double, nullable=True)
     disk_available_gb: Mapped[float | None] = mapped_column(Double, nullable=True)

@@ -15,6 +15,7 @@ class BackendType(str, Enum):
     HUGGINGFACE_CLASSIFICATION = "huggingface_classification"
     HUGGINGFACE_EMBEDDING = "huggingface_embedding"
     HUGGINGFACE_VISION = "huggingface_vision"
+    SGLANG = "sglang"
 
 
 class InstanceStatus(str, Enum):

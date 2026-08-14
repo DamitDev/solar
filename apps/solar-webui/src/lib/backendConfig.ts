@@ -7,7 +7,7 @@
 import { Cpu, MessageSquare, Binary, Tags, Search } from 'lucide-react';
 import { BackendType, LlamaCppSplitMode, SpecType } from '@/api/types';
 
-export type PrimaryBackend = 'llamacpp' | 'huggingface';
+export type PrimaryBackend = 'llamacpp' | 'huggingface' | 'sglang';
 
 export type LlamaCppMode = 'llm' | 'embedding' | 'reranker';
 export type HuggingFaceMode = 'causal' | 'classifier' | 'embedding';
@@ -86,10 +86,50 @@ export const applySpecType = (config: Record<string, any>, specType: SpecType | 
   return next;
 };
 
+/**
+ * Parse the SGLang "extra arguments" textarea into an argv list.
+ *
+ * One flag per line, with its value after a space — the line is split on
+ * whitespace because argv entries have to be separate, so
+ * `--dist-init-addr 10.0.0.1:5000` becomes two entries the way a shell would
+ * pass them.
+ */
+export const parseExtraArgs = (text: string): string[] =>
+  text
+    .split('\n')
+    .flatMap((line) => line.trim().split(/\s+/))
+    .filter((arg) => arg.length > 0);
+
+/** Render an argv list back into the textarea form (one entry per line). */
+export const formatExtraArgs = (args: string[] | undefined | null): string => (args ?? []).join('\n');
+
+/** Parse the SGLang "extra environment" textarea (`NAME=value` per line). */
+export const parseExtraEnv = (text: string): Record<string, string> => {
+  const env: Record<string, string> = {};
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq <= 0) continue;
+    env[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+  }
+  return env;
+};
+
+/** Render an environment map back into the textarea form. */
+export const formatExtraEnv = (env: Record<string, string> | undefined | null): string =>
+  Object.entries(env ?? {})
+    .map(([name, value]) => `${name}=${value}`)
+    .join('\n');
+
 // Helper to get BackendType from selections
 export const getBackendTypeFromSelection = (primary: PrimaryBackend, mode: string): BackendType => {
   if (primary === 'llamacpp') {
     return 'llamacpp';
+  }
+  // SGLang serves generation models only, so it has no mode selection.
+  if (primary === 'sglang') {
+    return 'sglang';
   }
   switch (mode) {
     case 'causal':
@@ -141,6 +181,39 @@ export const getDefaultConfig = (primary: PrimaryBackend, mode: string, forInten
       ot: '',
       model_type: mode as LlamaCppMode,
       pooling: undefined,
+    };
+  }
+
+  if (primary === 'sglang') {
+    return {
+      ...base,
+      backend_type: 'sglang',
+      // Intents resolve model_source into model_path server-side.
+      ...(forIntent ? {} : { model_path: '', alias: '' }),
+      tp_size: 1,
+      dp_size: undefined,
+      context_length: undefined,
+      mem_fraction_static: 0.9,
+      chunked_prefill_size: undefined,
+      max_running_requests: undefined,
+      cuda_graph_max_bs: undefined,
+      cuda_graph_max_bs_decode: undefined,
+      swa_full_tokens_ratio: undefined,
+      dtype: '',
+      quantization: '',
+      kv_cache_dtype: '',
+      moe_runner_backend: '',
+      speculative_algorithm: '',
+      trust_remote_code: false,
+      enable_hierarchical_cache: false,
+      hicache_ratio: undefined,
+      hicache_mem_layout: '',
+      hicache_io_backend: '',
+      hicache_storage_backend: '',
+      hicache_storage_backend_extra_config: '',
+      hicache_storage_prefetch_policy: '',
+      extra_args: [],
+      extra_env: {},
     };
   }
 
@@ -208,8 +281,28 @@ export const stripEmptyOptionalFields = (config: Record<string, any>): Record<st
     'devices',
     'split_mode',
     'tensor_split',
+    // SGLang: an omitted flag means "SGLang's own default", so an empty
+    // string must not be sent as an explicit value.
+    'quantization',
+    'kv_cache_dtype',
+    'moe_runner_backend',
+    'speculative_algorithm',
+    'hicache_mem_layout',
+    'hicache_io_backend',
+    'hicache_storage_backend',
+    'hicache_storage_backend_extra_config',
+    'hicache_storage_prefetch_policy',
   ]) {
     if (!next[field]) delete next[field];
+  }
+
+  // 'dtype' is shared: HuggingFace treats 'auto' as a real value, SGLang has
+  // no such token and wants the flag omitted instead.
+  if (next.backend_type === 'sglang' && !next.dtype) delete next.dtype;
+
+  if (Array.isArray(next.extra_args) && next.extra_args.length === 0) delete next.extra_args;
+  if (next.extra_env && typeof next.extra_env === 'object' && Object.keys(next.extra_env).length === 0) {
+    delete next.extra_env;
   }
 
   // Speculative decoding is a generation-only feature and each type takes a

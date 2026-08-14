@@ -27,6 +27,20 @@ def _has_roles(host: Host, required_roles: list[str]) -> bool:
     return all(r in host_roles for r in required_roles)
 
 
+def supports_backend(host: Host, backend_type: str | None) -> bool:
+    """Whether *host* can run *backend_type*.
+
+    A host that has not advertised its backends (empty list — it predates
+    advertisement, or has not reconnected since) is treated as having no
+    opinion, so the fleet keeps working exactly as before while the roster
+    catches up. Only a host that did advertise can be excluded.
+    """
+    if backend_type is None:
+        return True
+    advertised = host.supported_backends or []
+    return not advertised or backend_type in advertised
+
+
 def filter_durable_hosts(
     hosts: list[Host],
     *,
@@ -34,11 +48,14 @@ def filter_durable_hosts(
     gpu_type: str | None = None,
     host_allow: list[str] | None = None,
     host_deny: list[str] | None = None,
+    backend_type: str | None = None,
 ) -> list[Host]:
-    """Hosts passing the durable placement filters (roles/gpu_type/allow/deny).
+    """Hosts passing the durable placement filters.
 
-    Draining, reachability and resource fit are deliberately NOT part of
-    this filter — they are dynamic fleet state that intent validation
+    Durable means roles, gpu_type, allow/deny and backend support: facts
+    about how a host is built and provisioned. Draining, reachability and
+    resource fit are deliberately NOT part of this filter — they are dynamic
+    fleet state that intent validation
     (``app.services.intent_validation``) reports as advisory warnings, never
     as hard errors. ``find_candidates`` applies them afterwards, so both
     paths share one filter chain.
@@ -54,6 +71,10 @@ def filter_durable_hosts(
 
         # GPU type filter
         if gpu_type is not None and host.gpu_type != gpu_type:
+            continue
+
+        # Backend support (e.g. SGLang is a separate install, not everywhere)
+        if not supports_backend(host, backend_type):
             continue
 
         # Allow/deny lists
@@ -114,6 +135,7 @@ async def find_candidates(
     gpu_type: str | None = None,
     host_allow: list[str] | None = None,
     host_deny: list[str] | None = None,
+    backend_type: str | None = None,
     vram_gb: float,
     ram_gb: float | None = None,
     disk_gb: float | None = None,
@@ -138,6 +160,7 @@ async def find_candidates(
         gpu_type=gpu_type,
         host_allow=host_allow,
         host_deny=host_deny,
+        backend_type=backend_type,
     )
 
     for host in durable:

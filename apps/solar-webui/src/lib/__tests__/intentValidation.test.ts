@@ -93,6 +93,7 @@ describe('validateIntentRequest', () => {
           host: 'h',
           port: 1,
           api_key: 'k',
+          model_path: '/srv/models/x',
         },
       };
       const messages = errorsFor(withForbidden).map((e) => e.message);
@@ -218,6 +219,56 @@ describe('validateIntentRequest', () => {
       it('ignores an absent device on any backend', () => {
         expect(fieldNames({ backend: { backend_type: 'llamacpp' } })).not.toContain('backend.device');
         expect(fieldNames({ backend: hf(null) })).not.toContain('backend.device');
+      });
+    });
+
+    // Mirrors _validate_sglang in app/validation.py — SGLang only runs on
+    // CUDA and owns a set of flags no other backend accepts.
+    describe('sglang', () => {
+      const sglang = (extra: Record<string, unknown> = {}) => ({ backend_type: 'sglang', ...extra });
+
+      it('accepts an sglang backend with its own flags', () => {
+        expect(errorsFor({ backend: sglang({ tp_size: 8, mem_fraction_static: 0.85 }) })).toEqual([]);
+      });
+
+      it('rejects an sglang flag on another backend', () => {
+        const fields = fieldNames({ backend: { backend_type: 'llamacpp', tp_size: 8, hicache_ratio: 30 } });
+        expect(fields).toContain('backend.tp_size');
+        expect(fields).toContain('backend.hicache_ratio');
+      });
+
+      it('requires an NVIDIA accelerator, and accepts the aliases for it', () => {
+        expect(fieldNames({ backend: sglang(), placement: { gpu_type: 'apple_mps' } })).toContain('placement.gpu_type');
+        expect(fieldNames({ backend: sglang(), placement: { gpu_type: 'cuda' } })).not.toContain('placement.gpu_type');
+        // Unset is fine: the server pins it to nvidia_cuda.
+        expect(fieldNames({ backend: sglang() })).not.toContain('placement.gpu_type');
+      });
+
+      it('rejects extra args that are not a list of non-empty strings', () => {
+        expect(fieldNames({ backend: sglang({ extra_args: '--enable-metrics' }) })).toContain('backend.extra_args');
+        expect(fieldNames({ backend: sglang({ extra_args: ['  '] }) })).toContain('backend.extra_args');
+      });
+
+      it('rejects an extra arg that would override a host-managed flag', () => {
+        for (const arg of ['--port', '--api-key=leaked', '--served-model-name', '--model-path']) {
+          const errors = errorsFor({ backend: sglang({ extra_args: [arg, 'x'] }) });
+          const err = errors.find((e) => e.field === 'backend.extra_args');
+          expect(err, arg).toBeDefined();
+          expect(err!.message).toContain('solar-host');
+        }
+      });
+
+      it('accepts an extra arg SGLang has no typed field for', () => {
+        expect(fieldNames({ backend: sglang({ extra_args: ['--dist-init-addr', '10.0.0.1:5000'] }) })).not.toContain(
+          'backend.extra_args',
+        );
+      });
+
+      it('rejects an extra env that is not a flat string map', () => {
+        expect(fieldNames({ backend: sglang({ extra_env: ['A=1'] }) })).toContain('backend.extra_env');
+        expect(fieldNames({ backend: sglang({ extra_env: { A: 1 } }) })).toContain('backend.extra_env');
+        expect(fieldNames({ backend: sglang({ extra_env: { '': 'x' } }) })).toContain('backend.extra_env');
+        expect(fieldNames({ backend: sglang({ extra_env: { A: '1' } }) })).not.toContain('backend.extra_env');
       });
     });
 

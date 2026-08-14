@@ -39,6 +39,9 @@ class _HostStub:
     api_key: str = "test-key"
     roles: list | None = None
     gpu_type: str | None = None
+    # Empty means the host advertised nothing, which placement reads as
+    # "no opinion" — the default keeps these stubs eligible for any backend.
+    supported_backends: list | None = None
     drain_state: str | None = None
 
     def __post_init__(self):
@@ -266,6 +269,69 @@ class TestHelpers:
             ),
         }
         assert _detect_backend_drift(intent, instance_config) == ["mmproj"]
+
+    def test_detect_backend_drift_skips_the_resolved_sglang_model_path(self):
+        """model_path is resolved per host, so comparing it would report drift
+        on every replica whose model landed under a different root."""
+        intent = _make_intent(
+            backend={"backend_type": "sglang", "tp_size": 8},
+        )
+        instance_config = {
+            "backend_type": "sglang",
+            "tp_size": 8,
+            "model_path": "/srv/models/dsv4",
+        }
+        assert _detect_backend_drift(intent, instance_config) == []
+
+    def test_detect_backend_drift_ignores_hicache_json_whitespace(self):
+        intent = _make_intent(
+            backend={
+                "backend_type": "sglang",
+                "hicache_storage_backend_extra_config": (
+                    '{"max_size": "256G", "eviction_ratio": 0.9}'
+                ),
+            }
+        )
+        instance_config = {
+            "backend_type": "sglang",
+            "hicache_storage_backend_extra_config": (
+                '{"max_size":"256G","eviction_ratio":0.9}'
+            ),
+        }
+        assert _detect_backend_drift(intent, instance_config) == []
+
+    def test_detect_backend_drift_sees_a_real_hicache_config_change(self):
+        intent = _make_intent(
+            backend={
+                "backend_type": "sglang",
+                "hicache_storage_backend_extra_config": '{"max_size":"512G"}',
+            }
+        )
+        instance_config = {
+            "backend_type": "sglang",
+            "hicache_storage_backend_extra_config": '{"max_size":"256G"}',
+        }
+        assert _detect_backend_drift(intent, instance_config) == [
+            "hicache_storage_backend_extra_config"
+        ]
+
+    def test_detect_backend_drift_compares_extra_env_and_extra_args(self):
+        intent = _make_intent(
+            backend={
+                "backend_type": "sglang",
+                "extra_args": ["--dist-init-addr", "10.0.0.1:5000"],
+                "extra_env": {"SGLANG_DSV4_COMPRESS_STATE_DTYPE": "bf16"},
+            }
+        )
+        same = {
+            "backend_type": "sglang",
+            "extra_args": ["--dist-init-addr", "10.0.0.1:5000"],
+            "extra_env": {"SGLANG_DSV4_COMPRESS_STATE_DTYPE": "bf16"},
+        }
+        assert _detect_backend_drift(intent, same) == []
+
+        changed = dict(same, extra_env={"SGLANG_DSV4_COMPRESS_STATE_DTYPE": "fp8"})
+        assert _detect_backend_drift(intent, changed) == ["extra_env"]
 
     def test_detect_backend_drift_non_path_mismatch_still_drift(self):
         """The path-tail normalization only applies to bare filenames —

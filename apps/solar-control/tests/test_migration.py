@@ -100,6 +100,68 @@ async def test_create_instance_on_host_success(target_host):
 
 
 @pytest.mark.anyio
+async def test_create_instance_on_host_resolves_sglang_model_path(target_host):
+    """SGLang serves a directory through --model-path, not llama.cpp's `model`
+    file nor HuggingFace's `model_id` repo id."""
+    sent: dict = {}
+
+    with (
+        patch("app.services.migration.resolve") as mock_resolve,
+        patch("aiohttp.ClientSession.post") as mock_post,
+    ):
+        mock_resolve.return_value = "local:///srv/models/dsv4"
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"instance_id": "new-inst"})
+        mock_post.return_value.__aenter__.return_value = mock_resp
+
+        payload = {
+            "config": {
+                "backend_type": "sglang",
+                "alias": "dsv4:flash",
+                "model_source": "repo://dsv4:flash",
+            }
+        }
+        await create_instance_on_host(target_host, payload)
+        sent = mock_post.call_args.kwargs["json"]["config"]
+
+    assert sent["model_path"] == "/srv/models/dsv4"
+    assert "model" not in sent and "model_id" not in sent
+    # The URI survives so a later migration can re-resolve on the new host.
+    assert sent["model_source"] == "repo://dsv4:flash"
+    assert mock_resolve.call_args.kwargs["backend_type"] == "sglang"
+
+
+@pytest.mark.anyio
+async def test_create_instance_on_host_keeps_an_already_resolved_model_path(
+    target_host,
+):
+    """Migration passes the path ensure_model_on_target returned; re-resolving
+    it would point the replica at the source host's layout."""
+    with (
+        patch("app.services.migration.resolve") as mock_resolve,
+        patch("aiohttp.ClientSession.post") as mock_post,
+    ):
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"instance_id": "new-inst"})
+        mock_post.return_value.__aenter__.return_value = mock_resp
+
+        await create_instance_on_host(
+            target_host,
+            {
+                "config": {
+                    "backend_type": "sglang",
+                    "model_source": "repo://dsv4:flash",
+                    "model_path": "/mnt/target/dsv4",
+                }
+            },
+        )
+
+    mock_resolve.assert_not_called()
+
+
+@pytest.mark.anyio
 async def test_create_instance_on_host_invalid_priority(target_host):
     with pytest.raises(HTTPException) as exc:
         await create_instance_on_host(target_host, {"priority": "invalid"})

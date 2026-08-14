@@ -428,4 +428,31 @@ describe('IntentFormModal in create mode', () => {
     expect(createIntent.mock.calls[0][0]).toMatchObject({ alias: 'lily:v1' });
     expect(onSaved).toHaveBeenCalled();
   });
+
+  it('pins the accelerator to NVIDIA for SGLang, which only runs on CUDA', async () => {
+    const createIntent = vi.spyOn(solarClient, 'createIntent').mockResolvedValue(intent);
+
+    render(
+      <IntentFormModal
+        initial={{ alias: 'dsv4:flash', model_source: 'repo://dsv4:flash' }}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: /SGLang/ }));
+
+    const gpuSelect = screen.getByLabelText('GPU type') as HTMLSelectElement;
+    await waitFor(() => expect(gpuSelect.value).toBe('nvidia_cuda'));
+    // Editable, it would only ever produce a spec the server rejects.
+    expect(gpuSelect).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Submit Intent' }));
+
+    await waitFor(() => expect(createIntent).toHaveBeenCalled());
+    expect(createIntent.mock.calls[0][0]).toMatchObject({
+      backend: { backend_type: 'sglang' },
+      placement: { gpu_type: 'nvidia_cuda' },
+    });
+  });
 });

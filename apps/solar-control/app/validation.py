@@ -21,6 +21,7 @@ VALID_BACKEND_TYPES: frozenset[str] = frozenset(
         "huggingface_classification",
         "huggingface_embedding",
         "huggingface_vision",
+        "sglang",
     }
 )
 VALID_MODEL_SOURCE_SCHEMES: frozenset[str] = frozenset({"repo", "huggingface", "local"})
@@ -31,6 +32,10 @@ FORBIDDEN_BACKEND_FIELDS: frozenset[str] = frozenset(
         "host",
         "port",
         "api_key",
+        # SGLang's served model directory: resolved from model_source, so a
+        # client-supplied value would suppress resolution and pin the intent
+        # to one host's filesystem layout.
+        "model_path",
     }
 )
 
@@ -96,6 +101,36 @@ _HUGGINGFACE_ONLY_FIELDS: frozenset[str] = frozenset(
         "trust_remote_code",
     }
 )
+# Ownership is many-to-many, so ``dtype`` and ``trust_remote_code`` appear
+# here as well as in the huggingface set: both backends accept them.
+_SGLANG_FIELDS: frozenset[str] = frozenset(
+    {
+        "dtype",
+        "trust_remote_code",
+        "tp_size",
+        "dp_size",
+        "context_length",
+        "mem_fraction_static",
+        "chunked_prefill_size",
+        "max_running_requests",
+        "cuda_graph_max_bs",
+        "cuda_graph_max_bs_decode",
+        "swa_full_tokens_ratio",
+        "quantization",
+        "kv_cache_dtype",
+        "moe_runner_backend",
+        "speculative_algorithm",
+        "enable_hierarchical_cache",
+        "hicache_ratio",
+        "hicache_mem_layout",
+        "hicache_io_backend",
+        "hicache_storage_backend",
+        "hicache_storage_backend_extra_config",
+        "hicache_storage_prefetch_policy",
+        "extra_args",
+        "extra_env",
+    }
+)
 BACKEND_FIELD_OWNERS: dict[str, frozenset[str]] = {
     "llamacpp": _LLAMACPP_ONLY_FIELDS,
     "huggingface": _HUGGINGFACE_ONLY_FIELDS,
@@ -103,7 +138,24 @@ BACKEND_FIELD_OWNERS: dict[str, frozenset[str]] = {
     "huggingface_embedding": frozenset({"normalize_embeddings"}),
     "huggingface_causal": frozenset({"use_flash_attention"}),
     "huggingface_vision": frozenset({"use_flash_attention"}),
+    "sglang": _SGLANG_FIELDS,
 }
+
+# SGLang's kernels are CUDA-only, so an SGLang intent can only ever land on an
+# NVIDIA host. The token is set for the user when the placement leaves it open.
+SGLANG_GPU_TYPE: str = "nvidia_cuda"
+
+# Flags solar-host derives itself (port allocator, host API key, alias-based
+# served name). Mirrors RESERVED_SGLANG_ARGS in the host's SGlang config model.
+RESERVED_SGLANG_ARGS: frozenset[str] = frozenset(
+    {
+        "--host",
+        "--port",
+        "--api-key",
+        "--model-path",
+        "--served-model-name",
+    }
+)
 
 # Device values matching DEVICE_OPTIONS in the webui backendConfig.ts.
 DEVICE_OPTIONS: frozenset[str] = frozenset({"auto", "cuda", "mps", "cpu"})
@@ -154,6 +206,39 @@ def validate_priority(instance_data: dict[str, Any]) -> None:
             detail=(
                 f"Invalid priority '{priority}'. "
                 f"Must be one of: {', '.join(sorted(VALID_PRIORITIES))}"
+            ),
+        )
+
+
+def validate_host_supports_backend(host: Any, backend_type: Any) -> None:
+    """Reject a manual instance whose backend the target host cannot run.
+
+    Manual creation names its host explicitly and so never passes through
+    placement, which is where an intent's backend/accelerator fit is checked.
+    A host that predates backend advertisement reports nothing, so an empty
+    ``supported_backends`` is read as "no opinion" and only the accelerator
+    contract applies.
+    """
+    if not isinstance(backend_type, str) or backend_type not in VALID_BACKEND_TYPES:
+        return
+
+    if backend_type == "sglang" and getattr(host, "gpu_type", None) != SGLANG_GPU_TYPE:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"The sglang backend requires an NVIDIA host, but "
+                f"'{host.name}' reports gpu_type "
+                f"'{getattr(host, 'gpu_type', None)}'"
+            ),
+        )
+
+    supported = getattr(host, "supported_backends", None) or []
+    if supported and backend_type not in supported:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Host '{host.name}' does not support the '{backend_type}' "
+                f"backend. It reports: {', '.join(sorted(supported))}"
             ),
         )
 
@@ -339,6 +424,10 @@ def _describe_owners(owners: frozenset[str]) -> str:
     if owners == hf_types:
         return "huggingface_* backends"
     names = sorted(owners)
+    if owners > hf_types:
+        # A field shared with another backend (dtype, trust_remote_code) would
+        # otherwise spell out all four huggingface names before it.
+        names = ["huggingface_*"] + sorted(owners - hf_types)
     if len(names) == 1:
         return f"the {names[0]} backend"
     return "the " + " or ".join(names) + " backends"
@@ -461,6 +550,88 @@ def _validate_device(
                 ),
             }
         )
+    return errors
+
+
+def _validate_sglang(
+    backend: dict[str, Any],
+    data: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Validate the SGLang contract and pin the placement to NVIDIA.
+
+    SGLang only runs on CUDA, so an unset ``placement.gpu_type`` is filled in
+    on *data* rather than left to chance (placement filters on exact equality,
+    and an unset token would let the reconciler pick a CPU or Apple host and
+    fail at start). A gpu_type naming a different accelerator is a hard 422.
+
+    ``extra_args``/``extra_env`` are the version-specific escape hatches; they
+    are shape-checked here, and ``extra_args`` may not carry a flag solar-host
+    derives itself — a second ``--port`` would silently break gateway routing.
+    """
+    errors: list[dict[str, str]] = []
+    if backend.get("backend_type") != "sglang":
+        return errors
+
+    placement = data.get("placement")
+    if placement is None:
+        placement = {}
+        data["placement"] = placement
+    if isinstance(placement, dict):
+        gpu_type = placement.get("gpu_type")
+        if gpu_type is None:
+            placement["gpu_type"] = SGLANG_GPU_TYPE
+        elif gpu_type != SGLANG_GPU_TYPE:
+            errors.append(
+                {
+                    "field": "placement.gpu_type",
+                    "message": (
+                        f"the sglang backend requires gpu_type "
+                        f"'{SGLANG_GPU_TYPE}', but placement.gpu_type is "
+                        f"'{gpu_type}'"
+                    ),
+                }
+            )
+
+    extra_args = backend.get("extra_args")
+    if extra_args is not None:
+        if not isinstance(extra_args, list) or not all(
+            isinstance(a, str) and a.strip() for a in extra_args
+        ):
+            errors.append(
+                {
+                    "field": "backend.extra_args",
+                    "message": "extra_args must be a list of non-empty strings",
+                }
+            )
+        else:
+            for arg in extra_args:
+                flag = arg.strip().split("=", 1)[0]
+                if flag in RESERVED_SGLANG_ARGS:
+                    errors.append(
+                        {
+                            "field": "backend.extra_args",
+                            "message": (
+                                f"'{flag}' is managed by solar-host and must not "
+                                f"be set through extra_args"
+                            ),
+                        }
+                    )
+
+    extra_env = backend.get("extra_env")
+    if extra_env is not None and (
+        not isinstance(extra_env, dict)
+        or not all(
+            isinstance(k, str) and k.strip() and isinstance(v, str)
+            for k, v in extra_env.items()
+        )
+    ):
+        errors.append(
+            {
+                "field": "backend.extra_env",
+                "message": "extra_env must be an object mapping names to strings",
+            }
+        )
+
     return errors
 
 
@@ -719,6 +890,7 @@ def validate_intent_create(
             )
         )
         errors.extend(_validate_backend_speculative_decoding(backend))
+        errors.extend(_validate_sglang(backend, data))
 
     return errors
 
@@ -796,6 +968,48 @@ def _canonicalize_device_lists(backend: dict[str, Any]) -> None:
             )
 
 
+def _canonicalize_json_object_field(
+    backend: dict[str, Any], field: str, *, coerce_booleans: bool
+) -> None:
+    """Store *field* as the compact canonical JSON the host produces, in place.
+
+    Accepts a JSON object string (as the webui form sends) or a dict.
+    ``coerce_booleans`` mirrors whether the owning host config model rewrites
+    boolean-looking strings — it must match exactly, or the stored value and
+    the instance config would differ and drift detection would restart the
+    instance on every pass.
+
+    Raises HTTPException(422) on malformed JSON or a non-object value.
+    """
+    value = backend.get(field)
+    if value is None:
+        return
+
+    def _invalid(message: str) -> HTTPException:
+        return _invalid_backend_field(field, message)
+
+    if isinstance(value, dict):
+        parsed = value
+    elif isinstance(value, str):
+        if not value.strip():
+            return
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError) as exc:
+            raise _invalid(f"{field} is not valid JSON: {exc}") from exc
+    else:
+        raise _invalid(f"{field} must be a JSON object string or a dict")
+
+    if not isinstance(parsed, dict):
+        raise _invalid(f"{field} must be a JSON object")
+
+    backend[field] = json.dumps(
+        _coerce_jsonish(parsed) if coerce_booleans else parsed,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 def canonicalize_intent_backend(backend: dict[str, Any]) -> None:
     """Normalize the backend fields the host rewrites on parse, in place (C1).
 
@@ -803,38 +1017,19 @@ def canonicalize_intent_backend(backend: dict[str, Any]) -> None:
     form sends, or a dict), recursively coerced so boolean-looking strings
     become real booleans, and re-serialized as compact canonical JSON — the
     exact form the host's ``LlamaCppConfig.normalize_chat_template_kwargs``
-    produces. ``devices`` and ``tensor_split`` get the same treatment for
-    their comma-separated form. Storing the canonical form means new intents
-    never carry a representation that drift detection would flag; the
-    normalization-aware comparison in the reconciler remains for
-    already-stored intents.
+    produces. SGLang's ``hicache_storage_backend_extra_config`` gets the same
+    treatment minus the boolean coercion (its host model does not coerce), and
+    ``devices``/``tensor_split`` the comma-separated equivalent. Storing the
+    canonical form means new intents never carry a representation that drift
+    detection would flag; the normalization-aware comparison in the reconciler
+    remains for already-stored intents.
 
     Raises HTTPException(422) on malformed JSON or a non-object value.
     """
     _canonicalize_device_lists(backend)
-
-    kwargs = backend.get("chat_template_kwargs")
-    if kwargs is None:
-        return
-
-    def _invalid(message: str) -> HTTPException:
-        return _invalid_backend_field("chat_template_kwargs", message)
-
-    if isinstance(kwargs, dict):
-        parsed = kwargs
-    elif isinstance(kwargs, str):
-        if not kwargs.strip():
-            return
-        try:
-            parsed = json.loads(kwargs)
-        except (ValueError, TypeError) as exc:
-            raise _invalid(f"chat_template_kwargs is not valid JSON: {exc}") from exc
-    else:
-        raise _invalid("chat_template_kwargs must be a JSON object string or a dict")
-
-    if not isinstance(parsed, dict):
-        raise _invalid("chat_template_kwargs must be a JSON object")
-
-    backend["chat_template_kwargs"] = json.dumps(
-        _coerce_jsonish(parsed), ensure_ascii=False, separators=(",", ":")
+    _canonicalize_json_object_field(
+        backend, "chat_template_kwargs", coerce_booleans=True
+    )
+    _canonicalize_json_object_field(
+        backend, "hicache_storage_backend_extra_config", coerce_booleans=False
     )

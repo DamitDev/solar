@@ -298,9 +298,11 @@ class SolarControlClient:
             )
 
         from solar_host import __version__
+        from solar_host.backends import supported_backend_types
         from solar_host.memory_monitor import detect_gpu_type
 
         gpu_type = await asyncio.to_thread(detect_gpu_type)
+        backends = await asyncio.to_thread(supported_backend_types)
         await self._sio.emit(
             "registration",
             {
@@ -308,6 +310,7 @@ class SolarControlClient:
                 "instances": instances,
                 "roles": config_manager.roles,
                 "gpu_type": gpu_type,
+                "supported_backends": backends,
                 "version": __version__,
             },
             namespace=self.NAMESPACE,
@@ -369,6 +372,7 @@ class SolarControlClient:
         for older control versions, and the full ``resources`` snapshot (C5)
         that control caches as its WS-first read model.
         """
+        from solar_host.backends import supported_backend_types
         from solar_host.config import config_manager, settings
         from solar_host.memory_monitor import (
             detect_gpu_type,
@@ -390,6 +394,7 @@ class SolarControlClient:
             "memory": memory,
             "gpu_type": gpu_type,
             "roles": config_manager.roles,
+            "supported_backends": await asyncio.to_thread(supported_backend_types),
             "instance_count": len(instances),
             "running_instance_count": running_count,
             "version": __version__,

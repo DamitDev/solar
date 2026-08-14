@@ -51,19 +51,24 @@ async def create_instance_on_host(
     """Create an inference instance on *host* with the given config.
 
     Validates priority (S-036), resolves ``model_source`` (S-019), sets
-    the derived ``model``/``model_id`` while preserving the original URI
-    for cross-host operations (S-037), and POSTs to the host.
+    the derived ``model``/``model_id``/``model_path`` while preserving the
+    original URI for cross-host operations (S-037), and POSTs to the host.
     """
     # Validate priority if present (S-036)
     validate_priority(instance_data)
 
-    # Resolve model_source and set model/model_id while preserving the
-    # original URI.  Support both flat and {config: {...}} payload shapes.
-    # Skip re-resolution when the caller already set model/model_id
+    # Resolve model_source and set the backend's model field while preserving
+    # the original URI.  Support both flat and {config: {...}} payload shapes.
+    # Skip re-resolution when the caller already set the model field
     # (migration passes the path returned by ensure_model_on_target).
     config = instance_data.get("config", instance_data)
     model_source = config.get("model_source")
-    if model_source and not config.get("model") and not config.get("model_id"):
+    if (
+        model_source
+        and not config.get("model")
+        and not config.get("model_id")
+        and not config.get("model_path")
+    ):
         backend_type = config.get("backend_type", "llamacpp")
         # Forward the backend so repo:// pulls for llama.cpp resolve to the
         # largest *.gguf in the artifact instead of the directory, and the
@@ -80,7 +85,9 @@ async def create_instance_on_host(
             model_path = resolved[8:]
         else:
             model_path = resolved
-        if backend_type.startswith("huggingface"):
+        if backend_type == "sglang":
+            config["model_path"] = model_path
+        elif backend_type.startswith("huggingface"):
             config["model_id"] = model_path
         else:
             config["model"] = model_path
@@ -774,7 +781,9 @@ def _build_target_create(instance_config: dict[str, Any], path: str) -> dict[str
     # Preserve model_source alongside the resolved path for intent
     # linking and cross-host operations (S-037/D-017).
     backend_type = str(create_payload.get("backend_type", "llamacpp"))
-    if backend_type.startswith("huggingface"):
+    if backend_type == "sglang":
+        create_payload["model_path"] = path
+    elif backend_type.startswith("huggingface"):
         create_payload["model_id"] = path
     else:
         create_payload["model"] = path

@@ -12,7 +12,12 @@ import pytest
 from app.models import Host, HostStatus
 
 
-def _host(host_id: str, gpu_type: str = "cpu", drain_state=None) -> Host:
+def _host(
+    host_id: str,
+    gpu_type: str = "cpu",
+    drain_state=None,
+    supported_backends: list[str] | None = None,
+) -> Host:
     return Host(
         id=host_id,
         name=host_id,
@@ -22,6 +27,7 @@ def _host(host_id: str, gpu_type: str = "cpu", drain_state=None) -> Host:
         roles=["inference"],
         gpu_type=gpu_type,
         drain_state=drain_state,
+        supported_backends=supported_backends or [],
     )
 
 
@@ -240,6 +246,60 @@ class TestWarnings:
         # payload dict, so it needs its own normalization to reach the token.
         stored = PlacementConstraints(**payload["placement"])
         assert _requested_gpu_type(stored) == "apple_mps"
+
+    @pytest.mark.anyio
+    async def test_a_backend_no_connected_host_advertises_warns(self):
+        """SGLang is a separate CUDA-only install, so this is the usual reason an
+        otherwise valid intent never gets placed."""
+        hosts = [
+            _host(
+                "h1",
+                gpu_type="nvidia_cuda",
+                supported_backends=["llamacpp", "huggingface_causal"],
+            )
+        ]
+        payload = _payload(
+            backend={"backend_type": "sglang"},
+            placement={"gpu_type": "nvidia_cuda"},
+        )
+
+        hard, warnings = await _validate(payload, hosts)
+
+        assert hard == []
+        assert any(
+            w["field"] == "backend.backend_type" and "sglang" in w["message"]
+            for w in warnings
+        )
+
+    @pytest.mark.anyio
+    async def test_a_host_advertising_the_backend_does_not_warn(self):
+        hosts = [
+            _host("h1", gpu_type="nvidia_cuda", supported_backends=["sglang"]),
+        ]
+        payload = _payload(
+            backend={"backend_type": "sglang"},
+            placement={"gpu_type": "nvidia_cuda"},
+        )
+
+        hard, warnings = await _validate(payload, hosts)
+
+        assert hard == []
+        assert not any(w["field"] == "backend.backend_type" for w in warnings)
+
+    @pytest.mark.anyio
+    async def test_a_fleet_that_advertises_nothing_does_not_warn(self):
+        """Hosts predating advertisement report an empty list; treating that as
+        a denial would warn on every intent in an un-upgraded fleet."""
+        hosts = [_host("h1", gpu_type="nvidia_cuda")]
+        payload = _payload(
+            backend={"backend_type": "sglang"},
+            placement={"gpu_type": "nvidia_cuda"},
+        )
+
+        hard, warnings = await _validate(payload, hosts)
+
+        assert hard == []
+        assert not any(w["field"] == "backend.backend_type" for w in warnings)
 
     @pytest.mark.anyio
     async def test_warnings_never_become_errors(self):
