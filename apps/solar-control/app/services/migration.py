@@ -763,6 +763,8 @@ def _build_target_create(instance_config: dict[str, Any], path: str) -> dict[str
             "pid",
             "api_key",
             "supported_endpoints",
+            # Derived from the alias by whichever host runs the process.
+            "served_model_name",
             "created_at",
             "started_at",
             "error_message",

@@ -240,7 +240,9 @@ curl -X POST http://localhost:8001/instances \
   }'
 ```
 
-`--host`, `--port`, `--api-key` and `--served-model-name` are not config fields: the host binds the port from its own allocator, authenticates with its own API key, and serves the model under `alias` so the gateway can route on it. `extra_args` is rejected when it tries to set one of them.
+`--host`, `--port`, `--api-key` and `--served-model-name` are not config fields: the host binds the port from its own allocator, authenticates with its own API key, and derives the served name from `alias`. `extra_args` is rejected when it tries to set one of them.
+
+A colon in the alias is translated for SGLang, which reads `alias:tag` as base model plus LoRA adapter: `deepseek-v4-flash:284b` is served as `deepseek-v4-flash-284b`. The host reports that name as `served_model_name` on the instance (REST and `instances_update`), and solar-control rewrites the `model` field of each forwarded request to it while continuing to route on — and advertise — the alias. Clients keep using the alias.
 
 ### Starting an Instance
 
@@ -383,7 +385,7 @@ Every optional flag defaults to "omitted", so SGLang's own default applies. The 
 |-----------|----------|---------|-------------|
 | `backend_type` | Yes | - | Must be `"sglang"` |
 | `model_path` | Yes | - | Local directory of the model weights (`--model-path`); derived from `model_source` when the instance is created through solar-control |
-| `alias` | Yes | - | Model alias for routing, also passed as `--served-model-name` |
+| `alias` | Yes | - | Model alias for routing; `--served-model-name` is derived from it, with any `:` replaced by `-` |
 | `tp_size` | No | - | Tensor parallel size (`--tp-size`) |
 | `dp_size` | No | - | Data parallel size (`--dp-size`) |
 | `context_length` | No | - | Maximum context length (`--context-length`) |

@@ -87,6 +87,9 @@ class OpenAIGateway:
                     "supported_endpoints",
                     RegistryEntry.DEFAULT_ENDPOINTS,
                 ),
+                # Without it a cache re-seeded from HTTP would forward the alias
+                # to a backend serving a translated name (SGLang and its colon).
+                "served_model_name": instance.get("served_model_name"),
                 "backend_type": config.get(
                     "backend_type",
                     instance.get("backend_type", "llamacpp"),
@@ -506,6 +509,59 @@ class OpenAIGateway:
             return None
 
     @staticmethod
+    def _upstream_body(
+        instance: RegistryEntry, data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Translate the request's ``model`` to the name the backend serves.
+
+        Solar routes on the alias, but a backend cannot always be launched
+        under it: SGLang reads ``a:b`` as base model ``a`` plus LoRA adapter
+        ``b`` and answers "LoRA adapter b is not loaded", so the host serves a
+        colon-free name and reports it. Forwarding the alias verbatim would
+        turn every request to such an instance into a 400.
+
+        Backends that do serve the alias (llama.cpp, HuggingFace) get the body
+        untouched, including a partial name the client used — rewriting that
+        would change long-standing behaviour for them.
+        """
+        served = instance.served_model_name
+        if not served or served == instance.model_alias or "model" not in data:
+            return data
+        return {**data, "model": served}
+
+    @staticmethod
+    def _restore_alias_in_models(
+        payload: dict[str, Any], instance: RegistryEntry
+    ) -> dict[str, Any]:
+        """Advertise the alias for an instance serving under a different name.
+
+        The upstream reports what it was launched with, and that name does not
+        route: :meth:`_resolve_model_name` only matches registry keys, which are
+        aliases. Left alone, ``/v1/models`` would advertise a name whose next
+        request 404s.
+        """
+        served = instance.served_model_name
+        alias = instance.model_alias
+        if not served or served == alias:
+            return payload
+
+        patched = dict(payload)
+        # Ollama-style entries name the model twice; OpenAI-style entries once.
+        for key, name_fields in (("models", ("name", "model")), ("data", ("id",))):
+            entries = patched.get(key)
+            if not isinstance(entries, list):
+                continue
+            patched[key] = [
+                (
+                    {**e, **{f: alias for f in name_fields if e.get(f) == served}}
+                    if isinstance(e, dict)
+                    else e
+                )
+                for e in entries
+            ]
+        return patched
+
+    @staticmethod
     def _override_context_metadata(
         model: dict[str, Any], context_size: int | None
     ) -> dict[str, Any]:
@@ -561,7 +617,9 @@ class OpenAIGateway:
                     url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)
                 ) as response:
                     if response.status == 200:
-                        payload = await response.json()
+                        payload = self._restore_alias_in_models(
+                            await response.json(), instance
+                        )
 
                         ollama_models = payload.get("models") or []
                         caps_by_name: dict[str, list[str]] = {}
@@ -1041,7 +1099,10 @@ class OpenAIGateway:
                     timeout = self._make_route_timeout()
 
                     async with self.session.post(
-                        url, json=data, headers=headers, timeout=timeout
+                        url,
+                        json=self._upstream_body(instance, data),
+                        headers=headers,
+                        timeout=timeout,
                     ) as response:
                         if response.status == 200:
                             await health_store.mark_healthy(
@@ -1228,7 +1289,10 @@ class OpenAIGateway:
                     timeout = self._make_route_timeout()
 
                     async with self.session.post(
-                        url, json=data, headers=headers, timeout=timeout
+                        url,
+                        json=self._upstream_body(instance, data),
+                        headers=headers,
+                        timeout=timeout,
                     ) as response:
                         if response.status == 200:
                             await health_store.mark_healthy(

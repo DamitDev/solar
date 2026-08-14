@@ -46,6 +46,20 @@ def test_host_managed_flags_come_from_the_host_not_the_config() -> None:
     assert flag_value(command, "--api-key") == "test-key"
 
 
+def test_a_colon_in_the_alias_is_translated_for_sglang() -> None:
+    """SGLang reads `a:b` as base model `a` plus LoRA adapter `b`, so an alias
+    like deepseek-v4-flash:284b cannot be served verbatim."""
+    config = SglangConfig(model_path="/models/dsv4", alias="deepseek-v4-flash:284b")
+    instance = SimpleNamespace(config=config, port=8080, id="inst-1")
+    runner = SglangRunner()
+
+    command = runner.build_command(instance)
+
+    assert flag_value(command, "--served-model-name") == "deepseek-v4-flash-284b"
+    # Reported to solar-control, which rewrites the request's model field to it.
+    assert runner.get_served_model_name(config) == "deepseek-v4-flash-284b"
+
+
 def test_the_venv_console_script_is_used(_sglang_available) -> None:
     command = build_command()
 

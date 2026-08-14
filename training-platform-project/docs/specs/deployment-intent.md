@@ -341,11 +341,12 @@ A DSpark drafter is trained for one specific target model, so it lives beside th
 
 #### 4.7.5 SGLang backend
 
-`sglang` serves generation models through `sglang serve` and has no model-type variants, so `backend_type: "sglang"` is the whole selection. It differs from the other backends in three ways:
+`sglang` serves generation models through `sglang serve` and has no model-type variants, so `backend_type: "sglang"` is the whole selection. It differs from the other backends in four ways:
 
 - **CUDA-only placement.** SGLang's kernels require NVIDIA hardware, so `placement.gpu_type` is pinned to `nvidia_cuda` when unset and a contradiction is a 422. Solar Host advertises `sglang` in its `supported_backends` only on an NVIDIA host where the executable resolves, and placement drops hosts that advertise a list without it — a host that advertises nothing is treated as having no opinion, so an un-upgraded fleet keeps working.
 - **`model_path`, not `model`/`model_id`.** The resolver hands SGLang the model *directory*, written into `backend.model_path` per host. Like `model`/`model_id` it is server-derived and rejected inside an intent's `backend`.
 - **Typed fields plus escape hatches.** The common knobs (`tp_size`, `dp_size`, `context_length`, `mem_fraction_static`, `chunked_prefill_size`, `max_running_requests`, `cuda_graph_max_bs`, `cuda_graph_max_bs_decode`, `swa_full_tokens_ratio`, `dtype`, `quantization`, `kv_cache_dtype`, `moe_runner_backend`, `speculative_algorithm`, `trust_remote_code`, and the `hicache_*` cache settings) each map to one CLI flag. `extra_args` (argv entries) and `extra_env` (environment variables) carry everything else, because SGLang's flag surface moves faster than this contract. `extra_args` is appended last, so an entry there overrides the typed flag above it, and it may not set `--host`, `--port`, `--api-key`, `--model-path` or `--served-model-name` — those are host-derived, and overriding them would break routing or auth.
+- **The alias is not always the served name.** SGLang reads `a:b` in a model name as base model `a` plus LoRA adapter `b`, so an alias following the `name:tag` convention cannot be served verbatim: Solar Host launches `deepseek-v4-flash:284b` as `deepseek-v4-flash-284b` and reports that as `served_model_name` on the instance. Solar Control rewrites the `model` field of each forwarded request to it, and maps it back to the alias in `/v1/models`, so the alias stays the only name clients and intents ever use. A host that reports no `served_model_name` is taken at its word — it is what ran the command, so Control never invents a translation.
 
 ```json
 {

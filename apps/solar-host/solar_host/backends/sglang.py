@@ -79,6 +79,20 @@ _STORAGE_FLAGS: tuple[tuple[str, str], ...] = (
 HICACHE_STORAGE_DIR_ENV = "SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR"
 
 
+def served_model_name(alias: str) -> str:
+    """The name SGLang can actually be served under for *alias*.
+
+    SGLang reads ``:`` in a model name as the ``base-model:adapter`` LoRA
+    separator (sgl-project/sglang#12745): newer builds refuse to start with a
+    colon in ``--served-model-name``, and older ones accept the flag but then
+    answer requests for ``a:b`` with "LoRA adapter b is not loaded". Solar's
+    aliases are ``name:tag`` by convention, so the colon is translated here and
+    solar-control translates the request's ``model`` field to match. The alias
+    itself stays untouched everywhere else — it is what the gateway routes on.
+    """
+    return alias.replace(":", "-")
+
+
 def resolve_executable() -> list[str] | None:
     """Return the argv prefix that launches SGLang, or None if unavailable.
 
@@ -119,6 +133,10 @@ class SglangRunner(BackendRunner):
     def get_backend_type(self) -> str:
         return "sglang"
 
+    def get_served_model_name(self, config: Any) -> str:
+        """SGLang answers to the colon-free form of the alias."""
+        return served_model_name(config.alias)
+
     def is_ready_line(self, line: str) -> bool:
         """True when the line proves SGLang finished warmup and is serving."""
         return _RE_READY.search(line) is not None
@@ -155,7 +173,7 @@ class SglangRunner(BackendRunner):
             "--model-path",
             config.model_path,
             "--served-model-name",
-            config.alias,
+            served_model_name(config.alias),
             "--host",
             config.host,
             "--port",

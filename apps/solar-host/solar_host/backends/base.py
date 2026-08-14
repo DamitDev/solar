@@ -83,6 +83,22 @@ class BackendRunner(ABC):
             The backend type string (e.g., "llamacpp", "huggingface_causal").
         """
 
+    def get_served_model_name(self, config: Any) -> str:
+        """The model name the backend process answers to.
+
+        Normally the alias itself, which is also what solar-control routes on.
+        Override when the backend cannot serve the alias verbatim (SGLang reads
+        ``:`` as a LoRA separator), so control can translate the request's
+        ``model`` field instead of the operator having to rename the model.
+
+        Args:
+            config: The instance config.
+
+        Returns:
+            The name the backend serves the model under.
+        """
+        return config.alias
+
     def build_env(self, instance: Any) -> dict[str, str]:
         """Extra environment variables for the backend process.
 

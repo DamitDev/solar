@@ -113,6 +113,7 @@ async def test_refresh_recovers_connected_host_with_empty_instance_cache(host):
                 "status": "running",
                 "port": 3500,
                 "supported_endpoints": ["/v1/chat/completions", "/v1/models"],
+                "served_model_name": None,
                 "backend_type": "llamacpp",
                 "api_key": "instance-api-key",
                 "managed_by": None,

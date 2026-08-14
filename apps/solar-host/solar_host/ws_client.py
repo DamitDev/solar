@@ -285,6 +285,7 @@ class SolarControlClient:
                     "status": instance.status.value,
                     "port": instance.port,
                     "supported_endpoints": instance.supported_endpoints,
+                    "served_model_name": instance.served_model_name,
                     "backend_type": getattr(
                         instance.config, "backend_type", "llamacpp"
                     ),
@@ -459,6 +460,7 @@ class SolarControlClient:
                     "status": instance.status.value,
                     "port": instance.port,
                     "supported_endpoints": instance.supported_endpoints,
+                    "served_model_name": instance.served_model_name,
                     "backend_type": getattr(
                         instance.config, "backend_type", "llamacpp"
                     ),

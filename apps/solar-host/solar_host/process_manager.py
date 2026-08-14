@@ -649,6 +649,8 @@ class ProcessManager:
         else:
             instance.supported_endpoints = runner.get_supported_endpoints()
 
+        instance.served_model_name = runner.get_served_model_name(instance.config)
+
         config_manager.update_instance(instance_id, instance)
 
         # Park on the ready event. The log thread promotes
@@ -928,6 +930,7 @@ class ProcessManager:
             config=config,
             status=InstanceStatus.STOPPED,
             supported_endpoints=supported_endpoints,
+            served_model_name=runner.get_served_model_name(config),
             priority=(
                 InstancePriority(priority) if priority else InstancePriority.PRODUCTION
             ),

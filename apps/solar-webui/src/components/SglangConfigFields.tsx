@@ -144,7 +144,8 @@ export function SglangConfigFields({
             className={inputClass}
           />
           <p className={hintClass}>
-            Also becomes SGLang's <code>--served-model-name</code>, so requests can use it directly.
+            Requests use this name. SGLang reads <code>:</code> as its LoRA separator, so it is served with the colon
+            replaced by <code>-</code> and solar-control translates each request.
           </p>
         </div>
       )}
