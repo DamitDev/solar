@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   DEVICE_OPTIONS,
   DTYPE_OPTIONS,
+  SPLIT_MODE_OPTIONS,
   applySpecType,
   getBackendTypeFromSelection,
   getDefaultConfig,
@@ -47,6 +48,14 @@ describe('getDefaultConfig', () => {
     expect(getDefaultConfig('llamacpp', 'llm').model_file).toBeUndefined();
   });
 
+  it('starts the multi-GPU fields empty so llama.cpp keeps its own defaults', () => {
+    const cfg = getDefaultConfig('llamacpp', 'llm', true);
+    expect(cfg.devices).toBe('');
+    expect(cfg.split_mode).toBe('');
+    expect(cfg.tensor_split).toBe('');
+    expect(cfg.main_gpu).toBeUndefined();
+  });
+
   it('returns the huggingface shape for huggingface backends', () => {
     const cfg = getDefaultConfig('huggingface', 'classifier', true);
     expect(cfg.backend_type).toBe('huggingface_classification');
@@ -70,6 +79,18 @@ describe('stripEmptyOptionalFields', () => {
     expect(stripEmptyOptionalFields({ backend_type: 'llamacpp', file_filters: ['*Q4*'] }).file_filters).toEqual([
       '*Q4*',
     ]);
+  });
+
+  it('drops blank multi-GPU fields and keeps the filled ones', () => {
+    expect(
+      stripEmptyOptionalFields({
+        backend_type: 'llamacpp',
+        devices: '',
+        split_mode: '',
+        tensor_split: '3,1',
+        main_gpu: 0,
+      }),
+    ).toEqual({ backend_type: 'llamacpp', tensor_split: '3,1', main_gpu: 0 });
   });
 
   it('drops every speculative field when no implementation is selected', () => {
@@ -160,5 +181,9 @@ describe('option constants', () => {
   it('exposes device and dtype options', () => {
     expect(DEVICE_OPTIONS).toEqual(['auto', 'cuda', 'mps', 'cpu']);
     expect(DTYPE_OPTIONS).toContain('bfloat16');
+  });
+
+  it('exposes every llama.cpp split mode', () => {
+    expect(SPLIT_MODE_OPTIONS.map((o) => o.value)).toEqual(['none', 'layer', 'row', 'tensor']);
   });
 });

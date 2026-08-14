@@ -6,6 +6,7 @@ the codebase.
 """
 
 import json
+import math
 from typing import Any
 from urllib.parse import urlparse
 
@@ -61,6 +62,10 @@ _LLAMACPP_ONLY_FIELDS: frozenset[str] = frozenset(
         "mmproj_offload",
         "threads",
         "n_gpu_layers",
+        "devices",
+        "split_mode",
+        "tensor_split",
+        "main_gpu",
         "temp",
         "top_p",
         "top_k",
@@ -402,8 +407,8 @@ def _validate_device(
     """Validate the HuggingFace-only ``device`` field against the placement (C3).
 
     ``device`` is a contract for HuggingFace backends only: llama.cpp has no
-    such field (its device selection is ``n_gpu_layers``/``ot``), so a
-    ``device`` on a llamacpp intent used to be silently dropped. For HF
+    such field (its device selection is ``devices``/``n_gpu_layers``/``ot``),
+    so a ``device`` on a llamacpp intent used to be silently dropped. For HF
     backends the value must be one of ``auto/cuda/mps/cpu`` and must not
     contradict an explicitly chosen ``placement.gpu_type`` — the reported
     ``mps`` plus NVIDIA-host symptom is fully static and a hard 422.
@@ -426,7 +431,7 @@ def _validate_device(
                 "field": "backend.device",
                 "message": (
                     "device is only supported for huggingface_* backends; "
-                    "llama.cpp device selection is n_gpu_layers/ot"
+                    "llama.cpp device selection is devices/n_gpu_layers/ot"
                 ),
             }
         )
@@ -468,12 +473,10 @@ def validate_intent_warnings(data: dict[str, Any]) -> list[dict[str, str]]:
     """
     warnings: list[dict[str, str]] = []
     backend = data.get("backend", {})
-    if (
-        isinstance(backend, dict)
-        and backend.get("backend_type") == "llamacpp"
-        and backend.get("pooling") is not None
-        and backend.get("model_type") != "embedding"
-    ):
+    if not isinstance(backend, dict) or backend.get("backend_type") != "llamacpp":
+        return warnings
+
+    if backend.get("pooling") is not None and backend.get("model_type") != "embedding":
         warnings.append(
             {
                 "field": "backend.pooling",
@@ -481,6 +484,28 @@ def validate_intent_warnings(data: dict[str, Any]) -> list[dict[str, str]]:
                     "pooling is only meaningful with model_type "
                     "'embedding' (llama.cpp tolerates it, but it will "
                     "have no effect)"
+                ),
+            }
+        )
+
+    split_mode = backend.get("split_mode")
+    if backend.get("tensor_split") is not None and split_mode == "none":
+        warnings.append(
+            {
+                "field": "backend.tensor_split",
+                "message": (
+                    "tensor_split has no effect with split_mode 'none' — "
+                    "that mode puts the whole model on main_gpu"
+                ),
+            }
+        )
+    if backend.get("main_gpu") is not None and split_mode in ("layer", "tensor"):
+        warnings.append(
+            {
+                "field": "backend.main_gpu",
+                "message": (
+                    f"main_gpu has no effect with split_mode '{split_mode}' — "
+                    "it only applies to split_mode 'none' or 'row'"
                 ),
             }
         )
@@ -716,36 +741,84 @@ def _coerce_jsonish(value: Any) -> Any:
     return value
 
 
-def canonicalize_intent_backend(backend: dict[str, Any]) -> None:
-    """Normalize ``backend.chat_template_kwargs`` in place (C1).
+def _invalid_backend_field(field: str, message: str) -> HTTPException:
+    """422 in the intent error envelope for a single backend field."""
+    return HTTPException(
+        status_code=422,
+        detail={
+            "detail": "Invalid intent",
+            "errors": [{"field": f"backend.{field}", "message": message}],
+        },
+    )
 
-    Parses the kwargs (accepting a JSON string, as the webui form sends, or
-    a dict), recursively coerces boolean-looking strings to real booleans,
-    and re-serializes as compact canonical JSON — the exact form the host's
-    ``LlamaCppConfig.normalize_chat_template_kwargs`` produces. Storing the
-    canonical form means new intents never carry a representation that
-    drift detection would flag; the normalization-aware comparison in the
-    reconciler remains for already-stored intents.
+
+def _normalize_csv(value: Any) -> Any:
+    """Collapse a comma-separated list to its canonical ``a,b,c`` form.
+
+    Mirrors ``solar_host.models.llamacpp._normalize_csv`` (the duplication is
+    intentional — control cannot import ``solar_host`` — and is pinned by a
+    test). Without it a stored ``"0, 1"`` would never match the host's
+    ``"0,1"`` and drift detection would restart the instance on every pass.
+    """
+    if not isinstance(value, str):
+        return value
+    parts = [part.strip() for part in value.split(",")]
+    return ",".join(part for part in parts if part) or None
+
+
+def _canonicalize_device_lists(backend: dict[str, Any]) -> None:
+    """Normalize the comma-separated multi-GPU lists in place."""
+    for field in ("devices", "tensor_split"):
+        if field in backend:
+            backend[field] = _normalize_csv(backend[field])
+
+    tensor_split = backend.get("tensor_split")
+    if not isinstance(tensor_split, str):
+        return
+    # llama.cpp parses the list with strtod and silently reads an unparseable
+    # entry as 0.0, so the whole model lands on one GPU instead of failing.
+    for part in tensor_split.split(","):
+        try:
+            proportion = float(part)
+        except ValueError as exc:
+            raise _invalid_backend_field(
+                "tensor_split",
+                f"tensor_split must be comma-separated numbers, got '{part}'",
+            ) from exc
+        if not math.isfinite(proportion):
+            raise _invalid_backend_field(
+                "tensor_split",
+                f"tensor_split must be comma-separated numbers, got '{part}'",
+            )
+        if proportion < 0:
+            raise _invalid_backend_field(
+                "tensor_split", "tensor_split proportions must not be negative"
+            )
+
+
+def canonicalize_intent_backend(backend: dict[str, Any]) -> None:
+    """Normalize the backend fields the host rewrites on parse, in place (C1).
+
+    ``chat_template_kwargs`` is parsed (accepting a JSON string, as the webui
+    form sends, or a dict), recursively coerced so boolean-looking strings
+    become real booleans, and re-serialized as compact canonical JSON — the
+    exact form the host's ``LlamaCppConfig.normalize_chat_template_kwargs``
+    produces. ``devices`` and ``tensor_split`` get the same treatment for
+    their comma-separated form. Storing the canonical form means new intents
+    never carry a representation that drift detection would flag; the
+    normalization-aware comparison in the reconciler remains for
+    already-stored intents.
 
     Raises HTTPException(422) on malformed JSON or a non-object value.
     """
+    _canonicalize_device_lists(backend)
+
     kwargs = backend.get("chat_template_kwargs")
     if kwargs is None:
         return
 
     def _invalid(message: str) -> HTTPException:
-        return HTTPException(
-            status_code=422,
-            detail={
-                "detail": "Invalid intent",
-                "errors": [
-                    {
-                        "field": "backend.chat_template_kwargs",
-                        "message": message,
-                    }
-                ],
-            },
-        )
+        return _invalid_backend_field("chat_template_kwargs", message)
 
     if isinstance(kwargs, dict):
         parsed = kwargs

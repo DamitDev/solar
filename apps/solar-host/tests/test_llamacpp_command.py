@@ -143,6 +143,82 @@ def test_chat_template_kwargs_invalid_json_raises() -> None:
         build_command(chat_template_kwargs="{enable_thinking: true}")
 
 
+def test_multi_gpu_flags_are_omitted_by_default() -> None:
+    command = build_command()
+
+    assert "--device" not in command
+    assert "--split-mode" not in command
+    assert "--tensor-split" not in command
+    assert "--main-gpu" not in command
+
+
+def test_multi_gpu_flags_are_passed_through() -> None:
+    command = build_command(
+        devices="CUDA0,CUDA1",
+        split_mode="row",
+        tensor_split="3,1",
+        main_gpu=1,
+    )
+
+    for flag, expected in (
+        ("--device", "CUDA0,CUDA1"),
+        ("--split-mode", "row"),
+        ("--tensor-split", "3,1"),
+        ("--main-gpu", "1"),
+    ):
+        assert command[command.index(flag) + 1] == expected
+
+
+def test_main_gpu_zero_is_still_passed() -> None:
+    """0 is the meaningful "first GPU" value, not an absent one."""
+    command = build_command(main_gpu=0)
+
+    assert command[command.index("--main-gpu") + 1] == "0"
+
+
+def test_multi_gpu_flags_apply_to_embedding_servers() -> None:
+    command = build_command(model_type="embedding", devices="CUDA1")
+
+    assert command[command.index("--device") + 1] == "CUDA1"
+
+
+def test_device_lists_are_normalized() -> None:
+    command = build_command(devices=" CUDA0 , CUDA1 ", tensor_split="3, 1")
+
+    assert command[command.index("--device") + 1] == "CUDA0,CUDA1"
+    assert command[command.index("--tensor-split") + 1] == "3,1"
+
+
+def test_blank_device_lists_are_dropped() -> None:
+    command = build_command(devices="  ", tensor_split=" , ")
+
+    assert "--device" not in command
+    assert "--tensor-split" not in command
+
+
+def test_non_numeric_tensor_split_raises() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="comma-separated numbers"):
+        build_command(tensor_split="3,half")
+
+
+def test_negative_tensor_split_raises() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="must not be negative"):
+        build_command(tensor_split="3,-1")
+
+
+def test_non_finite_tensor_split_raises() -> None:
+    """float() takes 'inf' and 'nan'; llama.cpp then divides by a nonsense sum."""
+    import pytest
+
+    for value in ("3,inf", "3,nan"):
+        with pytest.raises(ValueError, match="comma-separated numbers"):
+            build_command(tensor_split=value)
+
+
 # C1 cross-service pin. Duplicated verbatim in
 # apps/solar-control/tests/test_reconciliation.py — keep the two in step.
 # Control compares an intent's stored backend against what this host writes
@@ -180,3 +256,29 @@ def test_coerce_template_kwargs_matches_controls_copy() -> None:
         assert result == expected and type(result) is type(
             expected
         ), f"_coerce_template_kwargs({value!r}) == {result!r}, expected {expected!r}"
+
+
+# Same cross-service pin for the multi-GPU lists. Duplicated verbatim in
+# apps/solar-control/tests/test_reconciliation.py — keep the two in step.
+CSV_NORMALIZATION_PARITY_TABLE: list[tuple[object, object]] = [
+    ("CUDA0,CUDA1", "CUDA0,CUDA1"),
+    (" CUDA0 , CUDA1 ", "CUDA0,CUDA1"),
+    ("3, 1", "3,1"),
+    ("CUDA0,,CUDA1", "CUDA0,CUDA1"),
+    ("  ", None),
+    (",", None),
+    ("", None),
+    (None, None),
+    (1, 1),
+]
+
+
+def test_normalize_csv_matches_controls_copy() -> None:
+    """The host half of the parity pin; see CSV_NORMALIZATION_PARITY_TABLE."""
+    from solar_host.models.llamacpp import _normalize_csv
+
+    for value, expected in CSV_NORMALIZATION_PARITY_TABLE:
+        result = _normalize_csv(value)
+        assert (
+            result == expected
+        ), f"_normalize_csv({value!r}) == {result!r}, expected {expected!r}"

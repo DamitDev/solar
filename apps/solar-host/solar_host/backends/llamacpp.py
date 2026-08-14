@@ -85,6 +85,8 @@ class LlamaCppRunner(BackendRunner):
             "--no-warmup",
         ]
 
+        cmd.extend(self._multi_gpu_args(config))
+
         if config.chat_template_file:
             cmd.extend(["--jinja", "--chat-template-file", config.chat_template_file])
         else:
@@ -151,6 +153,29 @@ class LlamaCppRunner(BackendRunner):
                 cmd.extend(["--pooling", pooling])
 
         return cmd
+
+    @staticmethod
+    def _multi_gpu_args(config: Any) -> list[str]:
+        """Build the device/split flags for a multi-GPU host."""
+        args: list[str] = []
+
+        devices = getattr(config, "devices", None)
+        if devices and devices.strip():
+            args.extend(["--device", devices.strip()])
+
+        split_mode = getattr(config, "split_mode", None)
+        if split_mode:
+            args.extend(["--split-mode", split_mode])
+
+        tensor_split = getattr(config, "tensor_split", None)
+        if tensor_split and tensor_split.strip():
+            args.extend(["--tensor-split", tensor_split.strip()])
+
+        main_gpu = getattr(config, "main_gpu", None)
+        if main_gpu is not None:
+            args.extend(["--main-gpu", str(int(main_gpu))])
+
+        return args
 
     @staticmethod
     def _speculative_args(config: Any) -> list[str]:

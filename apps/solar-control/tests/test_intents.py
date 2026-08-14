@@ -1539,6 +1539,10 @@ class TestFieldOwnership:
             "mmproj_offload",
             "threads",
             "n_gpu_layers",
+            "devices",
+            "split_mode",
+            "tensor_split",
+            "main_gpu",
             "temp",
             "top_p",
             "top_k",
@@ -1644,6 +1648,105 @@ class TestModalityRules:
         assert validate_intent_create(data) == []
         warnings = validate_intent_warnings(data)
         assert any(w["field"] == "backend.pooling" for w in warnings)
+
+
+class TestMultiGpuFields:
+    """The llama.cpp split flags (--device/--split-mode/--tensor-split/--main-gpu)."""
+
+    def _data(self, **backend_fields) -> dict:
+        return {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(model_file="m.gguf", **backend_fields),
+        }
+
+    def test_multi_gpu_fields_accepted_on_llamacpp(self):
+        data = self._data(
+            devices="CUDA0,CUDA1",
+            split_mode="row",
+            tensor_split="3,1",
+            main_gpu=0,
+        )
+        assert validate_intent_create(data) == []
+        assert validate_intent_warnings(data) == []
+
+    def test_multi_gpu_fields_rejected_on_huggingface(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": {"backend_type": "huggingface_causal", "tensor_split": "3,1"},
+        }
+        errors = validate_intent_create(data)
+        assert any(e["field"] == "backend.tensor_split" for e in errors)
+
+    def test_device_message_names_the_llamacpp_alternatives(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": {"backend_type": "llamacpp", "device": "cuda"},
+        }
+        errors = [
+            e for e in validate_intent_create(data) if e["field"] == "backend.device"
+        ]
+        assert "devices" in errors[0]["message"]
+
+    def test_tensor_split_with_split_mode_none_warns(self):
+        data = self._data(split_mode="none", tensor_split="3,1")
+        assert validate_intent_create(data) == []
+        warnings = validate_intent_warnings(data)
+        assert any(w["field"] == "backend.tensor_split" for w in warnings)
+
+    def test_main_gpu_with_layer_split_warns(self):
+        data = self._data(split_mode="layer", main_gpu=1)
+        assert validate_intent_create(data) == []
+        warnings = validate_intent_warnings(data)
+        assert any(w["field"] == "backend.main_gpu" for w in warnings)
+
+    def test_main_gpu_with_row_split_does_not_warn(self):
+        data = self._data(split_mode="row", main_gpu=1)
+        assert validate_intent_warnings(data) == []
+
+    def test_device_lists_are_canonicalized(self):
+        backend = {
+            "backend_type": "llamacpp",
+            "devices": " CUDA0 , CUDA1 ",
+            "tensor_split": "3, 1",
+        }
+        canonicalize_intent_backend(backend)
+        assert backend["devices"] == "CUDA0,CUDA1"
+        assert backend["tensor_split"] == "3,1"
+
+    def test_blank_device_lists_canonicalize_to_none(self):
+        backend = {"backend_type": "llamacpp", "devices": "  ", "tensor_split": ","}
+        canonicalize_intent_backend(backend)
+        assert backend["devices"] is None
+        assert backend["tensor_split"] is None
+
+    def test_non_numeric_tensor_split_raises_422(self):
+        from fastapi import HTTPException
+
+        backend = {"backend_type": "llamacpp", "tensor_split": "3,half"}
+        with pytest.raises(HTTPException) as excinfo:
+            canonicalize_intent_backend(backend)
+        assert excinfo.value.status_code == 422
+        assert excinfo.value.detail["errors"][0]["field"] == "backend.tensor_split"
+
+    def test_negative_tensor_split_raises_422(self):
+        from fastapi import HTTPException
+
+        backend = {"backend_type": "llamacpp", "tensor_split": "3,-1"}
+        with pytest.raises(HTTPException) as excinfo:
+            canonicalize_intent_backend(backend)
+        assert "negative" in excinfo.value.detail["errors"][0]["message"]
+
+    def test_non_finite_tensor_split_raises_422(self):
+        """float() takes 'inf' and 'nan'; the host rejects both, so must control."""
+        from fastapi import HTTPException
+
+        for value in ("3,inf", "3,nan"):
+            backend = {"backend_type": "llamacpp", "tensor_split": value}
+            with pytest.raises(HTTPException):
+                canonicalize_intent_backend(backend)
 
 
 class TestUpdateGrandfathersModalityRules:

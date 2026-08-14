@@ -5,7 +5,7 @@
  */
 
 import { Cpu, MessageSquare, Binary, Tags, Search } from 'lucide-react';
-import { BackendType, SpecType } from '@/api/types';
+import { BackendType, LlamaCppSplitMode, SpecType } from '@/api/types';
 
 export type PrimaryBackend = 'llamacpp' | 'huggingface';
 
@@ -33,6 +33,13 @@ export const HUGGINGFACE_MODES: ModeOption[] = [
 
 export const DEVICE_OPTIONS = ['auto', 'cuda', 'mps', 'cpu'];
 export const DTYPE_OPTIONS = ['auto', 'float16', 'bfloat16', 'float32'];
+
+export const SPLIT_MODE_OPTIONS: { value: LlamaCppSplitMode; label: string }[] = [
+  { value: 'none', label: 'none — single GPU (main_gpu)' },
+  { value: 'layer', label: 'layer — split layers and KV (llama.cpp default)' },
+  { value: 'row', label: 'row — split weights by row' },
+  { value: 'tensor', label: 'tensor — split weights and KV (experimental)' },
+];
 
 export const SPEC_TYPE_OPTIONS: { value: SpecType; label: string; description: string }[] = [
   {
@@ -113,6 +120,10 @@ export const getDefaultConfig = (primary: PrimaryBackend, mode: string, forInten
       ...(forIntent ? {} : { alias: '' }),
       threads: 1,
       n_gpu_layers: 999,
+      devices: '',
+      split_mode: '',
+      tensor_split: '',
+      main_gpu: undefined,
       temp: 1,
       top_p: 1,
       top_k: 0,
@@ -194,6 +205,9 @@ export const stripEmptyOptionalFields = (config: Record<string, any>): Record<st
     'mmproj',
     'model_file',
     'pooling',
+    'devices',
+    'split_mode',
+    'tensor_split',
   ]) {
     if (!next[field]) delete next[field];
   }

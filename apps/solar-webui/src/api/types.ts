@@ -20,6 +20,13 @@ export type BackendType =
  */
 export type SpecType = 'draft-mtp' | 'draft-dspark';
 
+/**
+ * How llama-server splits a model across multiple GPUs (--split-mode).
+ * `none` keeps it on `main_gpu`, `layer` (llama.cpp's default) pipelines
+ * layers, `row` splits weights by row, `tensor` is experimental.
+ */
+export type LlamaCppSplitMode = 'none' | 'layer' | 'row' | 'tensor';
+
 export interface MemoryInfo {
   used_gb: number;
   total_gb: number;
@@ -55,6 +62,14 @@ export interface LlamaCppConfig extends BaseInstanceConfig {
   mmproj_offload?: boolean;
   threads: number;
   n_gpu_layers: number;
+  /** Comma-separated devices to offload to (llama-server --device), e.g. 'CUDA0,CUDA1' */
+  devices?: string;
+  /** How to split the model across GPUs (llama-server --split-mode) */
+  split_mode?: LlamaCppSplitMode;
+  /** Comma-separated per-GPU proportions (llama-server --tensor-split), e.g. '3,1' */
+  tensor_split?: string;
+  /** GPU for the model (split_mode none) or for KV and intermediate results (split_mode row) */
+  main_gpu?: number;
   temp: number;
   top_p: number;
   top_k: number;
