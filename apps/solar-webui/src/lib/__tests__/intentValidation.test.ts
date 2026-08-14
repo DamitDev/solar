@@ -220,6 +220,51 @@ describe('validateIntentRequest', () => {
         expect(fieldNames({ backend: hf(null) })).not.toContain('backend.device');
       });
     });
+
+    // Mirrors _validate_backend_field_ownership plus the host's tensor_split
+    // validator — llama.cpp reads an unparseable proportion as 0.0 and loads
+    // the whole model onto one GPU instead of failing.
+    describe('multi-GPU split fields', () => {
+      const llamacpp = (extra: Record<string, unknown>) => ({ backend_type: 'llamacpp', ...extra });
+
+      it('accepts the split fields on llama.cpp', () => {
+        expect(
+          errorsFor({
+            backend: llamacpp({ devices: 'CUDA0,CUDA1', split_mode: 'row', tensor_split: '3,1', main_gpu: 0 }),
+          }),
+        ).toEqual([]);
+      });
+
+      it('rejects them on a huggingface backend', () => {
+        const fields = fieldNames({
+          backend: { backend_type: 'huggingface_causal', devices: 'CUDA0', tensor_split: '3,1' },
+        });
+        expect(fields).toContain('backend.devices');
+        expect(fields).toContain('backend.tensor_split');
+      });
+
+      it('rejects a tensor split that is not a list of numbers', () => {
+        const errors = errorsFor({ backend: llamacpp({ tensor_split: '3,half' }) });
+        const err = errors.find((e) => e.field === 'backend.tensor_split');
+        expect(err).toBeDefined();
+        expect(err!.message).toContain('half');
+      });
+
+      it('rejects a negative proportion', () => {
+        const errors = errorsFor({ backend: llamacpp({ tensor_split: '3,-1' }) });
+        expect(errors.find((e) => e.field === 'backend.tensor_split')!.message).toContain('negative');
+      });
+
+      it('rejects inf and nan, which parse as numbers but are not proportions', () => {
+        for (const value of ['3,Infinity', '3,nan']) {
+          expect(fieldNames({ backend: llamacpp({ tensor_split: value }) })).toContain('backend.tensor_split');
+        }
+      });
+
+      it('tolerates the spacing the server canonicalizes away', () => {
+        expect(fieldNames({ backend: llamacpp({ tensor_split: '3, 1' }) })).not.toContain('backend.tensor_split');
+      });
+    });
   });
 
   it('rejects empty placement roles', () => {

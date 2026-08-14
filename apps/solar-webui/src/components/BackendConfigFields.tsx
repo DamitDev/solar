@@ -25,6 +25,7 @@ import {
   HUGGINGFACE_MODES,
   DEVICE_OPTIONS,
   DTYPE_OPTIONS,
+  SPLIT_MODE_OPTIONS,
   getDefaultConfig,
 } from '@/lib/backendConfig';
 import { SpeculativeDecodingFields } from './SpeculativeDecodingFields';
@@ -504,6 +505,81 @@ export function BackendConfigFields({
                   min="0"
                   className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
                 />
+              </div>
+
+              {/* Multi-GPU: devices */}
+              <div>
+                <label className="block text-sm font-medium text-nord-4 mb-1">Devices</label>
+                <input
+                  type="text"
+                  name="devices"
+                  value={value.devices || ''}
+                  onChange={handleChange}
+                  placeholder="CUDA0,CUDA1"
+                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent font-mono text-sm"
+                />
+                <p className="text-xs text-nord-4 mt-1">
+                  Which GPUs to offload to (<code>--device</code>). Comma-separated, blank uses all of them.
+                </p>
+                {fieldError('backend.devices')}
+              </div>
+
+              {/* Multi-GPU: split mode */}
+              <div>
+                <label className="block text-sm font-medium text-nord-4 mb-1">Split Mode</label>
+                <select
+                  name="split_mode"
+                  value={value.split_mode || ''}
+                  onChange={handleChange}
+                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                >
+                  <option value="">Default</option>
+                  {SPLIT_MODE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-nord-4 mt-1">
+                  How the model is split across GPUs (<code>--split-mode</code>).
+                </p>
+              </div>
+
+              {/* Multi-GPU: tensor split */}
+              <div>
+                <label className="block text-sm font-medium text-nord-4 mb-1">Tensor Split</label>
+                <input
+                  type="text"
+                  name="tensor_split"
+                  value={value.tensor_split || ''}
+                  onChange={handleChange}
+                  placeholder="3,1"
+                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent font-mono text-sm"
+                />
+                <p className="text-xs text-nord-4 mt-1">
+                  Proportion of the model per GPU (<code>--tensor-split</code>), e.g. <code>3,1</code> puts three
+                  quarters on the first GPU.
+                </p>
+                {fieldError('backend.tensor_split')}
+              </div>
+
+              {/* Multi-GPU: main GPU */}
+              <div>
+                <label className="block text-sm font-medium text-nord-4 mb-1">Main GPU</label>
+                <input
+                  type="number"
+                  name="main_gpu"
+                  value={value.main_gpu ?? ''}
+                  onChange={handleChange}
+                  placeholder="Blank = omit"
+                  min="0"
+                  step="1"
+                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                />
+                <p className="text-xs text-nord-4 mt-1">
+                  GPU index (<code>--main-gpu</code>) holding the model with split mode <code>none</code>, or the KV
+                  cache with <code>row</code>.
+                </p>
               </div>
 
               {/* Context Size */}

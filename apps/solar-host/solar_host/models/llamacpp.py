@@ -1,6 +1,7 @@
 """LlamaCpp backend configuration models."""
 
 import json
+import math
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -28,6 +29,20 @@ def _coerce_template_kwargs(value: Any) -> Any:
 def _serialize_template_kwargs(value: Any) -> str:
     """Compact, canonical JSON serialization for chat template kwargs."""
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _normalize_csv(value: Any) -> Any:
+    """Collapse a comma-separated list to its canonical ``a,b,c`` form.
+
+    solar-control compares the stored intent value against the instance config
+    to detect drift, so ``"0, 1"`` normalized here but stored verbatim there
+    would look like a config change on every reconciliation pass. Both sides
+    normalize identically (pinned by a test).
+    """
+    if not isinstance(value, str):
+        return value
+    parts = [part.strip() for part in value.split(",")]
+    return ",".join(part for part in parts if part) or None
 
 
 class LlamaCppConfig(BaseModel):
@@ -91,6 +106,68 @@ class LlamaCppConfig(BaseModel):
     alias: str = Field(..., description="Model alias (e.g., gpt-oss:120b)")
     threads: int = Field(default=1, description="Number of threads")
     n_gpu_layers: int = Field(default=999, description="Number of GPU layers")
+    devices: str | None = Field(
+        default=None,
+        description=(
+            "Comma-separated list of devices to offload to (--device), e.g. "
+            "'CUDA0,CUDA1'; 'none' disables offloading"
+        ),
+    )
+    split_mode: Literal["none", "layer", "row", "tensor"] | None = Field(
+        default=None,
+        description=(
+            "How to split the model across GPUs (--split-mode): none (single "
+            "GPU), layer (default), row, or tensor (experimental)"
+        ),
+    )
+    tensor_split: str | None = Field(
+        default=None,
+        description=(
+            "Comma-separated proportions of the model to offload to each GPU "
+            "(--tensor-split), e.g. '3,1'"
+        ),
+    )
+    main_gpu: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "GPU used for the model with split_mode 'none', or for KV and "
+            "intermediate results with split_mode 'row' (--main-gpu)"
+        ),
+    )
+
+    @field_validator("devices", "tensor_split", mode="before")
+    @classmethod
+    def normalize_device_lists(cls, raw: Any) -> Any:
+        """Canonicalize the comma-separated multi-GPU lists."""
+        return _normalize_csv(raw)
+
+    @field_validator("tensor_split", mode="after")
+    @classmethod
+    def check_tensor_split(cls, value: str | None) -> str | None:
+        """Reject a tensor split llama-server would parse as zeros.
+
+        llama.cpp reads the list with strtod and silently treats anything
+        unparseable as 0.0, which loads the whole model onto one GPU instead
+        of failing — a config error better surfaced at create time.
+        """
+        if value is None:
+            return None
+        for part in value.split(","):
+            try:
+                proportion = float(part)
+            except ValueError as exc:
+                raise ValueError(
+                    f"tensor_split must be comma-separated numbers, got '{part}'"
+                ) from exc
+            if not math.isfinite(proportion):
+                raise ValueError(
+                    f"tensor_split must be comma-separated numbers, got '{part}'"
+                )
+            if proportion < 0:
+                raise ValueError("tensor_split proportions must not be negative")
+        return value
+
     temp: float = Field(default=1.0, description="Temperature")
     top_p: float = Field(default=1.0, description="Top-p sampling")
     top_k: int = Field(default=0, description="Top-k sampling")

@@ -94,11 +94,60 @@ export function unchangedBackendFields(
  * Mirror the server's `_validate_device` (§4.7).
  *
  * `device` is a HuggingFace-only contract — llama.cpp selects its device
- * through `n_gpu_layers`/`ot` — and its value must not contradict an
+ * through `devices`/`n_gpu_layers`/`ot` — and its value must not contradict an
  * explicitly chosen `placement.gpu_type`. Both are hard 422s, so the reported
  * "mps plus an NVIDIA host" case need not cost a round trip. One bad value
  * yields one message, matching the server's early returns.
  */
+/**
+ * Mirror the server's multi-GPU rules: the split flags belong to llama.cpp,
+ * and `tensor_split` must parse as numbers.
+ *
+ * llama.cpp reads the list with strtod and silently treats an unparseable
+ * entry as 0.0 — the whole model then loads onto one GPU instead of failing,
+ * so a typo is worth catching in the form.
+ */
+function validateMultiGpu(backend: Record<string, any>): IntentFieldError[] {
+  const errors: IntentFieldError[] = [];
+  const isLlamaCpp = backend.backend_type === 'llamacpp';
+
+  for (const field of ['devices', 'split_mode', 'tensor_split', 'main_gpu']) {
+    const value = backend[field];
+    if (value === undefined || value === null || value === '') continue;
+    if (!isLlamaCpp) {
+      errors.push({
+        field: `backend.${field}`,
+        message: `${field} is only supported for the llama.cpp backend`,
+      });
+    }
+  }
+
+  const tensorSplit = backend.tensor_split;
+  if (isLlamaCpp && typeof tensorSplit === 'string' && tensorSplit.trim()) {
+    for (const part of tensorSplit.split(',')) {
+      const trimmed = part.trim();
+      if (!trimmed) continue;
+      const proportion = Number(trimmed);
+      if (!Number.isFinite(proportion)) {
+        errors.push({
+          field: 'backend.tensor_split',
+          message: `tensor_split must be comma-separated numbers, got '${trimmed}'`,
+        });
+        break;
+      }
+      if (proportion < 0) {
+        errors.push({
+          field: 'backend.tensor_split',
+          message: 'tensor_split proportions must not be negative',
+        });
+        break;
+      }
+    }
+  }
+
+  return errors;
+}
+
 function validateDevice(
   backend: Record<string, any>,
   placement: IntentCreateRequest['placement'],
@@ -114,7 +163,8 @@ function validateDevice(
     return [
       {
         field: 'backend.device',
-        message: 'device is only supported for huggingface_* backends; llama.cpp device selection is n_gpu_layers/ot',
+        message:
+          'device is only supported for huggingface_* backends; llama.cpp device selection is devices/n_gpu_layers/ot',
       },
     ];
   }
@@ -231,6 +281,7 @@ export function validateIntentRequest(
       }
     }
 
+    errors.push(...validateMultiGpu(req.backend));
     errors.push(...validateDevice(req.backend, req.placement, unchangedFields));
   }
 

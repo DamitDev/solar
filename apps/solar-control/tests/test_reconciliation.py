@@ -298,6 +298,31 @@ COERCION_PARITY_TABLE: list[tuple[object, object]] = [
     (None, None),
 ]
 
+# Same cross-service pin for the multi-GPU lists. Duplicated verbatim in
+# apps/solar-host/tests/test_llamacpp_command.py — keep the two in step.
+CSV_NORMALIZATION_PARITY_TABLE: list[tuple[object, object]] = [
+    ("CUDA0,CUDA1", "CUDA0,CUDA1"),
+    (" CUDA0 , CUDA1 ", "CUDA0,CUDA1"),
+    ("3, 1", "3,1"),
+    ("CUDA0,,CUDA1", "CUDA0,CUDA1"),
+    ("  ", None),
+    (",", None),
+    ("", None),
+    (None, None),
+    (1, 1),
+]
+
+
+def test_normalize_csv_matches_host_semantics():
+    """Pins control's copy against the host's; see CSV_NORMALIZATION_PARITY_TABLE."""
+    from app.validation import _normalize_csv
+
+    for value, expected in CSV_NORMALIZATION_PARITY_TABLE:
+        result = _normalize_csv(value)
+        assert (
+            result == expected
+        ), f"_normalize_csv({value!r}) == {result!r}, expected {expected!r}"
+
 
 class TestBackendValueMatching:
     """C1 canonicalization-aware comparison.

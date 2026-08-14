@@ -265,6 +265,10 @@ All requests require an `X-API-Key` header with your configured API key from the
 | `alias` | Yes | - | Model alias (e.g., "llama-3:8b") used for routing |
 | `threads` | No | 1 | Number of CPU threads to use |
 | `n_gpu_layers` | No | 999 | Number of layers to offload to GPU (999 = all) |
+| `devices` | No | - | Comma-separated devices to offload to (`--device`), e.g. `"CUDA0,CUDA1"` — see [Multi-GPU hosts](#multi-gpu-hosts) |
+| `split_mode` | No | - | How to split across GPUs (`--split-mode`): `"none"`, `"layer"`, `"row"`, `"tensor"` |
+| `tensor_split` | No | - | Per-GPU proportions (`--tensor-split`), e.g. `"3,1"` |
+| `main_gpu` | No | - | GPU index (`--main-gpu`) holding the model with `split_mode` `"none"`, or the KV cache with `"row"` |
 | `temp` | No | 1.0 | Sampling temperature (0.0-2.0) |
 | `top_p` | No | 1.0 | Top-p sampling (0.0-1.0) |
 | `top_k` | No | 0 | Top-k sampling (0 = disabled) |
@@ -358,6 +362,39 @@ A pull resolves a `model_source` to a **directory**, but `llama-server --model` 
 The pattern is resolved against the pulled model directory: an absolute path is used as-is, then an exact relative path, then a glob at the directory root, and finally a recursive glob — so a bare filename or a broad pattern is still found inside a subfolder. Among multiple matches, the trailing shards of a split GGUF are dropped (llama-server loads them itself from `...-00001-of-000NN.gguf`) and the largest remaining file wins. `mmproj` accepts the same patterns.
 
 `file_filters` is a separate concern: it limits **what gets downloaded** (a file is kept when it matches any pattern), while `model_file`, `mmproj` and `spec_draft_model` decide which of the downloaded files each llama-server flag points at. Filters only apply to HuggingFace pulls — ORAS always pulls a Harbor artifact whole.
+
+### Multi-GPU hosts
+
+`n_gpu_layers` decides **how much** of the model leaves the CPU; the four fields
+below decide **where** it goes on a host with several GPUs.
+
+`devices` is the one to reach for when several instances share a host: it pins an
+instance to specific GPUs, so two models can run side by side without either of
+them seeing the other's VRAM. The names come from llama.cpp
+(`llama-server --list-devices` prints them, e.g. `CUDA0`, `CUDA1`), and leaving
+it empty offers every device to that instance:
+
+```json
+{
+  "backend_type": "llamacpp",
+  "alias": "qwen3:32b",
+  "model_source": "huggingface://org/Qwen3-32B-GGUF",
+  "devices": "CUDA0,CUDA1",
+  "split_mode": "row",
+  "tensor_split": "3,1",
+  "main_gpu": 0
+}
+```
+
+`split_mode` chooses how the model is divided across whatever devices remain:
+`"layer"` (llama.cpp's default) pipelines layers and the KV cache, `"row"` splits
+weights by row and computes in parallel, `"tensor"` splits both and is still
+experimental, and `"none"` keeps the model on `main_gpu` alone.
+
+`tensor_split` weights the division — `"3,1"` puts three quarters of the model on
+the first device — and is what unequal GPUs need. `main_gpu` selects the device
+that holds the model with `split_mode: "none"`, or the KV cache and intermediate
+results with `"row"`; it does nothing for the other modes.
 
 ### Speculative decoding
 
