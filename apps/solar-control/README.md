@@ -138,14 +138,29 @@ See `training-platform-project/docs/specs/deployment-intent.md`.
 
 Hosts connect via Socket.IO to the `/hosts` namespace; they appear in pending until approved via these endpoints. The WebUI uses the same management API key for Socket.IO and REST.
 
-### API Endpoint Management
+### API Endpoint & Key Management
 
-- `GET /api/endpoints` - List all API endpoints (tenants)
-- `POST /api/endpoints` - Create a new endpoint (generates API key)
-- `GET /api/endpoints/{id}` - Get endpoint details
-- `PUT /api/endpoints/{id}` - Update endpoint
-- `DELETE /api/endpoints/{id}` - Delete endpoint
+Endpoints are the tenant boundary (ownership, model scoping, telemetry); API keys are many-to-one credentials beneath them. Model scoping is fnmatch globs over registry aliases: a scoped endpoint only ever sees (and can be routed to) the aliases its `model_patterns` match.
+
+- `GET /api/endpoints` - List endpoints (each with `key_count` and model scope)
+- `POST /api/endpoints` - Create an endpoint (no key generated; add keys via `/api/api-keys`)
+- `POST /api/endpoints/preview-models` - Live alias preview for `{serve_all_models, model_patterns}`
+- `GET /api/endpoints/{id}` - Endpoint details (with key count)
+- `GET /api/endpoints/{id}/keys` - List keys for an endpoint
+- `GET /api/endpoints/{id}/models` - Aliases this endpoint currently serves
+- `PUT /api/endpoints/{id}` - Update (incl. `serve_all_models` / `model_patterns`)
+- `DELETE /api/endpoints/{id}` - Delete endpoint (cascades its keys)
 - `GET /api/endpoints/{id}/usage` - Get usage statistics
+
+API keys (flat `/api/api-keys`):
+
+- `GET /api/api-keys?endpoint_id=` - List all keys (or filter by endpoint)
+- `POST /api/api-keys` - Create a key (endpoint_id + name; returns full key once)
+- `PUT /api/api-keys/{id}` - Rename / toggle `enabled` / reassign `endpoint_id`
+- `POST /api/api-keys/{id}/rotate` - Replace the key material (returns it once)
+- `DELETE /api/api-keys/{id}` - Delete a key
+
+Both routers invalidate the Redis endpoint cache and emit `endpoints_update` / `api_keys_update` Socket.IO events on mutation.
 
 ### OpenAI Gateway
 
@@ -195,10 +210,10 @@ Hosts connect via Socket.IO to the `/hosts` namespace; they appear in pending un
 
 ## Authentication
 
-- **Gateway requests** (e.g. `/v1/chat/completions`, `/v1/embeddings`) use **endpoint API keys** created via `/api/endpoints`. Send as `X-API-Key` or `Authorization: Bearer <key>`. The management key also works for gateway requests.
+- **Gateway requests** (e.g. `/v1/chat/completions`, `/v1/embeddings`) use **API keys** (created via `/api/api-keys`, each bound to one endpoint). Send as `X-API-Key` or `Authorization: Bearer <key>`. The management key also works for gateway requests and is unrestricted.
 - **Management and WebUI** use **MANAGEMENT_API_KEY**: management REST routes and the Socket.IO `/webui` namespace. WebUI clients can send the key in Socket.IO `auth.api_key` or the reverse proxy can inject `X-API-Key` / `Authorization` on the upgrade request.
 
-Solar-control handles authentication to solar-hosts transparently using stored credentials. Endpoint API keys are cached in Redis with TTL and invalidation on create/update/delete.
+Solar-control handles authentication to solar-hosts transparently using stored credentials. Endpoint API keys are cached in Redis (key → endpoint + key id) with TTL and invalidation on create/update/delete; each successful request also stamps the key's `last_used_at` (throttled).
 
 ## Socket.IO Namespaces
 

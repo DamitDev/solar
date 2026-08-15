@@ -20,7 +20,7 @@ import {
   GatewayFilter,
   PullProgressEvent,
 } from '@/hooks/useEventStream';
-import { LogMessage, PendingHost, Intent, ApiEndpoint } from '@/api/types';
+import { LogMessage, PendingHost, Intent, ApiEndpoint, ApiKey } from '@/api/types';
 
 interface EventStreamContextValue {
   isConnected: boolean;
@@ -37,6 +37,8 @@ interface EventStreamContextValue {
   pullProgress: Map<string, PullProgressEvent>;
   // C5: endpoint records, event-driven (endpoints_update).
   endpoints: ApiEndpoint[];
+  // S-045: API key records, event-driven (api_keys_update).
+  apiKeys: ApiKey[];
   getInstanceLogs: (hostId: string, instanceId: string) => LogMessage[];
   getInstanceState: (hostId: string, instanceId: string) => InstanceStateData | undefined;
   getPullProgress: (hostId: string | null | undefined, sourceUri: string) => PullProgressEvent | undefined;

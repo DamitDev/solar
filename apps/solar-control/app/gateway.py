@@ -20,6 +20,7 @@ from app.config import settings
 from app.database.hosts import host_db
 from app.models import HostStatus, RegistryEntry
 from app.redis_state import health_store, host_store, registry_store, routing_store
+from app.services.model_access import filter_aliases_for_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -509,9 +510,7 @@ class OpenAIGateway:
             return None
 
     @staticmethod
-    def _upstream_body(
-        instance: RegistryEntry, data: dict[str, Any]
-    ) -> dict[str, Any]:
+    def _upstream_body(instance: RegistryEntry, data: dict[str, Any]) -> dict[str, Any]:
         """Translate the request's ``model`` to the name the backend serves.
 
         Solar routes on the alias, but a backend cannot always be launched
@@ -584,7 +583,9 @@ class OpenAIGateway:
 
         return updated
 
-    async def get_available_models(self) -> dict[str, list[dict[str, Any]]]:
+    async def get_available_models(
+        self, model_patterns: list[str] | None = None
+    ) -> dict[str, list[dict[str, Any]]]:
         """Aggregate /v1/models from all registered upstream instances.
 
         Returns a dict with both an Ollama-style ``models`` array and an
@@ -594,12 +595,20 @@ class OpenAIGateway:
         from multimodal models. For llama.cpp upstreams the ``data[*]`` entry
         has no ``capabilities``, so we copy it over from the parallel
         ``models[*]`` entry (matched by ``name == id``).
+
+        ``model_patterns`` (S-045 scope) restricts which registry aliases are
+        advertised; ``None`` keeps the response unrestricted.
         """
         await self._ensure_session()
         if not self.session:
             return {"models": [], "data": []}
 
         registry = await registry_store.get_registry()
+        if model_patterns is not None:
+            allowed = set(filter_aliases_for_patterns(model_patterns, registry))
+            registry = {
+                alias: insts for alias, insts in registry.items() if alias in allowed
+            }
         data_dict: dict[str, dict[str, Any]] = {}
         ollama_dict: dict[str, dict[str, Any]] = {}
 
@@ -701,8 +710,15 @@ class OpenAIGateway:
             return ["embedding"]
         return ["completion"]
 
-    async def _resolve_model_name(self, model: str) -> str | None:
+    async def _resolve_model_name(
+        self, model: str, model_patterns: list[str] | None = None
+    ) -> str | None:
         registry = await registry_store.get_registry()
+        if model_patterns is not None:
+            allowed = set(filter_aliases_for_patterns(model_patterns, registry))
+            registry = {
+                alias: insts for alias, insts in registry.items() if alias in allowed
+            }
         if registry.get(model):
             return model
         matching = [m for m in registry if m.startswith(model) and registry[m]]
@@ -735,9 +751,10 @@ class OpenAIGateway:
         *,
         exclude_keys: set[str] | None = None,
         required_endpoint: str | None = None,
+        model_patterns: list[str] | None = None,
     ) -> RegistryEntry | None:
         """Select the best instance for a model using host-aware load balancing."""
-        resolved_model = await self._resolve_model_name(model)
+        resolved_model = await self._resolve_model_name(model, model_patterns)
         if not resolved_model:
             return None
 
@@ -990,10 +1007,14 @@ class OpenAIGateway:
         filter_endpoint: str,
         attempted: set[str],
         retried_once_flag: list[bool],
+        model_patterns: list[str] | None = None,
     ) -> RegistryEntry | None:
         """Try to find an instance, with one registry-refresh retry."""
         instance = await self._get_next_instance(
-            model, exclude_keys=attempted, required_endpoint=filter_endpoint
+            model,
+            exclude_keys=attempted,
+            required_endpoint=filter_endpoint,
+            model_patterns=model_patterns,
         )
         if instance:
             return instance
@@ -1009,7 +1030,10 @@ class OpenAIGateway:
             if delay > 0:
                 await asyncio.sleep(delay)
             return await self._get_next_instance(
-                model, exclude_keys=attempted, required_endpoint=filter_endpoint
+                model,
+                exclude_keys=attempted,
+                required_endpoint=filter_endpoint,
+                model_patterns=model_patterns,
             )
         return None
 
@@ -1029,6 +1053,7 @@ class OpenAIGateway:
         client_ip: str = "unknown",
         required_endpoint: str | None = None,
         endpoint_id: str | None = None,
+        model_patterns: list[str] | None = None,
     ) -> dict[str, Any]:
         request_id = str(uuid.uuid4())
         start_time = time.time()
@@ -1058,7 +1083,11 @@ class OpenAIGateway:
 
         for attempt in range(max(1, int(settings.route_max_attempts))):
             instance = await self._find_instance_or_retry(
-                model, filter_endpoint, attempted, retried_once
+                model,
+                filter_endpoint,
+                attempted,
+                retried_once,
+                model_patterns,
             )
             if not instance:
                 break
@@ -1217,6 +1246,7 @@ class OpenAIGateway:
         client_ip: str = "unknown",
         required_endpoint: str | None = None,
         endpoint_id: str | None = None,
+        model_patterns: list[str] | None = None,
     ):
         request_id = str(uuid.uuid4())
         start_time = time.time()
@@ -1248,7 +1278,11 @@ class OpenAIGateway:
 
         for attempt in range(max(1, int(settings.route_max_attempts))):
             instance = await self._find_instance_or_retry(
-                model, filter_endpoint, attempted, retried_once
+                model,
+                filter_endpoint,
+                attempted,
+                retried_once,
+                model_patterns,
             )
             if not instance:
                 break

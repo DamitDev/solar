@@ -2,7 +2,7 @@ import { createBrowserRouter, RouterProvider, Navigate, Outlet } from 'react-rou
 import { Dashboard } from './components/Dashboard';
 import { RoutingFlow } from './components/RoutingFlow';
 import { GatewayDashboard } from './components/GatewayDashboard';
-import { EndpointsDashboard } from './components/EndpointsDashboard';
+import { EndpointsDashboard } from './components/endpoints/EndpointsDashboard';
 import { ModelCatalog } from './components/ModelCatalog';
 import { IntentsPage } from './components/IntentsPage';
 import { IntentDetail } from './components/IntentDetail';

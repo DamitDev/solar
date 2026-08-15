@@ -559,8 +559,13 @@ export interface PullProgressEntry {
 export interface ApiEndpoint {
   id: string;
   name: string;
-  api_key: string;
   description?: string | null;
+  /** S-045: when true every registry alias is served; model_patterns is ignored. */
+  serve_all_models: boolean;
+  /** Glob patterns over registry aliases (fnmatch), e.g. `iris-osl:*`. */
+  model_patterns: string[];
+  /** Number of API keys currently attached to the endpoint. */
+  key_count: number;
   created_at: string;
   updated_at: string;
 }
@@ -568,13 +573,57 @@ export interface ApiEndpoint {
 export interface EndpointCreateRequest {
   name: string;
   description?: string | null;
-  api_key?: string | null;
+  serve_all_models?: boolean;
+  model_patterns?: string[];
 }
 
 export interface EndpointUpdateRequest {
   name?: string;
   description?: string | null;
-  api_key?: string | null;
+  serve_all_models?: boolean;
+  model_patterns?: string[];
+}
+
+export interface ApiKey {
+  id: string;
+  endpoint_id: string;
+  name: string;
+  /** The credential. Sent in full by create/rotate; mask it in lists. */
+  key: string;
+  description?: string | null;
+  enabled: boolean;
+  last_used_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiKeyCreateRequest {
+  endpoint_id: string;
+  name: string;
+  description?: string | null;
+}
+
+export interface ApiKeyUpdateRequest {
+  name?: string;
+  description?: string | null;
+  enabled?: boolean;
+  endpoint_id?: string;
+}
+
+export interface ModelPreviewRequest {
+  serve_all_models: boolean;
+  model_patterns: string[];
+}
+
+export interface ModelPreviewResponse {
+  aliases: string[];
+  count: number;
+}
+
+export interface EndpointModelsResponse {
+  endpoint: ApiEndpoint;
+  aliases: string[];
+  count: number;
 }
 
 export interface EndpointUsageStats {

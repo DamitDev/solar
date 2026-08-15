@@ -12,6 +12,12 @@ import {
   GatewayBucket,
   GatewayGroupBy,
   ApiEndpoint,
+  ApiKey,
+  ApiKeyCreateRequest,
+  ApiKeyUpdateRequest,
+  EndpointModelsResponse,
+  ModelPreviewRequest,
+  ModelPreviewResponse,
   PullProgressEntry,
   EndpointCreateRequest,
   EndpointUpdateRequest,
@@ -472,6 +478,44 @@ class SolarClient {
 
   async getEndpointUsage(id: string, hours: number = 24): Promise<EndpointUsageResponse> {
     const response = await this.client.get(`/api/endpoints/${id}/usage`, { params: { hours } });
+    return response.data;
+  }
+
+  async getEndpointModels(id: string): Promise<EndpointModelsResponse> {
+    const response = await this.client.get(`/api/endpoints/${id}/models`);
+    return response.data;
+  }
+
+  async previewEndpointModels(data: ModelPreviewRequest): Promise<ModelPreviewResponse> {
+    const response = await this.client.post('/api/endpoints/preview-models', data);
+    return response.data;
+  }
+
+  // API key management (S-045: keys are separate from endpoints)
+
+  async getApiKeys(endpointId?: string): Promise<ApiKey[]> {
+    const params = endpointId ? { params: { endpoint_id: endpointId } } : undefined;
+    const response = await this.client.get('/api/api-keys', params);
+    return response.data;
+  }
+
+  async createApiKey(data: ApiKeyCreateRequest): Promise<ApiKey> {
+    const response = await this.client.post('/api/api-keys', data);
+    return response.data;
+  }
+
+  async updateApiKey(id: string, data: ApiKeyUpdateRequest): Promise<ApiKey> {
+    const response = await this.client.put(`/api/api-keys/${id}`, data);
+    return response.data;
+  }
+
+  async rotateApiKey(id: string): Promise<ApiKey> {
+    const response = await this.client.post(`/api/api-keys/${id}/rotate`);
+    return response.data;
+  }
+
+  async deleteApiKey(id: string): Promise<{ message: string; id: string }> {
+    const response = await this.client.delete(`/api/api-keys/${id}`);
     return response.data;
   }
 

@@ -15,7 +15,16 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
 import solarClient from '@/api/client';
-import { ApiEndpoint, MemoryInfo, LogMessage, PendingHost, Intent, ActiveJobSummary, DrainState } from '@/api/types';
+import {
+  ApiEndpoint,
+  ApiKey,
+  MemoryInfo,
+  LogMessage,
+  PendingHost,
+  Intent,
+  ActiveJobSummary,
+  DrainState,
+} from '@/api/types';
 
 // Event type definitions
 export type WSMessageType =
@@ -38,6 +47,7 @@ export type WSMessageType =
   | 'intent_removed'
   | 'pull_progress'
   | 'endpoints_update'
+  | 'api_keys_update'
   | 'keepalive';
 
 /** C4: model pull progress pushed by a host and rebroadcast by control. */
@@ -312,6 +322,9 @@ export function useEventStream(handlers: EventHandlers = {}) {
   const [pullProgress, setPullProgress] = useState<Map<string, PullProgressEvent>>(new Map());
   // C5: multi-tenant API endpoint records, event-driven (endpoints_update).
   const [endpoints, setEndpoints] = useState<ApiEndpoint[]>([]);
+  // S-045: API key records, event-driven (api_keys_update; cascades on
+  // endpoint delete arrive as a list refresh from the same endpoint).
+  const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
 
   const socketRef = useRef<Socket | null>(null);
   const handlersRef = useRef(handlers);
@@ -610,6 +623,13 @@ export function useEventStream(handlers: EventHandlers = {}) {
           }
           break;
 
+        case 'api_keys_update':
+          // S-045: key records change only on explicit key CRUD.
+          if (Array.isArray(event.data?.api_keys)) {
+            setApiKeys(event.data.api_keys as ApiKey[]);
+          }
+          break;
+
         case 'keepalive':
           // Ignore keepalives
           break;
@@ -741,6 +761,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
         data: payload?.data ?? payload,
       }));
       bindEvent('endpoints_update', (payload) => ({ type: 'endpoints_update', data: payload }));
+      bindEvent('api_keys_update', (payload) => ({ type: 'api_keys_update', data: payload }));
     };
 
     connect();
@@ -820,6 +841,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
     intents,
     pullProgress,
     endpoints,
+    apiKeys,
     getInstanceLogs,
     getInstanceState,
     getPullProgress,
