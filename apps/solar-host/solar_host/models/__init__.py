@@ -17,6 +17,7 @@ from solar_host.models.base import (
     InstanceStateEvent,
     InstanceStatus,
     InstanceUpdate,
+    InstanceUsageSnapshot,
     LogMessage,
     MemoryInfo,
 )
@@ -62,6 +63,7 @@ __all__ = [
     "InstanceStateEvent",
     "InstanceStatus",
     "InstanceUpdate",
+    "InstanceUsageSnapshot",
     "LlamaCppConfig",
     # Runtime models
     "LogMessage",

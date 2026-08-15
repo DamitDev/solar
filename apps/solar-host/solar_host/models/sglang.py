@@ -22,6 +22,7 @@ RESERVED_SGLANG_ARGS: frozenset[str] = frozenset(
         "--api-key",
         "--model-path",
         "--served-model-name",
+        "--enable-metrics",
     }
 )
 

@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-from solar_host.models.base import InstancePhase
+from solar_host.models.base import InstancePhase, InstanceUsageSnapshot
 
 
 @dataclass
@@ -178,3 +178,44 @@ class BackendRunner(ABC):
         a live process is not evidence that the model is loaded.
         """
         return False
+
+    def get_metrics_path(self) -> str | None:
+        """Path of the backend's Prometheus endpoint, or None if it has none.
+
+        Hosts launch backends with the metrics flag enabled (llama.cpp
+        ``--metrics --slots``, SGLang ``--enable-metrics``); the returned
+        path is where the counters live for the metrics poll loop.
+        """
+        return None
+
+    def parse_metrics(self, text: str) -> InstanceUsageSnapshot | None:
+        """Parse /metrics exposition text into an instance usage snapshot.
+
+        Returns None when the text carries none of the backend's own
+        counters (e.g. a generic process metrics body only).
+        """
+        return None
+
+    def apply_usage_snapshot(
+        self,
+        instance_id: str,
+        context: dict[str, Any],
+        snapshot: InstanceUsageSnapshot,
+    ) -> RuntimeStateUpdate | None:
+        """React to a fresh usage snapshot for *instance_id*.
+
+        The metrics poll loop calls this after storing each snapshot. The
+        base implementation does nothing; backends override it to drive the
+        authoritative busy signal from the backend's own counters and to
+        finalize per-request metrics from counter deltas (SGLang).
+
+        Args:
+            instance_id: The instance ID.
+            context: The instance's parsing context.
+            snapshot: The freshly parsed snapshot.
+
+        Returns:
+            RuntimeStateUpdate if the snapshot changes the runtime state,
+            None otherwise.
+        """
+        return None

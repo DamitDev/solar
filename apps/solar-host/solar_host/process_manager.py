@@ -9,6 +9,7 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.request
 import uuid
 from collections import OrderedDict, deque
 from datetime import UTC, datetime
@@ -28,6 +29,7 @@ from solar_host.models import (
     InstanceRuntimeState,
     InstanceStateEvent,
     InstanceStatus,
+    InstanceUsageSnapshot,
     LogMessage,
 )
 from solar_host.ws_client import (
@@ -92,6 +94,10 @@ class ProcessManager:
 
         # Per-instance runner reference
         self.instance_runners: dict[str, BackendRunner] = {}
+
+        # Latest backend /metrics snapshot per instance (Layer 2): cumulative
+        # counters for traffic aggregation + the busy signal source.
+        self.instance_usage_snapshots: dict[str, InstanceUsageSnapshot] = {}
 
         # Batched emission queues (thread-safe, drained by _flush_loop).
         # Bounded to prevent OOM if the flush loop or WS broadcast stalls.
@@ -184,6 +190,7 @@ class ProcessManager:
         self.log_threads.pop(instance_id, None)
         self.state_buffers.pop(instance_id, None)
         self.state_sequences.pop(instance_id, None)
+        self.instance_usage_snapshots.pop(instance_id, None)
         self.ready_events.pop(instance_id, None)
 
     def _retain_dead_logs(self, instance_id: str) -> None:
@@ -579,6 +586,59 @@ class ProcessManager:
         if runner and hasattr(runner, "get_last_generation"):
             return runner.get_last_generation(context)
         return None
+
+    def get_instance_usage(self, instance_id: str) -> InstanceUsageSnapshot | None:
+        """Get the latest backend /metrics snapshot for an instance."""
+        return self.instance_usage_snapshots.get(instance_id)
+
+    def poll_instance_metrics(self) -> None:
+        """Fetch /metrics for every running instance and apply the snapshot.
+
+        Synchronous (``urllib`` is blocking); the caller wraps it in a
+        thread. Each snapshot is stored for the ``/usage`` endpoint, fed to
+        the runner's :meth:`BackendRunner.apply_usage_snapshot` so the
+        backend counters drive the authoritative busy signal, and — for
+        SGLang — finalizes per-request GenerationMetrics from the running-
+        request 0→1/1→0 counter deltas.
+        """
+        for instance in config_manager.get_all_instances():
+            if instance.status != InstanceStatus.RUNNING:
+                continue
+            runner = self.instance_runners.get(instance.id)
+            if runner is None:
+                continue
+            path = runner.get_metrics_path()
+            if not path:
+                continue
+            try:
+                text = self._fetch_metrics_text(instance, path)
+            except Exception:  # noqa: BLE001, S112
+                # An old backend build without /metrics (or one that is
+                # briefly unreachable) must not fail the poll cycle.
+                continue
+            snapshot = runner.parse_metrics(text)
+            if snapshot is None:
+                continue
+            snapshot.instance_id = instance.id
+            snapshot.backend_type = runner.get_backend_type()
+            snapshot.timestamp = datetime.now(UTC).isoformat()
+            self.instance_usage_snapshots[instance.id] = snapshot
+            update = runner.apply_usage_snapshot(
+                instance.id, self.instance_contexts.get(instance.id, {}), snapshot
+            )
+            if update is not None:
+                self._emit_state_event(instance.id, update)
+
+    @staticmethod
+    def _fetch_metrics_text(instance: Instance, path: str) -> str:
+        """GET the backend's /metrics endpoint as text (3s bound)."""
+        url = f"http://{instance.config.host}:{instance.port}{path}"
+        request = urllib.request.Request(
+            url,
+            headers={"Authorization": f"Bearer {settings.api_key}"},
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            return response.read().decode("utf-8", "replace")
 
     async def start_instance(self, instance_id: str) -> bool:
         """Start a model server instance with iterative retry."""
