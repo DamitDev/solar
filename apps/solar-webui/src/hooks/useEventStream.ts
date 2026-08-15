@@ -624,7 +624,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
           break;
 
         case 'api_keys_update':
-          // key records change only on explicit key CRUD.
+          // Key records change only on explicit key CRUD.
           if (Array.isArray(event.data?.api_keys)) {
             setApiKeys(event.data.api_keys as ApiKey[]);
           }

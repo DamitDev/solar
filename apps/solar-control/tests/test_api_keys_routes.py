@@ -1,4 +1,4 @@
-"""Tests for the /api/api-keys management router ."""
+"""Tests for the /api/api-keys management router."""
 
 from unittest.mock import AsyncMock, patch
 

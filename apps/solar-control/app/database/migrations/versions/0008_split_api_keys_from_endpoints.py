@@ -4,7 +4,7 @@ An endpoint used to *be* an API key: api_endpoints.api_key was unique and
 auth resolved straight off it. This migration breaks that 1:1 coupling:
 
 - creates ``api_keys`` (many keys per endpoint, endpoint_id NOT NULL with
- CASCADE delete)
+  CASCADE delete)
 - backfills one ``default`` key per endpoint from the old ``api_key`` column
 - adds ``serve_all_models`` / ``model_patterns`` to ``api_endpoints``
 - drops ``api_endpoints.api_key``
@@ -38,8 +38,8 @@ def _has_column(conn, table: str, column: str) -> bool:
     result = conn.execute(
         sa.text(
             "SELECT EXISTS ("
-            " SELECT 1 FROM information_schema.columns"
-            " WHERE table_name = :table AND column_name = :column"
+            "  SELECT 1 FROM information_schema.columns"
+            "  WHERE table_name = :table AND column_name = :column"
             ")"
         ),
         {"table": table, "column": column},
@@ -98,16 +98,17 @@ def upgrade() -> None:
         )
 
     # One default key per endpoint, preserving the credential already in use.
-    # ON CONFLICT DO NOTHING keeps this re-runnable (e.g. if the table half-
-    # applied and alembic retried) without duplicating keys.
-    conn.execute(
-        sa.text(
-            "INSERT INTO api_keys (endpoint_id, name, key)"
-            " SELECT id, 'default', api_key FROM api_endpoints"
-            " WHERE api_key IS NOT NULL"
-            " ON CONFLICT DO NOTHING"
+    # Guarded on the source column: once it is dropped below there is nothing
+    # left to backfill from, and the SELECT would fail on a re-run.
+    if _has_column(conn, "api_endpoints", "api_key"):
+        conn.execute(
+            sa.text(
+                "INSERT INTO api_keys (endpoint_id, name, key)"
+                " SELECT id, 'default', api_key FROM api_endpoints"
+                " WHERE api_key IS NOT NULL"
+                " ON CONFLICT DO NOTHING"
+            )
         )
-    )
 
     if not _has_column(conn, "api_endpoints", "serve_all_models"):
         op.add_column(
@@ -148,9 +149,9 @@ def downgrade() -> None:
                 "UPDATE api_endpoints ep"
                 " SET api_key = k.key"
                 " FROM ("
-                "  SELECT DISTINCT ON (endpoint_id) endpoint_id, key"
-                "  FROM api_keys"
-                "  ORDER BY endpoint_id, created_at ASC, key ASC"
+                "   SELECT DISTINCT ON (endpoint_id) endpoint_id, key"
+                "   FROM api_keys"
+                "   ORDER BY endpoint_id, created_at ASC, key ASC"
                 " ) k"
                 " WHERE k.endpoint_id = ep.id"
             )

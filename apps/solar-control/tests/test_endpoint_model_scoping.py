@@ -76,40 +76,76 @@ def test_model_not_found_shape():
     assert "'sec'" in body["message"]
 
 
+def _request(path: str):
+    from starlette.requests import Request as ASGIRequest
+
+    return ASGIRequest(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": path,
+            "headers": [],
+            "query_string": b"",
+            "client": ("127.0.0.1", 1),
+            "server": ("test", 80),
+            "scheme": "http",
+        }
+    )
+
+
+_OPENAI_DETAIL = {
+    "message": "The model 'sec' does not exist or you do not have access to it.",
+    "type": "invalid_request_error",
+    "param": None,
+    "code": "model_not_found",
+}
+
+
 @pytest.mark.anyio
 async def test_model_not_found_serializes_as_openai_error():
     """The wire format must be ``{"error": {...}}`` (OpenAI shape), not the
     FastAPI default ``{"detail": {...}}`` wrapper."""
-    from fastapi import HTTPException as HTTPExceptionCls
-    from starlette.requests import Request as ASGIRequest
-
     from app.main import _model_not_found_handler
 
-    exc_val = HTTPExceptionCls(
-        status_code=404,
-        detail={
-            "message": "The model 'sec' does not exist or you do not have access to it.",
-            "type": "invalid_request_error",
-            "param": None,
-            "code": "model_not_found",
-        },
+    response = await _model_not_found_handler(
+        _request("/v1/chat/completions"),
+        HTTPException(status_code=404, detail=dict(_OPENAI_DETAIL)),
     )
-    scope = {
-        "type": "http",
-        "method": "GET",
-        "path": "/v1/chat/completions",
-        "headers": [],
-        "query_string": b"",
-        "client": ("127.0.0.1", 1),
-        "server": ("test", 80),
-        "scheme": "http",
-    }
-    request = ASGIRequest(scope)
-    response = await _model_not_found_handler(request, exc_val)
     payload = json.loads(response.body)
     assert "error" in payload, payload
     assert payload["error"]["code"] == "model_not_found"
     assert "detail" not in payload
+
+
+@pytest.mark.anyio
+async def test_management_errors_keep_the_detail_envelope():
+    """Only the gateway speaks OpenAI. A management error carrying a ``code``
+    must not silently change shape for the WebUI, which parses ``detail``."""
+    from app.main import _model_not_found_handler
+
+    response = await _model_not_found_handler(
+        _request("/api/intents"),
+        HTTPException(status_code=409, detail={"detail": "nope", "code": "conflict"}),
+    )
+    payload = json.loads(response.body)
+    assert payload == {"detail": {"detail": "nope", "code": "conflict"}}
+
+
+@pytest.mark.anyio
+async def test_error_handler_preserves_exception_headers():
+    """FastAPI's default handler forwards ``headers``; ours must too, or a
+    401/429 loses its WWW-Authenticate / Retry-After."""
+    from app.main import _model_not_found_handler
+
+    response = await _model_not_found_handler(
+        _request("/v1/chat/completions"),
+        HTTPException(
+            status_code=429,
+            detail=dict(_OPENAI_DETAIL),
+            headers={"Retry-After": "30"},
+        ),
+    )
+    assert response.headers["retry-after"] == "30"
 
 
 # ── end / gateway filtering is exercised via the service layer ─────

@@ -2,8 +2,8 @@
 
 Two authentication modes:
 - /v1/* routes: API key looked up in the api_keys table (joined to its
- endpoint) -> sets request.state.endpoint + endpoint_id, so gateway
- handlers can filter models without another DB round-trip
+  endpoint) -> sets request.state.endpoint + endpoint_id, so gateway
+  handlers can filter models without another DB round-trip
 - /api/* routes: compared against MANAGEMENT_API_KEY env var
 """
 
@@ -82,8 +82,8 @@ async def _resolve_endpoint(api_key: str) -> tuple[Any, str] | None:
     """Resolve a raw key to an (endpoint, api_key_id) pair via Redis cache.
 
     The cache entry is ``{"endpoint": {...}, "api_key_id": "..."}`` keyed by
-    the same ``solar:endpoint_cache:{api_key}`` as before the endpoint/key split, so
-    a rolling deploy keeps a single cache namespace.
+    the same ``solar:endpoint_cache:{api_key}`` as before the endpoint/key
+    split, so a rolling deploy keeps a single cache namespace.
     """
     try:
         from app.redis_state.connection import redis_client

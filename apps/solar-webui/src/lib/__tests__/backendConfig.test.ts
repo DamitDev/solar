@@ -251,6 +251,49 @@ describe('sglang extra args and env editors', () => {
     expect(formatExtraArgs(undefined)).toBe('');
   });
 
+  it('keeps a quoted value whole instead of splitting it at every space', () => {
+    // SGLang parses --preferred-sampling-params with json.loads, so slicing
+    // the object at its spaces makes the backend fail to launch.
+    expect(parseExtraArgs('--preferred-sampling-params \'{"temperature": 1, "top_p": 0.95}\'')).toEqual([
+      '--preferred-sampling-params',
+      '{"temperature": 1, "top_p": 0.95}',
+    ]);
+    expect(parseExtraArgs('--dq "a b"')).toEqual(['--dq', 'a b']);
+    expect(parseExtraArgs('--esc a\\ b')).toEqual(['--esc', 'a b']);
+  });
+
+  it('treats quotes inside a value as literal so unquoted JSON survives', () => {
+    expect(parseExtraArgs('--json {"a":1}')).toEqual(['--json', '{"a":1}']);
+    expect(parseExtraArgs('--flag={"a":1}')).toEqual(['--flag={"a":1}']);
+    // ...but a quote right after `=` still opens a value.
+    expect(parseExtraArgs('--flag=\'{"a": 1}\'')).toEqual(['--flag={"a": 1}']);
+  });
+
+  it('regroups flags with their values so reopening the form is stable', () => {
+    const text = [
+      '--reasoning-parser deepseek-v4',
+      '--tool-call-parser deepseekv4',
+      '--preferred-sampling-params \'{"temperature": 1, "top_p": 0.95}\'',
+    ].join('\n');
+    const args = parseExtraArgs(text);
+
+    expect(formatExtraArgs(args)).toBe(text);
+    expect(parseExtraArgs(formatExtraArgs(args))).toEqual(args);
+  });
+
+  it('round-trips values that look like flags or need requoting', () => {
+    // The line grouping is cosmetic, so a value starting with `-` may wrap
+    // onto its own line; the argv list must still come back identical.
+    for (const args of [
+      ['--foo', '-1'],
+      ['--apos', "it's here"],
+      ['--json', '{"a": 1}'],
+      ['--back', 'a\\b'],
+    ]) {
+      expect(parseExtraArgs(formatExtraArgs(args))).toEqual(args);
+    }
+  });
+
   it('parses NAME=value lines and keeps values containing an equals sign', () => {
     expect(parseExtraEnv('A=1\nB=x=y')).toEqual({ A: '1', B: 'x=y' });
   });
