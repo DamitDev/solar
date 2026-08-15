@@ -37,6 +37,12 @@ def _task_done_callback(task: asyncio.Task) -> None:
 
 _RETRYABLE_STATUSES = frozenset({502, 503, 504})
 
+# Endpoints whose streaming form accepts ``stream_options.include_usage`` and
+# answers with a terminal usage chunk. Both are relayed by stream_request, and
+# without the option their token counts would fall back to the host's
+# last-generation endpoint, which cannot attribute a request under concurrency.
+_STREAM_USAGE_ENDPOINTS = frozenset({"/v1/chat/completions", "/v1/completions"})
+
 
 class OpenAIGateway:
 
@@ -1413,7 +1419,7 @@ class OpenAIGateway:
                     body, injected_usage = self._upstream_body(
                         instance,
                         data,
-                        stream=(endpoint == "/v1/chat/completions"),
+                        stream=(endpoint in _STREAM_USAGE_ENDPOINTS),
                     )
 
                     async with self.session.post(

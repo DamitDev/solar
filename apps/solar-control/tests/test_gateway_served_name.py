@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.gateway import OpenAIGateway
+from app.gateway import _STREAM_USAGE_ENDPOINTS, OpenAIGateway
 from app.models import Host, HostStatus, RegistryEntry
 
 ALIAS = "deepseek-v4-flash:284b"
@@ -148,15 +148,20 @@ class TestOutgoingRequest:
 
         assert data == {"model": ALIAS}
 
-    def test_non_chat_completions_streaming_is_not_injected(self):
-        """/v1/completions keeps the blind relay; injection is scoped to
-        chat/completions, where the terminal usage chunk is defined."""
+    def test_a_non_streaming_caller_is_not_injected(self):
+        """The non-stream path reads usage straight off the JSON body, so it
+        has no reason to touch stream_options."""
         body, injected = OpenAIGateway._upstream_body(
             _entry(), {"model": ALIAS, "stream": True}, stream=False
         )
 
         assert "stream_options" not in body
         assert injected is False
+
+    def test_only_the_completions_endpoints_carry_stream_usage(self):
+        """Both endpoints stream_request relays accept the option; anything
+        else (embeddings, rerank) would reject an unknown body field."""
+        assert _STREAM_USAGE_ENDPOINTS == {"/v1/chat/completions", "/v1/completions"}
 
 
 class TestStreamingUsage:
@@ -221,6 +226,39 @@ class TestStreamingUsage:
         )
 
         assert posted["stream_options"] == {"include_usage": True}
+
+    @pytest.mark.anyio
+    async def test_legacy_completions_gets_include_usage_injected(self):
+        """/v1/completions is relayed by stream_request too, so without the
+        option its tokens would fall back to the host's last-generation
+        endpoint on every request."""
+        usage_chunk = json.dumps(
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 34,
+                    "total_tokens": 46,
+                },
+            }
+        )
+        chunks, posted, emitted = await self._run(
+            self._event('{"choices":[{"text":"hi"}]}')
+            + self._event(usage_chunk)
+            + self._done(),
+            endpoint="/v1/completions",
+        )
+
+        assert posted["stream_options"] == {"include_usage": True}
+        assert chunks == [
+            b'data: {"choices":[{"text":"hi"}]}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+        assert emitted["usage"] == {
+            "prompt_tokens": 12,
+            "completion_tokens": 34,
+            "total_tokens": 46,
+        }
 
     @pytest.mark.anyio
     async def test_the_injected_usage_chunk_is_captured_and_stripped(self):
