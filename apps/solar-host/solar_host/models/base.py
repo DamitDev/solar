@@ -94,7 +94,18 @@ class MemoryInfo(BaseModel):
 
 
 class GenerationMetrics(BaseModel):
-    """Per-generation token usage and timing metrics."""
+    """Per-generation token usage and timing metrics.
+
+    ``prompt_tokens`` follows OpenAI semantics: the full request input,
+    including tokens served from the prompt cache. ``prompt_eval_tokens`` is
+    the uncached portion that was actually evaluated and ``cached_tokens``
+    the remainder, so ``prompt_tokens = prompt_eval_tokens + cached_tokens``
+    whenever both are known. ``source`` tells consumers how exact the numbers
+    are: ``"usage"`` from the upstream OpenAI usage block (exact),
+    ``"metrics"`` from the backend /metrics counters (exact), ``"log"`` from
+    log-line parsing (exact for llama.cpp, decode-interval granularity for
+    SGLang output tokens).
+    """
 
     instance_id: str
     slot_id: int | None = None
@@ -103,14 +114,50 @@ class GenerationMetrics(BaseModel):
     # Token usage
     prompt_tokens: int | None = None
     generated_tokens: int | None = None
+    cached_tokens: int | None = None
+    prompt_eval_tokens: int | None = None
+    total_tokens: int | None = None
 
     # Decode performance
     decode_tps: float | None = None
     decode_ms_per_token: float | None = None
 
+    # Provenance: "usage" | "metrics" | "log"
+    source: str | None = None
+
     # Timestamps
     started_at: str | None = None
     finished_at: str | None = None
+
+
+class InstanceUsageSnapshot(BaseModel):
+    """A snapshot of an instance's backend /metrics counters.
+
+    ``prompt_tokens_total`` / ``generated_tokens_total`` /
+    ``cached_tokens_total`` are cumulative counters since the backend started
+    (for traffic aggregation); the remaining fields are instantaneous gauges.
+    Both backends map onto the same field names:
+    llama.cpp ``requests_processing``/``requests_deferred`` and SGLang
+    ``num_running_reqs``/``num_queue_reqs`` both land in
+    ``requests_processing``/``requests_deferred``, and the KV-cache fill
+    ratios (``llamacpp:kv_cache_usage_ratio`` / ``sglang:token_usage``) land
+    in ``kv_cache_usage_ratio``.
+    """
+
+    instance_id: str | None = None
+    backend_type: str | None = None
+
+    # Cumulative counters (for traffic aggregation)
+    prompt_tokens_total: int | None = None
+    generated_tokens_total: int | None = None
+    cached_tokens_total: int | None = None
+
+    # Instantaneous gauges
+    requests_processing: int | None = None
+    requests_deferred: int | None = None
+    kv_cache_usage_ratio: float | None = None
+
+    timestamp: str | None = None
 
 
 class Instance(BaseModel):

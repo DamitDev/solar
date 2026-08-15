@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -199,6 +200,215 @@ class TestSglangLogParsing:
         context = runner.initialize_context()
 
         assert runner.parse_log_line("inst-1", "Load weight end.", context) is None
+
+    def test_the_comma_format_is_recognized(self):
+        """Current builds separate the batch marker with a comma, not a dot."""
+        runner = SglangRunner()
+        context = runner.initialize_context()
+
+        assert (
+            runner.parse_log_line(
+                "inst-1",
+                "[2026-08-15 13:17:04] Prefill batch, #new-seq: 1, "
+                "#new-token: 512, #cached-token: 0, #running-req: 0, "
+                "#pending-token: 128, cuda graph: False, "
+                "input throughput (token/s): 6342.89",
+                context,
+            )
+            is not None
+        )
+        assert (
+            runner.parse_log_line(
+                "inst-1",
+                "[2026-08-15 13:17:05] Decode batch, #running-req: 1, "
+                "#full token: 512, cuda graph: True, "
+                "gen throughput (token/s): 67.24, #queue-req: 0",
+                context,
+            )
+            is not None
+        )
+
+    def test_chunked_prefill_input_tokens_accumulate_to_pending_request(self):
+        """A request spread over several prefill chunks accrues #new-token;
+        the first chunk's #cached-token is counted once; #pending-token: 0
+        closes the group and records the exact input tokens."""
+        runner = SglangRunner()
+        context = runner.initialize_context()
+
+        # Chunk 1 of 3: first chunk carries the cached portion.
+        runner.parse_log_line(
+            "inst-1",
+            "[2026-08-15 13:17:00] Prefill batch, #new-seq: 1, #new-token: 4096, "
+            "#cached-token: 9472, full token usage: 0.01, #running-req: 0, "
+            "#queue-req: 0, #pending-token: 27188, cuda graph: False, "
+            "input throughput (token/s): 0.73",
+            context,
+        )
+        assert context["active_prefill"] is not None
+        assert context["pending_request"] is None
+
+        # Chunk 2 of 3: no MORE cached tokens for this request.
+        runner.parse_log_line(
+            "inst-1",
+            "[2026-08-15 13:17:01] Prefill batch, #new-seq: 1, #new-token: 4096, "
+            "#cached-token: 0, #running-req: 0, #queue-req: 0, "
+            "#pending-token: 18996, cuda graph: False, "
+            "input throughput (token/s): 6273.30",
+            context,
+        )
+        # Chunk 3 of 3: closes the group.
+        runner.parse_log_line(
+            "inst-1",
+            "[2026-08-15 13:17:02] Prefill batch, #new-seq: 1, #new-token: 2816, "
+            "#cached-token: 0, #running-req: 0, #queue-req: 0, "
+            "#pending-token: 0, cuda graph: False, "
+            "input throughput (token/s): 20141.65",
+            context,
+        )
+
+        assert context["active_prefill"] is None
+        pending = context["pending_request"]
+        assert pending is not None
+        # 4096 + 4096 + 2816 new + first chunk's 9472 cached = 20480.
+        assert pending["input_tokens"] == 20480
+        assert pending["prompt_eval_tokens"] == 11008
+        assert pending["cached_tokens"] == 9472
+
+    def test_decode_lines_drive_phase_and_tps_only(self):
+        """Decode lines update the pending request's TPS and phase; they do
+        not fabricate output-token counts (that is the counter delta's job)."""
+        runner = SglangRunner()
+        context = runner.initialize_context()
+        runner.parse_log_line(
+            "inst-1",
+            "[2026-08-15 13:17:04] Prefill batch, #new-seq: 1, #new-token: 512, "
+            "#cached-token: 0, #running-req: 0, #queue-req: 0, #pending-token: 0",
+            context,
+        )
+        update = runner.parse_log_line(
+            "inst-1",
+            "[2026-08-15 13:17:05] Decode batch, #running-req: 1, "
+            "gen throughput (token/s): 69.19, #queue-req: 0",
+            context,
+        )
+
+        assert update is not None
+        assert update.phase == InstancePhase.GENERATING
+        assert update.decode_tps == pytest.approx(69.19)
+        assert update.generated_tokens is None
+        assert context["pending_request"]["decode_tps"] == pytest.approx(69.19)
+
+
+class TestSglangFixtureParsing:
+    """Replays the production fixture (tests/fixtures/sglang_server.log):
+    two full requests (comma format, chunked prefill) plus a trailing
+    request whose decode section never drains in the log — the exact shape
+    that left instances busy forever, resolvable only via /metrics."""
+
+    FIXTURE = Path(__file__).parent / "fixtures" / "sglang_server.log"
+
+    def _replay(self):
+        runner = SglangRunner()
+        context = runner.initialize_context()
+        for line in self.FIXTURE.read_text().splitlines():
+            runner.parse_log_line("inst-1", line, context)
+        return runner, context
+
+    def test_both_requests_record_exact_input_tokens(self):
+        _runner, context = self._replay()
+
+        # Only the second request's group is still pending by the end of the
+        # log; the first full request (40960) was overwritten when the
+        # second request's prefill started. The pending one is exact:
+        # 1024 new + 41472 cached = 42496, matching the first decode's
+        # #full token: 42496.
+        pending = context["pending_request"]
+        assert pending is not None
+        assert pending["input_tokens"] == 42496
+        assert pending["prompt_eval_tokens"] == 1024
+        assert pending["cached_tokens"] == 41472
+
+    def test_the_sample_ends_busy_without_a_log_terminal(self):
+        """The fixture's trailing decode lines never emit #running-req: 0 —
+        the stuck-busy shape. The log parser must still report busy; the
+        /metrics drain in apply_usage_snapshot is what releases it."""
+        _runner, context = self._replay()
+
+        assert context["last_state"]["busy"] is True
+        assert context["last_state"]["phase"] == InstancePhase.GENERATING.value
+
+    def test_metrics_drain_finalizes_the_request_and_goes_idle(self):
+        runner, context = self._replay()
+
+        def snapshot(prompt, gen, cached, running):
+            snap = runner.parse_metrics(
+                f"sglang:prompt_tokens_total {prompt}\n"
+                f"sglang:generation_tokens_total {gen}\n"
+                f"sglang:cached_tokens_total {cached}\n"
+                f"sglang:num_running_reqs {running}\n"
+                f"sglang:num_queue_reqs 0\n"
+                f"sglang:token_usage 0.03\n"
+            )
+            assert snap is not None
+            return snap
+
+        # 0→1: the trailing request's decode is running.
+        runner.apply_usage_snapshot("inst-1", context, snapshot(83360, 2830, 50944, 1))
+        # 1→0: the request drained — exact generation delta 70, prompt from
+        # the log accumulation, and the idle transition emitted.
+        update = runner.apply_usage_snapshot(
+            "inst-1", context, snapshot(83360, 2900, 50944, 0)
+        )
+
+        assert update is not None
+        assert update.busy is False
+        assert update.phase == InstancePhase.IDLE
+
+        metrics = runner.get_last_generation(context)
+        assert metrics is not None
+        assert metrics.prompt_tokens == 42496
+        assert metrics.generated_tokens == 70
+        assert metrics.cached_tokens == 41472
+        assert metrics.prompt_eval_tokens == 1024
+        assert metrics.total_tokens == 42566
+        assert metrics.source == "metrics"
+        assert metrics.decode_tps == pytest.approx(69.31)
+
+    def test_metrics_prefill_guard_keeps_prefill_busy(self):
+        """During prefill SGLang reports 0 running requests; the metrics
+        poll must not flash the instance idle while the log says prefill."""
+        runner = SglangRunner()
+        context = runner.initialize_context()
+        runner.parse_log_line(
+            "inst-1",
+            "[2026-08-15 13:17:04] Prefill batch, #new-seq: 1, #new-token: 4096, "
+            "#cached-token: 0, #running-req: 0, #queue-req: 0, #pending-token: 4096",
+            context,
+        )
+
+        update = runner.apply_usage_snapshot(
+            "inst-1",
+            context,
+            runner.parse_metrics("sglang:num_running_reqs 0\n"),
+        )
+
+        assert update is None  # log's PREFILL wins; no idle flash
+
+    def test_metrics_busy_covers_a_mid_log_request_start(self):
+        """When the log missed a request's launch (mid-stream capture), the
+        counter is the only evidence of activity and drives busy=True."""
+        runner = SglangRunner()
+        context = runner.initialize_context()
+
+        update = runner.apply_usage_snapshot(
+            "inst-1",
+            context,
+            runner.parse_metrics("sglang:num_running_reqs 2\n"),
+        )
+
+        assert update is not None
+        assert update.busy is True
+        assert update.phase == InstancePhase.GENERATING
 
 
 # ---------------------------------------------------------------------------

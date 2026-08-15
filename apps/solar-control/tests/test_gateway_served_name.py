@@ -6,6 +6,7 @@ reports what it launched, and the gateway translates in both directions:
 requests going out, `/v1/models` coming back.
 """
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -77,15 +78,24 @@ def _entry(**overrides) -> RegistryEntry:
 
 class TestOutgoingRequest:
     def test_the_model_becomes_the_name_the_backend_answers_to(self):
-        body = OpenAIGateway._upstream_body(_entry(), {"model": ALIAS, "stream": True})
+        body, injected = OpenAIGateway._upstream_body(
+            _entry(), {"model": ALIAS, "stream": True}, stream=True
+        )
 
-        assert body == {"model": SERVED, "stream": True}
+        assert body["model"] == SERVED
+        assert body["stream"] is True
+        # The streaming relay asked for usage.
+        assert body["stream_options"] == {"include_usage": True}
+        assert injected is True
 
     def test_a_partial_name_the_client_used_is_replaced_too(self):
         """Routing resolves prefixes, so what arrives here need not be the alias."""
-        body = OpenAIGateway._upstream_body(_entry(), {"model": "deepseek-v4-flash"})
+        body, injected = OpenAIGateway._upstream_body(
+            _entry(), {"model": "deepseek-v4-flash"}
+        )
 
         assert body["model"] == SERVED
+        assert injected is False  # non-stream: nothing injected
 
     def test_a_backend_serving_the_alias_gets_the_body_untouched(self):
         """llama.cpp and HuggingFace have always seen the client's model string;
@@ -97,16 +107,39 @@ class TestOutgoingRequest:
             served_model_name="qwen3.6:35b",
         )
 
-        assert OpenAIGateway._upstream_body(entry, data) is data
+        body, injected = OpenAIGateway._upstream_body(entry, data, stream=True)
+
+        assert body["model"] == "qwen3.6"  # no model rewrite
+        assert body["stream_options"] == {"include_usage": True}
+        assert injected is True
 
     def test_a_host_that_reports_no_served_name_is_taken_at_its_word(self):
         """It is the host that ran the command, so silence means "the alias" —
         inventing a translation here would break instances it launched."""
         data = {"model": ALIAS}
 
-        assert (
-            OpenAIGateway._upstream_body(_entry(served_model_name=None), data) is data
+        body, injected = OpenAIGateway._upstream_body(
+            _entry(served_model_name=None), data
         )
+
+        assert body is data
+        assert injected is False
+
+    def test_a_client_that_already_asked_for_usage_is_not_reinjected(self):
+        """include_usage already set: the chunk belongs to the client, so the
+        relay must pass it through — the injected flag reports that."""
+        data = {
+            "model": ALIAS,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+
+        body, injected = OpenAIGateway._upstream_body(_entry(), data, stream=True)
+
+        # Only the model translation happened; the client's stream_options
+        # survived untouched and nothing was injected.
+        assert body["stream_options"] == {"include_usage": True}
+        assert injected is False
 
     def test_the_caller_s_body_is_not_mutated(self):
         data = {"model": ALIAS}
@@ -114,6 +147,183 @@ class TestOutgoingRequest:
         OpenAIGateway._upstream_body(_entry(), data)
 
         assert data == {"model": ALIAS}
+
+    def test_non_chat_completions_streaming_is_not_injected(self):
+        """/v1/completions keeps the blind relay; injection is scoped to
+        chat/completions, where the terminal usage chunk is defined."""
+        body, injected = OpenAIGateway._upstream_body(
+            _entry(), {"model": ALIAS, "stream": True}, stream=False
+        )
+
+        assert "stream_options" not in body
+        assert injected is False
+
+
+class TestStreamingUsage:
+    """The SSE-aware relay: capture the terminal usage chunk and strip it
+    when the gateway injected include_usage itself."""
+
+    @staticmethod
+    def _event(payload: str) -> list[bytes]:
+        """A complete SSE event as response.content would yield it: the data
+        line and the blank separator as separate lines."""
+        return [f"data: {payload}\n".encode(), b"\n"]
+
+    @staticmethod
+    def _done() -> list[bytes]:
+        return TestStreamingUsage._event("[DONE]")
+
+    async def _run(self, lines, data=None, endpoint="/v1/chat/completions"):
+        gateway = OpenAIGateway()
+        session = _RecordingSession(_Response(200, lines=lines))
+        gateway.session = session
+        entry = _entry()
+        host = Host(
+            id="host-1",
+            name="Test Host",
+            url="http://test-host:8000",
+            api_key="host-api-key",
+            status=HostStatus.ONLINE,
+        )
+        emitted = {}
+
+        async def _success(
+            request_id, model, instance, duration, usage_fields, endpoint_id
+        ):
+            emitted["usage"] = usage_fields
+
+        with (
+            patch.object(gateway, "_ensure_session", AsyncMock()),
+            patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+            patch.object(
+                gateway, "_find_instance_or_retry", AsyncMock(return_value=entry)
+            ),
+            patch.object(gateway, "_emit_success", AsyncMock(side_effect=_success)),
+            patch("app.gateway.host_db.get_host", AsyncMock(return_value=host)),
+            patch("app.gateway.health_store.mark_healthy", AsyncMock()),
+            patch("app.gateway.routing_store", AsyncMock()),
+        ):
+            chunks = [
+                chunk
+                async for chunk in gateway.stream_request(
+                    model=ALIAS,
+                    endpoint=endpoint,
+                    data=data or {"model": ALIAS, "stream": True},
+                )
+            ]
+
+        return chunks, session.posted, emitted
+
+    @pytest.mark.anyio
+    async def test_chat_completions_gets_include_usage_injected(self):
+        _chunks, posted, _emitted = await self._run(
+            self._event('{"choices":[{"delta":{"content":"hi"}}]}') + self._done()
+        )
+
+        assert posted["stream_options"] == {"include_usage": True}
+
+    @pytest.mark.anyio
+    async def test_the_injected_usage_chunk_is_captured_and_stripped(self):
+        usage_chunk = json.dumps(
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 341,
+                    "completion_tokens": 72,
+                    "total_tokens": 413,
+                    "prompt_tokens_details": {"cached_tokens": 282},
+                },
+            }
+        )
+        chunks, _posted, emitted = await self._run(
+            self._event('{"choices":[{"delta":{"content":"hi"}}]}')
+            + self._event(usage_chunk)
+            + self._done()
+        )
+
+        # The usage chunk is dropped; content and [DONE] pass through.
+        assert chunks == [
+            b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+        assert emitted["usage"] == {
+            "prompt_tokens": 341,
+            "completion_tokens": 72,
+            "total_tokens": 413,
+            "cached_tokens": 282,
+        }
+
+    @pytest.mark.anyio
+    async def test_a_client_asked_for_usage_keeps_its_usage_chunk(self):
+        usage_chunk = json.dumps(
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 341,
+                    "completion_tokens": 72,
+                    "total_tokens": 413,
+                },
+            }
+        )
+        chunks, _posted, emitted = await self._run(
+            self._event('{"choices":[{"delta":{"content":"hi"}}]}')
+            + self._event(usage_chunk)
+            + self._done(),
+            data={
+                "model": ALIAS,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            },
+        )
+
+        usages = [c for c in chunks if b"usage" in c]
+        assert len(usages) == 1
+        assert emitted["usage"]["prompt_tokens"] == 341
+
+    @pytest.mark.anyio
+    async def test_no_usage_chunk_falls_back_to_the_host_with_a_recency_bound(self):
+        gateway = OpenAIGateway()
+        session = _RecordingSession(_Response(200, lines=[b'data: {"choices":[]}\n\n']))
+        gateway.session = session
+        entry = _entry()
+        host = Host(
+            id="host-1",
+            name="Test Host",
+            url="http://test-host:8000",
+            api_key="host-api-key",
+            status=HostStatus.ONLINE,
+        )
+        called = {}
+
+        async def _fetch(host_id, instance_id, within_s=None):
+            called["within_s"] = within_s
+            return {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
+
+        with (
+            patch.object(gateway, "_ensure_session", AsyncMock()),
+            patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+            patch.object(
+                gateway, "_find_instance_or_retry", AsyncMock(return_value=entry)
+            ),
+            patch.object(
+                gateway, "_fetch_last_generation_metrics", AsyncMock(side_effect=_fetch)
+            ),
+            patch.object(gateway, "_emit_success", AsyncMock()),
+            patch("app.gateway.host_db.get_host", AsyncMock(return_value=host)),
+            patch("app.gateway.health_store.mark_healthy", AsyncMock()),
+            patch("app.gateway.routing_store", AsyncMock()),
+        ):
+            chunks = [
+                chunk
+                async for chunk in gateway.stream_request(
+                    model=ALIAS,
+                    endpoint="/v1/chat/completions",
+                    data={"model": ALIAS, "stream": True},
+                )
+            ]
+
+        assert chunks == [b'data: {"choices":[]}\n\n']
+        assert called["within_s"] == 5
 
 
 class TestAdvertisedModels:

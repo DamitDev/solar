@@ -187,11 +187,13 @@ def test_storage_flags_are_dropped_without_a_host_cache_root() -> None:
 
 def test_extra_args_come_last_so_an_override_wins() -> None:
     command = build_command(
-        tp_size=2, extra_args=["--tp-size", "4", "--enable-metrics"]
+        tp_size=2, extra_args=["--tp-size", "4", "--schedule-policy"]
     )
 
-    assert command[-3:] == ["--tp-size", "4", "--enable-metrics"]
+    assert command[-3:] == ["--tp-size", "4", "--schedule-policy"]
     assert command.count("--tp-size") == 2
+    # --enable-metrics is host-managed; see RESERVED_SGLANG_ARGS.
+    assert command.count("--enable-metrics") == 1
 
 
 def test_extra_args_reject_host_managed_flags() -> None:

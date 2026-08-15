@@ -4,6 +4,7 @@ All routing state is stored in Redis for multi-replica consistency.
 """
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -451,10 +452,19 @@ class OpenAIGateway:
             out["completion_tokens"] = int(usage["completion_tokens"])
         if isinstance(usage.get("total_tokens"), (int, float)):
             out["total_tokens"] = int(usage["total_tokens"])
+        # prompt_tokens_details.cached_tokens (OpenAI shape, emitted by
+        # llama.cpp and SGLang) is the prompt-cache hit portion.
+        details = (
+            usage.get("prompt_tokens_details") if isinstance(usage, dict) else None
+        )
+        if isinstance(details, dict) and isinstance(
+            details.get("cached_tokens"), (int, float)
+        ):
+            out["cached_tokens"] = int(details["cached_tokens"])
         return out
 
     async def _fetch_last_generation_metrics(
-        self, host_id: str, instance_id: str
+        self, host_id: str, instance_id: str, within_s: int | None = None
     ) -> dict[str, Any]:
         try:
             await self._ensure_session()
@@ -464,6 +474,8 @@ class OpenAIGateway:
             if not host:
                 return {}
             url = f"{host.url}/instances/{instance_id}/last-generation"
+            if within_s is not None and within_s >= 0:
+                url += f"?within_s={int(within_s)}"
             headers = {"X-API-Key": host.api_key}
             timeout = aiohttp.ClientTimeout(total=3)
             async with self.session.get(url, headers=headers, timeout=timeout) as resp:
@@ -475,10 +487,18 @@ class OpenAIGateway:
                     out["prompt_tokens"] = int(data["prompt_tokens"])
                 if isinstance(data.get("generated_tokens"), (int, float)):
                     out["completion_tokens"] = int(data["generated_tokens"])
-                if "prompt_tokens" in out and "completion_tokens" in out:
+                if isinstance(data.get("cached_tokens"), (int, float)):
+                    out["cached_tokens"] = int(data["cached_tokens"])
+                if isinstance(data.get("prompt_eval_tokens"), (int, float)):
+                    out["prompt_eval_tokens"] = int(data["prompt_eval_tokens"])
+                if isinstance(data.get("total_tokens"), (int, float)):
+                    out["total_tokens"] = int(data["total_tokens"])
+                elif "prompt_tokens" in out and "completion_tokens" in out:
                     out["total_tokens"] = (
                         out["prompt_tokens"] + out["completion_tokens"]
                     )
+                if data.get("source"):
+                    out["source"] = str(data["source"])
                 if isinstance(data.get("decode_tps"), (int, float)):
                     out["decode_tps"] = float(data["decode_tps"])
                 if isinstance(data.get("decode_ms_per_token"), (int, float)):
@@ -510,7 +530,12 @@ class OpenAIGateway:
             return None
 
     @staticmethod
-    def _upstream_body(instance: RegistryEntry, data: dict[str, Any]) -> dict[str, Any]:
+    def _upstream_body(
+        instance: RegistryEntry,
+        data: dict[str, Any],
+        *,
+        stream: bool = False,
+    ) -> tuple[dict[str, Any], bool]:
         """Translate the request's ``model`` to the name the backend serves.
 
         Solar routes on the alias, but a backend cannot always be launched
@@ -522,11 +547,65 @@ class OpenAIGateway:
         Backends that do serve the alias (llama.cpp, HuggingFace) get the body
         untouched, including a partial name the client used — rewriting that
         would change long-standing behaviour for them.
+
+        With *stream* the caller is the streaming relay, which can read the
+        terminal ``usage`` block only when the upstream is asked to include
+        it: ``stream_options.include_usage`` is merged into the body when the
+        client did not already set it. The second return value reports
+        whether this call injected it — the relay strips the usage chunk in
+        that case, because the client never asked for it.
+
+        Returns:
+            Tuple of ``(body, injected_usage)``.
         """
         served = instance.served_model_name
-        if not served or served == instance.model_alias or "model" not in data:
-            return data
-        return {**data, "model": served}
+        body = data
+        if served and served != instance.model_alias and "model" in data:
+            body = {**data, "model": served}
+
+        injected = False
+        if stream:
+            existing = body.get("stream_options") if isinstance(body, dict) else None
+            if not isinstance(existing, dict) or not existing.get("include_usage"):
+                body = {
+                    **body,
+                    "stream_options": {
+                        **(existing if isinstance(existing, dict) else {}),
+                        "include_usage": True,
+                    },
+                }
+                injected = True
+
+        return body, injected
+
+    def _sse_usage(self, payload: bytes) -> dict[str, Any] | None:
+        """Extract the OpenAI usage block from one SSE *data:* event.
+
+        Returns None for events without a JSON payload carrying a ``usage``
+        object (content chunks, ``[DONE]``, ping lines). The terminal chunk
+        of a stream with ``stream_options.include_usage`` carries empty
+        choices plus the full usage block.
+        """
+        text = payload.decode("utf-8", "replace")
+        data_value: str | None = None
+        for raw in text.splitlines():
+            if raw.startswith("data:"):
+                data_value = raw[5:].lstrip()
+                break
+        if data_value is None or data_value == "[DONE]":
+            return None
+        try:
+            parsed = json.loads(data_value)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        usage = parsed.get("usage")
+        if not isinstance(usage, dict) or not usage:
+            return None
+        # Reuse the non-stream extraction so both paths agree on the shape
+        # (prompt/completion/total tokens plus cached from details).
+        return self._extract_usage_from_result(parsed) or None
 
     @staticmethod
     def _restore_alias_in_models(
@@ -1129,7 +1208,7 @@ class OpenAIGateway:
 
                     async with self.session.post(
                         url,
-                        json=self._upstream_body(instance, data),
+                        json=self._upstream_body(instance, data)[0],
                         headers=headers,
                         timeout=timeout,
                     ) as response:
@@ -1322,9 +1401,19 @@ class OpenAIGateway:
                     }
                     timeout = self._make_route_timeout()
 
+                    # Streaming usage is exact only when the upstream is asked
+                    # to include it; the relay below captures the terminal
+                    # chunk's usage and strips it when we injected the option
+                    # ourselves (the client never asked for it).
+                    body, injected_usage = self._upstream_body(
+                        instance,
+                        data,
+                        stream=(endpoint == "/v1/chat/completions"),
+                    )
+
                     async with self.session.post(
                         url,
-                        json=self._upstream_body(instance, data),
+                        json=body,
                         headers=headers,
                         timeout=timeout,
                     ) as response:
@@ -1334,14 +1423,43 @@ class OpenAIGateway:
                                 instance.instance_id,
                                 ttl_s=settings.health_ttl_s + 2,
                             )
-                            async for line in response.content:
-                                yield line
+                            captured_usage: dict[str, Any] = {}
+                            event_lines: list[bytes] = []
+                            async for raw in response.content:
+                                event_lines.append(raw)
+                                if raw.strip() == b"":
+                                    payload = b"".join(event_lines)
+                                    usage = self._sse_usage(payload)
+                                    if usage:
+                                        captured_usage = usage
+                                        if injected_usage:
+                                            # The client did not ask for
+                                            # usage; drop the injected chunk.
+                                            event_lines = []
+                                            continue
+                                    yield payload
+                                    event_lines = []
+                            if event_lines:
+                                # Upstream ended without the trailing blank
+                                # line; flush what was buffered.
+                                yield b"".join(event_lines)
 
                             completed = True
                             duration = time.time() - start_time
-                            usage_fields = await self._fetch_last_generation_metrics(
-                                instance.host_id, instance.instance_id
-                            )
+                            if captured_usage:
+                                usage_fields = captured_usage
+                            else:
+                                # Fallback for backends that ignore
+                                # stream_options: bound the attribution window
+                                # so a stale generation from another request
+                                # cannot be billed to this one.
+                                usage_fields = (
+                                    await self._fetch_last_generation_metrics(
+                                        instance.host_id,
+                                        instance.instance_id,
+                                        within_s=5,
+                                    )
+                                )
                             await self._emit_success(
                                 request_id,
                                 model,

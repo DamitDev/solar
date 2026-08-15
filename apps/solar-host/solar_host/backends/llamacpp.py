@@ -5,8 +5,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 from solar_host.backends.base import BackendRunner, RuntimeStateUpdate
+from solar_host.backends.prom import parse_prometheus
 from solar_host.config import settings
-from solar_host.models.base import GenerationMetrics, InstancePhase
+from solar_host.models.base import (
+    GenerationMetrics,
+    InstancePhase,
+    InstanceUsageSnapshot,
+)
 
 # Tolerant matcher covering both the `llama_server:` and the newer
 # `main: server is listening` forms, any host/port. This is the readiness
@@ -29,7 +34,14 @@ class LlamaCppRunner(BackendRunner):
             r"prompt processing progress.*progress\s*=\s*([0-9.]+)"
         )
         self._re_prompt_done = re.compile(r"\|\s*prompt done\b")
+        # ``stop processing n_tokens`` carries the slot's exact total token
+        # count at release, from which the per-request token split is
+        # derived. Older builds print the release line without it; the
+        # dedicated legacy pattern still matches those.
         self._re_release = re.compile(
+            r"slot\s+release:\s+id\s+(\d+)\s*\|\s*task\s+(-?\d+)\s*\|\s*stop processing.*n_tokens\s*=\s*(\d+)"
+        )
+        self._re_release_legacy = re.compile(
             r"slot\s+release:\s+id\s+(\d+)\s*\|\s*task\s+(-?\d+)\s*\|\s*stop processing"
         )
         self._re_all_idle = re.compile(r"srv\s+update_slots:\s+all slots are idle")
@@ -39,11 +51,27 @@ class LlamaCppRunner(BackendRunner):
         self._re_checkpoint = re.compile(
             r"created context checkpoint\s+(\d+)\s+of\s+(\d+)"
         )
+        # Newer builds prefix every timing line with the slot/task header;
+        # the remainder is dispatched on by _handle_timing_rest. This must
+        # match BEFORE the legacy timing line pattern below.
         self._re_print_timing = re.compile(
             r"slot\s+print_timing:\s+id\s+(\d+)\s*\|\s*task\s+(-?\d+)\s*\|"
         )
-        self._re_decode_eval_line = re.compile(
-            r"\s*eval time\s*=\s*([0-9.]+)\s*ms\s*/\s*(\d+)\s*tokens\s*\(\s*([0-9.]+)\s*ms per token,\s*([0-9.]+)\s*tokens per second\)"
+        self._re_prompt_processing = re.compile(
+            r"prompt processing,\s*n_tokens\s*=\s*(\d+),\s*progress\s*=\s*([0-9.]+)"
+        )
+        self._re_ndecoded = re.compile(
+            r"n_decoded\s*=\s*(\d+),\s*tg\s*=\s*([0-9.]+)\s*t/s"
+        )
+        self._re_prompt_eval_time = re.compile(
+            r"prompt eval time\s*=\s*([0-9.]+)\s*ms\s*/\s*(\d+)\s*tokens"
+        )
+        # ``(?<!prompt )`` keeps this from also matching the prompt eval
+        # line, whose remainder contains ``eval time`` as a substring — the
+        # old unanchored pattern mis-attributed prompt eval as decode.
+        self._re_eval_time = re.compile(
+            r"(?<!prompt )eval time\s*=\s*([0-9.]+)\s*ms\s*/\s*(\d+)\s*tokens"
+            r"\s*\(\s*([0-9.]+)\s*ms per token,\s*([0-9.]+)\s*tokens per second\)"
         )
 
     def get_backend_type(self) -> str:
@@ -151,6 +179,11 @@ class LlamaCppRunner(BackendRunner):
             pooling = getattr(config, "pooling", None)
             if pooling and pooling.strip():
                 cmd.extend(["--pooling", pooling])
+
+        # Prometheus metrics endpoint with per-slot gauges: the /metrics
+        # counters are the authoritative busy signal and the exact source of
+        # per-request token counts for the metrics poll loop.
+        cmd.extend(["--metrics", "--slots"])
 
         return cmd
 
@@ -261,26 +294,33 @@ class LlamaCppRunner(BackendRunner):
         self, instance_id: str, line: str, context: dict[str, Any]
     ) -> RuntimeStateUpdate | None:
         """Parse a llama-server log line and return state update if changed."""
-        slots = context.get("active_slots", set())
-        last_state = context.get("last_state", {})
-        pending_by_slot = context.get("pending_generations_by_slot", {})
+        slots: set[int] = context.get("active_slots", set())
+        last_state: dict[str, Any] = context.get("last_state", {})
+        pending_by_slot: dict[int, dict[str, Any]] = context.get(
+            "pending_generations_by_slot", {}
+        )
 
-        # slot launch → add slot, busy true
+        # slot launch → add slot, busy true; create the pending entry so a
+        # generation is tracked even when its timing lines arrive without a
+        # preceding `new prompt` line (the current llama.cpp build's shape)
         m = self._re_launch.search(line)
         if m:
             try:
                 slot_id = int(m.group(1))
+                task_id = int(m.group(2))
             except Exception:  # noqa: BLE001
-                slot_id = -1
+                slot_id, task_id = -1, None
             slots.add(slot_id)
             context["active_slots"] = slots
+            if task_id is not None:
+                self._ensure_pending(context, slot_id, task_id)
             return self._create_update(
                 busy=True,
                 phase=InstancePhase.PREFILL,
                 prefill_progress=last_state.get("prefill_progress"),
                 active_slots=len(slots),
                 slot_id=slot_id,
-                task_id=last_state.get("task_id"),
+                task_id=task_id if task_id is not None else last_state.get("task_id"),
                 last_state=last_state,
                 context=context,
             )
@@ -298,17 +338,12 @@ class LlamaCppRunner(BackendRunner):
             context["active_slots"] = slots
 
             # Initialize pending generation metrics for this slot
+            self._ensure_pending(context, slot_id, task_id)
             pending = pending_by_slot.get(slot_id) or {}
-            pending.update(
-                {
-                    "slot_id": slot_id,
-                    "task_id": task_id,
-                    "prompt_tokens": prompt_tokens,
-                    "started_at": datetime.now(UTC).isoformat(),
-                }
-            )
-            pending_by_slot[slot_id] = pending
-            context["pending_generations_by_slot"] = pending_by_slot
+            if prompt_tokens is not None:
+                pending["prompt_tokens"] = prompt_tokens
+                pending_by_slot[slot_id] = pending
+                context["pending_generations_by_slot"] = pending_by_slot
 
             return self._create_update(
                 busy=True,
@@ -376,12 +411,40 @@ class LlamaCppRunner(BackendRunner):
                 context=context,
             )
 
-        # decode timing metrics after generation finishes
-        if self._re_print_timing.search(line):
-            # Subsequent lines include timing metrics; rely on later matches
-            return None
+        # Newer llama.cpp builds prefix every timing line with
+        # `slot print_timing: id N | task M |`; strip the header and dispatch
+        # on the remainder (progress, live decode, prompt eval, final eval).
+        prefix = self._re_print_timing.search(line)
+        if prefix:
+            try:
+                slot_id = int(prefix.group(1))
+                task_id = int(prefix.group(2))
+            except Exception:  # noqa: BLE001
+                slot_id, task_id = -1, None
+            # A timing line proves the slot is active (the fixture can start
+            # mid-generation with no launch line), so track it for
+            # active_slots/phase purposes.
+            slots.add(slot_id)
+            context["active_slots"] = slots
+            # A generation can enter the log mid-stream (no launch line
+            # visible), so every prefixed line ensures the pending entry.
+            if task_id is not None:
+                self._ensure_pending(context, slot_id, task_id)
+            return self._handle_timing_rest(
+                instance_id,
+                line,
+                context,
+                slots,
+                last_state,
+                pending_by_slot,
+                slot_id,
+                task_id,
+                line[prefix.end() :],
+            )
 
-        m = self._re_decode_eval_line.search(line)
+        # Legacy (pre-header) decode timing line, kept for older builds that
+        # print `llama_print_timings: eval time = ...` bare.
+        m = self._re_eval_time.search(line)
         if m:
             try:
                 gen_tokens = int(m.group(2))
@@ -428,30 +491,36 @@ class LlamaCppRunner(BackendRunner):
                 context=context,
             )
 
-        # slot release → remove slot; if none remain, clear busy and progress
+        # slot release → remove slot; if none remain, clear busy and progress.
+        # The release line carries the slot's exact total n_tokens, the
+        # anchor for the per-request token split at finalize time.
+        release_n_tokens: int | None = None
+        slot_id = -1
         m = self._re_release.search(line)
         if m:
             try:
                 slot_id = int(m.group(1))
-            except Exception:  # noqa: BLE001
-                slot_id = -1
+                release_n_tokens = int(m.group(3))
+            except Exception:  # noqa: BLE001, S110
+                pass
+        else:
+            m = self._re_release_legacy.search(line)
+            if m:
+                try:
+                    slot_id = int(m.group(1))
+                except Exception:  # noqa: BLE001, S110
+                    pass
+
+        if m:
             if slot_id in slots:
                 slots.discard(slot_id)
             context["active_slots"] = slots
 
             # Finalize any pending generation for this slot
-            pending = pending_by_slot.pop(slot_id, None)
+            pending: dict[str, Any] | None = pending_by_slot.pop(slot_id, None)
             if pending is not None:
-                metrics = GenerationMetrics(
-                    instance_id=instance_id,
-                    slot_id=pending.get("slot_id"),
-                    task_id=pending.get("task_id"),
-                    prompt_tokens=pending.get("prompt_tokens"),
-                    generated_tokens=pending.get("generated_tokens"),
-                    decode_tps=pending.get("decode_tps"),
-                    decode_ms_per_token=pending.get("decode_ms_per_token"),
-                    started_at=pending.get("started_at"),
-                    finished_at=datetime.now(UTC).isoformat(),
+                metrics = self._finalize_llamacpp_generation(
+                    instance_id, pending, release_n_tokens
                 )
                 recent = context.get("recent_generations", [])
                 recent.append(metrics)
@@ -510,6 +579,208 @@ class LlamaCppRunner(BackendRunner):
             )
 
         return None
+
+    def _ensure_pending(
+        self,
+        context: dict[str, Any],
+        slot_id: int,
+        task_id: int,
+    ) -> dict[str, Any]:
+        """Create or refresh the pending generation entry for a slot.
+
+        Only ``new prompt`` used to create entries, and that line no longer
+        fires on the current llama.cpp build. A generation can also enter
+        the log mid-stream without any launch line, so every prefixed timing
+        line and the launch itself ensure the entry exists; a new task_id on
+        a reused slot replaces the previous entry.
+        """
+        pending_by_slot = context.get("pending_generations_by_slot", {})
+        pending = pending_by_slot.get(slot_id)
+        if pending is None or pending.get("task_id") != task_id:
+            pending = {
+                "slot_id": slot_id,
+                "task_id": task_id,
+                "started_at": datetime.now(UTC).isoformat(),
+            }
+            pending_by_slot[slot_id] = pending
+            context["pending_generations_by_slot"] = pending_by_slot
+        return pending
+
+    def _handle_timing_rest(
+        self,
+        instance_id: str,
+        line: str,
+        context: dict[str, Any],
+        slots: set[int],
+        last_state: dict[str, Any],
+        pending_by_slot: dict[int, dict[str, Any]],
+        slot_id: int,
+        task_id: int | None,
+        rest: str,
+    ) -> RuntimeStateUpdate | None:
+        """Dispatch on the remainder of a ``slot print_timing`` header line.
+
+        The current build emits four timing lines per finished request, all
+        sharing the header. ``prompt processing`` feeds the live prefill
+        progress; ``n_decoded`` is the live decode signal (missing entirely
+        before this change); ``prompt eval time`` records the uncached
+        prompt portion; ``eval time`` records the final generated-token
+        count and decode speed. ``total time`` / ``graphs reused`` change no
+        state and return None.
+        """
+        pending: dict[str, Any]
+
+        # prompt processing, n_tokens = X, progress = P
+        m = self._re_prompt_processing.search(rest)
+        if m:
+            try:
+                progress = float(m.group(2))
+            except Exception:  # noqa: BLE001
+                progress = None
+            return self._create_update(
+                busy=True,
+                phase=InstancePhase.PREFILL,
+                prefill_progress=progress,
+                active_slots=len(slots),
+                slot_id=slot_id,
+                task_id=task_id,
+                last_state=last_state,
+                context=context,
+            )
+
+        # n_decoded = N, tg = T t/s → live generated-token count and TPS
+        m = self._re_ndecoded.search(rest)
+        if m:
+            try:
+                n_decoded = int(m.group(1))
+                tps = float(m.group(2))
+            except Exception:  # noqa: BLE001
+                n_decoded, tps = None, None
+            pending = pending_by_slot.get(slot_id) or {
+                "slot_id": slot_id,
+                "task_id": task_id,
+            }
+            if tps is not None:
+                pending["decode_tps"] = tps
+                pending["decode_ms_per_token"] = (1000.0 / tps) if tps > 0 else None
+            pending_by_slot[slot_id] = pending
+            context["pending_generations_by_slot"] = pending_by_slot
+            return self._create_update(
+                busy=True,
+                phase=InstancePhase.GENERATING,
+                prefill_progress=last_state.get("prefill_progress"),
+                active_slots=len(slots),
+                slot_id=slot_id,
+                task_id=task_id,
+                generated_tokens=n_decoded,
+                decode_tps=tps,
+                last_state=last_state,
+                context=context,
+            )
+
+        # prompt eval time = ... ms / N tokens → uncached prompt portion
+        m = self._re_prompt_eval_time.search(rest)
+        if m:
+            try:
+                prompt_eval_tokens = int(m.group(2))
+            except Exception:  # noqa: BLE001
+                prompt_eval_tokens = None
+            if prompt_eval_tokens is not None:
+                pending = pending_by_slot.get(slot_id) or {
+                    "slot_id": slot_id,
+                    "task_id": task_id,
+                }
+                pending["prompt_eval_tokens"] = prompt_eval_tokens
+                pending_by_slot[slot_id] = pending
+                context["pending_generations_by_slot"] = pending_by_slot
+            return None
+
+        # eval time = ... ms / N tokens (...) → final generated-token count
+        m = self._re_eval_time.search(rest)
+        if m:
+            try:
+                gen_tokens = int(m.group(2))
+                ms_per_tok = float(m.group(3))
+                tps = float(m.group(4))
+            except Exception:  # noqa: BLE001
+                gen_tokens, ms_per_tok, tps = None, None, None
+            pending = pending_by_slot.get(slot_id) or {
+                "slot_id": slot_id,
+                "task_id": task_id,
+            }
+            if gen_tokens is not None:
+                pending["generated_tokens"] = gen_tokens
+                pending["decode_tps"] = tps
+                pending["decode_ms_per_token"] = ms_per_tok
+                pending_by_slot[slot_id] = pending
+                context["pending_generations_by_slot"] = pending_by_slot
+
+            phase_str = last_state.get("phase", InstancePhase.IDLE.value)
+            phase = (
+                InstancePhase(phase_str)
+                if phase_str in [p.value for p in InstancePhase]
+                else InstancePhase.IDLE
+            )
+            if len(slots) > 0:
+                phase = InstancePhase.GENERATING
+            return self._create_update(
+                busy=True if len(slots) > 0 else last_state.get("busy", False),
+                phase=phase,
+                prefill_progress=last_state.get("prefill_progress"),
+                active_slots=len(slots),
+                slot_id=slot_id,
+                task_id=task_id,
+                generated_tokens=gen_tokens,
+                decode_tps=tps,
+                decode_ms_per_token=ms_per_tok,
+                last_state=last_state,
+                context=context,
+            )
+
+        return None
+
+    def _finalize_llamacpp_generation(
+        self,
+        instance_id: str,
+        pending: dict[str, Any],
+        release_n_tokens: int | None,
+    ) -> GenerationMetrics:
+        """Build the per-request GenerationMetrics at slot release.
+
+        Token semantics (OpenAI, verified on the production sample):
+          prompt_tokens      = release n_tokens - eval time tokens
+          prompt_eval_tokens = prompt eval time tokens (uncached portion)
+          cached_tokens      = prompt_tokens - prompt_eval_tokens (clamped
+                               at 0: a long generation can over-count the
+                               eval window by one token)
+          generated_tokens   = eval time tokens
+        """
+        generated = pending.get("generated_tokens")
+        prompt_tokens = None
+        if generated is not None and release_n_tokens is not None:
+            prompt_tokens = release_n_tokens - generated
+        prompt_eval_tokens = pending.get("prompt_eval_tokens")
+        cached_tokens = None
+        if prompt_tokens is not None and prompt_eval_tokens is not None:
+            cached_tokens = max(0, prompt_tokens - prompt_eval_tokens)
+        total_tokens = release_n_tokens
+        if total_tokens is None and prompt_tokens is not None and generated is not None:
+            total_tokens = prompt_tokens + generated
+        return GenerationMetrics(
+            instance_id=instance_id,
+            slot_id=pending.get("slot_id"),
+            task_id=pending.get("task_id"),
+            prompt_tokens=prompt_tokens,
+            generated_tokens=generated,
+            cached_tokens=cached_tokens,
+            prompt_eval_tokens=prompt_eval_tokens,
+            total_tokens=total_tokens,
+            decode_tps=pending.get("decode_tps"),
+            decode_ms_per_token=pending.get("decode_ms_per_token"),
+            started_at=pending.get("started_at"),
+            finished_at=datetime.now(UTC).isoformat(),
+            source="log",
+        )
 
     def _create_update(
         self,
@@ -593,3 +864,61 @@ class LlamaCppRunner(BackendRunner):
         if not recent:
             return None
         return recent[-1]
+
+    # llama.cpp exposes its counters through `/metrics` when launched with
+    # --metrics. Counters use the `llamacpp:` colon namespace; the gauges
+    # share the exposition without the prefix.
+    _METRICS_MAP: tuple[tuple[str, str, type], ...] = (
+        ("llamacpp:prompt_tokens_total", "prompt_tokens_total", int),
+        ("llamacpp:tokens_predicted_total", "generated_tokens_total", int),
+        ("llamacpp:requests_processing", "requests_processing", int),
+        ("llamacpp:requests_deferred", "requests_deferred", int),
+        ("llamacpp:kv_cache_usage_ratio", "kv_cache_usage_ratio", float),
+    )
+
+    def get_metrics_path(self) -> str | None:
+        """Prometheus endpoint of llama-server (enabled via --metrics)."""
+        return "/metrics"
+
+    def parse_metrics(self, text: str) -> InstanceUsageSnapshot | None:
+        """Parse the llama-server exposition into an usage snapshot."""
+        values = parse_prometheus(text)
+        kwargs: dict[str, Any] = {}
+        for prom_name, attr, cast in self._METRICS_MAP:
+            if prom_name in values:
+                kwargs[attr] = cast(values[prom_name])
+        if not kwargs:
+            return None
+        return InstanceUsageSnapshot(**kwargs)
+
+    def apply_usage_snapshot(
+        self,
+        instance_id: str,
+        context: dict[str, Any],
+        snapshot: InstanceUsageSnapshot,
+    ) -> RuntimeStateUpdate | None:
+        """Drive the authoritative busy signal from requests_processing.
+
+        ``requests_processing`` counts every request the server is working
+        on (queued or in a slot), which log parsing can miss at the tail of
+        a request. The counter only overrides the log-derived state when the
+        two disagree; while they agree, the log's finer-grained phase
+        (prefill vs generating) is kept.
+        """
+        if snapshot.requests_processing is None:
+            return None
+        busy = snapshot.requests_processing > 0
+        last_state = context.get("last_state", {})
+        if busy == last_state.get("busy", False):
+            return None
+        phase = InstancePhase.GENERATING if busy else InstancePhase.IDLE
+        return self._create_update(
+            busy=busy,
+            phase=phase,
+            prefill_progress=last_state.get("prefill_progress"),
+            active_slots=snapshot.requests_processing,
+            slot_id=last_state.get("slot_id"),
+            task_id=last_state.get("task_id"),
+            last_state=last_state,
+            context=context,
+        )

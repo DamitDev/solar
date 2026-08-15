@@ -65,6 +65,26 @@ async def reservation_cleanup_loop(app: FastAPI, interval: float = 60.0):
             logger.warning("reservation_cleanup_loop error: %s", exc)
 
 
+async def instance_metrics_poll_loop(app: FastAPI, interval: float = 2.0):
+    """Poll each backend's /metrics endpoint for exact usage counters.
+
+    The log parsers can only estimate output tokens (decode_log_interval
+    granularity for SGLang); the backends' Prometheus counters are exact.
+    The counters also drive the authoritative busy signal — SGLang simply
+    stops logging decode lines instead of emitting a terminal
+    ``#running-req: 0``, which left instances busy forever — and finalize
+    per-request SGLang metrics from the running-request 0→1/1→0 deltas.
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            await asyncio.to_thread(process_manager.poll_instance_metrics)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("instance_metrics_poll_loop error: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifecycle manager for the application"""
@@ -133,6 +153,7 @@ async def lifespan(app: FastAPI):
     health_task = None
     watchdog_task = None
     step_log_task: asyncio.Task | None = None
+    instance_metrics_task: asyncio.Task | None = None
     if clients:
         for client in clients:
             await client.start()
@@ -142,6 +163,7 @@ async def lifespan(app: FastAPI):
         health_task = asyncio.create_task(health_report_loop(app))
         resource_usage_task = asyncio.create_task(resource_usage_poll_loop(app))
         reservation_cleanup_task = asyncio.create_task(reservation_cleanup_loop(app))
+        instance_metrics_task = asyncio.create_task(instance_metrics_poll_loop(app))
         logger.info(
             "Solar Control WebSocket client(s) started (%d connection(s))", len(clients)
         )
@@ -209,6 +231,13 @@ async def lifespan(app: FastAPI):
         reservation_cleanup_task.cancel()
         try:
             await reservation_cleanup_task
+        except asyncio.CancelledError:
+            pass
+
+    if instance_metrics_task:
+        instance_metrics_task.cancel()
+        try:
+            await instance_metrics_task
         except asyncio.CancelledError:
             pass
 

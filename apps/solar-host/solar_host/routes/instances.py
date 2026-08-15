@@ -16,6 +16,7 @@ from solar_host.models import (
     InstanceRuntimeState,
     InstanceStatus,
     InstanceUpdate,
+    InstanceUsageSnapshot,
     LogMessage,
 )
 from solar_host.process_manager import process_manager
@@ -366,3 +367,21 @@ async def get_last_generation(
             )
 
     return metrics
+
+
+@router.get("/{instance_id}/usage", response_model=InstanceUsageSnapshot)
+async def get_instance_usage(instance_id: str):
+    """Return the latest backend /metrics snapshot for the instance.
+
+    The cumulative counters (prompt/generated/cached token totals) exist for
+    traffic aggregation; the gauges reflect the current backend state. Only
+    present for instances whose backend exposes a Prometheus endpoint, and
+    only once the metrics poll loop has fetched at least one snapshot.
+    """
+    if not config_manager.get_instance(instance_id):
+        raise HTTPException(status_code=404, detail="Instance not found")
+
+    snapshot = process_manager.get_instance_usage(instance_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="No usage metrics available")
+    return snapshot
