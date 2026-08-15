@@ -4,10 +4,12 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version
+from typing import Any
 
 import socketio
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.auth import auth_middleware
 from app.config import settings
@@ -118,6 +120,33 @@ app.add_middleware(
 
 # Authentication middleware
 app.middleware("http")(auth_middleware)
+
+
+@app.exception_handler(HTTPException)
+async def _model_not_found_handler(request: Request, exc: HTTPException):
+    """Render OpenAI-shaped errors as ``{"error": {...}}`` on ``/v1/*``.
+
+    FastAPI's default handler wraps ``HTTPException.detail`` in
+    ``{"detail": ...}``. Gateway errors carry an OpenAI error body (e.g.
+    ``model_not_found``), so OpenAI-compatible clients need the standard
+    ``error.code`` shape instead. Scoped to the gateway prefix: management
+    routes keep the ``{"detail": ...}`` envelope the WebUI parses, and a
+    future `/api/*` error dict that happens to carry a ``code`` key cannot
+    silently change shape.
+    """
+    detail = exc.detail
+    if (
+        request.url.path.startswith("/v1/")
+        and isinstance(detail, dict)
+        and detail.get("code")
+    ):
+        content: dict[str, Any] = {"error": detail}
+    else:
+        content = {"detail": detail}
+    return JSONResponse(
+        status_code=exc.status_code, content=content, headers=exc.headers
+    )
+
 
 # Routes
 from app.routes.management import router as management_router

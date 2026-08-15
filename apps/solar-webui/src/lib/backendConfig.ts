@@ -87,21 +87,116 @@ export const applySpecType = (config: Record<string, any>, specType: SpecType | 
 };
 
 /**
+ * Split one line of the SGLang "extra arguments" textarea into argv entries.
+ *
+ * solar-host spawns the backend with `subprocess.Popen(list)` and no shell,
+ * so a flag and its value have to be separate entries. Splitting on bare
+ * whitespace would cut inside a quoted value, so this walks the line and
+ * lets quotes group instead, keeping
+ * `--preferred-sampling-params '{"temperature": 1}'` as two entries with the
+ * JSON intact rather than shredding it at every space.
+ *
+ * Unlike a shell, a quote only groups when it opens a value — at the start
+ * of an entry or right after `=`. Everywhere else it is a literal character,
+ * so pasting compact JSON unquoted (`--json {"a":1}`) keeps its double
+ * quotes instead of having them eaten as shell syntax.
+ */
+const tokenizeArgLine = (line: string): string[] => {
+  const tokens: string[] = [];
+  let current = '';
+  let started = false;
+  let quote: '"' | "'" | null = null;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+
+    if (quote === "'") {
+      // Single quotes are fully literal, as in POSIX: no escapes inside.
+      if (char === "'") quote = null;
+      else current += char;
+      continue;
+    }
+
+    if (quote === '"') {
+      if (char === '\\' && (line[i + 1] === '"' || line[i + 1] === '\\')) {
+        current += line[++i];
+      } else if (char === '"') {
+        quote = null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    const opensValue = !started || line[i - 1] === '=';
+    if ((char === '"' || char === "'") && opensValue) {
+      quote = char;
+      started = true;
+      continue;
+    }
+    if (char === '\\' && i + 1 < line.length) {
+      current += line[++i];
+      started = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (started) tokens.push(current);
+      current = '';
+      started = false;
+      continue;
+    }
+    current += char;
+    started = true;
+  }
+
+  if (started) tokens.push(current);
+  return tokens;
+};
+
+/**
  * Parse the SGLang "extra arguments" textarea into an argv list.
  *
- * One flag per line, with its value after a space — the line is split on
- * whitespace because argv entries have to be separate, so
- * `--dist-init-addr 10.0.0.1:5000` becomes two entries the way a shell would
- * pass them.
+ * One flag per line, with its value after a space. Values containing spaces
+ * must be quoted, exactly as they would be on a command line.
  */
 export const parseExtraArgs = (text: string): string[] =>
   text
     .split('\n')
-    .flatMap((line) => line.trim().split(/\s+/))
+    .flatMap((line) => tokenizeArgLine(line))
     .filter((arg) => arg.length > 0);
 
-/** Render an argv list back into the textarea form (one entry per line). */
-export const formatExtraArgs = (args: string[] | undefined | null): string => (args ?? []).join('\n');
+/**
+ * Quote an argv entry so `parseExtraArgs` reads it back unchanged.
+ *
+ * Only entries that would otherwise be re-split or re-interpreted need it,
+ * which keeps compact JSON readable in the textarea rather than wrapping
+ * every value that happens to contain a double quote.
+ */
+const quoteArg = (arg: string): string => {
+  const needsQuoting = arg === '' || /\s|\\/.test(arg) || arg.startsWith("'") || arg.startsWith('"');
+  if (!needsQuoting) return arg;
+  if (!arg.includes("'")) return `'${arg}'`;
+  return `"${arg.replace(/([\\"])/g, '\\$1')}"`;
+};
+
+/**
+ * Render an argv list back into the textarea form.
+ *
+ * Line boundaries are not part of the stored value, so they are rebuilt by
+ * starting a new line at each flag and keeping its values alongside it —
+ * otherwise reopening the form would show every token on its own line. The
+ * grouping is cosmetic: `parseExtraArgs` flattens the lines again, so a
+ * value that looks like a flag (`--foo -1`) still round-trips correctly, it
+ * just wraps onto two lines.
+ */
+export const formatExtraArgs = (args: string[] | undefined | null): string => {
+  const lines: string[] = [];
+  for (const arg of args ?? []) {
+    if (arg.startsWith('-') || lines.length === 0) lines.push(quoteArg(arg));
+    else lines[lines.length - 1] += ` ${quoteArg(arg)}`;
+  }
+  return lines.join('\n');
+};
 
 /** Parse the SGLang "extra environment" textarea (`NAME=value` per line). */
 export const parseExtraEnv = (text: string): Record<string, string> => {

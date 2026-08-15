@@ -104,7 +104,9 @@ class TestOutgoingRequest:
         inventing a translation here would break instances it launched."""
         data = {"model": ALIAS}
 
-        assert OpenAIGateway._upstream_body(_entry(served_model_name=None), data) is data
+        assert (
+            OpenAIGateway._upstream_body(_entry(served_model_name=None), data) is data
+        )
 
     def test_the_caller_s_body_is_not_mutated(self):
         data = {"model": ALIAS}
@@ -117,7 +119,9 @@ class TestOutgoingRequest:
 class TestAdvertisedModels:
     def test_both_payload_shapes_get_the_alias_back(self):
         payload = {
-            "models": [{"name": SERVED, "model": SERVED, "capabilities": ["completion"]}],
+            "models": [
+                {"name": SERVED, "model": SERVED, "capabilities": ["completion"]}
+            ],
             "data": [{"id": SERVED, "object": "model"}],
         }
 
@@ -172,7 +176,9 @@ async def test_a_streamed_request_reaches_the_backend_translated():
         patch.object(gateway, "_ensure_session", AsyncMock()),
         patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
         patch.object(gateway, "_find_instance_or_retry", AsyncMock(return_value=entry)),
-        patch.object(gateway, "_fetch_last_generation_metrics", AsyncMock(return_value={})),
+        patch.object(
+            gateway, "_fetch_last_generation_metrics", AsyncMock(return_value={})
+        ),
         patch.object(gateway, "_emit_success", AsyncMock()),
         patch("app.gateway.host_db.get_host", AsyncMock(return_value=host)),
         patch("app.gateway.health_store.mark_healthy", AsyncMock()),

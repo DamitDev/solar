@@ -30,8 +30,50 @@ class ApiEndpointRow(Base):
         PG_UUID(as_uuid=False), primary_key=True, server_default=func.gen_random_uuid()
     )
     name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
-    api_key: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Model scoping (0008): an endpoint serves either every alias in the
+    # registry (serve_all_models) or only those matching its glob patterns.
+    serve_all_models: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    model_patterns: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ApiKeyRow(Base):
+    """A credential belonging to exactly one API endpoint."""
+
+    __tablename__ = "api_keys"
+    __table_args__ = (
+        Index("ix_api_keys_endpoint_id", "endpoint_id"),
+        Index("ix_api_keys_key", "key", unique=True),
+        Index("uq_api_keys_endpoint_name", "endpoint_id", "name", unique=True),
+    )
+
+    id: Mapped[str] = mapped_column(
+        PG_UUID(as_uuid=False), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    endpoint_id: Mapped[str] = mapped_column(
+        PG_UUID(as_uuid=False),
+        ForeignKey("api_endpoints.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    key: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

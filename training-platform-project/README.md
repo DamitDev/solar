@@ -115,7 +115,7 @@ Solar Control v3.0 is a **stateless, multi-replica** coordinator deployed in its
 
 - **Stateless control plane**: All shared state lives in Redis (host connections, model registry, routing, health) and PostgreSQL (gateway logs, API endpoints, host registry)
 - **Socket.IO** for real-time communication: `/hosts` namespace (host ↔ control) and `/webui` namespace (dashboard ↔ control). Redis adapter enables cross-replica broadcasting.
-- **Multi-tenant API keys**: `api_endpoints` table - each key is a separate entity (e.g. dev, uat, prod) with isolated log collection and usage metrics
+- **Multi-tenant API keys**: endpoints (`api_endpoints`) own one or more keys (`api_keys`, each a separate entity for e.g. dev/uat/prod or per-app) and declare which models they serve via glob patterns (`serve_all_models` / `model_patterns`). Telemetry stays attributed to the endpoint with isolated log collection and usage metrics
 - **Two-phase host registration**: Hosts connect via Socket.IO, unknown hosts are held pending until admin approval
 - **Management API key** (`MANAGEMENT_API_KEY`) for `/api/`* operations and WebUI Socket.IO
 
@@ -390,7 +390,7 @@ imgrepo.damit.hu/supernova/iris-tickets:2026-03     (dataset)
 
 ### 4.4 Solar System (Evolution for SuperNova)
 
-Solar v3.0 already provides a solid foundation: stateless multi-replica control plane, Redis-backed state, Socket.IO communication, multi-tenant API keys, and per-endpoint metrics. The following capabilities need to be added for SuperNova integration. See [Section 6](#6-solar-30-evolution) for full details.
+Solar v3.0 already provides a solid foundation: stateless multi-replica control plane, Redis-backed state, Socket.IO communication, multi-tenant endpoints and API keys, and per-endpoint metrics. The following capabilities need to be added for SuperNova integration. See [Section 6](#6-solar-30-evolution) for full details.
 
 **New Solar Host capabilities needed:**
 
@@ -459,7 +459,7 @@ Solar v3.0 already provides a solid foundation: stateless multi-replica control 
 
 ## 6. Solar Evolution for SuperNova
 
-Solar v3.0 already provides a strong foundation: stateless multi-replica control plane (Redis + Postgres), Socket.IO real-time communication, multi-tenant API keys with per-endpoint metrics, and two-phase host registration. It is deployed in its own Kubernetes namespace (`solar` on `damit-prod`) with at least 2 replicas.
+Solar v3.0 already provides a strong foundation: stateless multi-replica control plane (Redis + Postgres), Socket.IO real-time communication, multi-tenant endpoints and API keys with per-endpoint metrics, and two-phase host registration. It is deployed in its own Kubernetes namespace (`solar` on `damit-prod`) with at least 2 replicas.
 
 The following capabilities need to be built on top of this foundation to support SuperNova.
 

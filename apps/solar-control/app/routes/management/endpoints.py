@@ -6,7 +6,11 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, model_validator
 
 from app.auth import invalidate_endpoint_cache
+from app.database.api_keys import api_key_db
 from app.database.endpoints import endpoint_db
+from app.redis_state import registry_store
+from app.routes.management.api_keys import _emit_api_keys_update
+from app.services.model_access import filter_aliases, filter_aliases_for_patterns
 
 logger = logging.getLogger(__name__)
 
@@ -16,21 +20,32 @@ router = APIRouter(prefix="/endpoints", tags=["endpoints"])
 class EndpointCreate(BaseModel):
     name: str
     description: str | None = None
-    api_key: str | None = None
+    serve_all_models: bool = True
+    model_patterns: list[str] = []
 
 
 class EndpointUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
-    api_key: str | None = None
+    serve_all_models: bool | None = None
+    model_patterns: list[str] | None = None
     _description_provided: bool = False
+    _patterns_provided: bool = False
 
     @model_validator(mode="before")
     @classmethod
-    def _track_description(cls, values: dict) -> dict:
-        if isinstance(values, dict) and "description" in values:
-            values["_description_provided"] = True
+    def _track_provided(cls, values: dict) -> dict:
+        if isinstance(values, dict):
+            if "description" in values:
+                values["_description_provided"] = True
+            if "model_patterns" in values:
+                values["_patterns_provided"] = True
         return values
+
+
+class EndpointModelPreview(BaseModel):
+    serve_all_models: bool = True
+    model_patterns: list[str] = []
 
 
 async def _emit_endpoints_update() -> None:
@@ -52,27 +67,58 @@ async def _emit_endpoints_update() -> None:
         logger.warning("Failed to emit endpoints_update", exc_info=True)
 
 
+def _serialize(ep, key_count: int) -> dict:
+    data = ep.model_dump()
+    data["key_count"] = key_count
+    return data
+
+
+async def _list_keys_by_endpoint() -> dict[str, int]:
+    keys = await api_key_db.list_all()
+    counts: dict[str, int] = {}
+    for key in keys:
+        counts[key.endpoint_id] = counts.get(key.endpoint_id, 0) + 1
+    return counts
+
+
+async def _registry_aliases() -> list[str]:
+    registry = await registry_store.get_registry()
+    return [alias for alias, instances in registry.items() if instances]
+
+
 @router.get("")
 async def list_endpoints():
     endpoints = await endpoint_db.get_all_endpoints()
-    return [ep.model_dump() for ep in endpoints]
+    counts = await _list_keys_by_endpoint()
+    return [_serialize(ep, counts.get(ep.id, 0)) for ep in endpoints]
 
 
 @router.post("")
 async def create_endpoint(data: EndpointCreate):
     try:
         ep = await endpoint_db.create_endpoint(
-            name=data.name, description=data.description, api_key=data.api_key
+            name=data.name,
+            description=data.description,
+            serve_all_models=data.serve_all_models,
+            model_patterns=data.model_patterns,
         )
         await invalidate_endpoint_cache()
         await _emit_endpoints_update()
-        return ep.model_dump()
+        return _serialize(ep, 0)
     except Exception as e:  # noqa: BLE001
         if "unique" in str(e).lower():
-            raise HTTPException(
-                status_code=409, detail="Endpoint name or API key already exists"
-            )
+            raise HTTPException(status_code=409, detail="Endpoint name already exists")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/preview-models")
+async def preview_models(data: EndpointModelPreview):
+    """Live alias preview for the create/edit form (model scoping)."""
+    aliases = await _registry_aliases()
+    if data.serve_all_models:
+        return {"aliases": aliases, "count": len(aliases)}
+    matched = filter_aliases_for_patterns(data.model_patterns, aliases)
+    return {"aliases": matched, "count": len(matched)}
 
 
 @router.get("/{endpoint_id}")
@@ -80,25 +126,47 @@ async def get_endpoint(endpoint_id: str):
     ep = await endpoint_db.get_endpoint(endpoint_id)
     if not ep:
         raise HTTPException(status_code=404, detail="Endpoint not found")
-    return ep.model_dump()
+    keys = await api_key_db.list_for_endpoint(endpoint_id)
+    return _serialize(ep, len(keys))
+
+
+@router.get("/{endpoint_id}/keys")
+async def get_endpoint_keys(endpoint_id: str):
+    ep = await endpoint_db.get_endpoint(endpoint_id)
+    if not ep:
+        raise HTTPException(status_code=404, detail="Endpoint not found")
+    keys = await api_key_db.list_for_endpoint(endpoint_id)
+    return [key.model_dump() for key in keys]
+
+
+@router.get("/{endpoint_id}/models")
+async def get_endpoint_models(endpoint_id: str):
+    ep = await endpoint_db.get_endpoint(endpoint_id)
+    if not ep:
+        raise HTTPException(status_code=404, detail="Endpoint not found")
+    aliases = filter_aliases(ep, await _registry_aliases())
+    return {"endpoint": ep.model_dump(), "aliases": aliases, "count": len(aliases)}
 
 
 @router.put("/{endpoint_id}")
 async def update_endpoint(endpoint_id: str, data: EndpointUpdate):
-    kwargs: dict[str, str | None] = {}
+    kwargs: dict = {}
     if data.name is not None:
         kwargs["name"] = data.name
     if data._description_provided:
         kwargs["description"] = data.description
-    if data.api_key is not None:
-        kwargs["api_key"] = data.api_key
+    if data.serve_all_models is not None:
+        kwargs["serve_all_models"] = data.serve_all_models
+    if data._patterns_provided:
+        kwargs["model_patterns"] = data.model_patterns
 
     ep = await endpoint_db.update_endpoint(endpoint_id, **kwargs)
     if not ep:
         raise HTTPException(status_code=404, detail="Endpoint not found")
     await invalidate_endpoint_cache()
     await _emit_endpoints_update()
-    return ep.model_dump()
+    keys = await api_key_db.list_for_endpoint(endpoint_id)
+    return _serialize(ep, len(keys))
 
 
 @router.delete("/{endpoint_id}")
@@ -106,10 +174,16 @@ async def delete_endpoint(endpoint_id: str):
     ep = await endpoint_db.get_endpoint(endpoint_id)
     if not ep:
         raise HTTPException(status_code=404, detail="Endpoint not found")
+    keys = await api_key_db.list_for_endpoint(endpoint_id)
     await endpoint_db.delete_endpoint(endpoint_id)
     await invalidate_endpoint_cache()
     await _emit_endpoints_update()
-    return {"message": f"Endpoint '{ep.name}' deleted", "id": endpoint_id}
+    await _emit_api_keys_update()
+    return {
+        "message": f"Endpoint '{ep.name}' deleted",
+        "id": endpoint_id,
+        "deleted_keys": len(keys),
+    }
 
 
 @router.get("/{endpoint_id}/usage")

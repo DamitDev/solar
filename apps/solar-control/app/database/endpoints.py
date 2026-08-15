@@ -1,10 +1,11 @@
 """PostgreSQL-backed API endpoint CRUD operations using SQLAlchemy ORM.
 
-Each API endpoint represents a tenant (dev, uat, prod) with its own API key.
-All endpoints serve the same models but have separate request logging.
+Each API endpoint represents a tenant (dev, uat, prod) with its own model
+scoping and any number of API keys (see ``app.database.api_keys``).
+All endpoints share the registry but may be restricted by glob patterns;
+telemetry stays attributed to the endpoint.
 """
 
-import secrets
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -12,8 +13,9 @@ from typing import Any
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select, update
 
+from .api_keys import ApiKey
 from .connection import get_session_factory
-from .tables import ApiEndpointRow, GatewayRequestRow
+from .tables import ApiEndpointRow, ApiKeyRow, GatewayRequestRow
 
 
 class ApiEndpoint(BaseModel):
@@ -21,8 +23,9 @@ class ApiEndpoint(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
-    api_key: str = Field(default_factory=lambda: f"sk-{secrets.token_urlsafe(32)}")
     description: str | None = None
+    serve_all_models: bool = True
+    model_patterns: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -40,8 +43,9 @@ class EndpointDB:
         return ApiEndpoint(
             id=str(row.id),
             name=row.name,
-            api_key=row.api_key,
             description=row.description,
+            serve_all_models=row.serve_all_models,
+            model_patterns=list(row.model_patterns or []),
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -51,18 +55,23 @@ class EndpointDB:
         name: str,
         *,
         description: str | None = None,
-        api_key: str | None = None,
+        serve_all_models: bool = True,
+        model_patterns: list[str] | None = None,
     ) -> ApiEndpoint:
-        ep = ApiEndpoint(name=name, description=description)
-        if api_key:
-            ep.api_key = api_key
+        ep = ApiEndpoint(
+            name=name,
+            description=description,
+            serve_all_models=serve_all_models,
+            model_patterns=list(model_patterns or []),
+        )
         async with self._session() as session:
             session.add(
                 ApiEndpointRow(
                     id=ep.id,
                     name=ep.name,
-                    api_key=ep.api_key,
                     description=ep.description,
+                    serve_all_models=ep.serve_all_models,
+                    model_patterns=ep.model_patterns,
                     created_at=ep.created_at,
                     updated_at=ep.updated_at,
                 )
@@ -75,13 +84,37 @@ class EndpointDB:
             row = await session.get(ApiEndpointRow, endpoint_id)
             return self._row_to_endpoint(row) if row else None
 
-    async def get_endpoint_by_api_key(self, api_key: str) -> ApiEndpoint | None:
+    async def resolve_by_api_key(
+        self, api_key: str
+    ) -> tuple[ApiEndpoint, ApiKey] | None:
+        """Resolve a raw credential to its (endpoint, key) pair.
+
+        Only enabled keys resolve; a disabled key behaves like a missing one.
+        """
         async with self._session() as session:
             result = await session.execute(
-                select(ApiEndpointRow).where(ApiEndpointRow.api_key == api_key)
+                select(ApiEndpointRow, ApiKeyRow)
+                .join(ApiKeyRow, ApiKeyRow.endpoint_id == ApiEndpointRow.id)
+                .where(ApiKeyRow.key == api_key, ApiKeyRow.enabled.is_(True))
             )
-            row = result.scalar_one_or_none()
-            return self._row_to_endpoint(row) if row else None
+            row = result.one_or_none()
+            if not row:
+                return None
+            endpoint_row, key_row = row
+            return (
+                self._row_to_endpoint(endpoint_row),
+                ApiKey(
+                    id=str(key_row.id),
+                    endpoint_id=str(key_row.endpoint_id),
+                    name=key_row.name,
+                    key=key_row.key,
+                    description=key_row.description,
+                    enabled=key_row.enabled,
+                    last_used_at=key_row.last_used_at,
+                    created_at=key_row.created_at,
+                    updated_at=key_row.updated_at,
+                ),
+            )
 
     async def get_all_endpoints(self) -> list[ApiEndpoint]:
         async with self._session() as session:
@@ -96,15 +129,18 @@ class EndpointDB:
         *,
         name: str | None = None,
         description: str | None = _UNSET,  # type: ignore[assignment]
-        api_key: str | None = None,
+        serve_all_models: bool | None = None,
+        model_patterns: list[str] | None = None,
     ) -> ApiEndpoint | None:
         values: dict[str, Any] = {}
         if name is not None:
             values["name"] = name
         if description is not _UNSET:
             values["description"] = description
-        if api_key is not None:
-            values["api_key"] = api_key
+        if serve_all_models is not None:
+            values["serve_all_models"] = serve_all_models
+        if model_patterns is not None:
+            values["model_patterns"] = model_patterns
 
         if not values:
             return await self.get_endpoint(endpoint_id)

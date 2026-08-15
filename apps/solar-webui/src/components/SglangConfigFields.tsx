@@ -342,9 +342,10 @@ export function SglangConfigFields({
           className={`${monoInputClass} resize-y`}
         />
         <p className={hintClass}>
-          One flag per line, value after a space. Passed to SGLang after the fields above, so an entry here wins.{' '}
-          <code>--port</code>, <code>--api-key</code>, <code>--model-path</code> and <code>--served-model-name</code>{' '}
-          are managed by the host and rejected.
+          One flag per line, value after a space. Quote a value that contains spaces, e.g.{' '}
+          <code>--preferred-sampling-params &apos;{'{"temperature": 1}'}&apos;</code>. Passed to SGLang after the fields
+          above, so an entry here wins. <code>--port</code>, <code>--api-key</code>, <code>--model-path</code> and{' '}
+          <code>--served-model-name</code> are managed by the host and rejected.
         </p>
         {fieldError('backend.extra_args')}
       </div>
