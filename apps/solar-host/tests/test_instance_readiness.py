@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -19,7 +20,12 @@ from solar_host.backends.huggingface import HuggingFaceRunner
 from solar_host.backends.llamacpp import LlamaCppRunner
 from solar_host.backends.sglang import SglangRunner
 from solar_host.config import config_manager, settings
-from solar_host.models.base import Instance, InstancePhase, InstanceStatus
+from solar_host.models.base import (
+    GenerationMetrics,
+    Instance,
+    InstancePhase,
+    InstanceStatus,
+)
 from solar_host.models.llamacpp import LlamaCppConfig
 from solar_host.process_manager import ProcessManager
 
@@ -172,7 +178,9 @@ class TestSglangLogParsing:
         assert update.busy is True
         assert update.phase == InstancePhase.GENERATING
         assert update.decode_tps == pytest.approx(84.21)
-        assert runner.get_last_generation(context).decode_tps == pytest.approx(84.21)
+        # Decode lines drive phase and TPS only: they must not create a
+        # tokenless record that would shadow the /metrics-finalized one.
+        assert runner.get_last_generation(context) is None
 
     def test_a_drained_queue_goes_idle(self):
         runner = SglangRunner()
@@ -297,6 +305,8 @@ class TestSglangLogParsing:
         assert update.decode_tps == pytest.approx(69.19)
         assert update.generated_tokens is None
         assert context["pending_request"]["decode_tps"] == pytest.approx(69.19)
+        # No tokenless record was appended to recent_generations.
+        assert runner.get_last_generation(context) is None
 
 
 class TestSglangFixtureParsing:
@@ -409,6 +419,60 @@ class TestSglangFixtureParsing:
         assert update is not None
         assert update.busy is True
         assert update.phase == InstancePhase.GENERATING
+
+    def test_replay_stores_no_tokenless_records(self):
+        """Regression for the shadowing bug: replaying the 46-line fixture
+        (dozens of decode lines, no /metrics finalization) used to append a
+        tokenless GenerationMetrics per decode line; recent_generations must
+        stay empty until the /metrics poll finalizes a request."""
+        _runner, context = self._replay()
+
+        assert context["recent_generations"] == []
+
+    def test_the_finalized_record_survives_later_decode_lines(self):
+        """Regression: after the /metrics drain finalizes the request, a
+        trailing decode line must not push the real record out of
+        recent_generations[-1] (the old code appended a TPS sample per
+        decode line, so get_last_generation returned a tokenless record and
+        the gateway billed zero tokens)."""
+        runner, context = self._replay()
+
+        def snapshot(prompt, gen, cached, running):
+            snap = runner.parse_metrics(
+                f"sglang:prompt_tokens_total {prompt}\n"
+                f"sglang:generation_tokens_total {gen}\n"
+                f"sglang:cached_tokens_total {cached}\n"
+                f"sglang:num_running_reqs {running}\n"
+                f"sglang:num_queue_reqs 0\n"
+                f"sglang:token_usage 0.03\n"
+            )
+            assert snap is not None
+            return snap
+
+        runner.apply_usage_snapshot("inst-1", context, snapshot(83360, 2830, 50944, 1))
+        update = runner.apply_usage_snapshot(
+            "inst-1", context, snapshot(83360, 2900, 50944, 0)
+        )
+        assert update is not None
+
+        finalized = runner.get_last_generation(context)
+        assert finalized is not None
+        assert finalized.prompt_tokens == 42496
+
+        # A decode line arrives after the drain (queue drained, line still
+        # printed): the finalized record must remain the last one.
+        runner.parse_log_line(
+            "inst-1",
+            "[2026-08-15 13:17:23] Decode batch, #running-req: 0, "
+            "gen throughput (token/s): 0.00, #queue-req: 0",
+            context,
+        )
+
+        last = runner.get_last_generation(context)
+        assert last is not None
+        assert last is finalized
+        assert last.generated_tokens == 70
+        assert last.finished_at is not None
 
 
 # ---------------------------------------------------------------------------
@@ -584,3 +648,53 @@ def test_assigned_ports_include_starting(_isolated_env):
     config_manager.update_instance("inst-stopped", stopped)
 
     assert manager._get_assigned_ports() == {3500, 3501}
+
+
+# ---------------------------------------------------------------------------
+# GET /instances/{id}/last-generation recency bound
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_within_s_rejects_a_record_without_finish_time(
+    _isolated_env, monkeypatch
+):
+    """A record with finished_at=None cannot be proven recent: a tokenless
+    decode TPS sample used to slip through the within_s filter and return
+    200 with null token counts, which the gateway then billed as zero."""
+
+    from fastapi import HTTPException
+
+    from solar_host.routes.instances import get_last_generation
+
+    _make_instance("inst-1")
+    record = GenerationMetrics(instance_id="inst-1", decode_tps=84.21, source="log")
+    manager = MagicMock()
+    manager.get_last_generation.return_value = record
+    monkeypatch.setattr("solar_host.routes.instances.process_manager", manager)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await get_last_generation("inst-1", within_s=5)
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_within_s_accepts_a_fresh_finished_record(_isolated_env, monkeypatch):
+    """The happy path still works: a just-finished real record passes."""
+    from solar_host.routes.instances import get_last_generation
+
+    _make_instance("inst-1")
+    record = GenerationMetrics(
+        instance_id="inst-1",
+        prompt_tokens=341,
+        generated_tokens=72,
+        total_tokens=413,
+        finished_at=datetime.now(UTC).isoformat(),
+    )
+    manager = MagicMock()
+    manager.get_last_generation.return_value = record
+    monkeypatch.setattr("solar_host.routes.instances.process_manager", manager)
+
+    result = await get_last_generation("inst-1", within_s=5)
+
+    assert result.prompt_tokens == 341

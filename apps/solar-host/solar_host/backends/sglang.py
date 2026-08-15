@@ -337,19 +337,12 @@ class SglangRunner(BackendRunner):
             phase = InstancePhase.GENERATING if busy else InstancePhase.IDLE
             active_slots = running if running is not None else (1 if busy else 0)
 
-        if decode_tps is not None and busy:
-            metrics = GenerationMetrics(
-                instance_id=instance_id,
-                decode_tps=decode_tps,
-                decode_ms_per_token=(1000.0 / decode_tps) if decode_tps > 0 else None,
-                source="log",
-            )
-            recent = context.get("recent_generations", [])
-            recent.append(metrics)
-            if len(recent) > 100:
-                recent = recent[-100:]
-            context["recent_generations"] = recent
-
+        # Decode lines drive phase and TPS only — they must NOT create
+        # tokenless GenerationMetrics records. recent_generations is
+        # consumed by GET /instances/{id}/last-generation, and a TPS sample
+        # would shadow the /metrics-finalized per-request record
+        # (recent_generations[-1]) and flush real records out of the
+        # 100-entry ring buffer on long generations.
         return self._state_update(context, busy, phase, active_slots, decode_tps)
 
     def _accumulate_prefill(self, context: dict[str, Any], line: str) -> None:

@@ -578,13 +578,15 @@ class OpenAIGateway:
 
         return body, injected
 
-    def _sse_usage(self, payload: bytes) -> dict[str, Any] | None:
+    def _sse_usage(self, payload: bytes) -> tuple[dict[str, Any], bool] | None:
         """Extract the OpenAI usage block from one SSE *data:* event.
 
         Returns None for events without a JSON payload carrying a ``usage``
-        object (content chunks, ``[DONE]``, ping lines). The terminal chunk
-        of a stream with ``stream_options.include_usage`` carries empty
-        choices plus the full usage block.
+        object (content chunks, ``[DONE]``, ping lines). The second tuple
+        element reports whether the chunk is a *usage-only* terminal chunk
+        (``choices`` is an empty list, per the OpenAI contract): a backend
+        that attaches usage to a content-carrying or finish chunk is not
+        usage-only, and its content must reach the client.
         """
         text = payload.decode("utf-8", "replace")
         data_value: str | None = None
@@ -603,9 +605,12 @@ class OpenAIGateway:
         usage = parsed.get("usage")
         if not isinstance(usage, dict) or not usage:
             return None
-        # Reuse the non-stream extraction so both paths agree on the shape
-        # (prompt/completion/total tokens plus cached from details).
-        return self._extract_usage_from_result(parsed) or None
+        fields = self._extract_usage_from_result(parsed)
+        if not fields:
+            return None
+        choices = parsed.get("choices")
+        usage_only = isinstance(choices, list) and len(choices) == 0
+        return fields, usage_only
 
     @staticmethod
     def _restore_alias_in_models(
@@ -1429,12 +1434,14 @@ class OpenAIGateway:
                                 event_lines.append(raw)
                                 if raw.strip() == b"":
                                     payload = b"".join(event_lines)
-                                    usage = self._sse_usage(payload)
-                                    if usage:
+                                    usage_info = self._sse_usage(payload)
+                                    if usage_info:
+                                        usage, usage_only = usage_info
                                         captured_usage = usage
-                                        if injected_usage:
+                                        if injected_usage and usage_only:
                                             # The client did not ask for
-                                            # usage; drop the injected chunk.
+                                            # usage; drop the injected
+                                            # usage-only terminal chunk.
                                             event_lines = []
                                             continue
                                     yield payload

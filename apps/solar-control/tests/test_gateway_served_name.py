@@ -281,6 +281,30 @@ class TestStreamingUsage:
         assert emitted["usage"]["prompt_tokens"] == 341
 
     @pytest.mark.anyio
+    async def test_usage_on_a_content_chunk_is_captured_but_not_dropped(self):
+        """A backend that attaches usage to the finish chunk (non-empty
+        choices) must keep that chunk: the relay captures the usage but
+        only strips usage-ONLY terminal chunks, so finish_reason and any
+        trailing content reach the client."""
+        content_with_usage = json.dumps(
+            {
+                "choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 2,
+                    "total_tokens": 3,
+                },
+            }
+        )
+        chunks, _posted, emitted = await self._run(
+            self._event(content_with_usage) + self._done()
+        )
+
+        assert len(chunks) == 2  # content chunk passed through, [DONE] too
+        assert b'"finish_reason": "stop"' in chunks[0]
+        assert emitted["usage"]["prompt_tokens"] == 1
+
+    @pytest.mark.anyio
     async def test_no_usage_chunk_falls_back_to_the_host_with_a_recency_bound(self):
         gateway = OpenAIGateway()
         session = _RecordingSession(_Response(200, lines=[b'data: {"choices":[]}\n\n']))
