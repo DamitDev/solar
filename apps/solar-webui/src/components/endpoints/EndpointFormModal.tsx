@@ -36,8 +36,14 @@ export function EndpointFormModal({ endpoint, onClose, onCreated, onSaved }: End
     }
   }, []);
 
+  // Debounce the preview so rapid pattern typing does not fire a POST on
+  // every keystroke; the value is advisory so a failed/raced response is
+  // silently ignored (a newer keystroke supersedes it).
   useEffect(() => {
-    refreshPreview(serveAll, patterns);
+    const timer = setTimeout(() => {
+      refreshPreview(serveAll, patterns);
+    }, 300);
+    return () => clearTimeout(timer);
   }, [serveAll, patterns, refreshPreview]);
 
   const updatePattern = (index: number, value: string) => {

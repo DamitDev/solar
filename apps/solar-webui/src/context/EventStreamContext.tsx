@@ -37,7 +37,7 @@ interface EventStreamContextValue {
   pullProgress: Map<string, PullProgressEvent>;
   // C5: endpoint records, event-driven (endpoints_update).
   endpoints: ApiEndpoint[];
-  // S-045: API key records, event-driven (api_keys_update).
+  // API key records, event-driven (api_keys_update).
   apiKeys: ApiKey[];
   getInstanceLogs: (hostId: string, instanceId: string) => LogMessage[];
   getInstanceState: (hostId: string, instanceId: string) => InstanceStateData | undefined;

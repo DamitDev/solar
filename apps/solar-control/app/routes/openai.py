@@ -1,6 +1,6 @@
 """OpenAI-compatible API gateway endpoints.
 
-Each request is authenticated against the api_keys table (S-045); the
+Each request is authenticated against the api_keys table; the
 resolved endpoint is stored in request.state by the auth middleware and
 passed through to the gateway for scoping and logging. A key belongs to
 exactly one endpoint, whose model scoping restricts the registry.

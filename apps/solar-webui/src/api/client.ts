@@ -240,8 +240,8 @@ class SolarClient {
    * Get the management API key.
    *
    * Resolution order:
-   *  1. window.__SOLAR_CONFIG__ (injected by Express server at runtime)
-   *  2. VITE_SOLAR_CONTROL_API_KEY (baked by Vite at build time, dev mode)
+   * 1. window.__SOLAR_CONFIG__ (injected by Express server at runtime)
+   * 2. VITE_SOLAR_CONTROL_API_KEY (baked by Vite at build time, dev mode)
    */
   getManagementApiKey(): string {
     if (this._managementApiKey) return this._managementApiKey;
@@ -272,7 +272,7 @@ class SolarClient {
   }
 
   /** Bucketed gateway traffic for the dashboard charts. `bucket: 'auto'` lets
-   *  the server pick a resolution that suits the range. */
+   * the server pick a resolution that suits the range. */
   async getGatewayTimeseries(params: {
     from?: string;
     to?: string;
@@ -491,7 +491,7 @@ class SolarClient {
     return response.data;
   }
 
-  // API key management (S-045: keys are separate from endpoints)
+  // API key management (keys are separate from endpoints)
 
   async getApiKeys(endpointId?: string): Promise<ApiKey[]> {
     const params = endpointId ? { params: { endpoint_id: endpointId } } : undefined;

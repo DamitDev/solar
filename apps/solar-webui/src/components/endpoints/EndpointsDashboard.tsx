@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Plus, RefreshCw, AlertCircle, KeyRound } from 'lucide-react';
 import solarClient from '@/api/client';
 import type { ApiEndpoint, ApiKey, EndpointUsageResponse } from '@/api/types';
@@ -87,12 +87,23 @@ export function EndpointsDashboard() {
 
   // Event-driven updates: the socket only fires on CRUD, so a fresh page
   // still needs the REST load above; afterwards live edits arrive here.
+  // The initial context value is an empty array (no event yet), so gate on
+  // an actual socket delivery to avoid clobbering the REST snapshot — but
+  // still apply an empty event (e.g. deleting the last key) to other tabs.
+  const endpointsEventRef = useRef(false);
+  const keysEventRef = useRef(false);
   useEffect(() => {
-    if (eventEndpoints.length > 0) setEndpoints(eventEndpoints);
+    if (endpointsEventRef.current || eventEndpoints.length > 0) {
+      endpointsEventRef.current = true;
+      setEndpoints(eventEndpoints);
+    }
   }, [eventEndpoints]);
 
   useEffect(() => {
-    if (eventApiKeys.length > 0) setApiKeys(eventApiKeys);
+    if (keysEventRef.current || eventApiKeys.length > 0) {
+      keysEventRef.current = true;
+      setApiKeys(eventApiKeys);
+    }
   }, [eventApiKeys]);
 
   // Disconnected fallback: degraded to polling.
@@ -169,6 +180,7 @@ export function EndpointsDashboard() {
               <EndpointCard
                 key={ep.id}
                 endpoint={ep}
+                allEndpoints={endpoints}
                 keys={apiKeys.filter((k) => k.endpoint_id === ep.id)}
                 usage={usageMap[ep.id] ?? null}
                 models={modelsMap[ep.id] ?? null}

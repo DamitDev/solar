@@ -48,7 +48,7 @@ class ApiEndpointRow(Base):
 
 
 class ApiKeyRow(Base):
-    """A credential belonging to exactly one API endpoint (S-045 split)."""
+    """A credential belonging to exactly one API endpoint."""
 
     __tablename__ = "api_keys"
     __table_args__ = (

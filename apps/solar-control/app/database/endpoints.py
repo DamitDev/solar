@@ -1,7 +1,7 @@
 """PostgreSQL-backed API endpoint CRUD operations using SQLAlchemy ORM.
 
 Each API endpoint represents a tenant (dev, uat, prod) with its own model
-scoping and any number of API keys (S-045; see ``app.database.api_keys``).
+scoping and any number of API keys (see ``app.database.api_keys``).
 All endpoints share the registry but may be restricted by glob patterns;
 telemetry stays attributed to the endpoint.
 """

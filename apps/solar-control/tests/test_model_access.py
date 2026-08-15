@@ -1,4 +1,4 @@
-"""Tests for per-endpoint model access scoping (S-045)."""
+"""Tests for per-endpoint model access scoping ."""
 
 from app.database.endpoints import ApiEndpoint
 from app.services.model_access import (

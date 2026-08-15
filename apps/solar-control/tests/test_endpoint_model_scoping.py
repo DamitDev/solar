@@ -1,10 +1,12 @@
-"""Tests for per-endpoint model scoping on /v1 routes (S-045).
+"""Tests for per-endpoint model scoping on /v1 routes.
 
 The auth middleware resolves a key to (endpoint, key_id); handlers then
 thread the endpoint's patterns into the gateway. A scoped key must not
-leak aliases in /v1/models and must not route to well-a- denied model,
-not even through a prefix abbreviation ("sec" for "secret-7b").
+leak aliases in /v1/models and must not route to a denied model, not
+even through a prefix abbreviation ("sec" for "secret-7b").
 """
+
+import json
 
 import pytest
 from fastapi import HTTPException
@@ -72,6 +74,42 @@ def test_model_not_found_shape():
     assert body["code"] == "model_not_found"
     assert body["type"] == "invalid_request_error"
     assert "'sec'" in body["message"]
+
+
+@pytest.mark.anyio
+async def test_model_not_found_serializes_as_openai_error():
+    """The wire format must be ``{"error": {...}}`` (OpenAI shape), not the
+    FastAPI default ``{"detail": {...}}`` wrapper."""
+    from fastapi import HTTPException as HTTPExceptionCls
+    from starlette.requests import Request as ASGIRequest
+
+    from app.main import _model_not_found_handler
+
+    exc_val = HTTPExceptionCls(
+        status_code=404,
+        detail={
+            "message": "The model 'sec' does not exist or you do not have access to it.",
+            "type": "invalid_request_error",
+            "param": None,
+            "code": "model_not_found",
+        },
+    )
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/v1/chat/completions",
+        "headers": [],
+        "query_string": b"",
+        "client": ("127.0.0.1", 1),
+        "server": ("test", 80),
+        "scheme": "http",
+    }
+    request = ASGIRequest(scope)
+    response = await _model_not_found_handler(request, exc_val)
+    payload = json.loads(response.body)
+    assert "error" in payload, payload
+    assert payload["error"]["code"] == "model_not_found"
+    assert "detail" not in payload
 
 
 # ── end / gateway filtering is exercised via the service layer ─────

@@ -115,8 +115,8 @@ export function ApiKeyFormModal({
           <div className="p-4 space-y-4">
             <div className="p-3 bg-nord-14 bg-opacity-15 text-nord-14 rounded-md text-sm">
               {isRotating
-                ? 'The old key no longer works. Copy the new one now — it is only shown this once.'
-                : 'Copy this key now — it is only shown this once.'}
+                ? 'The old key no longer works. The new one is shown here and also visible in the list.'
+                : 'Your new key is shown here and visible in the list at any time.'}
             </div>
             <div className="flex items-center gap-2">
               <code className="flex-1 px-3 py-2 bg-nord-2 border border-nord-3 rounded-md text-sm text-nord-5 font-mono break-all">

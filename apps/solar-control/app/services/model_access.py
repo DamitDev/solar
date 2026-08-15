@@ -1,4 +1,4 @@
-"""Per-endpoint model alias scoping (S-045).
+"""Per-endpoint model alias scoping.
 
 The single source of truth for how an endpoint's ``model_patterns`` match
 against registry aliases. Semantics are fnmatch globs over the alias string
@@ -7,7 +7,7 @@ short-circuits to allow-all so a scoped endpoint can never accidentally
 "include everything" through an empty pattern list.
 
 The gateway threads the raw ``model_patterns`` list through routing internally
-(``filter_aliases_by_patterns``, where ``None`` means unrestricted) so the
+(``filter_aliases_for_patterns``, where ``None`` means unrestricted) so the
 context is carried without needing a DB round-trip per request; endpoint
 shaped filtering (``is_model_allowed`` / ``filter_aliases``) is used by the
 management routes and tests.

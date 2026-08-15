@@ -2,7 +2,7 @@
 
 Keys belong to exactly one endpoint (``endpoint_id`` NOT NULL, CASCADE
 delete). An endpoint can hold many keys; telemetry stays attributed to the
-endpoint, and per-key visibility comes from ``last_used_at`` (S-045).
+endpoint, and per-key visibility comes from ``last_used_at``.
 """
 
 import secrets

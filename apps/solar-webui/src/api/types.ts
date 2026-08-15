@@ -465,7 +465,7 @@ export interface GatewayStats {
 }
 
 /** One bucket of the gateway time series. Empty buckets are zero-filled by
- *  the API, so a flat stretch means no traffic rather than a missing sample. */
+ * the API, so a flat stretch means no traffic rather than a missing sample. */
 export interface GatewayTimeseriesPoint {
   ts: string;
   success: number;
@@ -482,7 +482,7 @@ export type GatewayBucket = '1m' | '5m' | '15m' | '1h' | '6h' | '1d' | '7d';
 export type GatewayGroupBy = 'none' | 'endpoint' | 'model' | 'host';
 
 /** One breakdown series. `key` is an endpoint id, model name or host id
- *  depending on `group_by`; every series shares the combined bucket grid. */
+ * depending on `group_by`; every series shares the combined bucket grid. */
 export interface GatewayTimeseriesSeries {
   key: string;
   total: number;
@@ -560,7 +560,7 @@ export interface ApiEndpoint {
   id: string;
   name: string;
   description?: string | null;
-  /** S-045: when true every registry alias is served; model_patterns is ignored. */
+  /** when true every registry alias is served; model_patterns is ignored. */
   serve_all_models: boolean;
   /** Glob patterns over registry aliases (fnmatch), e.g. `iris-osl:*`. */
   model_patterns: string[];

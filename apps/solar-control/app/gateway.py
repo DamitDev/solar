@@ -596,7 +596,7 @@ class OpenAIGateway:
         has no ``capabilities``, so we copy it over from the parallel
         ``models[*]`` entry (matched by ``name == id``).
 
-        ``model_patterns`` (S-045 scope) restricts which registry aliases are
+        ``model_patterns`` (model scope) restricts which registry aliases are
         advertised; ``None`` keeps the response unrestricted.
         """
         await self._ensure_session()

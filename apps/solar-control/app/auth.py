@@ -2,8 +2,8 @@
 
 Two authentication modes:
 - /v1/* routes: API key looked up in the api_keys table (joined to its
-  endpoint) -> sets request.state.endpoint + endpoint_id, so gateway
-  handlers can filter models without another DB round-trip
+ endpoint) -> sets request.state.endpoint + endpoint_id, so gateway
+ handlers can filter models without another DB round-trip
 - /api/* routes: compared against MANAGEMENT_API_KEY env var
 """
 
@@ -26,6 +26,14 @@ ENDPOINT_CACHE_TTL = 300  # 5 minutes
 # per key per minute, even under heavy load.
 TOUCH_PREFIX = "solar:last_touch:"
 TOUCH_TTL = 60
+
+# Tracked fire-and-forget tasks so the event loop does not garbage-collect
+# a live task mid-await (collectable async tasks are dropped silently).
+_TOUCH_TASKS: set[asyncio.Task] = set()
+
+
+def _task_done(t: asyncio.Task) -> None:
+    _TOUCH_TASKS.discard(t)
 
 
 def _extract_api_key(request: Request) -> str | None:
@@ -74,7 +82,7 @@ async def _resolve_endpoint(api_key: str) -> tuple[Any, str] | None:
     """Resolve a raw key to an (endpoint, api_key_id) pair via Redis cache.
 
     The cache entry is ``{"endpoint": {...}, "api_key_id": "..."}`` keyed by
-    the same ``solar:endpoint_cache:{api_key}`` as before the S-045 split, so
+    the same ``solar:endpoint_cache:{api_key}`` as before the endpoint/key split, so
     a rolling deploy keeps a single cache namespace.
     """
     try:
@@ -100,7 +108,10 @@ async def _resolve_endpoint(api_key: str) -> tuple[Any, str] | None:
             await r.set(
                 f"{ENDPOINT_CACHE_PREFIX}{api_key}",
                 json.dumps(
-                    {"endpoint": endpoint.model_dump(), "api_key_id": api_key_row.id}
+                    {
+                        "endpoint": endpoint.model_dump(mode="json"),
+                        "api_key_id": api_key_row.id,
+                    }
                 ),
                 ex=ENDPOINT_CACHE_TTL,
             )
@@ -158,7 +169,9 @@ async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyp
             request.state.api_key_id = api_key_id
             request.state.endpoint_id = endpoint.id
             request.state.endpoint_name = endpoint.name
-            asyncio.create_task(_touch_last_used(api_key_id))
+            task = asyncio.create_task(_touch_last_used(api_key_id))
+            _TOUCH_TASKS.add(task)
+            task.add_done_callback(_task_done)
             return await call_next(request)
         if api_key == settings.management_api_key:
             request.state.endpoint = None

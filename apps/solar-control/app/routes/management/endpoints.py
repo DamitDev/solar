@@ -113,7 +113,7 @@ async def create_endpoint(data: EndpointCreate):
 
 @router.post("/preview-models")
 async def preview_models(data: EndpointModelPreview):
-    """Live alias preview for the create/edit form (S-045 scoping)."""
+    """Live alias preview for the create/edit form (model scoping)."""
     aliases = await _registry_aliases()
     if data.serve_all_models:
         return {"aliases": aliases, "count": len(aliases)}

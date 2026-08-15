@@ -38,6 +38,8 @@ function copyToClipboard(value: string): void {
 
 interface EndpointCardProps {
   endpoint: ApiEndpoint;
+  /** Full endpoint list so the key modal can offer cross-endpoint reassignment. */
+  allEndpoints: ApiEndpoint[];
   keys: ApiKey[];
   usage: EndpointUsageResponse | null;
   models: EndpointModels | null;
@@ -139,6 +141,7 @@ function KeyRow({
 
 export function EndpointCard({
   endpoint,
+  allEndpoints,
   keys,
   usage,
   models,
@@ -188,7 +191,7 @@ export function EndpointCard({
               </span>
             ) : (
               <>
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-nord-14 bg-opacity-20 text-nord-14 text-xs font-medium">
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-nord-14 bg-opacity-20 text-nord-14 text-xs font-medium">
                   {models?.count ?? 0} model{models?.count === 1 ? '' : 's'}
                 </span>
                 {endpoint.model_patterns.map((p) => (
@@ -256,7 +259,7 @@ export function EndpointCard({
 
       {editingKey && (
         <ApiKeyFormModal
-          endpoints={[]}
+          endpoints={allEndpoints}
           endpoint={endpoint}
           editingKey={editingKey}
           onClose={() => setEditingKey(null)}

@@ -322,7 +322,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
   const [pullProgress, setPullProgress] = useState<Map<string, PullProgressEvent>>(new Map());
   // C5: multi-tenant API endpoint records, event-driven (endpoints_update).
   const [endpoints, setEndpoints] = useState<ApiEndpoint[]>([]);
-  // S-045: API key records, event-driven (api_keys_update; cascades on
+  // API key records, event-driven (api_keys_update; cascades on
   // endpoint delete arrive as a list refresh from the same endpoint).
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
 
@@ -624,7 +624,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
           break;
 
         case 'api_keys_update':
-          // S-045: key records change only on explicit key CRUD.
+          // key records change only on explicit key CRUD.
           if (Array.isArray(event.data?.api_keys)) {
             setApiKeys(event.data.api_keys as ApiKey[]);
           }
