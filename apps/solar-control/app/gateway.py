@@ -538,7 +538,10 @@ class OpenAIGateway:
         lacked one, the instance is remembered as split-less and the
         round-trip is skipped until the negative cache expires -- old
         backends that never emit ``prompt_tokens_details`` would otherwise
-        cost an HTTP call on every request.
+        cost an HTTP call on every request. A failed fetch (``None``) never
+        arms that cache: a transient blip or an out-of-window record is not
+        proof that the backend lacks a split, so the next request gets a
+        fresh chance to fill.
         """
         if not self._usage_need_host_fallback(usage_fields, instance):
             return usage_fields
@@ -553,20 +556,29 @@ class OpenAIGateway:
         host_metrics = await self._fetch_last_generation_metrics(
             instance.host_id, instance.instance_id, within_s=within_s
         )
+        if host_metrics is None:
+            return usage_fields
         if "cached_tokens" not in host_metrics:
             self._no_cached_until[key] = time.monotonic() + _NEGATIVE_CACHE_TTL_S
         return {**host_metrics, **usage_fields}
 
     async def _fetch_last_generation_metrics(
         self, host_id: str, instance_id: str, within_s: int | None = None
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
+        """Fetch the host's last-generation metrics.
+
+        ``None`` means the call failed (timeout, non-200, no host/session) and
+        is distinct from a successful answer that simply lacks a cached split.
+        Callers use the distinction: a transient failure must not be taken as
+        proof that the backend cannot supply ``cached_tokens``.
+        """
         try:
             await self._ensure_session()
             if not self.session:
-                return {}
+                return None
             host = await host_db.get_host(host_id)
             if not host:
-                return {}
+                return None
             url = f"{host.url}/instances/{instance_id}/last-generation"
             if within_s is not None and within_s >= 0:
                 url += f"?within_s={int(within_s)}"
@@ -574,7 +586,7 @@ class OpenAIGateway:
             timeout = aiohttp.ClientTimeout(total=3)
             async with self.session.get(url, headers=headers, timeout=timeout) as resp:
                 if resp.status != 200:
-                    return {}
+                    return None
                 data = await resp.json()
                 out: dict[str, Any] = {}
                 if isinstance(data.get("prompt_tokens"), (int, float)):
@@ -599,7 +611,7 @@ class OpenAIGateway:
                     out["decode_ms_per_token"] = float(data["decode_ms_per_token"])
                 return out
         except Exception:  # noqa: BLE001
-            return {}
+            return None
 
     async def _fetch_instance_context_size(self, instance: RegistryEntry) -> int | None:
         """Fetch ctx_size from solar-host when the cached registry entry lacks it."""
@@ -1558,7 +1570,7 @@ class OpenAIGateway:
                                         instance.instance_id,
                                         within_s=5,
                                     )
-                                )
+                                ) or {}
                             await self._emit_success(
                                 request_id,
                                 model,
