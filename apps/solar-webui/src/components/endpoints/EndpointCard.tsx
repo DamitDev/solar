@@ -311,7 +311,7 @@ export function EndpointCard({
         </div>
         <div className="text-nord-4">
           Tokens: {totalTokens.toLocaleString()}
-          {u?.total_cached_tokens ? ` (cached ${u.total_cached_tokens.toLocaleString()})` : ''}
+          {u?.total_cached_tokens ? ` (hit ${u.total_cached_tokens.toLocaleString()})` : ''}
         </div>
         <div className="text-nord-4">Avg latency: {avgLatency}s</div>
       </div>

@@ -72,11 +72,11 @@ describe('BreakdownTable', () => {
     expect(labelColumn()).toEqual(['iris-bert:110m', 'solver-v4:9b', 'qwen3.6:35b']);
   });
 
-  it('sorts by average duration', async () => {
+  it('sorts by latency', async () => {
     const user = userEvent.setup();
     render(<BreakdownTable title="By Model" labelHeading="Model" rows={rows} />);
 
-    await user.click(screen.getByRole('button', { name: /Avg Duration/ }));
+    await user.click(screen.getByRole('button', { name: /Latency/ }));
 
     expect(labelColumn()).toEqual(['solver-v4:9b', 'qwen3.6:35b', 'iris-bert:110m']);
   });
