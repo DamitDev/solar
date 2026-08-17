@@ -839,6 +839,128 @@ class TestCachedTokensFlow:
         assert "cached_tokens" not in emitted["usage"]
 
     @pytest.mark.anyio
+    async def test_a_splitless_backend_is_remembered_so_later_requests_skip_the_fetch(
+        self,
+    ):
+        """One negative host answer caches the instance: the next request
+        does not pay another round-trip that can never fill the split."""
+        gateway = OpenAIGateway()
+        usage = {
+            "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 100,
+                "total_tokens": 600,
+            },
+        }
+        session = _RecordingSession(_Response(200, payload=usage))
+        gateway.session = session
+        entry = _entry()
+        host = self._host()
+        emitted = []
+
+        async def _fetch(host_id, instance_id, within_s=None):
+            # The host has no cached split either: old backend build.
+            return {
+                "prompt_tokens": 999,
+                "completion_tokens": 111,
+                "total_tokens": 1110,
+            }
+
+        async def _success(
+            request_id, model, instance, duration, usage_fields, endpoint_id
+        ):
+            emitted.append(usage_fields)
+
+        with (
+            patch.object(gateway, "_ensure_session", AsyncMock()),
+            patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+            patch.object(
+                gateway, "_find_instance_or_retry", AsyncMock(return_value=entry)
+            ),
+            patch.object(
+                gateway, "_fetch_last_generation_metrics", AsyncMock(side_effect=_fetch)
+            ),
+            patch.object(gateway, "_emit_success", AsyncMock(side_effect=_success)),
+            patch("app.gateway.host_db.get_host", AsyncMock(return_value=host)),
+            patch("app.gateway.health_store.mark_healthy", AsyncMock()),
+            patch("app.gateway.routing_store", AsyncMock()),
+        ):
+            fetch_mock = gateway._fetch_last_generation_metrics
+            for _ in range(2):
+                await gateway.route_request(
+                    model=ALIAS,
+                    endpoint="/v1/chat/completions",
+                    data={"model": ALIAS},
+                )
+
+            assert len(emitted) == 2
+            # First request asked the host, second one skipped the round-trip.
+            assert fetch_mock.call_count == 1
+            # Neither response carries a cached split (the gap stayed a gap).
+            assert all("cached_tokens" not in e for e in emitted)
+            # Upstream counts were never clobbered.
+            assert emitted[0]["prompt_tokens"] == 500
+
+    @pytest.mark.anyio
+    async def test_a_backend_that_supplies_the_split_is_not_negatively_cached(self):
+        """A host that answers with cached_tokens proves the split exists, so
+        later requests keep asking (the cache never grows stale)."""
+        gateway = OpenAIGateway()
+        usage = {
+            "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 100,
+                "total_tokens": 600,
+            },
+        }
+        session = _RecordingSession(_Response(200, payload=usage))
+        gateway.session = session
+        entry = _entry()
+        host = self._host()
+        emitted = []
+
+        async def _fetch(host_id, instance_id, within_s=None):
+            return {
+                "prompt_tokens": 999,
+                "completion_tokens": 111,
+                "total_tokens": 1110,
+                "cached_tokens": 300,
+            }
+
+        async def _success(
+            request_id, model, instance, duration, usage_fields, endpoint_id
+        ):
+            emitted.append(usage_fields)
+
+        with (
+            patch.object(gateway, "_ensure_session", AsyncMock()),
+            patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+            patch.object(
+                gateway, "_find_instance_or_retry", AsyncMock(return_value=entry)
+            ),
+            patch.object(
+                gateway, "_fetch_last_generation_metrics", AsyncMock(side_effect=_fetch)
+            ),
+            patch.object(gateway, "_emit_success", AsyncMock(side_effect=_success)),
+            patch("app.gateway.host_db.get_host", AsyncMock(return_value=host)),
+            patch("app.gateway.health_store.mark_healthy", AsyncMock()),
+            patch("app.gateway.routing_store", AsyncMock()),
+        ):
+            fetch_mock = gateway._fetch_last_generation_metrics
+            for _ in range(2):
+                await gateway.route_request(
+                    model=ALIAS,
+                    endpoint="/v1/chat/completions",
+                    data={"model": ALIAS},
+                )
+
+            assert len(emitted) == 2
+            assert fetch_mock.call_count == 2
+            assert all(e["cached_tokens"] == 300 for e in emitted)
+
+    @pytest.mark.anyio
     async def test_cached_tokens_out_of_bounds_are_dropped_at_ingest(self):
         """A cached split larger than the prompt count, or negative, is a
         backend artifact: it must not reach the persisted row (NULL instead)."""

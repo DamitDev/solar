@@ -454,6 +454,9 @@ export interface GatewayStats {
   token_cached_total: number;
   /** token_in_total - token_cached_total: the input actually evaluated. */
   token_uncached_total: number;
+  /** Sum of prompt_tokens over cache-aware success rows; the rate's
+   *  denominator. Exposed so the live merge can add to a real baseline. */
+  token_in_measured_total: number;
   /** cached / measured input; the denominator only counts cache-aware rows. */
   cache_hit_rate: number;
   token_out_total: number;

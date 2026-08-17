@@ -126,6 +126,7 @@ async def test_cache_hit_rate_counts_only_cache_aware_rows():
     assert stats["token_in_total"] == 700
     assert stats["token_cached_total"] == 300
     assert stats["token_uncached_total"] == 400
+    assert stats["token_in_measured_total"] == 500
     assert stats["cache_hit_rate"] == pytest.approx(0.6)
     assert {m["model"]: m["token_cached"] for m in stats["models"]} == {
         "m1": 300,

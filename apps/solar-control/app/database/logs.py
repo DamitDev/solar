@@ -616,9 +616,17 @@ class GatewayLogger:
                 "completed": 0,
                 "missed": 0,
                 "error": 0,
+                "rerouted_requests": 0,
+                "token_in_total": 0,
                 "token_cached_total": 0,
                 "token_uncached_total": 0,
+                "token_in_measured_total": 0,
                 "cache_hit_rate": 0,
+                "token_out_total": 0,
+                "avg_tokens_in": 0,
+                "avg_tokens_out": 0,
+                "models": [],
+                "hosts": [],
             }
 
         R = GatewayRequestRow
@@ -728,6 +736,7 @@ class GatewayLogger:
             "token_in_total": token_in_total,
             "token_cached_total": token_cached_total,
             "token_uncached_total": token_in_total - token_cached_total,
+            "token_in_measured_total": token_in_measured_total,
             "cache_hit_rate": (
                 token_cached_total / token_in_measured_total
                 if token_in_measured_total

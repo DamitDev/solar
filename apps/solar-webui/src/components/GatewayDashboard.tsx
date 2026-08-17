@@ -4,6 +4,7 @@ import solarClient from '@/api/client';
 import { ApiEndpoint, GatewayStats, GatewayRequestSummary } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
 import { useFallbackPolling } from '@/hooks/useFallbackPolling';
+import { mergeRealtimeStats } from '@/lib/gatewayStats';
 import { formatTokenCount } from '@/lib/utils';
 import { Sparkline } from './charts/Sparkline';
 import { NORD, seriesColor } from './charts/chartTheme';
@@ -72,10 +73,6 @@ export function GatewayDashboard() {
   const countedIdsRef = useRef<Set<string>>(new Set());
   const gatewayRequestsRef = useRef(gatewayRequests);
   gatewayRequestsRef.current = gatewayRequests;
-  // Realtime cache-hit bookkeeping: the measured-input denominator recovered
-  // from the last REST baseline, grown only by cache-aware live requests.
-  const statsBaselineRef = useRef<GatewayStats | null>(null);
-  const measuredInputRef = useRef<number | null>(null);
 
   // Time range - initialize with 1d preset
   const initialPreset: TimePreset = '1d';
@@ -321,63 +318,13 @@ export function GatewayDashboard() {
   useEffect(() => {
     if (!stats || !live) return;
 
-    // A fresh REST baseline re-anchors the measured-input denominator: the
-    // server computes cache_hit_rate over cache-aware rows only, so
-    // measured = cached / rate recovers it exactly. A zero rate means no
-    // measured traffic, and the denominator stays irrelevant.
-    if (statsBaselineRef.current !== stats) {
-      statsBaselineRef.current = stats;
-      if (stats.cache_hit_rate != null && stats.cache_hit_rate > 0) {
-        measuredInputRef.current = (stats.token_cached_total ?? 0) / stats.cache_hit_rate;
-      } else {
-        measuredInputRef.current = 0;
-      }
-    }
-
     const seen = countedIdsRef.current;
     const newItems = gatewayRequests.filter((r) => !seen.has(r.request_id));
     if (newItems.length === 0) return;
 
     for (const r of newItems) seen.add(r.request_id);
 
-    // The live denominator mirrors the server's NULL-cached_tokens exclusion:
-    // only cache-aware requests contribute their prompt tokens.
-    let measuredDelta = 0;
-    for (const r of newItems) {
-      if (r.cached_tokens != null && r.prompt_tokens != null) measuredDelta += r.prompt_tokens;
-    }
-    if (measuredDelta > 0) measuredInputRef.current = (measuredInputRef.current ?? 0) + measuredDelta;
-
-    setStats((prev) => {
-      if (!prev) return prev;
-      let { completed, missed, error, rerouted_requests, token_in_total, token_out_total, token_cached_total } = prev;
-      let totalCompleted = completed + missed + error;
-      for (const r of newItems) {
-        if (r.status === 'success') completed++;
-        else if (r.status === 'missed') missed++;
-        else if (r.status === 'error') error++;
-        if (r.attempts > 1) rerouted_requests++;
-        token_in_total += r.prompt_tokens ?? 0;
-        token_cached_total += r.cached_tokens ?? 0;
-        token_out_total += r.completion_tokens ?? 0;
-      }
-      totalCompleted += newItems.length;
-      const measured = measuredInputRef.current ?? 0;
-      return {
-        ...prev,
-        completed,
-        missed,
-        error,
-        rerouted_requests,
-        token_in_total,
-        token_cached_total,
-        token_uncached_total: token_in_total - token_cached_total,
-        cache_hit_rate: measured > 0 ? token_cached_total / measured : 0,
-        token_out_total,
-        avg_tokens_in: totalCompleted > 0 ? token_in_total / totalCompleted : 0,
-        avg_tokens_out: totalCompleted > 0 ? token_out_total / totalCompleted : 0,
-      };
-    });
+    setStats((prev) => (prev ? mergeRealtimeStats(prev, newItems) : prev));
   }, [gatewayRequests, live, stats]);
 
   // Combine requests for display
