@@ -636,6 +636,7 @@ export function GatewayDashboard() {
                 <th className="text-left px-3 py-2">Status</th>
                 <th className="text-left px-3 py-2">Host</th>
                 <th className="text-left px-3 py-2">Input</th>
+                <th className="text-left px-3 py-2">Miss</th>
                 <th className="text-left px-3 py-2">Hit</th>
                 <th className="text-left px-3 py-2">Output</th>
                 <th className="text-left px-3 py-2">Duration</th>
@@ -671,6 +672,11 @@ export function GatewayDashboard() {
                     </td>
                     <td className="px-3 py-2">{r.host_name || r.host_id || '—'}</td>
                     <td className="px-3 py-2">{formatTokenCount(r.prompt_tokens)}</td>
+                    <td className="px-3 py-2">
+                      {r.cached_tokens != null && r.prompt_tokens != null
+                        ? formatTokenCount(r.prompt_tokens - r.cached_tokens)
+                        : '—'}
+                    </td>
                     <td className="px-3 py-2">{r.cached_tokens != null ? formatTokenCount(r.cached_tokens) : '—'}</td>
                     <td className="px-3 py-2">{formatTokenCount(r.completion_tokens)}</td>
                     <td className="px-3 py-2">{r.duration_s?.toFixed(2)}s</td>
@@ -679,7 +685,7 @@ export function GatewayDashboard() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={11} className="px-3 py-6 text-center text-nord-4">
+                  <td colSpan={12} className="px-3 py-6 text-center text-nord-4">
                     No data
                   </td>
                 </tr>
