@@ -9,6 +9,7 @@ export interface BreakdownRow {
   label: string;
   completed: number;
   token_in: number;
+  token_cached: number;
   token_out: number;
   avg_duration_s: number;
 }
@@ -26,6 +27,7 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
       { key: 'label', value: (r) => r.label },
       { key: 'completed', value: (r) => r.completed, numeric: true },
       { key: 'token_in', value: (r) => r.token_in, numeric: true },
+      { key: 'token_cached', value: (r) => r.token_cached, numeric: true },
       { key: 'token_out', value: (r) => r.token_out, numeric: true },
       { key: 'avg_duration_s', value: (r) => r.avg_duration_s, numeric: true },
     ],
@@ -42,9 +44,10 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
         (acc, r) => ({
           completed: acc.completed + r.completed,
           token_in: acc.token_in + r.token_in,
+          token_cached: acc.token_cached + r.token_cached,
           token_out: acc.token_out + r.token_out,
         }),
-        { completed: 0, token_in: 0, token_out: 0 },
+        { completed: 0, token_in: 0, token_cached: 0, token_out: 0 },
       ),
     [rows],
   );
@@ -87,6 +90,14 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
                 align="right"
               />
               <SortHeader
+                label="Cached"
+                sortKey="token_cached"
+                activeKey={sortKey}
+                direction={direction}
+                onSort={toggle}
+                align="right"
+              />
+              <SortHeader
                 label="Output tokens"
                 sortKey="token_out"
                 activeKey={sortKey}
@@ -111,13 +122,14 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
                   <td className="px-3 py-2">{row.label}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{row.completed}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{formatTokenCount(row.token_in)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{formatTokenCount(row.token_cached)}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{formatTokenCount(row.token_out)}</td>
                   <td className="px-3 py-2 text-right tabular-nums">{row.avg_duration_s.toFixed(2)}s</td>
                 </tr>
               ))
             ) : (
               <tr>
-                <td colSpan={5} className="px-3 py-4 text-center text-nord-4">
+                <td colSpan={6} className="px-3 py-4 text-center text-nord-4">
                   No data
                 </td>
               </tr>

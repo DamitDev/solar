@@ -67,6 +67,7 @@ class TestFillBuckets:
                 "error": 1,
                 "missed": 0,
                 "token_in": 100,
+                "token_cached": 40,
                 "token_out": 50,
                 "avg_duration_s": 1.5,
             }
@@ -80,6 +81,9 @@ class TestFillBuckets:
         assert [p["success"] for p in points[1:]] == [0, 0, 0, 0, 0]
         # No traffic means no latency to report -- 0.0 would read as "instant".
         assert all(p["avg_duration_s"] is None for p in points[1:])
+        # The cached split rides the same zero-fill as every other bucket field.
+        assert points[0]["token_cached"] == 40
+        assert [p["token_cached"] for p in points[1:]] == [0, 0, 0, 0, 0]
 
     def test_series_is_contiguous_and_bucket_aligned(self):
         start = datetime(2026, 8, 13, 12, 0, 37, tzinfo=timezone.utc)
@@ -97,7 +101,17 @@ class Row:
     """Stand-in for a SQLAlchemy result row from the timeseries query."""
 
     def __init__(
-        self, ts, *, success=0, error=0, missed=0, tin=0, tout=0, dur=0.0, key=None
+        self,
+        ts,
+        *,
+        success=0,
+        error=0,
+        missed=0,
+        tin=0,
+        tout=0,
+        dur=0.0,
+        key=None,
+        tc=0,
     ):
         self.ts = ts
         self.success = success
@@ -105,6 +119,7 @@ class Row:
         self.missed = missed
         self.token_in = tin
         self.token_out = tout
+        self.token_cached = tc
         self.duration_s = dur
         self.group_key = key
 
@@ -124,6 +139,23 @@ class TestShapeTimeseries:
         assert points[0]["error"] == 1
         assert points[0]["token_in"] == 30
         assert {s["key"] for s in series} == {"ep-a", "ep-b"}
+
+    def test_token_cached_appears_in_points_and_grouped_series(self):
+        # The tc=0 row stands in for a NULL-cached_tokens (non-cache-aware)
+        # request: it must not break the sum, it simply contributes nothing.
+        rows = [
+            Row(START, success=3, tin=300, tc=200, tout=50, dur=6.0, key="ep-a"),
+            Row(START, success=1, tin=100, tc=0, tout=10, dur=0.5, key="ep-b"),
+        ]
+
+        points, series = self.shape(rows, START, START, 60, grouped=True)
+
+        assert points[0]["token_cached"] == 200
+        assert points[0]["token_in"] == 400
+        assert {s["key"]: s["points"][0]["token_cached"] for s in series} == {
+            "ep-a": 200,
+            "ep-b": 0,
+        }
 
     def test_combined_latency_is_weighted_by_volume(self):
         # A mean of per-group means would over-weight the quiet group.

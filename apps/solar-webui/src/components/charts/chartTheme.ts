@@ -32,6 +32,8 @@ export const STATUS_COLORS = {
 
 export const TOKEN_COLORS = {
   token_in: NORD.blue,
+  // Cached input reads as a dimmer sibling of the input band it is part of.
+  token_cached: NORD.deepBlue,
   token_out: NORD.cyan,
 } as const;
 

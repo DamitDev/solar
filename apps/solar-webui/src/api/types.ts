@@ -450,15 +450,32 @@ export interface GatewayStats {
   error: number;
   rerouted_requests: number;
   token_in_total: number;
+  /** Prompt-cache hit portion of token_in_total (cache-aware backends only). */
+  token_cached_total: number;
+  /** token_in_total - token_cached_total: the input actually evaluated. */
+  token_uncached_total: number;
+  /** Sum of prompt_tokens over cache-aware success rows; the rate's
+   *  denominator. Exposed so the live merge can add to a real baseline. */
+  token_in_measured_total: number;
+  /** cached / measured input; the denominator only counts cache-aware rows. */
+  cache_hit_rate: number;
   token_out_total: number;
   avg_tokens_in: number;
   avg_tokens_out: number;
-  models?: Array<{ model: string; completed: number; token_in: number; token_out: number; avg_duration_s: number }>;
+  models?: Array<{
+    model: string;
+    completed: number;
+    token_in: number;
+    token_cached: number;
+    token_out: number;
+    avg_duration_s: number;
+  }>;
   hosts?: Array<{
     host_id: string;
     host_name?: string;
     completed: number;
     token_in: number;
+    token_cached: number;
     token_out: number;
     avg_duration_s: number;
   }>;
@@ -472,6 +489,8 @@ export interface GatewayTimeseriesPoint {
   error: number;
   missed: number;
   token_in: number;
+  /** Prompt-cache hit portion of token_in in this bucket (0 when unknown). */
+  token_cached: number;
   token_out: number;
   /** Null when the bucket had no successful request to measure. */
   avg_duration_s: number | null;
@@ -521,6 +540,8 @@ export interface GatewayRequestSummary {
   instance_url?: string;
   error_message?: string;
   prompt_tokens?: number;
+  /** Prompt-cache hit portion of prompt_tokens; null/absent = not cache-aware. */
+  cached_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
   decode_tps?: number;
@@ -636,6 +657,7 @@ export interface EndpointUsageStats {
   missed_requests: number;
   total_prompt_tokens: number;
   total_completion_tokens: number;
+  total_cached_tokens: number;
   total_tokens: number;
   avg_duration_s: number | null;
   avg_decode_tps: number | null;

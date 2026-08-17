@@ -4,6 +4,7 @@ import solarClient from '@/api/client';
 import { ApiEndpoint, GatewayStats, GatewayRequestSummary } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
 import { useFallbackPolling } from '@/hooks/useFallbackPolling';
+import { mergeRealtimeStats } from '@/lib/gatewayStats';
 import { formatTokenCount } from '@/lib/utils';
 import { Sparkline } from './charts/Sparkline';
 import { NORD, seriesColor } from './charts/chartTheme';
@@ -323,31 +324,7 @@ export function GatewayDashboard() {
 
     for (const r of newItems) seen.add(r.request_id);
 
-    setStats((prev) => {
-      if (!prev) return prev;
-      let { completed, missed, error, rerouted_requests, token_in_total, token_out_total } = prev;
-      let totalCompleted = completed + missed + error;
-      for (const r of newItems) {
-        if (r.status === 'success') completed++;
-        else if (r.status === 'missed') missed++;
-        else if (r.status === 'error') error++;
-        if (r.attempts > 1) rerouted_requests++;
-        token_in_total += r.prompt_tokens ?? 0;
-        token_out_total += r.completion_tokens ?? 0;
-      }
-      totalCompleted += newItems.length;
-      return {
-        ...prev,
-        completed,
-        missed,
-        error,
-        rerouted_requests,
-        token_in_total,
-        token_out_total,
-        avg_tokens_in: totalCompleted > 0 ? token_in_total / totalCompleted : 0,
-        avg_tokens_out: totalCompleted > 0 ? token_out_total / totalCompleted : 0,
-      };
-    });
+    setStats((prev) => (prev ? mergeRealtimeStats(prev, newItems) : prev));
   }, [gatewayRequests, live, stats]);
 
   // Combine requests for display
@@ -460,7 +437,7 @@ export function GatewayDashboard() {
       </div>
 
       {/* Stats cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-4">
         <div className="bg-nord-1 border border-nord-3 rounded p-4">
           <div className="text-nord-4 text-sm">Completed</div>
           <div className="text-nord-14 text-2xl font-semibold">{stats?.completed ?? '—'}</div>
@@ -480,7 +457,18 @@ export function GatewayDashboard() {
         <div className="bg-nord-1 border border-nord-3 rounded p-4">
           <div className="text-nord-4 text-sm">Input tokens</div>
           <div className="text-nord-6 text-lg">{formatTokenCount(stats?.token_in_total)}</div>
+          <div className="text-nord-4 text-xs">
+            true {formatTokenCount((stats?.token_in_total ?? 0) - (stats?.token_cached_total ?? 0))} • cached{' '}
+            {formatTokenCount(stats?.token_cached_total)}
+          </div>
           <div className="text-nord-4 text-xs">avg {formatTokenCount(stats?.avg_tokens_in)}</div>
+        </div>
+        <div className="bg-nord-1 border border-nord-3 rounded p-4">
+          <div className="text-nord-4 text-sm">Cache hit</div>
+          <div className="text-nord-13 text-2xl font-semibold">
+            {stats?.cache_hit_rate != null ? `${(stats.cache_hit_rate * 100).toFixed(1)}%` : '—'}
+          </div>
+          <div className="text-nord-4 text-xs">of measured input</div>
         </div>
         <div className="bg-nord-1 border border-nord-3 rounded p-4">
           <div className="text-nord-4 text-sm">Output tokens</div>
@@ -648,6 +636,7 @@ export function GatewayDashboard() {
                 <th className="text-left px-3 py-2">Status</th>
                 <th className="text-left px-3 py-2">Host</th>
                 <th className="text-left px-3 py-2">Input</th>
+                <th className="text-left px-3 py-2">Cached</th>
                 <th className="text-left px-3 py-2">Output</th>
                 <th className="text-left px-3 py-2">Duration</th>
                 <th className="text-left px-3 py-2">Attempts</th>
@@ -682,6 +671,7 @@ export function GatewayDashboard() {
                     </td>
                     <td className="px-3 py-2">{r.host_name || r.host_id || '—'}</td>
                     <td className="px-3 py-2">{formatTokenCount(r.prompt_tokens)}</td>
+                    <td className="px-3 py-2">{r.cached_tokens != null ? formatTokenCount(r.cached_tokens) : '—'}</td>
                     <td className="px-3 py-2">{formatTokenCount(r.completion_tokens)}</td>
                     <td className="px-3 py-2">{r.duration_s?.toFixed(2)}s</td>
                     <td className="px-3 py-2">{r.attempts}</td>
@@ -689,7 +679,7 @@ export function GatewayDashboard() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={10} className="px-3 py-6 text-center text-nord-4">
+                  <td colSpan={11} className="px-3 py-6 text-center text-nord-4">
                     No data
                   </td>
                 </tr>

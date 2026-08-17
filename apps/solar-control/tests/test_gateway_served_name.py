@@ -7,10 +7,12 @@ requests going out, `/v1/models` coming back.
 """
 
 import json
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.database.logs import GatewayLogger
 from app.gateway import _STREAM_USAGE_ENDPOINTS, OpenAIGateway
 from app.models import Host, HostStatus, RegistryEntry
 
@@ -387,6 +389,92 @@ class TestStreamingUsage:
         assert chunks == [b'data: {"choices":[]}\n\n']
         assert called["within_s"] == 5
 
+    @pytest.mark.anyio
+    async def test_a_usage_chunk_without_the_cached_split_gets_it_from_the_host(self):
+        """The terminal chunk carries the counts but omits
+        prompt_tokens_details; the host fills the cached split, bounded to
+        the window, without clobbering the upstream counts."""
+        usage_chunk = json.dumps(
+            {
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 341,
+                    "completion_tokens": 72,
+                    "total_tokens": 413,
+                },
+            }
+        )
+        gateway = OpenAIGateway()
+        session = _RecordingSession(
+            _Response(
+                200,
+                lines=self._event('{"choices":[{"delta":{"content":"hi"}}]}')
+                + self._event(usage_chunk)
+                + self._done(),
+            )
+        )
+        gateway.session = session
+        entry = _entry()
+        host = Host(
+            id="host-1",
+            name="Test Host",
+            url="http://test-host:8000",
+            api_key="host-api-key",
+            status=HostStatus.ONLINE,
+        )
+        called = {}
+
+        async def _fetch(host_id, instance_id, within_s=None):
+            called["within_s"] = within_s
+            return {
+                "prompt_tokens": 999,
+                "completion_tokens": 111,
+                "total_tokens": 1110,
+                "cached_tokens": 300,
+                "source": "log",
+            }
+
+        emitted = {}
+
+        async def _success(
+            request_id, model, instance, duration, usage_fields, endpoint_id
+        ):
+            emitted["usage"] = usage_fields
+
+        with (
+            patch.object(gateway, "_ensure_session", AsyncMock()),
+            patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+            patch.object(
+                gateway, "_find_instance_or_retry", AsyncMock(return_value=entry)
+            ),
+            patch.object(
+                gateway, "_fetch_last_generation_metrics", AsyncMock(side_effect=_fetch)
+            ),
+            patch.object(gateway, "_emit_success", AsyncMock(side_effect=_success)),
+            patch("app.gateway.host_db.get_host", AsyncMock(return_value=host)),
+            patch("app.gateway.health_store.mark_healthy", AsyncMock()),
+            patch("app.gateway.routing_store", AsyncMock()),
+        ):
+            chunks = [
+                chunk
+                async for chunk in gateway.stream_request(
+                    model=ALIAS,
+                    endpoint="/v1/chat/completions",
+                    data={"model": ALIAS, "stream": True},
+                )
+            ]
+
+        # The usage-only chunk was stripped, content and [DONE] pass through.
+        assert chunks == [
+            b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+        assert called["within_s"] == 5
+        assert emitted["usage"]["prompt_tokens"] == 341
+        assert emitted["usage"]["completion_tokens"] == 72
+        assert emitted["usage"]["total_tokens"] == 413
+        assert emitted["usage"]["cached_tokens"] == 300
+
 
 class TestAdvertisedModels:
     def test_both_payload_shapes_get_the_alias_back(self):
@@ -525,3 +613,409 @@ class TestRegistryEntry:
         )
 
         assert entry.served_model_name is None
+
+
+class TestCachedTokensFlow:
+    """The prompt-cache split survives from the upstream, through the emit
+    path, into the persisted request row -- and the host fills it when the
+    upstream omits it."""
+
+    @staticmethod
+    def _host() -> Host:
+        return Host(
+            id="host-1",
+            name="Test Host",
+            url="http://test-host:8000",
+            api_key="host-api-key",
+            status=HostStatus.ONLINE,
+        )
+
+    @pytest.mark.anyio
+    async def test_cached_tokens_survive_into_the_persisted_request_row(self):
+        """The summary queued for the gateway_requests insert carries the
+        cached split next to the prompt count."""
+        logger = GatewayLogger()
+        summary = await logger.log_event(
+            {
+                "type": "request_success",
+                "data": {
+                    "request_id": "req-cached-1",
+                    "prompt_tokens": 341,
+                    "completion_tokens": 72,
+                    "total_tokens": 413,
+                    "cached_tokens": 282,
+                    "duration": 1.0,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            }
+        )
+
+        assert summary is not None
+        assert summary.prompt_tokens == 341
+        assert summary.cached_tokens == 282
+        queued = logger._request_buffer[-1]
+        assert queued["request_id"] == "req-cached-1"
+        assert queued["cached_tokens"] == 282
+
+    @pytest.mark.anyio
+    async def test_a_no_usage_upstream_still_gets_a_cached_split_from_the_host(self):
+        """The upstream can omit usage entirely; the host's last-generation
+        fill keeps the request measurable (the non-streaming fallback)."""
+        gateway = OpenAIGateway()
+        session = _RecordingSession(
+            _Response(
+                200,
+                payload={
+                    "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}]
+                },
+            )
+        )
+        gateway.session = session
+        entry = _entry()
+        host = self._host()
+        fetched = {}
+
+        async def _fetch(host_id, instance_id, within_s=None):
+            fetched["within_s"] = within_s
+            return {
+                "prompt_tokens": 500,
+                "completion_tokens": 100,
+                "total_tokens": 600,
+                "cached_tokens": 300,
+                "source": "log",
+            }
+
+        emitted = {}
+
+        async def _success(
+            request_id, model, instance, duration, usage_fields, endpoint_id
+        ):
+            emitted["usage"] = usage_fields
+
+        with (
+            patch.object(gateway, "_ensure_session", AsyncMock()),
+            patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+            patch.object(
+                gateway, "_find_instance_or_retry", AsyncMock(return_value=entry)
+            ),
+            patch.object(
+                gateway, "_fetch_last_generation_metrics", AsyncMock(side_effect=_fetch)
+            ),
+            patch.object(gateway, "_emit_success", AsyncMock(side_effect=_success)),
+            patch("app.gateway.host_db.get_host", AsyncMock(return_value=host)),
+            patch("app.gateway.health_store.mark_healthy", AsyncMock()),
+            patch("app.gateway.routing_store", AsyncMock()),
+        ):
+            await gateway.route_request(
+                model=ALIAS,
+                endpoint="/v1/chat/completions",
+                data={"model": ALIAS},
+            )
+
+        assert emitted["usage"]["prompt_tokens"] == 500
+        assert emitted["usage"]["completion_tokens"] == 100
+        assert emitted["usage"]["total_tokens"] == 600
+        assert emitted["usage"]["cached_tokens"] == 300
+        assert fetched["within_s"] is None  # non-streaming fallback is unbounded
+
+    @pytest.mark.anyio
+    async def test_the_host_only_fills_holes_and_never_clobbers_the_upstream(self):
+        """When the upstream reports counts but omits prompt_tokens_details,
+        the host fills cached_tokens while the upstream prompt_tokens win."""
+        gateway = OpenAIGateway()
+        session = _RecordingSession(
+            _Response(
+                200,
+                payload={
+                    "choices": [
+                        {"message": {"content": "hi"}, "finish_reason": "stop"}
+                    ],
+                    "usage": {
+                        "prompt_tokens": 500,
+                        "completion_tokens": 100,
+                        "total_tokens": 600,
+                    },
+                },
+            )
+        )
+        gateway.session = session
+        entry = _entry()
+        host = self._host()
+        fetched = {}
+
+        async def _fetch(host_id, instance_id, within_s=None):
+            fetched["within_s"] = within_s
+            return {
+                "prompt_tokens": 999,
+                "completion_tokens": 111,
+                "total_tokens": 1110,
+                "cached_tokens": 300,
+                "source": "log",
+            }
+
+        emitted = {}
+
+        async def _success(
+            request_id, model, instance, duration, usage_fields, endpoint_id
+        ):
+            emitted["usage"] = usage_fields
+
+        with (
+            patch.object(gateway, "_ensure_session", AsyncMock()),
+            patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+            patch.object(
+                gateway, "_find_instance_or_retry", AsyncMock(return_value=entry)
+            ),
+            patch.object(
+                gateway, "_fetch_last_generation_metrics", AsyncMock(side_effect=_fetch)
+            ),
+            patch.object(gateway, "_emit_success", AsyncMock(side_effect=_success)),
+            patch("app.gateway.host_db.get_host", AsyncMock(return_value=host)),
+            patch("app.gateway.health_store.mark_healthy", AsyncMock()),
+            patch("app.gateway.routing_store", AsyncMock()),
+        ):
+            await gateway.route_request(
+                model=ALIAS,
+                endpoint="/v1/chat/completions",
+                data={"model": ALIAS},
+            )
+
+        assert emitted["usage"]["prompt_tokens"] == 500
+        assert emitted["usage"]["completion_tokens"] == 100
+        assert emitted["usage"]["total_tokens"] == 600
+        assert emitted["usage"]["cached_tokens"] == 300
+        assert fetched["within_s"] is None
+
+    @pytest.mark.anyio
+    async def test_a_huggingface_instance_never_triggers_the_host_fallback(self):
+        """HuggingFace has no cached split to offer; the round-trip would be
+        pure waste."""
+        gateway = OpenAIGateway()
+        session = _RecordingSession(
+            _Response(
+                200,
+                payload={
+                    "choices": [
+                        {"message": {"content": "hi"}, "finish_reason": "stop"}
+                    ],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15,
+                    },
+                },
+            )
+        )
+        gateway.session = session
+        entry = _entry(backend_type="huggingface_causal")
+        host = self._host()
+        emitted = {}
+
+        async def _success(
+            request_id, model, instance, duration, usage_fields, endpoint_id
+        ):
+            emitted["usage"] = usage_fields
+
+        with (
+            patch.object(gateway, "_ensure_session", AsyncMock()),
+            patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+            patch.object(
+                gateway, "_find_instance_or_retry", AsyncMock(return_value=entry)
+            ),
+            patch.object(gateway, "_fetch_last_generation_metrics", AsyncMock()),
+            patch.object(gateway, "_emit_success", AsyncMock(side_effect=_success)),
+            patch("app.gateway.host_db.get_host", AsyncMock(return_value=host)),
+            patch("app.gateway.health_store.mark_healthy", AsyncMock()),
+            patch("app.gateway.routing_store", AsyncMock()),
+        ):
+            await gateway.route_request(
+                model=ALIAS,
+                endpoint="/v1/chat/completions",
+                data={"model": ALIAS},
+            )
+
+            gateway._fetch_last_generation_metrics.assert_not_called()
+
+        assert "cached_tokens" not in emitted["usage"]
+
+    @pytest.mark.anyio
+    async def test_a_splitless_backend_is_remembered_so_later_requests_skip_the_fetch(
+        self,
+    ):
+        """One negative host answer caches the instance: the next request
+        does not pay another round-trip that can never fill the split."""
+        gateway = OpenAIGateway()
+        usage = {
+            "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 100,
+                "total_tokens": 600,
+            },
+        }
+        session = _RecordingSession(_Response(200, payload=usage))
+        gateway.session = session
+        entry = _entry()
+        host = self._host()
+        emitted = []
+
+        async def _fetch(host_id, instance_id, within_s=None):
+            # The host has no cached split either: old backend build.
+            return {
+                "prompt_tokens": 999,
+                "completion_tokens": 111,
+                "total_tokens": 1110,
+            }
+
+        async def _success(
+            request_id, model, instance, duration, usage_fields, endpoint_id
+        ):
+            emitted.append(usage_fields)
+
+        with (
+            patch.object(gateway, "_ensure_session", AsyncMock()),
+            patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+            patch.object(
+                gateway, "_find_instance_or_retry", AsyncMock(return_value=entry)
+            ),
+            patch.object(
+                gateway, "_fetch_last_generation_metrics", AsyncMock(side_effect=_fetch)
+            ),
+            patch.object(gateway, "_emit_success", AsyncMock(side_effect=_success)),
+            patch("app.gateway.host_db.get_host", AsyncMock(return_value=host)),
+            patch("app.gateway.health_store.mark_healthy", AsyncMock()),
+            patch("app.gateway.routing_store", AsyncMock()),
+        ):
+            fetch_mock = gateway._fetch_last_generation_metrics
+            for _ in range(2):
+                await gateway.route_request(
+                    model=ALIAS,
+                    endpoint="/v1/chat/completions",
+                    data={"model": ALIAS},
+                )
+
+            assert len(emitted) == 2
+            # First request asked the host, second one skipped the round-trip.
+            assert fetch_mock.call_count == 1
+            # Neither response carries a cached split (the gap stayed a gap).
+            assert all("cached_tokens" not in e for e in emitted)
+            # Upstream counts were never clobbered.
+            assert emitted[0]["prompt_tokens"] == 500
+
+    @pytest.mark.anyio
+    async def test_a_backend_that_supplies_the_split_is_not_negatively_cached(self):
+        """A host that answers with cached_tokens proves the split exists, so
+        later requests keep asking (the cache never grows stale)."""
+        gateway = OpenAIGateway()
+        usage = {
+            "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 500,
+                "completion_tokens": 100,
+                "total_tokens": 600,
+            },
+        }
+        session = _RecordingSession(_Response(200, payload=usage))
+        gateway.session = session
+        entry = _entry()
+        host = self._host()
+        emitted = []
+
+        async def _fetch(host_id, instance_id, within_s=None):
+            return {
+                "prompt_tokens": 999,
+                "completion_tokens": 111,
+                "total_tokens": 1110,
+                "cached_tokens": 300,
+            }
+
+        async def _success(
+            request_id, model, instance, duration, usage_fields, endpoint_id
+        ):
+            emitted.append(usage_fields)
+
+        with (
+            patch.object(gateway, "_ensure_session", AsyncMock()),
+            patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+            patch.object(
+                gateway, "_find_instance_or_retry", AsyncMock(return_value=entry)
+            ),
+            patch.object(
+                gateway, "_fetch_last_generation_metrics", AsyncMock(side_effect=_fetch)
+            ),
+            patch.object(gateway, "_emit_success", AsyncMock(side_effect=_success)),
+            patch("app.gateway.host_db.get_host", AsyncMock(return_value=host)),
+            patch("app.gateway.health_store.mark_healthy", AsyncMock()),
+            patch("app.gateway.routing_store", AsyncMock()),
+        ):
+            fetch_mock = gateway._fetch_last_generation_metrics
+            for _ in range(2):
+                await gateway.route_request(
+                    model=ALIAS,
+                    endpoint="/v1/chat/completions",
+                    data={"model": ALIAS},
+                )
+
+            assert len(emitted) == 2
+            assert fetch_mock.call_count == 2
+            assert all(e["cached_tokens"] == 300 for e in emitted)
+
+    @pytest.mark.anyio
+    async def test_cached_tokens_out_of_bounds_are_dropped_at_ingest(self):
+        """A cached split larger than the prompt count, or negative, is a
+        backend artifact: it must not reach the persisted row (NULL instead)."""
+        cases = [
+            (5000, 100, None),  # exceeds prompt
+            (-5, 100, None),  # negative
+            (80, 100, 80),  # valid split survives
+        ]
+        for cached, prompt, expected in cases:
+            gateway = OpenAIGateway()
+            session = _RecordingSession(
+                _Response(
+                    200,
+                    payload={
+                        "choices": [
+                            {"message": {"content": "hi"}, "finish_reason": "stop"}
+                        ],
+                        "usage": {
+                            "prompt_tokens": prompt,
+                            "completion_tokens": 20,
+                            "total_tokens": prompt + 20,
+                            "prompt_tokens_details": {"cached_tokens": cached},
+                        },
+                    },
+                )
+            )
+            gateway.session = session
+            entry = _entry()
+            host = self._host()
+            emitted = {}
+
+            async def _broadcast(event_data, *, endpoint_id=None, _target=emitted):
+                _target["data"] = event_data["data"]
+
+            with (
+                patch.object(gateway, "_ensure_session", AsyncMock()),
+                patch.object(
+                    gateway,
+                    "_broadcast_routing_event",
+                    AsyncMock(side_effect=_broadcast),
+                ),
+                patch.object(
+                    gateway, "_find_instance_or_retry", AsyncMock(return_value=entry)
+                ),
+                patch("app.gateway.host_db.get_host", AsyncMock(return_value=host)),
+                patch("app.gateway.health_store.mark_healthy", AsyncMock()),
+                patch("app.gateway.routing_store", AsyncMock()),
+            ):
+                await gateway.route_request(
+                    model=ALIAS,
+                    endpoint="/v1/chat/completions",
+                    data={"model": ALIAS},
+                )
+
+            if expected is None:
+                assert "cached_tokens" not in emitted["data"]
+            else:
+                assert emitted["data"]["cached_tokens"] == expected

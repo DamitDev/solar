@@ -37,6 +37,12 @@ def _task_done_callback(task: asyncio.Task) -> None:
 
 _RETRYABLE_STATUSES = frozenset({502, 503, 504})
 
+# How long to remember that a cache-aware backend answered usage without a
+# cached split. Old llama.cpp/SGLang builds do not emit
+# prompt_tokens_details; without this, every chat request pays an extra
+# host round-trip that can never fill the gap.
+_NEGATIVE_CACHE_TTL_S = 60
+
 # Endpoints whose streaming form accepts ``stream_options.include_usage`` and
 # answers with a terminal usage chunk. Both are relayed by stream_request, and
 # without the option their token counts would fall back to the host's
@@ -52,6 +58,8 @@ class OpenAIGateway:
         self._bg_tasks: list[asyncio.Task[None]] = []
         self._pending_tasks: set[asyncio.Task] = set()
         self._stop_event: asyncio.Event | None = None
+        # instance_key -> monotonic deadline; see _fill_usage_gaps.
+        self._no_cached_until: dict[str, float] = {}
 
     async def _ensure_session(self) -> None:
         if self.session is not None and not self.session.closed:
@@ -468,6 +476,86 @@ class OpenAIGateway:
         ):
             out["cached_tokens"] = int(details["cached_tokens"])
         return out
+
+    @staticmethod
+    def _usage_need_host_fallback(
+        usage_fields: dict[str, Any], instance: RegistryEntry
+    ) -> bool:
+        """Whether the host's last-generation metrics should fill usage gaps.
+
+        Only cache-aware backends (llama.cpp, SGLang) can supply a cached
+        split, so a HuggingFace instance never warrants the round-trip. The
+        upstream ``usage`` block stays authoritative; the host only fills
+        holes (``cached_tokens`` above all, but also a missing prompt or
+        completion count).
+        """
+        if instance.backend_type not in {"llamacpp", "sglang"}:
+            return False
+        return (
+            "prompt_tokens" not in usage_fields
+            or "completion_tokens" not in usage_fields
+            or "cached_tokens" not in usage_fields
+        )
+
+    @staticmethod
+    def _clamp_cached_tokens(usage_fields: dict[str, Any]) -> dict[str, Any]:
+        """Drop ``cached_tokens`` when it cannot be a real cache hit.
+
+        A negative value or one exceeding ``prompt_tokens`` is a backend
+        artifact; without a valid cached portion the row stays NULL rather
+        than polluting the cache-hit rate with nonsense.
+        """
+        cached = usage_fields.get("cached_tokens")
+        if cached is None:
+            return usage_fields
+        prompt = usage_fields.get("prompt_tokens")
+        if (
+            prompt is None
+            or not isinstance(cached, int)
+            or cached < 0
+            or cached > prompt
+        ):
+            out = dict(usage_fields)
+            out.pop("cached_tokens", None)
+            return out
+        return usage_fields
+
+    async def _fill_usage_gaps(
+        self,
+        usage_fields: dict[str, Any],
+        instance: RegistryEntry,
+        *,
+        within_s: int | None = None,
+    ) -> dict[str, Any]:
+        """Fill missing tokens from the host's last-generation metrics.
+
+        The upstream usage block stays authoritative: the host only fills
+        holes (``cached_tokens`` above all, but also a missing prompt or
+        completion count). Only cache-aware backends (llama.cpp, SGLang) can
+        supply a cached split, so HuggingFace never warrants the round-trip.
+
+        When the only gap is the cached split and a recent host answer also
+        lacked one, the instance is remembered as split-less and the
+        round-trip is skipped until the negative cache expires -- old
+        backends that never emit ``prompt_tokens_details`` would otherwise
+        cost an HTTP call on every request.
+        """
+        if not self._usage_need_host_fallback(usage_fields, instance):
+            return usage_fields
+        key = f"{instance.host_id}/{instance.instance_id}"
+        if (
+            "prompt_tokens" in usage_fields
+            and "completion_tokens" in usage_fields
+            and "cached_tokens" not in usage_fields
+            and self._no_cached_until.get(key, 0.0) > time.monotonic()
+        ):
+            return usage_fields
+        host_metrics = await self._fetch_last_generation_metrics(
+            instance.host_id, instance.instance_id, within_s=within_s
+        )
+        if "cached_tokens" not in host_metrics:
+            self._no_cached_until[key] = time.monotonic() + _NEGATIVE_CACHE_TTL_S
+        return {**host_metrics, **usage_fields}
 
     async def _fetch_last_generation_metrics(
         self, host_id: str, instance_id: str, within_s: int | None = None
@@ -996,7 +1084,7 @@ class OpenAIGateway:
             "duration": duration,
             "timestamp": self._ts(),
         }
-        base_data.update(usage_fields)
+        base_data.update(self._clamp_cached_tokens(usage_fields))
         await self._broadcast_routing_event(
             {"type": "request_success", "data": base_data},
             endpoint_id=endpoint_id,
@@ -1233,16 +1321,9 @@ class OpenAIGateway:
                             duration = time.time() - start_time
 
                             usage_fields = self._extract_usage_from_result(result)
-                            if (
-                                "prompt_tokens" not in usage_fields
-                                or "completion_tokens" not in usage_fields
-                            ):
-                                host_metrics = (
-                                    await self._fetch_last_generation_metrics(
-                                        instance.host_id, instance.instance_id
-                                    )
-                                )
-                                usage_fields = {**usage_fields, **host_metrics}
+                            usage_fields = await self._fill_usage_gaps(
+                                usage_fields, instance
+                            )
 
                             await self._emit_success(
                                 request_id,
@@ -1460,7 +1541,12 @@ class OpenAIGateway:
                             completed = True
                             duration = time.time() - start_time
                             if captured_usage:
-                                usage_fields = captured_usage
+                                # The terminal chunk can carry the counts but
+                                # omit the cached split (older backends); ask
+                                # the host for it, bounded to this window.
+                                usage_fields = await self._fill_usage_gaps(
+                                    captured_usage, instance, within_s=5
+                                )
                             else:
                                 # Fallback for backends that ignore
                                 # stream_options: bound the attribution window

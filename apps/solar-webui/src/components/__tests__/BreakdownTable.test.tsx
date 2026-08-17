@@ -4,9 +4,33 @@ import { describe, expect, it } from 'vitest';
 import { BreakdownRow, BreakdownTable } from '../gateway/BreakdownTable';
 
 const rows: BreakdownRow[] = [
-  { id: 'b', label: 'qwen3.6:35b', completed: 5, token_in: 900, token_out: 100, avg_duration_s: 12.5 },
-  { id: 'a', label: 'iris-bert:110m', completed: 50, token_in: 100, token_out: 50, avg_duration_s: 0.09 },
-  { id: 'c', label: 'solver-v4:9b', completed: 12, token_in: 500, token_out: 400, avg_duration_s: 24.61 },
+  {
+    id: 'b',
+    label: 'qwen3.6:35b',
+    completed: 5,
+    token_in: 900,
+    token_cached: 600,
+    token_out: 100,
+    avg_duration_s: 12.5,
+  },
+  {
+    id: 'a',
+    label: 'iris-bert:110m',
+    completed: 50,
+    token_in: 100,
+    token_cached: 0,
+    token_out: 50,
+    avg_duration_s: 0.09,
+  },
+  {
+    id: 'c',
+    label: 'solver-v4:9b',
+    completed: 12,
+    token_in: 500,
+    token_cached: 200,
+    token_out: 400,
+    avg_duration_s: 24.61,
+  },
 ];
 
 function labelColumn(): string[] {
