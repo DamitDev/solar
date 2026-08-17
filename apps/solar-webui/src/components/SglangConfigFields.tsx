@@ -164,7 +164,10 @@ export function SglangConfigFields({
         step: 1,
       })}
       {numberField('context_length', 'Context Length', <>Maximum sequence length (--context-length).</>, {
-        min: 1,
+        // HTML uses `min` as the step base: (value - min) must be a multiple of
+        // `step`. min=1 therefore rejects 262144 (256 Ki tokens) and every other
+        // 1024-aligned window. Keep min equal to the step, matching ctx_size.
+        min: 1024,
         step: 1024,
       })}
       {numberField(

@@ -67,4 +67,18 @@ describe('BackendConfigFields backend selection', () => {
     expect(screen.getByLabelText('Extra Arguments')).toBeInTheDocument();
     expect(screen.getByLabelText('Extra Environment')).toBeInTheDocument();
   });
+
+  it('accepts 262144 as context length because min is the HTML step base', () => {
+    render(
+      <BackendConfigFields value={{ backend_type: 'sglang', context_length: 262144 }} onChange={vi.fn()} forIntent />,
+    );
+
+    const input = screen.getByLabelText('Context Length') as HTMLInputElement;
+    const min = Number(input.min);
+    const step = Number(input.step);
+    expect(step).toBe(1024);
+    expect((262144 - min) % step).toBe(0);
+    expect(input.validity.stepMismatch).toBe(false);
+    expect(input.validity.rangeUnderflow).toBe(false);
+  });
 });
