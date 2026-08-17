@@ -3,7 +3,7 @@
 import logging
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel
 
 from app.auth import invalidate_endpoint_cache
 from app.database.api_keys import api_key_db
@@ -21,18 +21,16 @@ class ApiKeyCreate(BaseModel):
 
 
 class ApiKeyUpdate(BaseModel):
+    """Partial update. Absent keys are left untouched.
+
+    Presence is read from ``model_fields_set`` so that an explicit ``null``
+    ``description`` clears the column while omitting the key preserves it.
+    """
+
     name: str | None = None
     description: str | None = None
     enabled: bool | None = None
     endpoint_id: str | None = None
-    _description_provided: bool = False
-
-    @model_validator(mode="before")
-    @classmethod
-    def _track_description(cls, values: dict) -> dict:
-        if isinstance(values, dict) and "description" in values:
-            values["_description_provided"] = True
-        return values
 
 
 async def _emit_api_keys_update() -> None:
@@ -98,7 +96,7 @@ async def update_api_key(key_id: str, data: ApiKeyUpdate):
     kwargs: dict = {}
     if data.name is not None:
         kwargs["name"] = data.name
-    if data._description_provided:
+    if "description" in data.model_fields_set:
         kwargs["description"] = data.description
     if data.endpoint_id is not None:
         ep = await endpoint_db.get_endpoint(data.endpoint_id)

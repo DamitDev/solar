@@ -3,7 +3,7 @@
 import logging
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel
 
 from app.auth import invalidate_endpoint_cache
 from app.database.api_keys import api_key_db
@@ -25,22 +25,16 @@ class EndpointCreate(BaseModel):
 
 
 class EndpointUpdate(BaseModel):
+    """Partial update. Absent keys are left untouched.
+
+    Presence is read from ``model_fields_set`` so that an explicit ``null``
+    ``description`` clears the column while omitting the key preserves it.
+    """
+
     name: str | None = None
     description: str | None = None
     serve_all_models: bool | None = None
     model_patterns: list[str] | None = None
-    _description_provided: bool = False
-    _patterns_provided: bool = False
-
-    @model_validator(mode="before")
-    @classmethod
-    def _track_provided(cls, values: dict) -> dict:
-        if isinstance(values, dict):
-            if "description" in values:
-                values["_description_provided"] = True
-            if "model_patterns" in values:
-                values["_patterns_provided"] = True
-        return values
 
 
 class EndpointModelPreview(BaseModel):
@@ -113,12 +107,18 @@ async def create_endpoint(data: EndpointCreate):
 
 @router.post("/preview-models")
 async def preview_models(data: EndpointModelPreview):
-    """Live alias preview for the create/edit form (model scoping)."""
+    """Live alias preview for the create/edit form (model scoping).
+
+    ``available`` lists every registry alias so the form can offer a pick list
+    instead of making the user guess glob syntax against unseen aliases.
+    """
     aliases = await _registry_aliases()
-    if data.serve_all_models:
-        return {"aliases": aliases, "count": len(aliases)}
-    matched = filter_aliases_for_patterns(data.model_patterns, aliases)
-    return {"aliases": matched, "count": len(matched)}
+    matched = (
+        aliases
+        if data.serve_all_models
+        else filter_aliases_for_patterns(data.model_patterns, aliases)
+    )
+    return {"aliases": matched, "count": len(matched), "available": aliases}
 
 
 @router.get("/{endpoint_id}")
@@ -150,14 +150,15 @@ async def get_endpoint_models(endpoint_id: str):
 
 @router.put("/{endpoint_id}")
 async def update_endpoint(endpoint_id: str, data: EndpointUpdate):
+    provided = data.model_fields_set
     kwargs: dict = {}
     if data.name is not None:
         kwargs["name"] = data.name
-    if data._description_provided:
+    if "description" in provided:
         kwargs["description"] = data.description
     if data.serve_all_models is not None:
         kwargs["serve_all_models"] = data.serve_all_models
-    if data._patterns_provided:
+    if "model_patterns" in provided and data.model_patterns is not None:
         kwargs["model_patterns"] = data.model_patterns
 
     ep = await endpoint_db.update_endpoint(endpoint_id, **kwargs)

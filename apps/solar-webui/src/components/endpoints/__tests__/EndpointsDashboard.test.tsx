@@ -84,7 +84,7 @@ beforeEach(() => {
   mockedClient.getApiKeys.mockResolvedValue([]);
   mockedClient.getEndpointUsage.mockResolvedValue(emptyUsage(endpoint('ep-1')));
   mockedClient.getEndpointModels.mockResolvedValue(emptyModels());
-  mockedClient.previewEndpointModels.mockResolvedValue({ aliases: [], count: 0 });
+  mockedClient.previewEndpointModels.mockResolvedValue({ aliases: [], count: 0, available: [] });
 });
 
 describe('EndpointsDashboard', () => {
@@ -95,7 +95,7 @@ describe('EndpointsDashboard', () => {
     expect(screen.getByText('All models')).toBeTruthy();
   });
 
-  it('renders model pattern chips and the matched-alias count for scoped endpoints', async () => {
+  it('renders granted models, wildcard rules and the matched-alias count for scoped endpoints', async () => {
     mockedClient.getEndpoints.mockResolvedValue([
       endpoint('ep-scoped', {
         name: 'Scoped',
@@ -115,6 +115,25 @@ describe('EndpointsDashboard', () => {
     expect(screen.getByText('iris-*')).toBeTruthy();
     expect(screen.getByText('qwen-v4*')).toBeTruthy();
     await waitFor(() => expect(screen.getByText(/2 models/)).toBeTruthy());
+    // The models actually granted are listed, not just the patterns.
+    expect(screen.getByText('iris-osl:8b')).toBeTruthy();
+    expect(screen.getByText('qwen-v4-flash:284b')).toBeTruthy();
+  });
+
+  it('warns when a scoped endpoint grants no models at all', async () => {
+    mockedClient.getEndpoints.mockResolvedValue([
+      endpoint('ep-empty', { name: 'Locked', serve_all_models: false, model_patterns: [] }),
+    ]);
+    render(<EndpointsDashboard />);
+    expect(await screen.findByText('Locked')).toBeTruthy();
+    expect(screen.getByText(/No models selected/)).toBeTruthy();
+  });
+
+  it('opens the endpoint editor from the card model-access panel', async () => {
+    mockedClient.getEndpoints.mockResolvedValue([endpoint('ep-1', { name: 'Primary' })]);
+    render(<EndpointsDashboard />);
+    fireEvent.click(await screen.findByText('Manage models'));
+    expect(await screen.findByText('Edit Endpoint')).toBeTruthy();
   });
 
   it('lists keys with masked values', async () => {
