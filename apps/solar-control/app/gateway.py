@@ -43,6 +43,15 @@ _RETRYABLE_STATUSES = frozenset({502, 503, 504})
 # host round-trip that can never fill the gap.
 _NEGATIVE_CACHE_TTL_S = 60
 
+# How old a host last-generation record may be when only the cached split is
+# missing. The strict 5s attribution window exists so a STALE generation's
+# token COUNTS cannot be billed to a fresher request; the cached split is a
+# cache-state property, not a per-request count, so a record up to two
+# minutes old is still a fair fill. Verified against production 2026-08-17:
+# the SGLang host record lags the 2s /metrics poll, so on a quiet instance
+# the 5s fetch 404s and the row stays NULL with real data available.
+_CACHED_FILL_WINDOW_S = 120
+
 # Endpoints whose streaming form accepts ``stream_options.include_usage`` and
 # answers with a terminal usage chunk. Both are relayed by stream_request, and
 # without the option their token counts would fall back to the host's
@@ -546,13 +555,22 @@ class OpenAIGateway:
         if not self._usage_need_host_fallback(usage_fields, instance):
             return usage_fields
         key = f"{instance.host_id}/{instance.instance_id}"
-        if (
+        only_cached_missing = (
             "prompt_tokens" in usage_fields
             and "completion_tokens" in usage_fields
             and "cached_tokens" not in usage_fields
+        )
+        if (
+            only_cached_missing
             and self._no_cached_until.get(key, 0.0) > time.monotonic()
         ):
             return usage_fields
+        if only_cached_missing and (
+            within_s is None or within_s < _CACHED_FILL_WINDOW_S
+        ):
+            # Counts are already attributed upstream; only the split is
+            # borrowed, so the strict concurrency window does not apply.
+            within_s = _CACHED_FILL_WINDOW_S
         host_metrics = await self._fetch_last_generation_metrics(
             instance.host_id, instance.instance_id, within_s=within_s
         )

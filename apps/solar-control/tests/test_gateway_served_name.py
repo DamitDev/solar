@@ -13,7 +13,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.database.logs import GatewayLogger
-from app.gateway import _STREAM_USAGE_ENDPOINTS, OpenAIGateway
+from app.gateway import (
+    _CACHED_FILL_WINDOW_S,
+    _STREAM_USAGE_ENDPOINTS,
+    OpenAIGateway,
+)
 from app.models import Host, HostStatus, RegistryEntry
 
 ALIAS = "deepseek-v4-flash:284b"
@@ -469,7 +473,9 @@ class TestStreamingUsage:
             b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
             b"data: [DONE]\n\n",
         ]
-        assert called["within_s"] == 5
+        # Counts are upstream-attributed, so only the split is borrowed and
+        # the fill tolerates an older record.
+        assert called["within_s"] == _CACHED_FILL_WINDOW_S
         assert emitted["usage"]["prompt_tokens"] == 341
         assert emitted["usage"]["completion_tokens"] == 72
         assert emitted["usage"]["total_tokens"] == 413
@@ -784,7 +790,8 @@ class TestCachedTokensFlow:
         assert emitted["usage"]["completion_tokens"] == 100
         assert emitted["usage"]["total_tokens"] == 600
         assert emitted["usage"]["cached_tokens"] == 300
-        assert fetched["within_s"] is None
+        # Counts are already attributed; the split borrow tolerates age.
+        assert fetched["within_s"] == _CACHED_FILL_WINDOW_S
 
     @pytest.mark.anyio
     async def test_a_huggingface_instance_never_triggers_the_host_fallback(self):
