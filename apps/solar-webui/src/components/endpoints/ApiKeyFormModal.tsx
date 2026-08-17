@@ -1,7 +1,11 @@
 import { useState } from 'react';
-import { X, Copy, Check, KeyRound, RefreshCw, AlertCircle } from 'lucide-react';
+import { AlertCircle, AlertTriangle, Check, Copy, Globe2, KeyRound, ListChecks, RefreshCw, X } from 'lucide-react';
 import solarClient from '@/api/client';
 import type { ApiEndpoint, ApiKey } from '@/api/types';
+import { useModelScopePreview } from './modelScope';
+
+/** Keep the inherited-scope hint from growing taller than the form. */
+const ALIAS_PREVIEW_LIMIT = 8;
 
 interface ApiKeyFormModalProps {
   /** Selectable endpoints (create/reassign). Omit in fixed-endpoint contexts. */
@@ -41,6 +45,14 @@ export function ApiKeyFormModal({
   const [copied, setCopied] = useState(false);
 
   const isRotating = !!rotatingKey;
+
+  // A key has no scope of its own: it inherits whatever its endpoint serves.
+  // Showing that here is what makes reassignment (and the absence of per-key
+  // globs) understandable without leaving the modal.
+  const selectedEndpoint = targets.find((ep) => ep.id === endpointId);
+  const serveAll = selectedEndpoint?.serve_all_models ?? true;
+  const { matched, available, ready } = useModelScopePreview(serveAll, selectedEndpoint?.model_patterns ?? []);
+  const granted = serveAll ? available : matched;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -161,6 +173,40 @@ export function ApiKeyFormModal({
                 ))}
               </select>
               {fixedTarget && <p className="text-xs text-nord-5 mt-1">Key binds to this endpoint.</p>}
+            </div>
+
+            <div className="p-3 rounded-md bg-nord-2 border border-nord-3 space-y-2">
+              <p className="flex items-center gap-1.5 text-xs font-medium text-nord-4">
+                {serveAll ? <Globe2 size={13} /> : <ListChecks size={13} />}
+                {serveAll
+                  ? 'Reaches all registered models'
+                  : ready
+                    ? `Reaches ${granted.length} model${granted.length === 1 ? '' : 's'}`
+                    : 'Resolving model access…'}
+              </p>
+              {ready && !serveAll && granted.length === 0 ? (
+                <p className="flex items-start gap-2 text-xs text-nord-12">
+                  <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+                  This endpoint serves no models right now, so the key cannot resolve any request.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {granted.slice(0, ALIAS_PREVIEW_LIMIT).map((alias) => (
+                    <code
+                      key={alias}
+                      className="px-1.5 py-0.5 bg-nord-1 border border-nord-3 rounded text-xs text-nord-5 font-mono"
+                    >
+                      {alias}
+                    </code>
+                  ))}
+                  {granted.length > ALIAS_PREVIEW_LIMIT && (
+                    <span className="text-xs text-nord-4">+{granted.length - ALIAS_PREVIEW_LIMIT} more</span>
+                  )}
+                </div>
+              )}
+              <p className="text-xs text-nord-5">
+                Model access is a property of the endpoint — edit the endpoint to change it.
+              </p>
             </div>
             {!isRotating && (
               <>

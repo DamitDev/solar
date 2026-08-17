@@ -616,8 +616,11 @@ export interface ModelPreviewRequest {
 }
 
 export interface ModelPreviewResponse {
+  /** Registry aliases matched by the previewed scope. */
   aliases: string[];
   count: number;
+  /** Every registry alias with a live instance, for the pick list. */
+  available?: string[];
 }
 
 export interface EndpointModelsResponse {

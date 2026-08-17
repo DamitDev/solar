@@ -1,13 +1,33 @@
 import { useState } from 'react';
-import { Plus, Pencil, Trash2, BarChart3, Key, Eye, EyeOff, Copy, Check, RefreshCw, Globe2 } from 'lucide-react';
+import {
+  AlertTriangle,
+  BarChart3,
+  Check,
+  Copy,
+  Eye,
+  EyeOff,
+  Globe2,
+  Key,
+  ListChecks,
+  Pencil,
+  Plus,
+  RefreshCw,
+  SlidersHorizontal,
+  Trash2,
+  Wand2,
+} from 'lucide-react';
 import solarClient from '@/api/client';
 import type { ApiEndpoint, ApiKey, EndpointUsageResponse } from '@/api/types';
 import { ApiKeyFormModal } from './ApiKeyFormModal';
+import { isGlobPattern } from './modelScope';
 
 export interface EndpointModels {
   count: number;
   aliases: string[];
 }
+
+/** Keep long registry lists from dominating the card. */
+const ALIAS_PREVIEW_LIMIT = 6;
 
 function maskKey(key: string): string {
   if (!key || key.length <= 8) return '••••••••';
@@ -158,6 +178,12 @@ export function EndpointCard({
   const totalTokens = u?.total_tokens ?? 0;
   const avgLatency = u?.avg_duration_s != null ? u.avg_duration_s.toFixed(2) : '—';
 
+  const aliases = models?.aliases ?? [];
+  const rules = endpoint.model_patterns.filter(isGlobPattern);
+  // A scoped endpoint with nothing selected resolves no model at all, which is
+  // easy to create by accident and otherwise only shows up as a 404 at runtime.
+  const servesNothing = !endpoint.serve_all_models && endpoint.model_patterns.length === 0;
+
   const handleToggleEnabled = async (apiKey: ApiKey) => {
     try {
       await solarClient.updateApiKey(apiKey.id, { enabled: !apiKey.enabled });
@@ -190,19 +216,14 @@ export function EndpointCard({
                 All models
               </span>
             ) : (
-              <>
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-nord-14 bg-opacity-20 text-nord-14 text-xs font-medium">
-                  {models?.count ?? 0} model{models?.count === 1 ? '' : 's'}
-                </span>
-                {endpoint.model_patterns.map((p) => (
-                  <code
-                    key={p}
-                    className="px-1.5 py-0.5 bg-nord-2 border border-nord-3 rounded text-xs text-nord-5 font-mono"
-                  >
-                    {p}
-                  </code>
-                ))}
-              </>
+              <span
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${
+                  servesNothing ? 'bg-nord-12 bg-opacity-20 text-nord-12' : 'bg-nord-14 bg-opacity-20 text-nord-14'
+                }`}
+              >
+                <ListChecks size={12} />
+                {models?.count ?? 0} model{models?.count === 1 ? '' : 's'}
+              </span>
             )}
             <span className="text-xs text-nord-4">
               {endpoint.key_count} key{endpoint.key_count === 1 ? '' : 's'}
@@ -226,6 +247,61 @@ export function EndpointCard({
             <Trash2 size={18} />
           </button>
         </div>
+      </div>
+
+      <div className="mt-4 p-3 rounded-md bg-nord-2 border border-nord-3">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs font-medium text-nord-4 uppercase tracking-wide">Model access</span>
+          <button
+            onClick={() => onEdit(endpoint)}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-nord-3 text-nord-4 hover:text-nord-6 transition-colors text-xs"
+          >
+            <SlidersHorizontal size={13} />
+            Manage models
+          </button>
+        </div>
+        {servesNothing ? (
+          <p className="mt-2 flex items-start gap-2 text-xs text-nord-12">
+            <AlertTriangle size={13} className="shrink-0 mt-0.5" />
+            No models selected — every request returns <code>model_not_found</code>.
+          </p>
+        ) : (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {endpoint.serve_all_models && (
+              <span className="text-xs text-nord-4">Every registered model{aliases.length ? ':' : ''}</span>
+            )}
+            {aliases.slice(0, ALIAS_PREVIEW_LIMIT).map((alias) => (
+              <code
+                key={alias}
+                className="px-1.5 py-0.5 bg-nord-1 border border-nord-3 rounded text-xs text-nord-5 font-mono"
+              >
+                {alias}
+              </code>
+            ))}
+            {aliases.length > ALIAS_PREVIEW_LIMIT && (
+              <span className="text-xs text-nord-4">+{aliases.length - ALIAS_PREVIEW_LIMIT} more</span>
+            )}
+            {aliases.length === 0 && !endpoint.serve_all_models && (
+              <span className="text-xs text-nord-4">Matching models are not registered right now.</span>
+            )}
+          </div>
+        )}
+        {!endpoint.serve_all_models && rules.length > 0 && (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <span className="inline-flex items-center gap-1 text-xs text-nord-4">
+              <Wand2 size={12} />
+              Rules
+            </span>
+            {rules.map((rule) => (
+              <code
+                key={rule}
+                className="px-1.5 py-0.5 bg-nord-1 border border-nord-3 rounded text-xs text-nord-5 font-mono"
+              >
+                {rule}
+              </code>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="mt-4 pt-4 border-t border-nord-3 flex items-center gap-4 text-sm">

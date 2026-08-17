@@ -200,6 +200,10 @@ export function EndpointsDashboard() {
           onCreated={(ep) => {
             setEndpoints((prev) => [ep, ...prev]);
             setShowCreate(false);
+            // The card renders its model list from modelsMap, which the initial
+            // load only fills for endpoints that existed back then.
+            fetchModels(ep.id);
+            fetchUsage(ep.id);
           }}
         />
       )}
@@ -210,6 +214,8 @@ export function EndpointsDashboard() {
           onSaved={(ep) => {
             setEndpoints((prev) => prev.map((e) => (e.id === ep.id ? ep : e)));
             setEditing(null);
+            // Scope edits change which aliases resolve, so the cached list is stale.
+            fetchModels(ep.id);
           }}
         />
       )}
