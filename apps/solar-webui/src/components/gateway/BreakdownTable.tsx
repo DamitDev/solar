@@ -26,7 +26,7 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
     () => [
       { key: 'label', value: (r) => r.label },
       { key: 'completed', value: (r) => r.completed, numeric: true },
-      { key: 'token_in', value: (r) => r.token_in, numeric: true },
+      { key: 'token_miss', value: (r) => r.token_in - r.token_cached, numeric: true },
       { key: 'token_cached', value: (r) => r.token_cached, numeric: true },
       { key: 'token_out', value: (r) => r.token_out, numeric: true },
       { key: 'avg_duration_s', value: (r) => r.avg_duration_s, numeric: true },
@@ -82,15 +82,15 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
                 align="right"
               />
               <SortHeader
-                label="Input tokens"
-                sortKey="token_in"
+                label="Miss"
+                sortKey="token_miss"
                 activeKey={sortKey}
                 direction={direction}
                 onSort={toggle}
                 align="right"
               />
               <SortHeader
-                label="Cached"
+                label="Hit"
                 sortKey="token_cached"
                 activeKey={sortKey}
                 direction={direction}
@@ -98,7 +98,7 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
                 align="right"
               />
               <SortHeader
-                label="Output tokens"
+                label="Output"
                 sortKey="token_out"
                 activeKey={sortKey}
                 direction={direction}
@@ -106,7 +106,7 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
                 align="right"
               />
               <SortHeader
-                label="Avg Duration"
+                label="Latency"
                 sortKey="avg_duration_s"
                 activeKey={sortKey}
                 direction={direction}
@@ -119,12 +119,16 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
             {sorted.length ? (
               sorted.map((row) => (
                 <tr key={row.id} className="border-t border-nord-3 hover:bg-nord-2/40">
-                  <td className="px-3 py-2">{row.label}</td>
-                  <td className="px-3 py-2 text-right tabular-nums">{row.completed}</td>
-                  <td className="px-3 py-2 text-right tabular-nums">{formatTokenCount(row.token_in)}</td>
-                  <td className="px-3 py-2 text-right tabular-nums">{formatTokenCount(row.token_cached)}</td>
-                  <td className="px-3 py-2 text-right tabular-nums">{formatTokenCount(row.token_out)}</td>
-                  <td className="px-3 py-2 text-right tabular-nums">{row.avg_duration_s.toFixed(2)}s</td>
+                  <td className="px-2 py-2 max-w-[180px] truncate" title={row.label}>
+                    {row.label}
+                  </td>
+                  <td className="px-2 py-2 text-right tabular-nums">{row.completed}</td>
+                  <td className="px-2 py-2 text-right tabular-nums">
+                    {formatTokenCount(row.token_in - row.token_cached)}
+                  </td>
+                  <td className="px-2 py-2 text-right tabular-nums">{formatTokenCount(row.token_cached)}</td>
+                  <td className="px-2 py-2 text-right tabular-nums">{formatTokenCount(row.token_out)}</td>
+                  <td className="px-2 py-2 text-right tabular-nums">{row.avg_duration_s.toFixed(2)}s</td>
                 </tr>
               ))
             ) : (

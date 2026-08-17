@@ -458,7 +458,7 @@ export function GatewayDashboard() {
           <div className="text-nord-4 text-sm">Input tokens</div>
           <div className="text-nord-6 text-lg">{formatTokenCount(stats?.token_in_total)}</div>
           <div className="text-nord-4 text-xs">
-            true {formatTokenCount((stats?.token_in_total ?? 0) - (stats?.token_cached_total ?? 0))} • cached{' '}
+            miss {formatTokenCount((stats?.token_in_total ?? 0) - (stats?.token_cached_total ?? 0))} • hit{' '}
             {formatTokenCount(stats?.token_cached_total)}
           </div>
           <div className="text-nord-4 text-xs">avg {formatTokenCount(stats?.avg_tokens_in)}</div>
@@ -636,7 +636,7 @@ export function GatewayDashboard() {
                 <th className="text-left px-3 py-2">Status</th>
                 <th className="text-left px-3 py-2">Host</th>
                 <th className="text-left px-3 py-2">Input</th>
-                <th className="text-left px-3 py-2">Cached</th>
+                <th className="text-left px-3 py-2">Hit</th>
                 <th className="text-left px-3 py-2">Output</th>
                 <th className="text-left px-3 py-2">Duration</th>
                 <th className="text-left px-3 py-2">Attempts</th>
@@ -724,7 +724,7 @@ export function GatewayDashboard() {
       </div>
 
       {/* Breakdown tables */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <BreakdownTable title="By Model" labelHeading="Model" rows={modelRows} />
         <BreakdownTable title="By Host" labelHeading="Host" rows={hostRows} />
       </div>

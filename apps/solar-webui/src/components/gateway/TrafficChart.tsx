@@ -284,14 +284,14 @@ function buildChartData(
       bands: [
         {
           key: 'token_cached',
-          label: 'Cached input',
+          label: 'Hit',
           color: TOKEN_COLORS.token_cached,
           shape: 'area',
           stacked: true,
         },
         {
           key: 'token_uncached',
-          label: 'True input',
+          label: 'Miss',
           color: TOKEN_COLORS.token_in,
           shape: 'area',
           stacked: true,
