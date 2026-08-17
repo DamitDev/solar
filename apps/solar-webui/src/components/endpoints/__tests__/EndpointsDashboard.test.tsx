@@ -66,6 +66,7 @@ const emptyUsage = (ep: ApiEndpoint): EndpointUsageResponse => ({
     missed_requests: 0,
     total_prompt_tokens: 0,
     total_completion_tokens: 0,
+    total_cached_tokens: 0,
     total_tokens: 0,
     avg_duration_s: null,
     avg_decode_tps: null,

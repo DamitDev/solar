@@ -179,6 +179,10 @@ class GatewayRequestRow(Base):
     instance_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Prompt-cache hit portion of prompt_tokens (llama.cpp / SGLang only).
+    # NULL = backend not cache-aware (HuggingFace); sums coalesce it to 0 but
+    # the cache-hit rate only counts rows where this is not NULL.
+    cached_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     decode_tps: Mapped[float | None] = mapped_column(Double, nullable=True)

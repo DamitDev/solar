@@ -309,7 +309,10 @@ export function EndpointCard({
           <BarChart3 size={16} />
           <span>24h requests: {totalRequests.toLocaleString()}</span>
         </div>
-        <div className="text-nord-4">Tokens: {totalTokens.toLocaleString()}</div>
+        <div className="text-nord-4">
+          Tokens: {totalTokens.toLocaleString()}
+          {u?.total_cached_tokens ? ` (cached ${u.total_cached_tokens.toLocaleString()})` : ''}
+        </div>
         <div className="text-nord-4">Avg latency: {avgLatency}s</div>
       </div>
 

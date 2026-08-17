@@ -469,6 +469,49 @@ class OpenAIGateway:
             out["cached_tokens"] = int(details["cached_tokens"])
         return out
 
+    @staticmethod
+    def _usage_need_host_fallback(
+        usage_fields: dict[str, Any], instance: RegistryEntry
+    ) -> bool:
+        """Whether the host's last-generation metrics should fill usage gaps.
+
+        Only cache-aware backends (llama.cpp, SGLang) can supply a cached
+        split, so a HuggingFace instance never warrants the round-trip. The
+        upstream ``usage`` block stays authoritative; the host only fills
+        holes (``cached_tokens`` above all, but also a missing prompt or
+        completion count).
+        """
+        if instance.backend_type not in {"llamacpp", "sglang"}:
+            return False
+        return (
+            "prompt_tokens" not in usage_fields
+            or "completion_tokens" not in usage_fields
+            or "cached_tokens" not in usage_fields
+        )
+
+    @staticmethod
+    def _clamp_cached_tokens(usage_fields: dict[str, Any]) -> dict[str, Any]:
+        """Drop ``cached_tokens`` when it cannot be a real cache hit.
+
+        A negative value or one exceeding ``prompt_tokens`` is a backend
+        artifact; without a valid cached portion the row stays NULL rather
+        than polluting the cache-hit rate with nonsense.
+        """
+        cached = usage_fields.get("cached_tokens")
+        if cached is None:
+            return usage_fields
+        prompt = usage_fields.get("prompt_tokens")
+        if (
+            prompt is None
+            or not isinstance(cached, int)
+            or cached < 0
+            or cached > prompt
+        ):
+            out = dict(usage_fields)
+            out.pop("cached_tokens", None)
+            return out
+        return usage_fields
+
     async def _fetch_last_generation_metrics(
         self, host_id: str, instance_id: str, within_s: int | None = None
     ) -> dict[str, Any]:
@@ -996,7 +1039,7 @@ class OpenAIGateway:
             "duration": duration,
             "timestamp": self._ts(),
         }
-        base_data.update(usage_fields)
+        base_data.update(self._clamp_cached_tokens(usage_fields))
         await self._broadcast_routing_event(
             {"type": "request_success", "data": base_data},
             endpoint_id=endpoint_id,
@@ -1233,16 +1276,16 @@ class OpenAIGateway:
                             duration = time.time() - start_time
 
                             usage_fields = self._extract_usage_from_result(result)
-                            if (
-                                "prompt_tokens" not in usage_fields
-                                or "completion_tokens" not in usage_fields
-                            ):
+                            if self._usage_need_host_fallback(usage_fields, instance):
                                 host_metrics = (
                                     await self._fetch_last_generation_metrics(
                                         instance.host_id, instance.instance_id
                                     )
                                 )
-                                usage_fields = {**usage_fields, **host_metrics}
+                                # The upstream usage block is authoritative;
+                                # the host only fills holes (cached_tokens
+                                # above all, but also a missing count).
+                                usage_fields = {**host_metrics, **usage_fields}
 
                             await self._emit_success(
                                 request_id,
@@ -1461,6 +1504,20 @@ class OpenAIGateway:
                             duration = time.time() - start_time
                             if captured_usage:
                                 usage_fields = captured_usage
+                                # The terminal chunk can carry the counts but
+                                # omit the cached split (older backends); ask
+                                # the host for it, bounded to this window.
+                                if self._usage_need_host_fallback(
+                                    usage_fields, instance
+                                ):
+                                    host_metrics = (
+                                        await self._fetch_last_generation_metrics(
+                                            instance.host_id,
+                                            instance.instance_id,
+                                            within_s=5,
+                                        )
+                                    )
+                                    usage_fields = {**host_metrics, **usage_fields}
                             else:
                                 # Fallback for backends that ignore
                                 # stream_options: bound the attribution window

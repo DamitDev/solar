@@ -75,6 +75,7 @@ def fill_buckets(
                 "error": agg["error"] if agg else 0,
                 "missed": agg["missed"] if agg else 0,
                 "token_in": agg["token_in"] if agg else 0,
+                "token_cached": agg["token_cached"] if agg else 0,
                 "token_out": agg["token_out"] if agg else 0,
                 "avg_duration_s": agg["avg_duration_s"] if agg else None,
             }
@@ -158,6 +159,7 @@ class RequestSummary:
     instance_url: str | None
     error_message: str | None = None
     prompt_tokens: int | None = None
+    cached_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
     decode_tps: float | None = None
@@ -273,6 +275,7 @@ class GatewayLogger:
                                 instance_url=r.get("instance_url"),
                                 error_message=r.get("error_message"),
                                 prompt_tokens=r.get("prompt_tokens"),
+                                cached_tokens=r.get("cached_tokens"),
                                 completion_tokens=r.get("completion_tokens"),
                                 total_tokens=r.get("total_tokens"),
                                 decode_tps=r.get("decode_tps"),
@@ -417,6 +420,12 @@ class GatewayLogger:
                 if t_tok is None and p_tok is not None and c_tok is not None:
                     t_tok = int(p_tok) + int(c_tok)
 
+                cached_tok = (
+                    data.get("cached_tokens")
+                    if isinstance(data.get("cached_tokens"), (int, float))
+                    else None
+                )
+
                 decode_tps = (
                     float(data["decode_tps"])
                     if isinstance(data.get("decode_tps"), (int, float))
@@ -452,6 +461,7 @@ class GatewayLogger:
                     instance_url=rip.instance_url,
                     error_message=data.get("error_message"),
                     prompt_tokens=int(p_tok) if p_tok is not None else None,
+                    cached_tokens=(int(cached_tok) if cached_tok is not None else None),
                     completion_tokens=int(c_tok) if c_tok is not None else None,
                     total_tokens=int(t_tok) if t_tok is not None else None,
                     decode_tps=decode_tps,
@@ -532,6 +542,7 @@ class GatewayLogger:
             "instance_url": row.instance_url,
             "error_message": row.error_message,
             "prompt_tokens": row.prompt_tokens,
+            "cached_tokens": row.cached_tokens,
             "completion_tokens": row.completion_tokens,
             "total_tokens": row.total_tokens,
             "decode_tps": row.decode_tps,
@@ -601,7 +612,14 @@ class GatewayLogger:
         try:
             session_factory = get_session_factory()
         except RuntimeError:
-            return {"completed": 0, "missed": 0, "error": 0}
+            return {
+                "completed": 0,
+                "missed": 0,
+                "error": 0,
+                "token_cached_total": 0,
+                "token_uncached_total": 0,
+                "cache_hit_rate": 0,
+            }
 
         R = GatewayRequestRow
         conditions = self._build_request_conditions(
@@ -622,6 +640,12 @@ class GatewayLogger:
                 sa_func.sum(R.completion_tokens)
                 .filter(R.status == "success")
                 .label("token_out_total"),
+                sa_func.sum(R.cached_tokens)
+                .filter(R.status == "success")
+                .label("token_cached_total"),
+                sa_func.sum(R.prompt_tokens)
+                .filter(R.status == "success", R.cached_tokens.isnot(None))
+                .label("token_in_measured_total"),
                 sa_func.count()
                 .filter(R.status == "success", R.prompt_tokens.isnot(None))
                 .label("p_count"),
@@ -636,6 +660,8 @@ class GatewayLogger:
             error = row.error or 0
             token_in_total = int(row.token_in_total or 0)
             token_out_total = int(row.token_out_total or 0)
+            token_cached_total = int(row.token_cached_total or 0)
+            token_in_measured_total = int(row.token_in_measured_total or 0)
             p_count = row.p_count or 0
             c_count = row.c_count or 0
 
@@ -645,6 +671,9 @@ class GatewayLogger:
                     model_key.label("model_key"),
                     sa_func.count().label("completed"),
                     sa_func.coalesce(sa_func.sum(R.prompt_tokens), 0).label("token_in"),
+                    sa_func.coalesce(sa_func.sum(R.cached_tokens), 0).label(
+                        "token_cached"
+                    ),
                     sa_func.coalesce(sa_func.sum(R.completion_tokens), 0).label(
                         "token_out"
                     ),
@@ -663,6 +692,9 @@ class GatewayLogger:
                     sa_func.max(R.host_name).label("host_name"),
                     sa_func.count().label("completed"),
                     sa_func.coalesce(sa_func.sum(R.prompt_tokens), 0).label("token_in"),
+                    sa_func.coalesce(sa_func.sum(R.cached_tokens), 0).label(
+                        "token_cached"
+                    ),
                     sa_func.coalesce(sa_func.sum(R.completion_tokens), 0).label(
                         "token_out"
                     ),
@@ -694,6 +726,13 @@ class GatewayLogger:
             "error": error,
             "rerouted_requests": rerouted_unique,
             "token_in_total": token_in_total,
+            "token_cached_total": token_cached_total,
+            "token_uncached_total": token_in_total - token_cached_total,
+            "cache_hit_rate": (
+                token_cached_total / token_in_measured_total
+                if token_in_measured_total
+                else 0
+            ),
             "token_out_total": token_out_total,
             "avg_tokens_in": (token_in_total / p_count) if p_count else 0,
             "avg_tokens_out": (token_out_total / c_count) if c_count else 0,
@@ -702,6 +741,7 @@ class GatewayLogger:
                     "model": r.model_key,
                     "completed": r.completed,
                     "token_in": int(r.token_in),
+                    "token_cached": int(r.token_cached),
                     "token_out": int(r.token_out),
                     "avg_duration_s": float(r.avg_duration_s),
                 }
@@ -713,6 +753,7 @@ class GatewayLogger:
                     "host_name": r.host_name or r.host_id,
                     "completed": r.completed,
                     "token_in": int(r.token_in),
+                    "token_cached": int(r.token_cached),
                     "token_out": int(r.token_out),
                     "avg_duration_s": float(r.avg_duration_s),
                 }
@@ -790,6 +831,9 @@ class GatewayLogger:
             sa_func.coalesce(
                 sa_func.sum(R.completion_tokens).filter(R.status == "success"), 0
             ).label("token_out"),
+            sa_func.coalesce(
+                sa_func.sum(R.cached_tokens).filter(R.status == "success"), 0
+            ).label("token_cached"),
             sa_func.sum(R.duration_s).filter(R.status == "success").label("duration_s"),
         ]
         group_cols: list = [bucket_expr]
@@ -831,6 +875,7 @@ class GatewayLogger:
                 "error": 0,
                 "missed": 0,
                 "token_in": 0,
+                "token_cached": 0,
                 "token_out": 0,
                 "duration_s": 0.0,
             }
@@ -840,6 +885,7 @@ class GatewayLogger:
             target["error"] += row.error
             target["missed"] += row.missed
             target["token_in"] += int(row.token_in)
+            target["token_cached"] += int(row.token_cached)
             target["token_out"] += int(row.token_out)
             target["duration_s"] += float(row.duration_s or 0.0)
 

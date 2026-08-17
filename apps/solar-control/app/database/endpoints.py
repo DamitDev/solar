@@ -189,6 +189,9 @@ class EndpointDB:
                     func.coalesce(
                         func.sum(GatewayRequestRow.completion_tokens), 0
                     ).label("total_completion_tokens"),
+                    func.coalesce(func.sum(GatewayRequestRow.cached_tokens), 0).label(
+                        "total_cached_tokens"
+                    ),
                     func.coalesce(func.sum(GatewayRequestRow.total_tokens), 0).label(
                         "total_tokens"
                     ),
@@ -215,6 +218,7 @@ class EndpointDB:
             "missed_requests": row.missed_requests,
             "total_prompt_tokens": row.total_prompt_tokens,
             "total_completion_tokens": row.total_completion_tokens,
+            "total_cached_tokens": row.total_cached_tokens,
             "total_tokens": row.total_tokens,
             "avg_duration_s": float(row.avg_duration_s) if row.avg_duration_s else None,
             "avg_decode_tps": float(row.avg_decode_tps) if row.avg_decode_tps else None,

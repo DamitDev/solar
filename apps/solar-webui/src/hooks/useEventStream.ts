@@ -242,6 +242,8 @@ export interface GatewayRequestSummary {
   instance_url?: string;
   error_message?: string;
   prompt_tokens?: number;
+  /** Prompt-cache hit portion of prompt_tokens; absent = not cache-aware. */
+  cached_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
   decode_tps?: number;

@@ -272,10 +272,30 @@ function buildChartData(
   if (metric === 'tokens') {
     const tin = data.points.reduce((s, p) => s + p.token_in, 0);
     const tout = data.points.reduce((s, p) => s + p.token_out, 0);
+    // The input band splits into its cached and truly-evaluated portions;
+    // cached + uncached == token_in, so the total stays comparable.
     return {
-      rows: data.points.map((p) => ({ ts: p.ts, token_in: p.token_in, token_out: p.token_out })),
+      rows: data.points.map((p) => ({
+        ts: p.ts,
+        token_cached: p.token_cached,
+        token_uncached: p.token_in - p.token_cached,
+        token_out: p.token_out,
+      })),
       bands: [
-        { key: 'token_in', label: 'Input', color: TOKEN_COLORS.token_in, shape: 'area', stacked: true },
+        {
+          key: 'token_cached',
+          label: 'Cached input',
+          color: TOKEN_COLORS.token_cached,
+          shape: 'area',
+          stacked: true,
+        },
+        {
+          key: 'token_uncached',
+          label: 'True input',
+          color: TOKEN_COLORS.token_in,
+          shape: 'area',
+          stacked: true,
+        },
         { key: 'token_out', label: 'Output', color: TOKEN_COLORS.token_out, shape: 'area', stacked: true },
       ],
       summary: `${formatCompactNumber(tin + tout)} tokens`,

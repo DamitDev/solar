@@ -72,6 +72,10 @@ export function GatewayDashboard() {
   const countedIdsRef = useRef<Set<string>>(new Set());
   const gatewayRequestsRef = useRef(gatewayRequests);
   gatewayRequestsRef.current = gatewayRequests;
+  // Realtime cache-hit bookkeeping: the measured-input denominator recovered
+  // from the last REST baseline, grown only by cache-aware live requests.
+  const statsBaselineRef = useRef<GatewayStats | null>(null);
+  const measuredInputRef = useRef<number | null>(null);
 
   // Time range - initialize with 1d preset
   const initialPreset: TimePreset = '1d';
@@ -317,15 +321,36 @@ export function GatewayDashboard() {
   useEffect(() => {
     if (!stats || !live) return;
 
+    // A fresh REST baseline re-anchors the measured-input denominator: the
+    // server computes cache_hit_rate over cache-aware rows only, so
+    // measured = cached / rate recovers it exactly. A zero rate means no
+    // measured traffic, and the denominator stays irrelevant.
+    if (statsBaselineRef.current !== stats) {
+      statsBaselineRef.current = stats;
+      if (stats.cache_hit_rate != null && stats.cache_hit_rate > 0) {
+        measuredInputRef.current = (stats.token_cached_total ?? 0) / stats.cache_hit_rate;
+      } else {
+        measuredInputRef.current = 0;
+      }
+    }
+
     const seen = countedIdsRef.current;
     const newItems = gatewayRequests.filter((r) => !seen.has(r.request_id));
     if (newItems.length === 0) return;
 
     for (const r of newItems) seen.add(r.request_id);
 
+    // The live denominator mirrors the server's NULL-cached_tokens exclusion:
+    // only cache-aware requests contribute their prompt tokens.
+    let measuredDelta = 0;
+    for (const r of newItems) {
+      if (r.cached_tokens != null && r.prompt_tokens != null) measuredDelta += r.prompt_tokens;
+    }
+    if (measuredDelta > 0) measuredInputRef.current = (measuredInputRef.current ?? 0) + measuredDelta;
+
     setStats((prev) => {
       if (!prev) return prev;
-      let { completed, missed, error, rerouted_requests, token_in_total, token_out_total } = prev;
+      let { completed, missed, error, rerouted_requests, token_in_total, token_out_total, token_cached_total } = prev;
       let totalCompleted = completed + missed + error;
       for (const r of newItems) {
         if (r.status === 'success') completed++;
@@ -333,9 +358,11 @@ export function GatewayDashboard() {
         else if (r.status === 'error') error++;
         if (r.attempts > 1) rerouted_requests++;
         token_in_total += r.prompt_tokens ?? 0;
+        token_cached_total += r.cached_tokens ?? 0;
         token_out_total += r.completion_tokens ?? 0;
       }
       totalCompleted += newItems.length;
+      const measured = measuredInputRef.current ?? 0;
       return {
         ...prev,
         completed,
@@ -343,6 +370,9 @@ export function GatewayDashboard() {
         error,
         rerouted_requests,
         token_in_total,
+        token_cached_total,
+        token_uncached_total: token_in_total - token_cached_total,
+        cache_hit_rate: measured > 0 ? token_cached_total / measured : 0,
         token_out_total,
         avg_tokens_in: totalCompleted > 0 ? token_in_total / totalCompleted : 0,
         avg_tokens_out: totalCompleted > 0 ? token_out_total / totalCompleted : 0,
@@ -460,7 +490,7 @@ export function GatewayDashboard() {
       </div>
 
       {/* Stats cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-4">
         <div className="bg-nord-1 border border-nord-3 rounded p-4">
           <div className="text-nord-4 text-sm">Completed</div>
           <div className="text-nord-14 text-2xl font-semibold">{stats?.completed ?? '—'}</div>
@@ -480,7 +510,18 @@ export function GatewayDashboard() {
         <div className="bg-nord-1 border border-nord-3 rounded p-4">
           <div className="text-nord-4 text-sm">Input tokens</div>
           <div className="text-nord-6 text-lg">{formatTokenCount(stats?.token_in_total)}</div>
+          <div className="text-nord-4 text-xs">
+            true {formatTokenCount((stats?.token_in_total ?? 0) - (stats?.token_cached_total ?? 0))} • cached{' '}
+            {formatTokenCount(stats?.token_cached_total)}
+          </div>
           <div className="text-nord-4 text-xs">avg {formatTokenCount(stats?.avg_tokens_in)}</div>
+        </div>
+        <div className="bg-nord-1 border border-nord-3 rounded p-4">
+          <div className="text-nord-4 text-sm">Cache hit</div>
+          <div className="text-nord-13 text-2xl font-semibold">
+            {stats?.cache_hit_rate != null ? `${(stats.cache_hit_rate * 100).toFixed(1)}%` : '—'}
+          </div>
+          <div className="text-nord-4 text-xs">of measured input</div>
         </div>
         <div className="bg-nord-1 border border-nord-3 rounded p-4">
           <div className="text-nord-4 text-sm">Output tokens</div>
@@ -648,6 +689,7 @@ export function GatewayDashboard() {
                 <th className="text-left px-3 py-2">Status</th>
                 <th className="text-left px-3 py-2">Host</th>
                 <th className="text-left px-3 py-2">Input</th>
+                <th className="text-left px-3 py-2">Cached</th>
                 <th className="text-left px-3 py-2">Output</th>
                 <th className="text-left px-3 py-2">Duration</th>
                 <th className="text-left px-3 py-2">Attempts</th>
@@ -682,6 +724,7 @@ export function GatewayDashboard() {
                     </td>
                     <td className="px-3 py-2">{r.host_name || r.host_id || '—'}</td>
                     <td className="px-3 py-2">{formatTokenCount(r.prompt_tokens)}</td>
+                    <td className="px-3 py-2">{r.cached_tokens != null ? formatTokenCount(r.cached_tokens) : '—'}</td>
                     <td className="px-3 py-2">{formatTokenCount(r.completion_tokens)}</td>
                     <td className="px-3 py-2">{r.duration_s?.toFixed(2)}s</td>
                     <td className="px-3 py-2">{r.attempts}</td>
@@ -689,7 +732,7 @@ export function GatewayDashboard() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={10} className="px-3 py-6 text-center text-nord-4">
+                  <td colSpan={11} className="px-3 py-6 text-center text-nord-4">
                     No data
                   </td>
                 </tr>
