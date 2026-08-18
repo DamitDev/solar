@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=83.0.0"]
+requires = ["setuptools>=84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,12 +8,12 @@ version = "0.0.0.dev0"
 description = "API for managing model and dataset registry metadata"
 dependencies = [
     "fastapi==0.141.1",
-    "uvicorn[standard]==0.52.1",
+    "uvicorn[standard]==0.52.3",
     "pydantic==2.13.4",
     "pydantic-settings==2.15.0",
     "asyncpg==0.31.0",
-    "sqlalchemy==2.0.51",
-    "alembic==1.19.0",
+    "sqlalchemy==2.0.52",
+    "alembic==1.19.1",
     "psycopg2-binary==2.9.12",
     "python-dotenv==1.2.2",
     "harbor-oci-client==0.1.0",
@@ -24,7 +24,7 @@ dev = [
     "black>=26.5.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "ruff==0.16.1",
+    "ruff==0.16.3",
 ]
 
 [tool.setuptools.packages.find]
