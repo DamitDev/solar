@@ -136,6 +136,16 @@ Adds the destructive counterpart to the upload path: models and versions can be 
 
 ---
 
+### Milestone 0.8: GPU-Aware Placement
+
+Makes placement and reservations work per physical GPU: hosts report per-GPU telemetry, intents declare `gpu_count`, solar-control picks the exact devices, and solar-host enforces them via `CUDA_VISIBLE_DEVICES`. See [docs/specs/gpu-aware-placement.md](docs/specs/gpu-aware-placement.md).
+
+| ID | Issue | Repo | Size | Depends on |
+|----|-------|------|------|------------|
+| S-058 | Implement GPU-aware placement end to end. Per-GPU host telemetry, `gpu_count` on intent resource requirements, `find_gpu_assignment` bin-packing in the shared placement policy, `CUDA_VISIBLE_DEVICES` enforcement and spawn-time verification in solar-host backend runners, GPU-aware reservations (S-034/S-038 + cold-start claims), `gpu_ids` threading through create/migrate/evacuate, minimal WebUI (per-GPU resources cards, `gpu_count` input, assigned devices), tests and doc amendments. | solar-host, solar-control, solar-webui | L | S-034, S-035, S-037, S-038, S-041 |
+
+---
+
 ## Phase 1: Data Repository
 
 > Centralized storage for models and training datasets. Can start in parallel with Phase 0.

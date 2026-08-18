@@ -117,3 +117,4 @@ For deeper context when needed:
   - [Declarative Deployment Intent](docs/specs/deployment-intent.md) — desired-state inference deployment API, reconciliation, and strategies (S-039)
   - [Host Draining](docs/specs/host-draining.md) — taking a host out of service: drain states, preflight, evacuation, and stall semantics (S-043)
   - [Artifact Upload](docs/specs/artifact-upload.md) — canonical flat file-per-layer OCI layout, the Solar Control upload relay, and the WebUI upload flow (S-045 – S-047, U-007)
+  - [GPU-Aware Placement](docs/specs/gpu-aware-placement.md) — per-GPU host telemetry, `gpu_count` intents, per-GPU placement, and `CUDA_VISIBLE_DEVICES` enforcement (S-058)
