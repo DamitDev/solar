@@ -200,6 +200,11 @@ class Instance(BaseModel):
     # request's model field to this. None means "same as the alias".
     served_model_name: str | None = Field(default=None)
 
+    # Capabilities advertised for this instance (populated at create/start by
+    # the host's detector). None means "unknown": solar-control leaves the
+    # upstream's own advertisement untouched.
+    capabilities: list[str] | None = Field(default=None)
+
     # Ephemeral runtime fields (not persisted to disk)
     busy: bool = Field(default=False, exclude=True)
     prefill_progress: float | None = Field(default=None, exclude=True)

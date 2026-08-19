@@ -114,6 +114,7 @@ async def test_refresh_recovers_connected_host_with_empty_instance_cache(host):
                 "port": 3500,
                 "supported_endpoints": ["/v1/chat/completions", "/v1/models"],
                 "served_model_name": None,
+                "capabilities": None,
                 "backend_type": "llamacpp",
                 "api_key": "instance-api-key",
                 "managed_by": None,
@@ -438,3 +439,147 @@ async def test_models_response_fetches_missing_context_size(host):
         result = await gateway.get_available_models()
 
     assert result["data"][0]["meta"]["n_ctx_train"] == 40960
+
+
+@pytest.mark.anyio
+async def test_models_response_stamps_host_capabilities_when_upstream_has_none():
+    """SGLang upstreams advertise no capabilities — the host-derived ones win."""
+    registry_entry = RegistryEntry(
+        host_id="host-1",
+        instance_id="inst-1",
+        url="http://test-host:3500",
+        api_key="instance-api-key",
+        model_alias="qwen3.6:35b",
+        backend_type="sglang",
+        capabilities=["completion", "multimodal"],
+    )
+    upstream_models = {
+        "models": [],
+        "data": [
+            {
+                "id": "qwen3.6-35b",
+                "object": "model",
+                "owned_by": "sglang",
+                "max_model_len": 262144,
+            }
+        ],
+    }
+
+    gateway = OpenAIGateway()
+    gateway.session = _URLSession(
+        {"http://test-host:3500/v1/models": _Response(200, upstream_models)}
+    )
+
+    with patch(
+        "app.gateway.registry_store.get_registry",
+        AsyncMock(return_value={"qwen3.6:35b": [registry_entry]}),
+    ):
+        result = await gateway.get_available_models()
+
+    assert result["data"][0]["capabilities"] == ["completion", "multimodal"]
+
+
+@pytest.mark.anyio
+async def test_models_response_prefers_upstream_capabilities_over_host_ones():
+    """llama.cpp advertises its own capabilities — upstream truth wins."""
+    registry_entry = RegistryEntry(
+        host_id="host-1",
+        instance_id="inst-1",
+        url="http://test-host:3500",
+        api_key="instance-api-key",
+        model_alias="qwen3.8:27b",
+        capabilities=["completion", "multimodal"],
+    )
+    upstream_models = {
+        "models": [
+            {
+                "name": "qwen3.8:27b",
+                "model": "qwen3.8:27b",
+                "capabilities": ["completion"],
+            }
+        ],
+        "data": [
+            {
+                "id": "qwen3.8:27b",
+                "object": "model",
+                "owned_by": "llamacpp",
+            }
+        ],
+    }
+
+    gateway = OpenAIGateway()
+    gateway.session = _URLSession(
+        {"http://test-host:3500/v1/models": _Response(200, upstream_models)}
+    )
+
+    with patch(
+        "app.gateway.registry_store.get_registry",
+        AsyncMock(return_value={"qwen3.8:27b": [registry_entry]}),
+    ):
+        result = await gateway.get_available_models()
+
+    assert result["data"][0]["capabilities"] == ["completion"]
+
+
+def test_ws_instance_payload_carries_capabilities():
+    entry = RegistryEntry.from_ws_instance(
+        host_id="host-1",
+        host_url="http://test-host:8000",
+        host_api_key="k",
+        instance={
+            "id": "inst-1",
+            "alias": "qwen3.6:35b",
+            "backend_type": "sglang",
+            "capabilities": ["completion", "multimodal"],
+            "port": 3500,
+        },
+    )
+
+    assert entry.capabilities == ["completion", "multimodal"]
+
+
+def test_http_instance_payload_carries_capabilities():
+    entry = RegistryEntry.from_http_instance(
+        host_id="host-1",
+        host_url="http://test-host:8000",
+        instance={
+            "id": "inst-1",
+            "port": 3500,
+            "capabilities": ["completion", "multimodal"],
+            "config": {
+                "alias": "qwen3.6:35b",
+                "backend_type": "sglang",
+                "api_key": "k",
+            },
+        },
+    )
+
+    assert entry.capabilities == ["completion", "multimodal"]
+
+
+def test_http_poll_cache_keeps_capabilities_for_the_ws_shape():
+    """The cache re-seeded from polling is read back through
+    from_ws_instance, so dropping it there would strand the advertisement."""
+    cached = OpenAIGateway._ws_cache_from_http_instances(
+        [
+            {
+                "id": "inst-1",
+                "port": 3500,
+                "capabilities": ["completion", "multimodal"],
+                "config": {"alias": "qwen3.6:35b", "backend_type": "sglang"},
+            }
+        ]
+    )
+
+    assert cached[0]["capabilities"] == ["completion", "multimodal"]
+
+
+def test_an_older_host_leaves_capabilities_unset():
+    entry = RegistryEntry.from_ws_instance(
+        host_id="host-1",
+        host_url="http://test-host:8000",
+        host_api_key="k",
+        instance={"id": "inst-1", "alias": "qwen3.6:35b", "port": 3500},
+    )
+
+    assert entry.capabilities is None
