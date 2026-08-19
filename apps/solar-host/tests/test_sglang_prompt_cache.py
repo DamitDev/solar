@@ -186,16 +186,6 @@ class TestDetachPurgePromptCache:
 
         assert detach_instance_prompt_cache("deepseek:flash", "inst-1") is None
 
-    def test_detach_probe_oserror_is_swallowed(
-        self, _isolated_env, monkeypatch
-    ) -> None:
-        self._cache_dir(_isolated_env)
-
-        monkeypatch.setattr(
-            "solar_host.backends.sglang.Path", _failing_path_cls("is_symlink")
-        )
-        assert detach_instance_prompt_cache("deepseek:flash", "inst-1") is None
-
     def test_purge_removes_trash_dir(self, _isolated_env) -> None:
         trash_dir = Path(_isolated_env / "prompt-cache" / f".trash-{_UUID_A}")
         trash_dir.mkdir(parents=True)
@@ -268,11 +258,17 @@ class TestDetachPurgePromptCache:
             while time.time() < deadline and not caplog.records:
                 time.sleep(0.05)
             records = [
-                r for r in caplog.records if r.name == "solar_host.backends.sglang"
+                r
+                for r in caplog.records
+                if r.name == "solar_host.backends.sglang"
+                and r.getMessage().startswith("Purge of")
             ]
             assert len(records) == 1
             # Only the OSError counts: the missing file is a clean purge.
-            assert "left 1 entry behind; first:" in records[0].getMessage()
+            # Read the count from the structured args, not the prose, so a
+            # wording change cannot break the suite.
+            assert records[0].args[1] == 1
+            assert "cache.bin" in records[0].args[2]
 
 
 class TestDetachAllPromptCacheDirs:
@@ -359,20 +355,6 @@ class TestDetachAllPromptCacheDirs:
         monkeypatch.setattr("solar_host.config.settings.sglang_prompt_cache_dir", "")
         assert detach_all_prompt_cache_dirs() == []
 
-    def test_purge_oserror_is_swallowed(self, _isolated_env, monkeypatch) -> None:
-        trash_dir = Path(_isolated_env / "prompt-cache" / f".trash-{_UUID_A}")
-        trash_dir.mkdir(parents=True)
-        purge_entered = threading.Event()
-
-        def _raise(path, *args, **kwargs) -> None:
-            purge_entered.set()
-            raise OSError("permission denied")
-
-        monkeypatch.setattr("solar_host.backends.sglang.shutil.rmtree", _raise)
-        purge_in_background([trash_dir])  # must not raise
-        assert purge_entered.wait(5)
-        assert trash_dir.is_dir()
-
     def test_purge_continues_after_unexpected_error(
         self, _isolated_env, monkeypatch
     ) -> None:
@@ -420,42 +402,66 @@ class TestDetachAllPromptCacheDirs:
         assert len(detached) == 1
         assert detached[0].name.startswith(".trash-")
 
-    def test_root_probe_oserror_is_swallowed(self, _isolated_env, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        ("probe", "only", "detach_fn", "target_name"),
+        [
+            pytest.param(
+                "is_symlink",
+                None,
+                detach_instance_prompt_cache,
+                f"deepseek-flash-{_UUID_A}",
+                id="detach-symlink-probe",
+            ),
+            pytest.param(
+                "is_dir",
+                "root",
+                detach_all_prompt_cache_dirs,
+                f"orphan-{_UUID_A}",
+                id="root-probe",
+            ),
+            pytest.param(
+                "iterdir",
+                None,
+                detach_all_prompt_cache_dirs,
+                f"orphan-{_UUID_A}",
+                id="iterdir-probe",
+            ),
+            pytest.param(
+                "is_dir",
+                "child",
+                detach_all_prompt_cache_dirs,
+                f"orphan-{_UUID_A}",
+                id="child-probe",
+            ),
+        ],
+    )
+    def test_probe_oserror_yields_no_detach(
+        self, _isolated_env, monkeypatch, probe, only, detach_fn, target_name
+    ) -> None:
+        """An OSError from any Path probe yields no detach and no raise.
+
+        The probe points (``is_symlink`` in ``_detach_dir``, the sweep's
+        root ``is_dir`` / ``iterdir``, and its child ``is_dir``) are
+        driven from one parametrized test so the ``Path``-subclass patch
+        stays in a single place.
+        """
         cache_root = Path(_isolated_env / "prompt-cache")
-        # A detachable orphan: without the raise the pass would return it,
-        # so an empty result proves the probe error aborted the scan.
-        orphan = cache_root / f"orphan-{_UUID_A}"
-        orphan.mkdir(parents=True)
+        target = cache_root / target_name
+        target.mkdir(parents=True)
 
-        monkeypatch.setattr(
-            "solar_host.backends.sglang.Path", _failing_path_cls("is_dir")
-        )
-        assert detach_all_prompt_cache_dirs() == []
-        assert orphan.is_dir()
+        def _fails_only(p: Path) -> bool:
+            return (p == cache_root) if only == "root" else (p != cache_root)
 
-    def test_iterdir_oserror_is_swallowed(self, _isolated_env, monkeypatch) -> None:
-        cache_root = Path(_isolated_env / "prompt-cache")
-        orphan = cache_root / f"orphan-{_UUID_A}"
-        orphan.mkdir(parents=True)
-
-        monkeypatch.setattr(
-            "solar_host.backends.sglang.Path", _failing_path_cls("iterdir")
-        )
-        assert detach_all_prompt_cache_dirs() == []
-        assert orphan.is_dir()
-
-    def test_child_probe_oserror_is_swallowed(self, _isolated_env, monkeypatch) -> None:
-        cache_root = Path(_isolated_env / "prompt-cache")
-        orphan = cache_root / f"orphan-{_UUID_A}"
-        orphan.mkdir(parents=True)
-
-        # The root's own probe has to succeed for the scan to reach a child.
         monkeypatch.setattr(
             "solar_host.backends.sglang.Path",
-            _failing_path_cls("is_dir", only=lambda p: p != cache_root),
+            _failing_path_cls(probe, only=_fails_only if only else None),
         )
-        assert detach_all_prompt_cache_dirs() == []
-        assert orphan.is_dir()
+
+        if detach_fn is detach_instance_prompt_cache:
+            assert detach_fn("deepseek:flash", _UUID_A) is None
+        else:
+            assert detach_fn() == []
+        assert target.is_dir()
 
     def test_loose_files_and_symlinks_are_left_alone(
         self, _isolated_env, tmp_path
@@ -728,7 +734,7 @@ class TestProcessManagerTeardown:
                 log_thread.join(timeout=5)
 
     def test_discard_is_noop_while_process_is_tracked(self, _isolated_env) -> None:
-        """A live child owns the dir: _discard_sglang_prompt_cache must not
+        """A live child owns the dir: _discard_prompt_cache_if_idle must not
         detach it. The boot detach pass is the backstop for one we
         deliberately leave behind here."""
         _make_sglang_instance("inst-1", status=InstanceStatus.RUNNING)
@@ -736,7 +742,7 @@ class TestProcessManagerTeardown:
         manager = ProcessManager()
         manager.processes["inst-1"] = object()  # type: ignore[assignment]
 
-        manager._discard_sglang_prompt_cache(config_manager.get_instance("inst-1"))
+        manager._discard_prompt_cache_if_idle(config_manager.get_instance("inst-1"))
 
         assert cache_dir.is_dir()
         assert (cache_dir / "cache.bin").read_bytes() == b"x"
@@ -749,7 +755,7 @@ class TestProcessManagerTeardown:
         cache_dir = self._cache_dir(_isolated_env, "inst-1")
         manager = ProcessManager()
 
-        manager._discard_sglang_prompt_cache(config_manager.get_instance("inst-1"))
+        manager._discard_prompt_cache_if_idle(config_manager.get_instance("inst-1"))
 
         assert cache_dir.is_dir()
         assert (cache_dir / "cache.bin").read_bytes() == b"x"

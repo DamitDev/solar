@@ -92,12 +92,9 @@ _STORAGE_FLAGS: tuple[tuple[str, str], ...] = (
 # Environment variable SGLang's file storage backend reads its directory from.
 HICACHE_STORAGE_DIR_ENV = "SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR"
 
-# Prompt-cache cleanup: dirs are `<sanitized_alias>-<instance_id>` per run,
-# detached on teardown by an atomic O(1) rename to `.trash-<uuid>` so a stop
-# never waits on a multi-GB delete, and purged on a daemon thread nobody
-# joins — an interrupted purge leaves the trash dir for the next boot's
-# detach pass to reclaim. Nothing else may be detached: the suffix guard and
-# the trash prefix scope this to dirs the host created.
+# Teardown detaches a run's dir with an O(1) rename to `.trash-<uuid>`
+# and a daemon thread purges it. Nothing else may be detached: the
+# suffix guard and the trash prefix scope this to dirs the host created.
 _TRASH_PREFIX = ".trash-"
 
 # Both host-created dirs (`<alias>-<uuid4>`) and detached dirs
@@ -184,10 +181,9 @@ def purge_in_background(trash_dirs: list[Path]) -> None:
             return
         if failed:
             logger.warning(
-                "Purge of %s left %d entr%s behind; first: %s",
+                "Purge of %s left %d entries behind; first: %s",
                 trash_dir,
                 failed,
-                "y" if failed == 1 else "ies",
                 first_failure,
             )
 
@@ -205,16 +201,14 @@ def detach_all_prompt_cache_dirs() -> list[Path]:
     host can be in flight while it scans. A surviving orphan child from a
     dead host may still hold one of these dirs — acceptable, because the
     cache is disposable and ``auto_restart_running_instances`` kills the
-    child later in the same boot. Deliberately no
-    live-instance inventory filter: a literal filter would preserve stale
-    RUNNING records' dirs — auto_restart_running_instances resets those
-    to STOPPED before restarting, so build_env's mkdir(exist_ok=True)
-    would silently hand SGLang the previous boot's cache. A child is
-    detached iff it is a real directory (never a symlink or loose file)
-    whose name ends in the uuid suffix every host-created dir carries
-    (``<alias>-<instance_id>``); a name already starting with ``.trash-``
-    is collected as-is. No-op when the root is unset or missing; every
-    probe is best-effort (logged, never fatal).
+    child later in the same boot. Deliberately no live-instance inventory
+    filter (deviation from issue #45; documented in the PR): every
+    host-shaped dir is trash at boot. A child is detached iff it is a real
+    directory (never a symlink or loose file) whose name ends in the uuid
+    suffix every host-created dir carries (``<alias>-<instance_id>``); a
+    name already starting with ``.trash-`` is collected as-is. No-op when
+    the root is unset or missing; every probe is best-effort (logged,
+    never fatal).
     """
     root = settings.sglang_prompt_cache_dir.strip()
     if not root:
