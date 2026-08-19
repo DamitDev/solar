@@ -79,7 +79,7 @@ SGLANG_PROMPT_CACHE_DIR=/var/cache/sglang
 - **SOLAR_CONTROL_URL** - Base URL of solar-control (HTTP; Socket.IO connects to the same origin).
 - **SOLAR_CONTROL_API_KEY** - Management API key from solar-control. The host uses it to connect to the `/hosts` namespace; it must be approved via the management API or WebUI before it appears in the gateway pool.
 - **SGLANG_VENV_PATH** - Virtualenv SGLang is installed into (the directory holding `bin/sglang`). The host launches the executable from it directly, setting `VIRTUAL_ENV` and prepending `bin/` to `PATH` the way `activate` would. Leave empty to use a `sglang` on `PATH`; with neither, `sglang` is dropped from the advertised backends.
-- **SGLANG_PROMPT_CACHE_DIR** - Root of SGLang's file-backed prompt cache. Each instance gets its own `<root>/<alias>-<instance_id>` subdirectory, exported as `SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR`. When it is empty the `--hicache-storage-*` flags are dropped with a warning (the in-memory hierarchical cache still works).
+- **SGLANG_PROMPT_CACHE_DIR** - Root of SGLang's file-backed prompt cache. Each instance gets its own `<root>/<alias>-<instance_id>` subdirectory, exported as `SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR`. When it is empty the `--hicache-storage-*` flags are dropped with a warning (the in-memory hierarchical cache still works). The host deletes the subdirectory when the instance stops and sweeps leftovers at startup, so point it at a dedicated path. While a stop is in flight the dir is transiently visible as `.trash-<uuid>` until the background purge finishes, and the root must be dedicated to a single host — a second host's startup sweep would otherwise discard the first's live caches.
 
 ### 2. Start the server
 
