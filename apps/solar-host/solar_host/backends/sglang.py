@@ -146,27 +146,54 @@ def purge_in_background(trash_dirs: list[Path]) -> None:
     """rmtree the given trash dirs on a daemon thread; never blocks and never raises.
 
     Each dir is purged independently so one failure cannot strand the rest
-    of the batch until the next boot; daemon on purpose, so shutdown never
-    waits on multi-GB unlinks.
+    of the batch until the next boot, and each ``rmtree`` runs with a
+    per-file ``onexc`` callback so one unreadable entry cannot strand the
+    rest of a multi-GB tree; each dir logs one bounded warning whose count
+    only includes real failures — an entry already gone
+    (``FileNotFoundError``) is a clean purge and is not counted. Daemon on
+    purpose, so shutdown never waits on multi-GB unlinks.
     """
     if not trash_dirs:
         return
 
+    def _purge_one(trash_dir: Path) -> None:
+        failed = 0
+        first_failure: str | None = None
+
+        def _record(func, path, exc) -> None:
+            # Already gone: another actor removed it, or the whole dir was
+            # never there. That is a clean purge, not something left behind
+            # (mirrors models_manager.delete_model_files).
+            if isinstance(exc, FileNotFoundError):
+                logger.debug("Purge entry already gone: %s", path)
+                return
+            nonlocal failed, first_failure
+            failed += 1
+            if first_failure is None:
+                first_failure = f"{path}: {exc}"
+
+        try:
+            # onexc: a single unreadable/sticky entry must not strand
+            # the rest of a multi-GB tree until the next boot.
+            shutil.rmtree(trash_dir, onexc=_record)
+        except Exception:
+            logger.exception(
+                "Unexpected error purging SGLang prompt cache trash dir %s",
+                trash_dir,
+            )
+            return
+        if failed:
+            logger.warning(
+                "Purge of %s left %d entr%s behind; first: %s",
+                trash_dir,
+                failed,
+                "y" if failed == 1 else "ies",
+                first_failure,
+            )
+
     def _purge() -> None:
         for trash_dir in trash_dirs:
-            try:
-                shutil.rmtree(trash_dir)
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                logger.warning(
-                    "Cannot purge SGLang prompt cache trash dir %s: %s", trash_dir, exc
-                )
-            except Exception:
-                logger.exception(
-                    "Unexpected error purging SGLang prompt cache trash dir %s",
-                    trash_dir,
-                )
+            _purge_one(trash_dir)
 
     threading.Thread(target=_purge, daemon=True).start()
 
@@ -174,10 +201,14 @@ def purge_in_background(trash_dirs: list[Path]) -> None:
 def detach_all_prompt_cache_dirs() -> list[Path]:
     """Rename every host-created prompt-cache dir under the root aside and return the trash paths.
 
-    Boot-only pass. Deliberately no live-instance inventory filter: at
-    boot nothing can own a dir yet, and a literal filter would preserve
-    stale RUNNING records' dirs — auto_restart_running_instances resets
-    those to STOPPED before restarting, so build_env's mkdir(exist_ok=True)
+    Boot-only pass, and it runs before ``init_clients``: no start of this
+    host can be in flight while it scans. A surviving orphan child from a
+    dead host may still hold one of these dirs — acceptable, because the
+    cache is disposable and ``auto_restart_running_instances`` kills the
+    child later in the same boot. Deliberately no
+    live-instance inventory filter: a literal filter would preserve stale
+    RUNNING records' dirs — auto_restart_running_instances resets those
+    to STOPPED before restarting, so build_env's mkdir(exist_ok=True)
     would silently hand SGLang the previous boot's cache. A child is
     detached iff it is a real directory (never a symlink or loose file)
     whose name ends in the uuid suffix every host-created dir carries

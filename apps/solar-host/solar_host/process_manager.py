@@ -5,6 +5,7 @@ import logging
 import os
 import queue
 import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -1195,8 +1196,6 @@ class ProcessManager:
         if pid is None:
             return
         try:
-            import signal
-
             os.kill(pid, signal.SIGTERM)
             logger.info("Sent SIGTERM to stale PID %d", pid)
         except ProcessLookupError:

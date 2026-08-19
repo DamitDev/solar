@@ -2,6 +2,7 @@
 process-manager teardown coverage — failed starts, stop, delete, child exit,
 the live-run guard, and the boot sweep."""
 
+import logging
 import shutil
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from solar_host.backends.sglang import (
     detach_all_prompt_cache_dirs,
     detach_instance_prompt_cache,
     discard_orphan_prompt_caches,
+    instance_prompt_cache_dir,
     purge_in_background,
 )
 from solar_host.config import config_manager
@@ -202,17 +204,29 @@ class TestDetachPurgePromptCache:
 
         assert _wait_for_removal(trash_dir)
 
-    def test_purge_missing_dir_is_a_noop(self, _isolated_env) -> None:
-        purge_in_background(
-            [Path(_isolated_env / "prompt-cache" / ".trash-never-created")]
-        )  # must not raise
+    def test_purge_missing_dir_is_a_noop(self, _isolated_env, caplog) -> None:
+        """An already-gone trash dir is a clean purge: no warning logged."""
+        with caplog.at_level(logging.WARNING, logger="solar_host.backends.sglang"):
+            purge_in_background(
+                [Path(_isolated_env / "prompt-cache" / ".trash-never-created")]
+            )  # must not raise
+
+            # The purge runs on a daemon thread — poll so the assertion
+            # cannot race it, then require silence from this logger.
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not caplog.records:
+                time.sleep(0.05)
+            records = [
+                r for r in caplog.records if r.name == "solar_host.backends.sglang"
+            ]
+            assert records == []
 
     def test_purge_oserror_is_swallowed(self, _isolated_env, monkeypatch) -> None:
         trash_dir = Path(_isolated_env / "prompt-cache" / f".trash-{_UUID_A}")
         trash_dir.mkdir(parents=True)
         purge_entered = threading.Event()
 
-        def _raise(path) -> None:
+        def _raise(path, *args, **kwargs) -> None:
             purge_entered.set()
             raise OSError("permission denied")
 
@@ -220,6 +234,57 @@ class TestDetachPurgePromptCache:
         purge_in_background([trash_dir])  # must not raise
         assert purge_entered.wait(5)
         assert trash_dir.is_dir()
+
+    def test_purge_onexc_collects_failures_and_logs_one_warning(
+        self, _isolated_env, monkeypatch, caplog
+    ) -> None:
+        """One unreadable entry must not strand the rest of a trash tree.
+
+        rmtree is asserted to run with a callable ``onexc``: per-file
+        OSErrors are collected there and reported as a single bounded
+        warning per trash dir, while the surviving entries are still
+        deleted instead of being deferred to the next boot. An entry
+        already gone (``FileNotFoundError``) is not a failure and must
+        not inflate the count.
+        """
+        trash_dir = Path(_isolated_env / "prompt-cache" / f".trash-{_UUID_A}")
+        trash_dir.mkdir(parents=True)
+        (trash_dir / "cache.bin").write_bytes(b"x")
+        seen: list[dict] = []
+        real_rmtree = shutil.rmtree
+
+        def _recording_rmtree(path, *args, **kwargs):
+            # Synthesize the per-file entries rmtree would report: one
+            # real failure plus one already-gone path.
+            kwargs["onexc"](
+                None, Path(path) / "cache.bin", OSError("permission denied")
+            )
+            kwargs["onexc"](
+                None, Path(path) / "gone.bin", FileNotFoundError("no such file")
+            )
+            seen.append({"path": str(path), "kwargs": kwargs})
+            return real_rmtree(path, *args, **kwargs)
+
+        monkeypatch.setattr(
+            "solar_host.backends.sglang.shutil.rmtree", _recording_rmtree
+        )
+        with caplog.at_level(logging.WARNING, logger="solar_host.backends.sglang"):
+            purge_in_background([trash_dir])
+
+            assert _wait_for_removal(trash_dir)
+            assert len(seen) == 1
+            assert callable(seen[0]["kwargs"].get("onexc"))
+            # The warning lands just after rmtree returns, on the same
+            # daemon thread — poll so the assertion cannot race it.
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not caplog.records:
+                time.sleep(0.05)
+            records = [
+                r for r in caplog.records if r.name == "solar_host.backends.sglang"
+            ]
+            assert len(records) == 1
+            # Only the OSError counts: the missing file is a clean purge.
+            assert "left 1 entry behind; first:" in records[0].getMessage()
 
 
 class TestDetachAllPromptCacheDirs:
@@ -259,6 +324,33 @@ class TestDetachAllPromptCacheDirs:
         purge_in_background(detached)
         assert _wait_for_removal(trash)
 
+    def test_create_instance_id_is_detached_by_sweep(self, _isolated_env) -> None:
+        """The sweep's suffix guard is coupled to create_instance's ID format.
+
+        The detach pass only accepts dirs whose name ends in the uuid4
+        shape ``create_instance`` generates. If that format ever changes
+        without the guard following, the sweep silently stops cleaning
+        and the leak returns with a green suite — this test derives the
+        ID from the real factory so the coupling is enforced, not
+        hardcoded by uuid-shaped constants.
+        """
+        instance = ProcessManager().create_instance(
+            {
+                "backend_type": "sglang",
+                "model_path": "/models/test",
+                "alias": "deepseek:flash",
+            }
+        )
+        cache_dir = instance_prompt_cache_dir("deepseek:flash", instance.id)
+        assert cache_dir is not None
+        cache_dir.mkdir(parents=True)
+
+        detached = detach_all_prompt_cache_dirs()
+
+        assert len(detached) == 1
+        assert not cache_dir.exists()
+        assert detached[0].name.startswith(".trash-")
+
     def test_leaves_non_host_shaped_dirs_alone(self, _isolated_env) -> None:
         cache_root = Path(_isolated_env / "prompt-cache")
         foreign = cache_root / "shared-data"
@@ -284,7 +376,7 @@ class TestDetachAllPromptCacheDirs:
         trash_dir.mkdir(parents=True)
         purge_entered = threading.Event()
 
-        def _raise(path) -> None:
+        def _raise(path, *args, **kwargs) -> None:
             purge_entered.set()
             raise OSError("permission denied")
 
@@ -535,7 +627,7 @@ class TestProcessManagerTeardown:
         _make_sglang_instance("inst-1", status=InstanceStatus.FAILED)
         self._cache_dir(_isolated_env, "inst-1")
 
-        def _raise(path) -> None:
+        def _raise(path, *args, **kwargs) -> None:
             raise OSError("permission denied")
 
         monkeypatch.setattr("solar_host.backends.sglang.shutil.rmtree", _raise)
