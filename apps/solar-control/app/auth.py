@@ -161,7 +161,7 @@ async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyp
             headers=_CORS_HEADERS,
         )
 
-    if path.startswith("/v1/"):
+    if path.startswith(("/v1/", "/cursor/v1/")):
         resolved = await _resolve_endpoint(api_key)
         if resolved:
             endpoint, api_key_id = resolved
@@ -173,7 +173,10 @@ async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyp
             _TOUCH_TASKS.add(task)
             task.add_done_callback(_task_done)
             return await call_next(request)
-        if api_key == settings.management_api_key:
+        # The cursor proxy is tenant-facing by design: only api_keys-table
+        # credentials are accepted, never the management key (S-059). The
+        # management key keeps working on /v1 for operator tooling.
+        if api_key == settings.management_api_key and path.startswith("/v1/"):
             request.state.endpoint = None
             request.state.api_key_id = None
             request.state.endpoint_id = None

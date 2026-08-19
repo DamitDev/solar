@@ -146,6 +146,22 @@ Makes placement and reservations work per physical GPU: hosts report per-GPU tel
 
 ---
 
+### Milestone 0.9: Cursor Proxy
+
+Makes DeepSeek thinking-mode usable from Cursor without per-user local
+proxies: a native `/cursor/v1` endpoint on solar-control that exposes
+reasoning-effort model aliases (`deepseek-v4-flash:max/high`,
+`krumpli:max/high`), restores multi-round tool-call reasoning from a shared
+Redis cache, mirrors thinking into Cursor-visible blocks, and attributes
+traffic to the caller's endpoint key. See
+[docs/specs/cursor-proxy.md](docs/specs/cursor-proxy.md).
+
+| ID | Issue | Repo | Size | Depends on |
+|----|-------|------|------|------------|
+| S-059 | Implement the `/cursor/v1` proxy endpoint end to end: port deepseek-cursor-proxy transform/streaming/reasoning modules (Redis store, async), alias table with effort injection, aiohttp self-HTTP to the /v1 gateway forwarding the caller's API key, auth (endpoint keys only, management key rejected), OpenAI error shapes, tests and docs. No DB migration, no webui surface. | solar-control | M | - |
+
+---
+
 ## Phase 1: Data Repository
 
 > Centralized storage for models and training datasets. Can start in parallel with Phase 0.

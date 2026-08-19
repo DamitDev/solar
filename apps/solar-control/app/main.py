@@ -91,6 +91,13 @@ async def lifespan(app: FastAPI):
         logger.error("Error stopping gateway logger: %s", e)
 
     try:
+        from app.cursor_proxy.service import close_session as close_cursor_session
+
+        await close_cursor_session()
+    except Exception as e:  # noqa: BLE001
+        logger.error("Error closing cursor proxy session: %s", e)
+
+    try:
         await reconciler.stop()
     except Exception as e:  # noqa: BLE001
         logger.error("Error stopping reconciler: %s", e)
@@ -136,7 +143,10 @@ async def _model_not_found_handler(request: Request, exc: HTTPException):
     """
     detail = exc.detail
     if (
-        request.url.path.startswith("/v1/")
+        (
+            request.url.path.startswith("/v1/")
+            or request.url.path.startswith("/cursor/v1/")
+        )
         and isinstance(detail, dict)
         and detail.get("code")
     ):
@@ -149,10 +159,12 @@ async def _model_not_found_handler(request: Request, exc: HTTPException):
 
 
 # Routes
+from app.routes.cursor import router as cursor_router
 from app.routes.management import router as management_router
 from app.routes.openai import router as openai_router
 
 app.include_router(openai_router)
+app.include_router(cursor_router)
 app.include_router(management_router)
 
 
@@ -197,6 +209,10 @@ async def root():
                 "/v1/classify",
                 "/v1/embeddings",
                 "/v1/rerank",
+            ],
+            "cursor": [
+                "/cursor/v1/models",
+                "/cursor/v1/chat/completions",
             ],
             "management": [
                 "/api/hosts",
