@@ -23,6 +23,10 @@ class RegistryEntry(BaseModel):
     supported_endpoints: list[str] = Field(default_factory=list)
     backend_type: str = "llamacpp"
     context_size: int | None = None
+    # Capabilities derived by the host (e.g. ["completion", "multimodal"] for
+    # a vision model). None means the host reported nothing — the gateway
+    # leaves the upstream's own /v1/models advertisement untouched.
+    capabilities: list[str] | None = None
     # The name the backend process was actually launched with, as reported by
     # the host. Differs from the alias only where a backend cannot serve it
     # verbatim (SGLang reads ``:`` as its LoRA separator). None means the
@@ -82,6 +86,7 @@ class RegistryEntry(BaseModel):
             backend_type=instance.get("backend_type", "llamacpp"),
             context_size=cls._extract_context_size(instance),
             served_model_name=instance.get("served_model_name"),
+            capabilities=instance.get("capabilities"),
         )
 
     @classmethod
@@ -116,4 +121,5 @@ class RegistryEntry(BaseModel):
             # Runtime detail of the process, so it sits beside supported_endpoints
             # on the instance rather than inside its config.
             served_model_name=instance.get("served_model_name"),
+            capabilities=instance.get("capabilities"),
         )

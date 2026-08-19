@@ -115,6 +115,7 @@ class OpenAIGateway:
                 # Without it a cache re-seeded from HTTP would forward the alias
                 # to a backend serving a translated name (SGLang and its colon).
                 "served_model_name": instance.get("served_model_name"),
+                "capabilities": instance.get("capabilities"),
                 "backend_type": config.get(
                     "backend_type",
                     instance.get("backend_type", "llamacpp"),
@@ -861,6 +862,16 @@ class OpenAIGateway:
                                 model = {
                                     **model,
                                     "capabilities": caps_by_name[model_id],
+                                }
+                            # SGLang advertises no capabilities at all (no
+                            # Ollama-style models array to copy from). Stamp
+                            # the host-derived capabilities onto the entry so
+                            # downstream apps (e.g. the orchestrator's vision
+                            # sensor) can differentiate text vs multimodal.
+                            if "capabilities" not in model and instance.capabilities:
+                                model = {
+                                    **model,
+                                    "capabilities": instance.capabilities,
                                 }
                             model = self._override_context_metadata(model, context_size)
                             if model_id not in data_dict:

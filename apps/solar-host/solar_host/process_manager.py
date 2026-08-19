@@ -32,6 +32,7 @@ from solar_host.models import (
     InstanceUsageSnapshot,
     LogMessage,
 )
+from solar_host.models.capabilities import capabilities_for_config
 from solar_host.ws_client import (
     broadcast_instance_state_batch,
     broadcast_instances_update,
@@ -710,6 +711,7 @@ class ProcessManager:
             instance.supported_endpoints = runner.get_supported_endpoints()
 
         instance.served_model_name = runner.get_served_model_name(instance.config)
+        instance.capabilities = capabilities_for_config(instance.config)
 
         config_manager.update_instance(instance_id, instance)
 
@@ -991,6 +993,7 @@ class ProcessManager:
             status=InstanceStatus.STOPPED,
             supported_endpoints=supported_endpoints,
             served_model_name=runner.get_served_model_name(config),
+            capabilities=capabilities_for_config(config),
             priority=(
                 InstancePriority(priority) if priority else InstancePriority.PRODUCTION
             ),
