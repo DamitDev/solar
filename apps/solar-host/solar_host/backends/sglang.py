@@ -11,6 +11,8 @@ import logging
 import os
 import re
 import shutil
+import threading
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,7 @@ from solar_host.models.base import (
     InstancePhase,
     InstanceUsageSnapshot,
 )
+from solar_host.naming import sanitize_alias_for_fs
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +91,136 @@ _STORAGE_FLAGS: tuple[tuple[str, str], ...] = (
 
 # Environment variable SGLang's file storage backend reads its directory from.
 HICACHE_STORAGE_DIR_ENV = "SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR"
+
+# Prompt-cache cleanup: dirs are `<sanitized_alias>-<instance_id>` per run,
+# detached on teardown by an atomic O(1) rename to `.trash-<uuid>` so a stop
+# never waits on a multi-GB delete, and purged on a daemon thread nobody
+# joins — an interrupted purge leaves the trash dir for the next boot's
+# detach pass to reclaim. Nothing else may be detached: the suffix guard and
+# the trash prefix scope this to dirs the host created.
+_TRASH_PREFIX = ".trash-"
+
+# Both host-created dirs (`<alias>-<uuid4>`) and detached dirs
+# (`.trash-<uuid4>`) end in this shape, and nothing else may be touched.
+_CACHE_DIR_SUFFIX_RE = re.compile(
+    r"-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
+)
+
+
+def instance_prompt_cache_dir(alias: str, instance_id: str) -> Path | None:
+    """The prompt-cache dir SGLang uses for this instance; None when no root is set."""
+    root = settings.sglang_prompt_cache_dir.strip()
+    if not root:
+        return None
+    return Path(root) / f"{sanitize_alias_for_fs(alias)}-{instance_id}"
+
+
+def _detach_dir(cache_dir: Path) -> Path | None:
+    """Rename *cache_dir* aside to a ``.trash-<uuid>`` sibling (O(1)); None when nothing was detached.
+
+    Symlinks are skipped, never followed; ``FileNotFoundError`` is a no-op
+    and other ``OSError`` is logged only — cleanup must never fail a stop.
+    """
+    trash_dir = cache_dir.with_name(f"{_TRASH_PREFIX}{uuid.uuid4()}")
+    try:
+        if cache_dir.is_symlink():
+            return None
+        cache_dir.rename(trash_dir)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.warning("Cannot detach SGLang prompt cache dir %s: %s", cache_dir, exc)
+        return None
+    return trash_dir
+
+
+def detach_instance_prompt_cache(alias: str, instance_id: str) -> Path | None:
+    """Move an instance's prompt-cache dir aside; None when there is nothing to detach."""
+    cache_dir = instance_prompt_cache_dir(alias, instance_id)
+    if cache_dir is None:
+        return None
+    return _detach_dir(cache_dir)
+
+
+def purge_in_background(trash_dirs: list[Path]) -> None:
+    """rmtree the given trash dirs on a daemon thread; never blocks and never raises.
+
+    Each dir is purged independently so one failure cannot strand the rest
+    of the batch until the next boot; daemon on purpose, so shutdown never
+    waits on multi-GB unlinks.
+    """
+    if not trash_dirs:
+        return
+
+    def _purge() -> None:
+        for trash_dir in trash_dirs:
+            try:
+                shutil.rmtree(trash_dir)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                logger.warning(
+                    "Cannot purge SGLang prompt cache trash dir %s: %s", trash_dir, exc
+                )
+            except Exception:
+                logger.exception(
+                    "Unexpected error purging SGLang prompt cache trash dir %s",
+                    trash_dir,
+                )
+
+    threading.Thread(target=_purge, daemon=True).start()
+
+
+def detach_all_prompt_cache_dirs() -> list[Path]:
+    """Rename every host-created prompt-cache dir under the root aside and return the trash paths.
+
+    Boot-only pass. Deliberately no live-instance inventory filter: at
+    boot nothing can own a dir yet, and a literal filter would preserve
+    stale RUNNING records' dirs — auto_restart_running_instances resets
+    those to STOPPED before restarting, so build_env's mkdir(exist_ok=True)
+    would silently hand SGLang the previous boot's cache. A child is
+    detached iff it is a real directory (never a symlink or loose file)
+    whose name ends in the uuid suffix every host-created dir carries
+    (``<alias>-<instance_id>``); a name already starting with ``.trash-``
+    is collected as-is. No-op when the root is unset or missing; every
+    probe is best-effort (logged, never fatal).
+    """
+    root = settings.sglang_prompt_cache_dir.strip()
+    if not root:
+        return []
+    cache_root = Path(root)
+    try:
+        if not cache_root.is_dir():
+            return []
+        # Snapshot before renaming: unlinking a readdir entry mid-iteration
+        # can skip later siblings on Linux.
+        children = list(cache_root.iterdir())
+    except OSError as exc:
+        logger.warning("Cannot scan SGLang prompt cache root %s: %s", cache_root, exc)
+        return []
+    detached: list[Path] = []
+    for child in children:
+        if _CACHE_DIR_SUFFIX_RE.search(child.name) is None:
+            logger.debug("Skipping %s: not a host-created cache dir", child)
+            continue
+        try:
+            if not child.is_dir() or child.is_symlink():
+                continue
+        except OSError as exc:
+            logger.warning("Cannot inspect SGLang prompt cache dir %s: %s", child, exc)
+            continue
+        if child.name.startswith(_TRASH_PREFIX):
+            detached.append(child)
+            continue
+        trash_dir = _detach_dir(child)
+        if trash_dir is not None:
+            detached.append(trash_dir)
+    return detached
+
+
+def discard_orphan_prompt_caches() -> None:
+    """Boot cleanup: detach leftover prompt-cache dirs and purge them in the background."""
+    purge_in_background(detach_all_prompt_cache_dirs())
 
 
 def served_model_name(alias: str) -> str:
@@ -244,10 +377,11 @@ class SglangRunner(BackendRunner):
             # add variables, so empty is how the removal is expressed.
             env["PYTHONHOME"] = ""
 
-        cache_root = settings.sglang_prompt_cache_dir.strip()
-        if cache_root:
-            alias_safe = config.alias.replace(":", "-").replace("/", "-")
-            cache_dir = Path(cache_root) / f"{alias_safe}-{instance.id}"
+        cache_dir = instance_prompt_cache_dir(config.alias, instance.id)
+        if cache_dir is not None:
+            # A leftover dir may survive here (stop, crash, or a failed
+            # start); the teardown paths and the boot detach pass own its
+            # removal. This only has to (re)create it.
             try:
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 env[HICACHE_STORAGE_DIR_ENV] = str(cache_dir)

@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from solar_host import __version__
 from solar_host.backends import supported_backend_types
+from solar_host.backends.sglang import discard_orphan_prompt_caches
 from solar_host.config import settings
 from solar_host.jobs import JobExecutor, cleanup_loop, job_store
 from solar_host.jobs.step_log_buffer import step_log_flush_loop
@@ -111,6 +112,10 @@ async def lifespan(app: FastAPI):
     settings.hf_cache_dir = str(Path(settings.hf_cache_dir).resolve())
     Path(settings.hf_cache_dir).mkdir(parents=True, exist_ok=True)
     logger.info("HF cache directory: %s", settings.hf_cache_dir)
+
+    # Must run before init_clients: no start can be in flight, so every
+    # host-created dir under the root is an orphan.
+    discard_orphan_prompt_caches()
 
     # --- Job execution layer ---
     from solar_host.docker.errors import DaemonUnavailableError

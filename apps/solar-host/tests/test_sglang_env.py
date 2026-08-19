@@ -6,12 +6,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from solar_host.backends.sglang import HICACHE_STORAGE_DIR_ENV, SglangRunner
+from solar_host.backends.sglang import (
+    HICACHE_STORAGE_DIR_ENV,
+    SglangRunner,
+    instance_prompt_cache_dir,
+)
 from solar_host.models.sglang import SglangConfig
+from solar_host.naming import sanitize_alias_for_fs
 
 
 @pytest.fixture
-def venv(tmp_path, monkeypatch) -> Path:
+def venv(_hermetic_settings, tmp_path, monkeypatch) -> Path:
     path = tmp_path / "sglang-venv"
     (path / "bin").mkdir(parents=True)
     monkeypatch.setattr("solar_host.config.settings.sglang_venv_path", str(path))
@@ -22,9 +27,9 @@ def venv(tmp_path, monkeypatch) -> Path:
 def build_env(
     instance_id: str = "inst-1", **config_overrides: object
 ) -> dict[str, str]:
-    config = SglangConfig(
-        model_path="/models/test", alias="deepseek:flash", **config_overrides
-    )
+    overrides = dict(config_overrides)
+    overrides.setdefault("alias", "deepseek:flash")
+    config = SglangConfig(model_path="/models/test", **overrides)
     instance = SimpleNamespace(config=config, port=8080, id=instance_id)
     return SglangRunner().build_env(instance)
 
@@ -69,6 +74,56 @@ def test_each_instance_gets_its_own_prompt_cache_directory(
 
 def test_no_cache_root_means_no_cache_variable(venv) -> None:
     assert HICACHE_STORAGE_DIR_ENV not in build_env()
+
+
+def test_empty_cache_root_helper_is_none(venv) -> None:
+    assert instance_prompt_cache_dir("deepseek:flash", "inst-1") is None
+
+
+def test_sanitize_alias_for_fs(venv) -> None:
+    assert sanitize_alias_for_fs("qwen3.6:8b/merged") == "qwen3.6-8b-merged"
+    assert sanitize_alias_for_fs("plain-name") == "plain-name"
+
+
+def test_helper_matches_build_env_path(venv, tmp_path, monkeypatch) -> None:
+    """The shared helper produces exactly the dir build_env points SGLang at,
+    for an alias carrying both a colon and a slash."""
+    cache_root = tmp_path / "prompt-cache"
+    monkeypatch.setattr(
+        "solar_host.config.settings.sglang_prompt_cache_dir", str(cache_root)
+    )
+
+    env = build_env("inst-9", alias="qwen3.6:8b/merged")
+
+    assert env[HICACHE_STORAGE_DIR_ENV] == str(
+        instance_prompt_cache_dir("qwen3.6:8b/merged", "inst-9")
+    )
+    assert env[HICACHE_STORAGE_DIR_ENV] == str(cache_root / "qwen3.6-8b-merged-inst-9")
+
+
+def test_build_env_creates_cache_dir_without_deleting_contents(
+    venv, tmp_path, monkeypatch
+) -> None:
+    """Mkdir-only contract: a leftover dir's contents survive build_env.
+
+    Leftover dirs are removed by the teardown paths and the boot detach
+    pass, never by build_env, which just (re)creates the dir it points
+    SGLang at.
+    """
+    cache_root = tmp_path / "prompt-cache"
+    monkeypatch.setattr(
+        "solar_host.config.settings.sglang_prompt_cache_dir", str(cache_root)
+    )
+    cache_dir = cache_root / "deepseek-flash-inst-1"
+    cache_dir.mkdir(parents=True)
+    leftover = cache_dir / "leftover.bin"
+    leftover.write_bytes(b"x" * 16)
+
+    env = build_env("inst-1")
+
+    assert env[HICACHE_STORAGE_DIR_ENV] == str(cache_dir)
+    assert cache_dir.is_dir()
+    assert (cache_dir / "leftover.bin").read_bytes() == b"x" * 16
 
 
 def test_extra_env_is_passed_through(venv) -> None:
