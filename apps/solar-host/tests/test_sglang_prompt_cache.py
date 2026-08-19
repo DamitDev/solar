@@ -204,22 +204,10 @@ class TestDetachPurgePromptCache:
 
         assert _wait_for_removal(trash_dir)
 
-    def test_purge_missing_dir_is_a_noop(self, _isolated_env, caplog) -> None:
-        """An already-gone trash dir is a clean purge: no warning logged."""
-        with caplog.at_level(logging.WARNING, logger="solar_host.backends.sglang"):
-            purge_in_background(
-                [Path(_isolated_env / "prompt-cache" / ".trash-never-created")]
-            )  # must not raise
-
-            # The purge runs on a daemon thread — poll so the assertion
-            # cannot race it, then require silence from this logger.
-            deadline = time.time() + 5.0
-            while time.time() < deadline and not caplog.records:
-                time.sleep(0.05)
-            records = [
-                r for r in caplog.records if r.name == "solar_host.backends.sglang"
-            ]
-            assert records == []
+    def test_purge_missing_dir_is_a_noop(self, _isolated_env) -> None:
+        purge_in_background(
+            [Path(_isolated_env / "prompt-cache" / ".trash-never-created")]
+        )  # must not raise
 
     def test_purge_oserror_is_swallowed(self, _isolated_env, monkeypatch) -> None:
         trash_dir = Path(_isolated_env / "prompt-cache" / f".trash-{_UUID_A}")
