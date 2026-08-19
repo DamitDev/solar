@@ -109,5 +109,19 @@ class Settings(BaseSettings):
     # short enough that the pulls hash does not grow without bound.
     pull_progress_terminal_grace_s: float = 300.0
 
+    # Cursor proxy (/cursor/v1, S-059)
+    # Self-HTTP target: solar-control's own /v1 gateway on the pod port.
+    cursor_upstream_base_url: str = "http://127.0.0.1:8015/v1"
+    cursor_upstream_model: str = "deepseek-v4-flash:284b"
+    cursor_thinking: str = "enabled"
+    cursor_reasoning_effort: str = "max"
+    cursor_request_timeout_s: float = 300.0
+    cursor_max_request_body_bytes: int = 20 * 1024 * 1024
+    cursor_missing_reasoning_strategy: str = "recover"
+    cursor_reasoning_cache_max_age_s: int = 30 * 24 * 60 * 60
+    cursor_reasoning_cache_max_rows: int = 100_000
+    cursor_display_reasoning: bool = True
+    cursor_collapsible_reasoning: bool = True
+
 
 settings = Settings()
