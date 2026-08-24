@@ -220,3 +220,104 @@ async def test_stream_rewrites_sse_and_closes_blocks(fake_redis):
     sent_headers = session.last_kwargs["headers"]
     assert sent_headers["Authorization"] == "Bearer sk-user-key"
     assert sent_headers["Accept"] == "text/event-stream"
+
+
+async def test_stream_injects_recovery_notice_into_content(fake_redis):
+    """A recovered request must surface the boundary marker to Cursor: the
+    notice is injected into the streamed content so the next turn can
+    truncate to the boundary instead of re-wiping the whole history."""
+    stream_lines = [
+        b'data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-flash-284b","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n',
+        b'data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-flash-284b","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}\n\n',
+        b'data: {"id":"1","object":"chat.completion.chunk","created":2,"model":"deepseek-v4-flash-284b","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    session = _FakeSession(_FakeResponse(status=200, lines=stream_lines))
+    # Unrecoverable tool round -> recovery -> notice is generated.
+    payload = {
+        "model": "krumpli:max",
+        "messages": [
+            {"role": "user", "content": "Use the tool."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_x",
+                        "type": "function",
+                        "function": {"name": "sync", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_x", "content": "ok"},
+        ],
+        "stream": True,
+    }
+    with patch(
+        "app.cursor_proxy.service.ensure_session", new=AsyncMock(return_value=session)
+    ):
+        chunks = [
+            chunk
+            async for chunk in proxy_stream(
+                payload,
+                CONFIG,
+                authorization="Bearer sk-user-key",
+                original_model="krumpli:max",
+                reasoning_effort="max",
+            )
+        ]
+    joined = b"".join(chunks)
+    assert b"[deepseek-cursor-proxy] Refreshed reasoning_content history." in joined
+    assert b"data: [DONE]" in joined
+
+
+async def test_stream_emits_recovery_notice_chunk_before_done_when_never_injected(
+    fake_redis,
+):
+    """A reasoning-only stream never carries a content/tool_calls chunk, so
+    the pending notice falls out at [DONE] as a standalone SSE chunk."""
+    stream_lines = [
+        b'data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-flash-284b","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}\n\n',
+        b'data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"deepseek-v4-flash-284b","choices":[{"index":0,"delta":{"reasoning_content":"thinking"},"finish_reason":null}]}\n\n',
+        b'data: {"id":"1","object":"chat.completion.chunk","created":2,"model":"deepseek-v4-flash-284b","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+    session = _FakeSession(_FakeResponse(status=200, lines=stream_lines))
+    payload = {
+        "model": "krumpli:max",
+        "messages": [
+            {"role": "user", "content": "Use the tool."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_x",
+                        "type": "function",
+                        "function": {"name": "sync", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_x", "content": "ok"},
+        ],
+        "stream": True,
+    }
+    with patch(
+        "app.cursor_proxy.service.ensure_session", new=AsyncMock(return_value=session)
+    ):
+        chunks = [
+            chunk
+            async for chunk in proxy_stream(
+                payload,
+                CONFIG,
+                authorization="Bearer sk-user-key",
+                original_model="krumpli:max",
+                reasoning_effort="max",
+            )
+        ]
+    joined = b"".join(chunks)
+    assert b"[deepseek-cursor-proxy] Refreshed reasoning_content history." in joined
+    # The notice chunk precedes the terminator.
+    notice_at = joined.find(b"[deepseek-cursor-proxy]")
+    done_at = joined.find(b"data: [DONE]")
+    assert notice_at != -1 and done_at != -1 and notice_at < done_at
