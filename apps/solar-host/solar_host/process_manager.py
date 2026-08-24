@@ -5,6 +5,7 @@ import logging
 import os
 import queue
 import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -19,7 +20,11 @@ from typing import Any
 from solar_host.backends.base import BackendRunner
 from solar_host.backends.huggingface import HuggingFaceRunner
 from solar_host.backends.llamacpp import LlamaCppRunner
-from solar_host.backends.sglang import SglangRunner
+from solar_host.backends.sglang import (
+    SglangRunner,
+    detach_instance_prompt_cache,
+    purge_in_background,
+)
 from solar_host.config import config_manager, parse_instance_config, settings
 from solar_host.models import (
     BackendType,
@@ -33,6 +38,7 @@ from solar_host.models import (
     LogMessage,
 )
 from solar_host.models.capabilities import capabilities_for_config
+from solar_host.naming import sanitize_alias_for_fs
 from solar_host.ws_client import (
     broadcast_instance_state_batch,
     broadcast_instances_update,
@@ -194,6 +200,46 @@ class ProcessManager:
         self.instance_usage_snapshots.pop(instance_id, None)
         self.ready_events.pop(instance_id, None)
 
+    def _discard_prompt_cache_now(self, instance: Instance) -> None:
+        """Detach and purge *instance*'s SGLang prompt-cache dir; never raises.
+
+        Unconditional: the caller owns the decision that no live run needs
+        the dir. Teardown paths must go through
+        :meth:`_discard_prompt_cache_if_idle` instead.
+        """
+        if getattr(instance.config, "backend_type", None) != "sglang":
+            return
+        try:
+            trash_dir = detach_instance_prompt_cache(instance.config.alias, instance.id)
+            if trash_dir is not None:
+                purge_in_background([trash_dir])
+        except Exception:
+            # Cleanup is best-effort; a helper regression must not fail a
+            # stop, purge or delete.
+            logger.exception(
+                "Failed to discard SGLang prompt cache dir for instance %s",
+                instance.id,
+            )
+
+    def _discard_prompt_cache_if_idle(self, instance: Instance | None) -> None:
+        """Teardown discard: skips a dir a live run still owns."""
+        if instance is None:
+            return
+        if instance.id in self.processes:
+            # A live child is still writing into this dir; the boot detach
+            # pass is the backstop for one we deliberately leave behind here.
+            return
+        # STARTING is published before build_env (re)creates the dir, so a
+        # live-record check closes the teardown-vs-fresh-start race. A
+        # missing record (delete path) still counts as dead.
+        current = config_manager.get_instance(instance.id)
+        if current is not None and current.status in (
+            InstanceStatus.RUNNING,
+            InstanceStatus.STARTING,
+        ):
+            return
+        self._discard_prompt_cache_now(instance)
+
     def _retain_dead_logs(self, instance_id: str) -> None:
         """Register a retained dead-instance log buffer, evicting the oldest."""
         self._retained_log_ids.pop(instance_id, None)
@@ -216,6 +262,7 @@ class ProcessManager:
 
         Idempotent: safe from log thread EOF and watchdog; skips intentional stops.
         """
+        reaped: Instance | None = None
         with self._child_exit_lock:
             instance = config_manager.get_instance(instance_id)
             if not instance:
@@ -267,7 +314,12 @@ class ProcessManager:
             self._purge_instance_resources(
                 instance_id, call_runner_on_stop=True, keep_logs=True
             )
+            reaped = instance
             self._push_instances_update()
+        # Outside the lock: _mark_instance_ready contends on it from other
+        # instances' log threads — no teardown work may run under it.
+        if reaped is not None:
+            self._discard_prompt_cache_if_idle(reaped)
 
     def _signal_ready(self, instance_id: str) -> None:
         """Wake an awaiter parked in _try_start_instance (thread-safe)."""
@@ -645,6 +697,13 @@ class ProcessManager:
         """Start a model server instance with iterative retry."""
         for attempt in range(1 + settings.max_retries):
             result = await self._try_start_instance(instance_id, attempt)
+            if result is not True:
+                # The attempt is over (failure or retry): the record is
+                # final by now, so detach its cache dir — a retry (or
+                # later start) must not inherit it.
+                self._discard_prompt_cache_if_idle(
+                    config_manager.get_instance(instance_id)
+                )
             if result is not None:
                 return result
             # result is None means "retry"
@@ -728,7 +787,7 @@ class ProcessManager:
         try:
             cmd = runner.build_command(instance)
 
-            alias_safe = instance.config.alias.replace(":", "-").replace("/", "-")
+            alias_safe = sanitize_alias_for_fs(instance.config.alias)
             # Instance-addressable log file (C2): the id in the name makes
             # the file findable after the instance record is gone.
             log_file = self.log_dir / (
@@ -737,6 +796,10 @@ class ProcessManager:
 
             run_env = os.environ.copy()
             run_env["PYTHONUNBUFFERED"] = "1"
+            # build_env only mkdirs(exist_ok=True): a leftover from an
+            # earlier run must not be handed to this one, and no live run
+            # owns the dir here (a tracked process returned early above).
+            self._discard_prompt_cache_now(instance)
             run_env.update(runner.build_env(instance))
             run_cmd = ["stdbuf", "-oL"] + cmd if _HAS_STDBUF else cmd
 
@@ -849,6 +912,9 @@ class ProcessManager:
             instance.started_at = None
             instance.error_message = None
             config_manager.update_instance(instance_id, instance)
+            # The process is already dead; drop its per-run prompt cache,
+            # which the stopped path below would otherwise never reach.
+            self._discard_prompt_cache_if_idle(instance)
             self._push_instances_update()
             return True
 
@@ -884,6 +950,9 @@ class ProcessManager:
             instance.started_at = None
             config_manager.update_instance(instance_id, instance)
 
+            # Detach this run's prompt-cache dir (per-run trash).
+            self._discard_prompt_cache_if_idle(instance)
+
             await self._cleanup_old_logs(instance.config.alias)
 
             self._push_instances_update()
@@ -905,7 +974,7 @@ class ProcessManager:
         intent with a single post-mortem, discarding every other replica's.
         """
         try:
-            alias_safe = alias.replace(":", "-").replace("/", "-")
+            alias_safe = sanitize_alias_for_fs(alias)
             pattern = f"{alias_safe}_*.log"
             files: list[tuple[Path, float, str]] = []
             for log_file in self.log_dir.glob(pattern):
@@ -1078,6 +1147,10 @@ class ProcessManager:
             log_thread.join(timeout=3)
 
         self._purge_instance_resources(instance_id, call_runner_on_stop=False)
+        # Sole cleanup for delete-while-running: the process and the record
+        # are gone by now, so the log thread's _handle_child_exit returns
+        # early and never discards — this call is not a fallback.
+        self._discard_prompt_cache_if_idle(instance)
         # Delete is the one operation that genuinely discards the logs
         # (C2): the retained buffer registry and exit-code record go too.
         self._retained_log_ids.pop(instance_id, None)
@@ -1121,8 +1194,6 @@ class ProcessManager:
         if pid is None:
             return
         try:
-            import signal
-
             os.kill(pid, signal.SIGTERM)
             logger.info("Sent SIGTERM to stale PID %d", pid)
         except ProcessLookupError:
