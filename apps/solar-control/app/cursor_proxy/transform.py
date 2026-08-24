@@ -18,7 +18,11 @@ from .reasoning_store import (
     tool_call_signature,
     turn_context_signature,
 )
-from .streaming import fold_reasoning_into_content
+from .streaming import (
+    THINKING_BLOCK_END,
+    THINKING_BLOCK_START,
+    fold_reasoning_into_content,
+)
 
 SUPPORTED_REQUEST_FIELDS = {
     "model",
@@ -160,7 +164,96 @@ def extract_text_content(content: Any) -> str | None:
 
 
 def strip_cursor_thinking_blocks(content: str) -> str:
-    return CURSOR_THINKING_BLOCK_RE.sub("", content).lstrip("\r\n")
+    """Remove display markup from assistant content before the model sees it.
+
+    Handles Cursor-style `` / `<details>` thinking blocks plus the
+    proxy's own folded reasoning blocks (``display_reasoning``). The
+    folded blocks are stripped by their exact adapter markers with
+    nesting awareness: a literal ``</details>`` inside the reasoning can
+    no longer truncate the match early and leak markup (which previously
+    broke the message signature and sent the reasoning repair into the
+    recovery/loop path).
+    """
+    stripped = _strip_folded_details_blocks(content)
+    stripped = _strip_non_collapsible_blocks(stripped)
+    return CURSOR_THINKING_BLOCK_RE.sub("", stripped).lstrip("\r\n")
+
+
+_FOLDED_DETAILS_START_RE = re.compile(
+    r"<details\b[^>]*>\s*<summary\b[^>]*>\s*Thinking\s*</summary>\s*",
+    re.IGNORECASE,
+)
+_DETAILS_OPENER_RE = re.compile(r"<details\b", re.IGNORECASE)
+_LINE_LEVEL_DETAILS_CLOSE_RE = re.compile(r"\n</details>\s*\n", re.IGNORECASE)
+
+
+def _matching_folded_block_end(content: str, start: int, start_len: int) -> int:
+    """Index just past the close of the folded block opening at ``start``.
+
+    ``<details`` openers inside the reasoning increment depth; only
+    line-level ``</details>`` (the adapter's close shape) decrement it.
+    When the scan runs out (e.g. a prose mention of ``<details>`` that is
+    never closed), fall back to the last line-level closer seen.
+    Returns -1 when the block is unclosed.
+    """
+    depth = 1
+    pos = start + start_len
+    last_close_end = -1
+    while pos < len(content):
+        opener = _DETAILS_OPENER_RE.search(content, pos)
+        closer = _LINE_LEVEL_DETAILS_CLOSE_RE.search(content, pos)
+        if closer is None:
+            return last_close_end
+        if opener is not None and opener.start() < closer.start():
+            depth += 1
+            pos = opener.end()
+            continue
+        depth -= 1
+        last_close_end = closer.end()
+        pos = closer.end()
+        if depth == 0:
+            return pos
+    return last_close_end
+
+
+def _strip_folded_details_blocks(content: str) -> str:
+    if not content:
+        return content
+    parts: list[str] = []
+    pos = 0
+    while True:
+        match = _FOLDED_DETAILS_START_RE.search(content, pos)
+        if match is None:
+            parts.append(content[pos:])
+            return "".join(parts)
+        end_idx = _matching_folded_block_end(
+            content, match.start(), len(match.group(0))
+        )
+        if end_idx == -1:
+            parts.append(content[pos:])
+            return "".join(parts)
+        parts.append(content[pos : match.start()])
+        pos = end_idx
+
+
+def _strip_non_collapsible_blocks(content: str) -> str:
+    if not content:
+        return content
+    parts: list[str] = []
+    pos = 0
+    while True:
+        start_idx = content.find(THINKING_BLOCK_START, pos)
+        if start_idx == -1:
+            parts.append(content[pos:])
+            return "".join(parts)
+        end_idx = content.find(
+            THINKING_BLOCK_END, start_idx + len(THINKING_BLOCK_START)
+        )
+        if end_idx == -1:
+            parts.append(content[pos:])
+            return "".join(parts)
+        parts.append(content[pos:start_idx])
+        pos = end_idx + len(THINKING_BLOCK_END)
 
 
 def normalize_tool_call(tool_call: Any) -> dict[str, Any]:
@@ -868,6 +961,16 @@ async def prepare_upstream_request(
             keep_reasoning=not thinking_disabled,
         )
         reasoning_diagnostics.extend(latest_diagnostics)
+    for diagnostic in reasoning_diagnostics:
+        if diagnostic.get("missing"):
+            LOG.warning(
+                "reasoning_content missing for assistant message %s "
+                "(scope %s…, tool_call_ids=%s) — %s recovery",
+                diagnostic.get("message_index"),
+                str(diagnostic.get("lookup_scope"))[:12],
+                diagnostic.get("tool_call_ids"),
+                config.missing_reasoning_strategy,
+            )
     active_record_response_scope = conversation_scope(messages, cache_namespace)
     record_response_contexts = response_recording_contexts(
         (record_response_scope, record_response_messages),

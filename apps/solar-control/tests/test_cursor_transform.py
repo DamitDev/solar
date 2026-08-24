@@ -11,12 +11,24 @@ from unittest.mock import patch
 import pytest
 
 from app.cursor_proxy.config import ProxyConfig
-from app.cursor_proxy.reasoning_store import ReasoningStore, conversation_scope
+from app.cursor_proxy.reasoning_store import (
+    ReasoningStore,
+    conversation_scope,
+    message_signature,
+)
+from app.cursor_proxy.streaming import (
+    COLLAPSIBLE_THINKING_BLOCK_END,
+    COLLAPSIBLE_THINKING_BLOCK_START,
+    THINKING_BLOCK_END,
+    THINKING_BLOCK_START,
+)
 from app.cursor_proxy.transform import (
+    active_messages_from_recovery_boundary,
     normalize_reasoning_effort,
     prepare_upstream_request,
     reasoning_cache_namespace,
     rewrite_response_body,
+    strip_cursor_thinking_blocks,
     upstream_model_for,
 )
 
@@ -268,3 +280,99 @@ async def test_rewrite_records_reasoning_to_store(store):
     }
     restored = await store.lookup_for_message(probe, conversation_scope(prior, ""), "")
     assert restored == "Tool reasoning."
+
+
+def _folded(reasoning: str, content: str, collapsible: bool = True) -> str:
+    start = COLLAPSIBLE_THINKING_BLOCK_START if collapsible else THINKING_BLOCK_START
+    end = COLLAPSIBLE_THINKING_BLOCK_END if collapsible else THINKING_BLOCK_END
+    return f"{start}{reasoning}{end}{content}"
+
+
+def test_strip_folded_blocks_is_lossless_for_clean_reasoning():
+    content = _folded("I should inspect the repo.", "Let me look.")
+    assert strip_cursor_thinking_blocks(content) == "Let me look."
+
+
+def test_strip_folded_blocks_ignores_embedded_details_close():
+    # Regression for the loop trigger: reasoning mentioning </details> used to
+    # truncate the non-greedy regex early, leaking markup into the echo and
+    # breaking the reasoning-cache message signature.
+    content = _folded(
+        "The proxy closes the block with </details>.", "Let me check the tools."
+    )
+    assert strip_cursor_thinking_blocks(content) == "Let me check the tools."
+
+
+def test_strip_folded_blocks_handles_nested_blocks():
+    nested = _folded(
+        _folded("inner analysis", "back outside"),
+        "Final.",
+    )
+    assert strip_cursor_thinking_blocks(nested) == "Final."
+
+
+def test_strip_folded_blocks_handles_non_collapsible_format():
+    content = _folded("think here", "Visible.", collapsible=False)
+    assert strip_cursor_thinking_blocks(content) == "Visible."
+
+
+def test_strip_folded_blocks_keeps_signature_stable_across_echo():
+    """The echo (folded content stripped on the way in) must yield the same
+    message signature as the clean content the proxy recorded."""
+    reasoning = "Mentions </details> and <details> markup."
+    clean = "Let me check the tools."
+    echoed = strip_cursor_thinking_blocks(_folded(reasoning, clean))
+    assert echoed == clean
+    assert message_signature({"role": "assistant", "content": echoed}) == (
+        message_signature({"role": "assistant", "content": clean})
+    )
+
+
+def test_strip_keeps_cursor_native_thinking_blocks_strippable():
+    content = (
+        "Let me think.\n<details>\n<summary>Thinking</summary>\n\n"
+        "old style\n</details>\n\nAnswer."
+    )
+    stripped = strip_cursor_thinking_blocks(content)
+    assert "<details>" not in stripped
+    assert stripped.endswith("Answer.")
+
+
+def test_recovery_boundary_truncates_only_to_notice():
+    """The streamed recovery notice becomes the boundary for the next turn:
+    history before it is retired, the notice-carrying turn and the tool
+    result survive, so the recovery converges instead of re-wiping."""
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "Q1"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "g", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "r1"},
+        {
+            "role": "assistant",
+            "content": "[deepseek-cursor-proxy] Refreshed reasoning_content history.\n\nPlan.",
+        },
+        {"role": "tool", "tool_call_id": "c2", "content": "r2"},
+    ]
+    boundary = active_messages_from_recovery_boundary(messages)
+    assert boundary is not None
+    active, retired, step = boundary
+    assert step["strategy"] == "continued_recovery_boundary"
+    assert retired == 2  # the first tool round (assistant + tool result) retired
+    assert [m["role"] for m in active] == [
+        "system",
+        "system",  # recovery system notice
+        "user",
+        "assistant",
+        "tool",
+    ]
+    assert active[3]["content"].startswith("[deepseek-cursor-proxy]")

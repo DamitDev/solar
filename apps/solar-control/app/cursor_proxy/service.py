@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -229,12 +230,17 @@ async def proxy_stream(
             else [(scope, response_prior_messages)]
         )
         finalized = False
+        pending_recovery_notice = prepared.recovery_notice
         try:
             while True:
                 line = await response.content.readline()
                 if not line:
                     break
-                rewritten, finalized = await _rewrite_sse_line(
+                (
+                    rewritten,
+                    finalized,
+                    pending_recovery_notice,
+                ) = await _rewrite_sse_line(
                     line,
                     original_model,
                     accumulator,
@@ -242,6 +248,7 @@ async def proxy_stream(
                     prepared.cache_namespace,
                     response_contexts,
                     display_adapter,
+                    pending_recovery_notice,
                 )
                 yield rewritten
                 if finalized:
@@ -262,10 +269,11 @@ async def _rewrite_sse_line(
     cache_namespace: str,
     response_contexts: list[tuple[str, list[dict[str, Any]]]],
     display_adapter: CursorReasoningDisplayAdapter | None,
-) -> tuple[bytes, bool]:
+    recovery_notice: str | None = None,
+) -> tuple[bytes, bool, str | None]:
     stripped = line.strip()
     if not stripped.startswith(b"data:"):
-        return line, False
+        return line, False, recovery_notice
 
     data = stripped[len(b"data:") :].strip()
     if data == b"[DONE]":
@@ -278,14 +286,22 @@ async def _rewrite_sse_line(
             closing_chunk = display_adapter.flush_chunk(original_model)
             if closing_chunk is not None:
                 prefix += _sse_data(closing_chunk)
-        return prefix + b"data: [DONE]\n\n", True
+        # The recovery notice is Cursor's boundary marker: it is echoed back
+        # in the next turn, and the proxy then truncates only to that marker
+        # instead of wiping the whole history again. Without it the recovery
+        # never converges and the client loops (see issue #52).
+        if recovery_notice:
+            prefix += _sse_data(_recovery_notice_chunk(original_model, recovery_notice))
+        return prefix + b"data: [DONE]\n\n", True, None
 
     try:
         chunk = json.loads(data.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
-        return line, False
+        return line, False, recovery_notice
 
     if isinstance(chunk, dict):
+        if recovery_notice and _inject_recovery_notice(chunk, recovery_notice):
+            recovery_notice = None
         accumulator.ingest_chunk(chunk)
         for scope, prior_messages in response_contexts:
             await accumulator.store_ready_reasoning(
@@ -299,8 +315,9 @@ async def _rewrite_sse_line(
         return (
             _sse_data(chunk, ending),
             False,
+            recovery_notice,
         )
-    return line, False
+    return line, False, recovery_notice
 
 
 def _sse_data(payload: dict[str, Any], ending: bytes = b"\n\n") -> bytes:
@@ -309,3 +326,44 @@ def _sse_data(payload: dict[str, Any], ending: bytes = b"\n\n") -> bytes:
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         + ending
     )
+
+
+def _inject_recovery_notice(chunk: dict[str, Any], notice: str) -> bool:
+    """Prepend the recovery notice to the first chunk that carries content
+    or tool calls (mirrors upstream deepseek-cursor-proxy server.py). The
+    notice becomes part of the recorded assistant message, so the echoed
+    message keeps matching the cache on later turns."""
+    choices = chunk.get("choices")
+    if not isinstance(choices, list):
+        return False
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        if "content" not in delta and not delta.get("tool_calls"):
+            continue
+        existing_content = delta.get("content")
+        delta["content"] = notice + (
+            existing_content if isinstance(existing_content, str) else ""
+        )
+        return True
+    return False
+
+
+def _recovery_notice_chunk(model: str, notice: str) -> dict[str, Any]:
+    """Standalone SSE chunk carrying the recovery-notice boundary marker."""
+    return {
+        "id": "chatcmpl-deepseek-cursor-proxy-recovery",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"content": notice},
+                "finish_reason": None,
+            }
+        ],
+    }
