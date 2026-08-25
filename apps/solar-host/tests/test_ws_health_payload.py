@@ -32,6 +32,17 @@ class _Snap:
     vram = _Dim(24.0, 2.0, 4.0, 6.0, 18.0)
     ram = _Dim(128.0, 20.0, 8.0, 28.0, 100.0)
     disk = _Dim(500.0, 100.0, 0.0, 100.0, 400.0)
+    # S-058: per-device telemetry included in the full-resources payload.
+    # Tupled for the mutable-default linter; serialized back to an array.
+    gpus = (
+        {
+            "index": 0,
+            "name": "RTX 4090",
+            "total_gb": 24.0,
+            "used_gb": 20.0,
+            "available_gb": 4.0,
+        },
+    )
 
     def __init__(self):
         self.reservations = [
@@ -75,6 +86,7 @@ class _Snap:
                 "available_gb": self.disk.available_gb,
             },
             "reservations": self.reservations,
+            "gpus": list(self.gpus),
         }
 
 
@@ -117,6 +129,10 @@ async def test_send_health_carries_full_resource_snapshot(monkeypatch):
     assert data["resources"] == snap.model_dump(mode="json")
     assert data["resources"]["memory_type"] == "VRAM"
     assert data["resources"]["reservations"][0]["job_id"] == "job-7"
+    # S-058: per-device telemetry rides along the instant the snapshot
+    # carries it — no second serialization path.
+    assert data["resources"]["gpus"][0]["index"] == 0
+    assert data["resources"]["gpus"][0]["available_gb"] == 4.0
 
     # Legacy summary keys still present for older control versions.
     assert data["reservations"]["active_count"] == 1

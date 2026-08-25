@@ -702,6 +702,7 @@ async def test_migrate_happy_path(source_host, target_host, instance_config):
         assert len(result.steps) == 9
         for step in result.steps:
             assert step.status == "ok", f"Step '{step.step}' failed"
+
         step_names = [s.step for s in result.steps]
         assert "disown_source" in step_names
 
@@ -716,6 +717,224 @@ async def test_migrate_happy_path(source_host, target_host, instance_config):
         # would otherwise see a shortfall and race a duplicate CREATE).
         assert mock_settle.call_count == 2
         assert all(call.args[0] == "intent-1" for call in mock_settle.call_args_list)
+
+
+# ── S-058: gpu_ids on the migration target ─────────────────────────
+
+
+@pytest.mark.anyio
+async def test_execute_migration_carries_supplied_gpu_ids(
+    source_host, target_host, instance_config
+):
+    """S-058: the reconciler's assignment travels into the target create."""
+    from app.services.reconciliation import reconciler
+
+    with (
+        patch("app.services.migration.host_db") as mock_db,
+        patch("app.services.migration.host_store") as mock_store,
+        patch("app.services.migration.check_no_active_training") as mock_train_check,
+        patch("app.services.migration.ensure_model_on_target") as mock_ensure,
+        patch("app.services.migration.stop_source_instance") as mock_stop,
+        patch("app.services.migration.create_instance_on_host") as mock_create,
+        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.put") as mock_put,
+        patch("app.database.intents.intent_db") as mock_intent_db,
+        patch.object(reconciler, "settle_intent"),
+        # The API path must NOT re-derive when the caller supplied devices.
+        patch(
+            "app.services.migration._derive_target_gpu_assignment",
+            new=AsyncMock(side_effect=AssertionError("must not be called")),
+        ),
+    ):
+        mock_db.get_host = AsyncMock(
+            side_effect=lambda hid: (
+                source_host
+                if hid == "host-src"
+                else target_host if hid == "host-tgt" else None
+            )
+        )
+        mock_store.get_host_instances = AsyncMock(
+            side_effect=lambda hid: [instance_config] if hid == "host-src" else []
+        )
+        mock_store.set_host_instances = AsyncMock()
+        mock_train_check.return_value = None
+        mock_intent_db.get_intent_by_alias = AsyncMock(
+            return_value=SimpleNamespace(id="intent-1")
+        )
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"disk": {"available_gb": 100.0}})
+        mock_get.return_value.__aenter__.return_value = mock_resp
+        put_resp = AsyncMock()
+        put_resp.status = 200
+        mock_put.return_value.__aenter__.return_value = put_resp
+        mock_ensure.return_value = ("/models/repo--test--v1", True)
+        mock_stop.return_value = {"status": "stopped"}
+        mock_create.return_value = {
+            "instance": {"id": "new-inst", "status": "stopped"},
+            "message": "created",
+        }
+
+        result = await execute_migration(
+            instance_id="inst-1",
+            source_host_id="host-src",
+            target_host_id="host-tgt",
+            gpu_ids=[1],
+        )
+
+        assert result.status == "completed"
+        payload = mock_create.await_args.args[1]
+        assert payload["gpu_ids"] == [1]
+        # L5: the device set is top-level, never inside config.
+        assert "gpu_ids" not in payload["config"]
+
+
+@pytest.mark.anyio
+async def test_execute_migration_re_derives_gpu_ids_for_the_api_path(
+    source_host, target_host, instance_config
+):
+    """POST /api/instances/migrate passes nothing → devices are re-picked."""
+    from app.services.reconciliation import reconciler
+
+    with (
+        patch("app.services.migration.host_db") as mock_db,
+        patch("app.services.migration.host_store") as mock_store,
+        patch("app.services.migration.check_no_active_training") as mock_train_check,
+        patch("app.services.migration.ensure_model_on_target") as mock_ensure,
+        patch("app.services.migration.stop_source_instance") as mock_stop,
+        patch("app.services.migration.create_instance_on_host") as mock_create,
+        patch(
+            "app.services.migration._derive_target_gpu_assignment",
+            new=AsyncMock(return_value=([2], True)),
+        ) as mock_derive,
+        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("aiohttp.ClientSession.put") as mock_put,
+        patch("app.database.intents.intent_db") as mock_intent_db,
+        patch.object(reconciler, "settle_intent"),
+    ):
+        mock_db.get_host = AsyncMock(
+            side_effect=lambda hid: (
+                source_host
+                if hid == "host-src"
+                else target_host if hid == "host-tgt" else None
+            )
+        )
+        mock_store.get_host_instances = AsyncMock(
+            side_effect=lambda hid: [instance_config] if hid == "host-src" else []
+        )
+        mock_store.set_host_instances = AsyncMock()
+        mock_train_check.return_value = None
+        mock_intent_db.get_intent_by_alias = AsyncMock(
+            return_value=SimpleNamespace(id="intent-1")
+        )
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"disk": {"available_gb": 100.0}})
+        mock_get.return_value.__aenter__.return_value = mock_resp
+        put_resp = AsyncMock()
+        put_resp.status = 200
+        mock_put.return_value.__aenter__.return_value = put_resp
+        mock_ensure.return_value = ("/models/repo--test--v1", True)
+        mock_stop.return_value = {"status": "stopped"}
+        mock_create.return_value = {
+            "instance": {"id": "new-inst", "status": "stopped"},
+            "message": "created",
+        }
+
+        result = await execute_migration(
+            instance_id="inst-1",
+            source_host_id="host-src",
+            target_host_id="host-tgt",
+        )
+
+        assert result.status == "completed"
+        mock_derive.assert_awaited_once_with(
+            target_host, mock_derive.await_args.args[1]
+        )
+        payload = mock_create.await_args.args[1]
+        assert payload["gpu_ids"] == [2]
+
+
+@pytest.mark.anyio
+async def test_execute_migration_fails_when_per_gpu_target_cannot_fit(
+    source_host, target_host, instance_config
+):
+    """A per-GPU target that cannot fit the instance fails before any
+    destructive step (S-058 review fix).
+
+    ``(None, True)`` means the target reports a ``gpus`` list but no device
+    set qualifies. The shortfall raises at step 3 — next to the other
+    target-fitness 507s — so the source is never stopped or disowned.
+    The old wiring failed at step 7, after the source had already been
+    released from the intent (S-037/D-017), leaving the instance stopped
+    and unmanaged on neither host.
+    """
+    from app.services.reconciliation import reconciler
+
+    with (
+        patch("app.services.migration.host_db") as mock_db,
+        patch("app.services.migration.host_store") as mock_store,
+        patch("app.services.migration.check_no_active_training") as mock_train_check,
+        patch("app.services.migration.stop_source_instance") as mock_stop,
+        patch("app.services.migration.create_instance_on_host") as mock_create,
+        patch(
+            "app.services.migration._derive_target_gpu_assignment",
+            new=AsyncMock(return_value=(None, True)),
+        ),
+        patch("aiohttp.ClientSession.get") as mock_get,
+        patch("app.database.intents.intent_db") as mock_intent_db,
+        patch.object(reconciler, "settle_intent"),
+    ):
+        mock_db.get_host = AsyncMock(
+            side_effect=lambda hid: (
+                source_host
+                if hid == "host-src"
+                else target_host if hid == "host-tgt" else None
+            )
+        )
+        mock_store.get_host_instances = AsyncMock(
+            side_effect=lambda hid: [instance_config] if hid == "host-src" else []
+        )
+        mock_train_check.return_value = None
+        mock_intent_db.get_intent_by_alias = AsyncMock(
+            return_value=SimpleNamespace(id="intent-1")
+        )
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"disk": {"available_gb": 100.0}})
+        mock_get.return_value.__aenter__.return_value = mock_resp
+
+        with pytest.raises(HTTPException) as exc:
+            await execute_migration(
+                instance_id="inst-1",
+                source_host_id="host-src",
+                target_host_id="host-tgt",
+            )
+
+    assert exc.value.status_code == 507
+    assert "cannot fit the instance's device set" in str(exc.value.detail)
+    # The source was never stopped or disowned...
+    mock_stop.assert_not_awaited()
+    # ...and no create ever reached the target.
+    mock_create.assert_not_awaited()
+
+
+def test_build_target_create_keeps_gpu_fields_top_level(instance_config):
+    """The target payload carries gpu_ids top-level and keeps vram_gb."""
+    from app.services.migration import _build_target_create
+
+    # The captured record carries the placement fields at TOP level (host
+    # Instance shape); the inner config never holds them (L5).
+    instance_config["gpu_ids"] = [0]
+    instance_config["vram_gb"] = 16.0
+
+    wrapper = _build_target_create(instance_config, "/models/x", gpu_ids=[2])
+
+    assert wrapper["gpu_ids"] == [2]
+    assert wrapper["vram_gb"] == 16.0
+    # The captured (stale) placement fields are not copied into config.
+    assert "gpu_ids" not in wrapper["config"]
+    assert wrapper["config"].get("vram_gb") is None
 
 
 @pytest.mark.anyio

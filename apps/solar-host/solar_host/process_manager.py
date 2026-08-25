@@ -26,6 +26,7 @@ from solar_host.backends.sglang import (
     purge_in_background,
 )
 from solar_host.config import config_manager, parse_instance_config, settings
+from solar_host.memory_monitor import verify_gpu_capacity
 from solar_host.models import (
     BackendType,
     GenerationMetrics,
@@ -785,6 +786,22 @@ class ProcessManager:
         self.ready_events[instance_id] = ready_event
 
         try:
+            # S-058 spawn-time re-verification: a foreign process may have
+            # taken a chosen device between placement and launch (TOCTOU
+            # window), or the device may be busy with something that bypassed
+            # the ledgers. Fail fast, naming the device; the existing
+            # except-Exception path below marks the instance FAILED with this
+            # message and the reconciler's backoff re-places on the next tick.
+            failure = verify_gpu_capacity(
+                instance.gpu_ids or [], instance.vram_gb or 0.0
+            )
+            if failure is not None:
+                index, available = failure
+                raise RuntimeError(
+                    f"GPU {index} has only {available:.1f} GB free, "
+                    f"instance needs {instance.vram_gb:.1f} GB"
+                )
+
             cmd = runner.build_command(instance)
 
             alias_safe = sanitize_alias_for_fs(instance.config.alias)
@@ -800,7 +817,21 @@ class ProcessManager:
             # earlier run must not be handed to this one, and no live run
             # owns the dir here (a tracked process returned early above).
             self._discard_prompt_cache_now(instance)
-            run_env.update(runner.build_env(instance))
+            child_env = runner.build_env(instance)
+            # S-058 observability: the integration suite has no POST-body
+            # capture, so the enforced device set is logged — a structured
+            # spawn record, legitimate observability rather than test code.
+            visible = child_env.get("CUDA_VISIBLE_DEVICES")
+            if visible is not None:
+                logger.info(
+                    "Spawning instance %s (alias=%s) with CUDA_VISIBLE_DEVICES=%s "
+                    "(gpu_ids=%s)",
+                    instance_id,
+                    instance.config.alias,
+                    visible,
+                    instance.gpu_ids,
+                )
+            run_env.update(child_env)
             run_cmd = ["stdbuf", "-oL"] + cmd if _HAS_STDBUF else cmd
 
             process = subprocess.Popen(  # noqa: ASYNC220 — spawn is non-blocking; logs are drained by a dedicated thread (_read_logs), never in the event loop
@@ -1035,6 +1066,8 @@ class ProcessManager:
         priority: str | None = None,
         managed_by: str | None = None,
         intent_id: str | None = None,
+        gpu_ids: list[int] | None = None,
+        vram_gb: float | None = None,
     ) -> Instance:
         """Create a new instance."""
         # Parse config if it's a dict (from FastAPI request body)
@@ -1068,6 +1101,8 @@ class ProcessManager:
             ),
             managed_by=managed_by,
             intent_id=intent_id,
+            gpu_ids=gpu_ids,
+            vram_gb=vram_gb,
         )
         config_manager.add_instance(instance)
 

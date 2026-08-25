@@ -8,6 +8,18 @@ For a *pending* reservation actual is None → treated as 0, so the full
 reserved amount is added as headroom.  For a *running* reservation only the
 unconsumed headroom max(reserved − actual, 0) is added, so real consumption
 that is already captured in system.usage is never double-counted.
+
+Per-device variant (S-058): on hosts with a GPU list, ``vram_gb`` is a
+per-GPU footprint (D3) and the aggregate VRAM charge of a reservation is
+``vram_gb * gpu_count``.  Per-device headroom is the same formula applied
+per reserved device:
+
+    device_headroom_i = Σ_j max(reservation_j.vram_gb − actual_share_j, 0)
+    actual_share_j    = reservation_j.actual_vram_gb / len(gpu_ids_j)
+
+spread evenly over the reservation's devices.  This is byte-identical to
+the control-side derivation from ``snapshot.reservations[].gpu_ids`` (L1),
+so the two ledgers agree.
 """
 
 from __future__ import annotations
@@ -19,7 +31,7 @@ from typing import TYPE_CHECKING
 
 import psutil
 
-from solar_host.memory_monitor import get_disk_info, get_memory_info
+from solar_host.memory_monitor import get_disk_info, get_gpu_list, get_memory_info
 from solar_host.resources.models import (
     Reservation,
     ReservationRequest,
@@ -40,15 +52,30 @@ class CapacityExceededError(Exception):
     """Raised when a new reservation would exceed available capacity."""
 
     def __init__(
-        self, dimension: str, requested_gb: float, available_gb: float
+        self,
+        dimension: str,
+        requested_gb: float,
+        available_gb: float,
+        device_index: int | None = None,
+        message: str | None = None,
     ) -> None:
-        super().__init__(
-            f"Capacity exceeded for {dimension}: requested {requested_gb:.3f} GB, "
-            f"available {available_gb:.3f} GB"
-        )
         self.dimension = dimension
         self.requested_gb = requested_gb
         self.available_gb = available_gb
+        self.device_index = device_index
+        if message is not None:
+            composed = message
+        elif device_index is not None:
+            composed = (
+                f"Capacity exceeded for {dimension} on GPU {device_index}: "
+                f"requested {requested_gb:.3f} GB, available {available_gb:.3f} GB"
+            )
+        else:
+            composed = (
+                f"Capacity exceeded for {dimension}: requested {requested_gb:.3f} GB, "
+                f"available {available_gb:.3f} GB"
+            )
+        super().__init__(composed)
 
 
 class ReservationRunningError(Exception):
@@ -96,7 +123,10 @@ class ResourceManager:
 
         Raises:
             CapacityExceededError: when any requested dimension would push
-                ``reported_used + requested > total``.
+                ``reported_used + requested > total`` (for VRAM on a host
+                with per-device telemetry: when no device in the resolved
+                set can fit the per-GPU ``vram_gb`` — the error then names
+                the failing device).
         """
         with self._lock:
             now = datetime.now(UTC)
@@ -107,13 +137,65 @@ class ResourceManager:
             # into the RAM request BEFORE the capacity check so the
             # reservation protects what the host actually has, and the
             # snapshot headroom accounts for it without special-casing.
+            # gpu_count is simply ignored on such hosts (spec §5).
             if snap.vram is None and req.vram_gb > 0:
                 req = req.model_copy(
                     update={"ram_gb": req.ram_gb + req.vram_gb, "vram_gb": 0.0}
                 )
 
-            if snap.vram is not None and req.vram_gb > snap.vram.available_gb:
-                raise CapacityExceededError("vram", req.vram_gb, snap.vram.available_gb)
+            # Per-device path (S-058): on hosts with a GPU list, resolve the
+            # device set first (L4: self-assign when the request omitted
+            # gpu_ids) and check each device against the per-GPU footprint.
+            gpu_list = get_gpu_list()
+            resolved_gpu_ids: list[int] | None = None
+            if gpu_list and req.vram_gb > 0:
+                device_headroom = self._gpu_headroom_unlocked()
+                resolved_gpu_ids = list(req.gpu_ids) if req.gpu_ids is not None else []
+                if not resolved_gpu_ids:
+                    resolved_gpu_ids = self._pick_devices_unlocked(
+                        req.gpu_count, req.vram_gb
+                    )
+                # A self-assigned set may come back shorter than asked — the
+                # host simply has fewer devices. The explicit-ids path cannot
+                # reach here (the model validator already enforces
+                # len(gpu_ids) == gpu_count), so refusing up front keeps
+                # gpu_count honest instead of storing a partial set. The
+                # message override names the shortage without disturbing the
+                # 409 body shape built in routes/resources.py.
+                if len(resolved_gpu_ids) < req.gpu_count:
+                    raise CapacityExceededError(
+                        "vram",
+                        req.vram_gb,
+                        0.0,
+                        message=(
+                            f"Requested {req.gpu_count} GPUs but the host has "
+                            f"{len(gpu_list)} device(s)"
+                        ),
+                    )
+                for idx in resolved_gpu_ids:
+                    gpu = next((g for g in gpu_list if g.index == idx), None)
+                    free = (
+                        gpu.available_gb - device_headroom.get(idx, 0.0)
+                        if gpu is not None
+                        else 0.0
+                    )
+                    if gpu is None or req.vram_gb > free:
+                        raise CapacityExceededError(
+                            "vram", req.vram_gb, free, device_index=idx
+                        )
+
+            # Aggregate checks. VRAM is per-GPU (D3): the ledger charge is
+            # vram_gb * gpu_count; with the default gpu_count=1 this is
+            # byte-identical to today.
+            if (
+                snap.vram is not None
+                and req.vram_gb * req.gpu_count > snap.vram.available_gb
+            ):
+                raise CapacityExceededError(
+                    "vram",
+                    req.vram_gb * req.gpu_count,
+                    snap.vram.available_gb,
+                )
             if snap.ram is not None and req.ram_gb > snap.ram.available_gb:
                 raise CapacityExceededError("ram", req.ram_gb, snap.ram.available_gb)
             if (
@@ -126,8 +208,18 @@ class ResourceManager:
             reservation = Reservation.from_request(
                 req, now, default_ttl_seconds=self._default_ttl_seconds
             )
+            if resolved_gpu_ids:
+                reservation = reservation.model_copy(
+                    update={"gpu_ids": resolved_gpu_ids, "gpu_count": req.gpu_count}
+                )
             self._reservations[reservation.id] = reservation
-            logger.info("Created reservation %s for job %s", reservation.id, req.job_id)
+            logger.info(
+                "Created reservation %s for job %s (gpu_count=%s, gpu_ids=%s)",
+                reservation.id,
+                req.job_id,
+                req.gpu_count,
+                resolved_gpu_ids,
+            )
             return reservation
 
     def release(self, reservation_id: str) -> None:
@@ -211,7 +303,10 @@ class ResourceManager:
         total = 0.0
         for res in self._reservations.values():
             if dimension == "vram":
-                reserved = res.vram_gb
+                # S-058: vram_gb is per-GPU, so the aggregate charge is
+                # vram_gb * gpu_count (D3). gpu_count defaults to 1, making
+                # single-GPU reservations byte-identical to before.
+                reserved = res.vram_gb * max(res.gpu_count, 1)
                 actual = res.actual_vram_gb if res.actual_vram_gb is not None else 0.0
             elif dimension == "ram":
                 reserved = res.ram_gb
@@ -223,6 +318,55 @@ class ResourceManager:
                 continue
             total += max(reserved - actual, 0.0)
         return total
+
+    def _gpu_headroom_unlocked(self) -> dict[int, float]:
+        """Per-device reservation headroom (S-058).
+
+        For each device-attributed reservation:
+        ``Σ max(vram_gb − actual_share, 0)`` where
+        ``actual_share = actual_vram_gb / len(gpu_ids)`` spreads a running
+        reservation's measured usage evenly over its devices. Reservations
+        without ``gpu_ids`` (only reachable when a reservation was taken
+        while NVML was down, so no device set could be resolved) are
+        charged pessimistically to every device — same L7 rule as the
+        control-side derivation, so the two ledgers agree.
+        """
+        per_device: dict[int, float] = {}
+        unattributed = 0.0
+        for res in self._reservations.values():
+            if not res.gpu_ids:
+                actual = res.actual_vram_gb if res.actual_vram_gb is not None else 0.0
+                unattributed += max(res.vram_gb * max(res.gpu_count, 1) - actual, 0.0)
+                continue
+            if res.actual_vram_gb is not None:
+                actual_share = res.actual_vram_gb / len(res.gpu_ids)
+            else:
+                actual_share = 0.0
+            charge = max(res.vram_gb - actual_share, 0.0)
+            for idx in res.gpu_ids:
+                per_device[idx] = per_device.get(idx, 0.0) + charge
+        if unattributed:
+            for gpu in get_gpu_list():
+                per_device[gpu.index] = per_device.get(gpu.index, 0.0) + unattributed
+        return per_device
+
+    def _pick_devices_unlocked(self, gpu_count: int, vram_gb: float) -> list[int]:
+        """Self-assign devices for a reservation that omitted gpu_ids (L4).
+
+        Preference mirrors control-side placement (L6): most free memory
+        first, lowest index as tie-break. A device counts as free after
+        subtracting its reservation headroom. The caller (``create()``)
+        performs the actual capacity check per device.
+        """
+        gpus = get_gpu_list()
+        if not gpus:
+            return []
+        headroom = self._gpu_headroom_unlocked()
+        ranked = sorted(
+            gpus,
+            key=lambda g: (-(g.available_gb - headroom.get(g.index, 0.0)), g.index),
+        )
+        return [g.index for g in ranked[:gpu_count]]
 
     def _snapshot_unlocked(self, _now: datetime) -> ResourceSnapshot:
         """Compute a ResourceSnapshot without acquiring the lock (caller holds it).
@@ -301,6 +445,7 @@ class ResourceManager:
             vram=vram_dim,
             ram=ram_dim,
             disk=disk_dim,
+            gpus=get_gpu_list(),
             reservations=views,
         )
 
@@ -313,6 +458,8 @@ class ResourceManager:
             vram_gb=res.vram_gb,
             ram_gb=res.ram_gb,
             disk_gb=res.disk_gb,
+            gpu_ids=res.gpu_ids or None,
+            gpu_count=res.gpu_count,
             actual_vram_gb=res.actual_vram_gb,
             actual_ram_gb=res.actual_ram_gb,
             actual_disk_gb=res.actual_disk_gb,

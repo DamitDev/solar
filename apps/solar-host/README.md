@@ -80,6 +80,7 @@ SGLANG_PROMPT_CACHE_DIR=/var/cache/sglang
 - **SOLAR_CONTROL_API_KEY** - Management API key from solar-control. The host uses it to connect to the `/hosts` namespace; it must be approved via the management API or WebUI before it appears in the gateway pool.
 - **SGLANG_VENV_PATH** - Virtualenv SGLang is installed into (the directory holding `bin/sglang`). The host launches the executable from it directly, setting `VIRTUAL_ENV` and prepending `bin/` to `PATH` the way `activate` would. Leave empty to use a `sglang` on `PATH`; with neither, `sglang` is dropped from the advertised backends.
 - **SGLANG_PROMPT_CACHE_DIR** - Root of SGLang's file-backed prompt cache. Each instance gets its own `<root>/<alias>-<instance_id>` subdirectory, exported as `SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR`. When it is empty the `--hicache-storage-*` flags are dropped with a warning (the in-memory hierarchical cache still works). The host deletes the subdirectory when the instance stops and sweeps leftovers at startup, so point it at a dedicated path. While a stop is in flight the dir is transiently visible as `.trash-<uuid>` until the background purge finishes, and the root must be dedicated to a single host — a second host's startup sweep would otherwise discard the first's live caches.
+- **GPU_TELEMETRY_OVERRIDE** - (S-058, dev/test only) JSON array of `{"index", "name", "total_gb", "used_gb"}` entries that fakes per-device NVIDIA telemetry without a physical GPU. When set, `GET /resources`, the `host_health` push and every GPU capacity check read these devices instead of NVML — the integration suite uses it to exercise the whole S-058 chain on CPU-only CI runners. Unset on production hosts.
 
 ### 2. Start the server
 
@@ -473,6 +474,29 @@ experimental, and `"none"` keeps the model on `main_gpu` alone.
 the first device — and is what unequal GPUs need. `main_gpu` selects the device
 that holds the model with `split_mode: "none"`, or the KV cache and intermediate
 results with `"row"`; it does nothing for the other modes.
+
+### Scheduler-chosen devices (S-058)
+
+Solar Control now bin-packs instances onto physical devices: it picks the exact
+`gpu_ids`, reserves them per instance, and the host enforces the choice when it
+starts the process (`CUDA_VISIBLE_DEVICES` in the given order, plus
+`CUDA_DEVICE_ORDER=PCI_BUS_ID` so the host's reported indices and CUDA's
+enumeration are the same space). The interfaces above (`devices`, `main_gpu`,
+`tensor_split`, `tp_size`) keep their meaning, but as **positions within the
+chosen set** — `main_gpu: 0` is the most-free chosen GPU, never a physical id.
+
+- `GET /resources` and the `host_health` push carry a `gpus` list — one entry
+  per device with `index`, `name`, `total_gb`, `used_gb`, `available_gb`.
+- `POST /resources/reservations` accepts `gpu_count` and `gpu_ids`; `vram_gb`
+  is the **per-GPU** footprint. Without `gpu_ids` the host self-assigns the
+  least-loaded devices, so legacy callers stay attributable per device.
+- Instance records (and the WS `instances_update` payload) carry `gpu_ids` and
+  `vram_gb`; the storage manifest shows the assigned devices per instance.
+- At spawn the host re-verifies the chosen devices still have the requested
+  capacity (a foreign process may have taken one since placement); a busy
+  device fails the start fast with the device named, and the reconciler
+  re-places on its next tick.
+- `GPU_TELEMETRY_OVERRIDE` fakes the telemetry for tests (see `.env` section).
 
 ### Speculative decoding
 

@@ -44,6 +44,23 @@ _WS_PAYLOAD = {
         "reported_used_gb": 100.0,
         "available_gb": 400.0,
     },
+    # S-058: per-device telemetry merged exactly like every other dimension.
+    "gpus": [
+        {
+            "index": 2,
+            "name": "RTX PRO 6000 Blackwell",
+            "total_gb": 96.0,
+            "used_gb": 40.0,
+            "available_gb": 56.0,
+        },
+        {
+            "index": 0,
+            "name": "RTX PRO 6000 Blackwell",
+            "total_gb": 96.0,
+            "used_gb": 90.0,
+            "available_gb": 6.0,
+        },
+    ],
     "reservations": [
         {
             "id": "res-1",
@@ -53,6 +70,8 @@ _WS_PAYLOAD = {
             "vram_gb": 8.0,
             "ram_gb": 0.0,
             "disk_gb": 10.0,
+            "gpu_ids": [2],
+            "gpu_count": 1,
             "actual_vram_gb": 6.0,
             "actual_ram_gb": 0.0,
             "actual_disk_gb": 4.0,
@@ -219,3 +238,78 @@ class TestMerge:
         assert from_ws.vram_available_gb == 18.0
         assert from_ws.reservation_ram_total_gb == 0.0
         assert from_ws.disk_training_used_gb == 4.0
+
+    def test_gpus_merge_with_reservation_gpu_ids(self):
+        """S-058: the per-device list and the per-reservation devices land on
+        the snapshot identically from WS and HTTP (the WS→HTTP parity holds)."""
+        base = HostResourceSnapshot(
+            host_id="host-1",
+            host_name="Test Host",
+            url="http://test-host:8000",
+            status=HostStatus.ONLINE,
+        )
+        merged = _merge_resource_payload(base, _WS_PAYLOAD)
+
+        # Per-device telemetry, in payload order, with the L1 five fields.
+        assert [g.index for g in merged.gpus] == [2, 0]
+        assert merged.gpus[0].name == "RTX PRO 6000 Blackwell"
+        assert merged.gpus[1].available_gb == 6.0
+        assert set(merged.gpus[0].model_dump()) == {
+            "index",
+            "name",
+            "total_gb",
+            "used_gb",
+            "available_gb",
+        }
+        # Per-reservation devices pass through.
+        assert merged.reservations[0].gpu_ids == [2]
+        assert merged.reservations[0].gpu_count == 1
+
+    @pytest.mark.anyio
+    async def test_gpus_parity_ws_path_versus_http_path(self):
+        """The gpus list merges identically whichever path serves the payload.
+
+        The WS path (fresh Redis snapshot, no HTTP call) and the HTTP
+        fallback path must produce the same per-device view — the review
+        fix pins the parity through the real fetch paths rather than
+        calling the merge helper twice with the same dict.
+        """
+        from_ws, mock_get = await _fetch()
+        assert from_ws.snapshot_source == "ws"
+        mock_get.assert_not_called()
+
+        from_http, _ = await _fetch(
+            get_host_resource_snapshot=AsyncMock(return_value=None)
+        )
+        assert from_http.snapshot_source == "http"
+
+        assert from_ws.gpus == from_http.gpus
+        assert [g.index for g in from_ws.gpus] == [2, 0]
+        assert from_ws.reservations[0].gpu_ids == from_http.reservations[0].gpu_ids
+        assert from_ws.reservations[0].gpu_count == from_http.reservations[0].gpu_count
+
+    def test_malformed_gpu_rows_are_skipped_not_fatal(self):
+        """Hosts run heterogeneous agent versions — bad rows never 500."""
+        payload = {
+            **_WS_PAYLOAD,
+            "gpus": [
+                {"index": "x-not-an-int", "total_gb": 1.0},
+                {
+                    "index": 3,
+                    "name": "RTX",
+                    "total_gb": 96.0,
+                    "used_gb": 1.0,
+                    "available_gb": 95.0,
+                },
+                "garbage",
+                None,
+            ],
+        }
+        base = HostResourceSnapshot(
+            host_id="host-1",
+            host_name="Test Host",
+            url="http://test-host:8000",
+            status=HostStatus.ONLINE,
+        )
+        merged = _merge_resource_payload(base, payload)
+        assert [g.index for g in merged.gpus] == [3]

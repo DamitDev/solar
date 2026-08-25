@@ -15,6 +15,7 @@ from app.config import settings
 from app.database.hosts import host_db
 from app.models import (
     AggregatedResourceResponse,
+    GpuInfo,
     Host,
     HostInstanceSummary,
     HostReservationSummary,
@@ -56,6 +57,28 @@ def _merge_resource_payload(
         setattr(base, f"{dim_name}_reported_used_gb", dim.get("reported_used_gb"))
         setattr(base, f"{dim_name}_available_gb", dim.get("available_gb"))
 
+    # S-058: per-device GPU telemetry. Rows are tolerated defensively — an
+    # unknown key or malformed row is skipped, never fatal (hosts run
+    # heterogeneous agent versions during rollout).
+    base.gpus = []
+    raw_gpus = data.get("gpus")
+    if isinstance(raw_gpus, list):
+        for row in raw_gpus:
+            if not isinstance(row, dict):
+                continue
+            try:
+                base.gpus.append(
+                    GpuInfo(
+                        index=int(row["index"]),
+                        name=str(row.get("name", "GPU")),
+                        total_gb=float(row["total_gb"]),
+                        used_gb=float(row["used_gb"]),
+                        available_gb=float(row["available_gb"]),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+
     # Merge reservation details + totals
     reservations = data.get("reservations", [])
     if not isinstance(reservations, list):
@@ -77,6 +100,12 @@ def _merge_resource_payload(
             vram_gb=float(r.get("vram_gb") or 0),
             ram_gb=float(r.get("ram_gb") or 0),
             disk_gb=float(r["disk_gb"]) if r.get("disk_gb") is not None else None,
+            gpu_ids=(
+                [int(x) for x in r["gpu_ids"]]
+                if isinstance(r.get("gpu_ids"), list)
+                else None
+            ),
+            gpu_count=int(r.get("gpu_count", 1)),
             actual_vram_gb=(
                 float(r["actual_vram_gb"])
                 if r.get("actual_vram_gb") is not None
@@ -190,6 +219,7 @@ async def _fetch_host_resource_snapshot(
                 # replicas from manual instances (S-043 §6).
                 managed_by=i.get("managed_by"),
                 intent_id=i.get("intent_id"),
+                gpu_ids=i.get("gpu_ids"),
             )
             for i in instances
             if i.get("id")

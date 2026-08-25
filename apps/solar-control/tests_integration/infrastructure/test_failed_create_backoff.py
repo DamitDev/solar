@@ -47,8 +47,10 @@ async def test_failed_create_backoff(stack, clean_state):
                 description="reconcile failure recorded (backoff)",
             )
 
-        # data-repo is back: the next tick's CREATE succeeds -> ready.
-        ready = await wait_intent_ready(http_control, intent["id"], timeout=30.0)
+        # data-repo is back: the next tick's CREATE succeeds -> ready. 90s (not
+        # 30s): a parallel CI runner can slow the cold start past 30s (seen
+        # under 5x suite load); the wait exits early on the fast path.
+        ready = await wait_intent_ready(http_control, intent["id"], timeout=90.0)
         assert ready["status"]["ready_replicas"] == 1
         assert ready["status"]["phase"] == "ready"
 

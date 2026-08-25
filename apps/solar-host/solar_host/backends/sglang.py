@@ -387,8 +387,13 @@ class SglangRunner(BackendRunner):
         return cmd
 
     def build_env(self, instance: Any) -> dict[str, str]:
-        """Activate the SGLang venv and point its prompt cache at this instance."""
-        env: dict[str, str] = {}
+        """Activate the SGLang venv and point its prompt cache at this instance.
+
+        Starts from the base GPU visibility block (S-058), then applies the
+        SGLang-specific variables; ``config.extra_env`` is applied last so
+        an operator can still override per instance.
+        """
+        env: dict[str, str] = super().build_env(instance)
         config = instance.config
 
         venv = settings.sglang_venv_path.strip()

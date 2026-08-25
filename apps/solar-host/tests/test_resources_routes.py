@@ -17,6 +17,7 @@ from solar_host.jobs.models import JobState, JobStatus, StepState
 from solar_host.jobs.store import JobStore
 from solar_host.main import app
 from solar_host.resources.manager import ResourceManager
+from solar_host.resources.models import GpuInfo
 
 API_KEY = "test-resources-key-s034"
 
@@ -158,6 +159,75 @@ class TestPostReservation:
             headers=_headers(),
         )
         assert resp.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# S-058: per-device GPUs on the wire
+# ---------------------------------------------------------------------------
+
+
+_GPU_LIST = [
+    GpuInfo(index=0, name="RTX 4090", total_gb=24.0, used_gb=20.0, available_gb=4.0),
+    GpuInfo(index=1, name="RTX 4090", total_gb=24.0, used_gb=12.0, available_gb=12.0),
+    GpuInfo(index=2, name="RTX 4090", total_gb=24.0, used_gb=0.0, available_gb=24.0),
+]
+
+
+@pytest.fixture
+def multi_gpu(monkeypatch):
+    """A 3-GPU fake host (device 2 free) behind the manager's get_gpu_list."""
+    monkeypatch.setattr(
+        "solar_host.resources.manager.get_gpu_list",
+        lambda: list(_GPU_LIST),
+    )
+
+
+class TestGpuAwareResources:
+    def test_resources_report_per_device_gpus(self, client, multi_gpu):
+        resp = client.get("/resources", headers=_headers())
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["gpus"]) == 3
+        assert body["gpus"][2] == {
+            "index": 2,
+            "name": "RTX 4090",
+            "total_gb": 24.0,
+            "used_gb": 0.0,
+            "available_gb": 24.0,
+        }
+
+    def test_reservation_view_carries_gpu_ids(self, client, multi_gpu):
+        resp = client.post(
+            "/resources/reservations",
+            json=_reservation_body(vram_gb=5.0, gpu_ids=[2]),
+            headers=_headers(),
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["gpu_ids"] == [2]
+        assert body["gpu_count"] == 1
+
+    def test_409_body_names_the_device(self, client, multi_gpu):
+        """Per-device failure: device 2 (24 GB) is the best pick, 25 cannot fit."""
+        resp = client.post(
+            "/resources/reservations",
+            json=_reservation_body(vram_gb=25.0),
+            headers=_headers(),
+        )
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["dimension"] == "vram"
+        assert body["device_index"] == 2
+
+    def test_aggregate_409_omits_device_index(self, client):
+        """No per-device telemetry → the 409 shape is unchanged (D6)."""
+        resp = client.post(
+            "/resources/reservations",
+            json=_reservation_body(vram_gb=20.0),
+            headers=_headers(),
+        )
+        assert resp.status_code == 409
+        assert "device_index" not in resp.json()
         body = resp.json()
         assert body["error"] == "capacity_exceeded"
         assert body["dimension"] == "vram"

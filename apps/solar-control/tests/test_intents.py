@@ -577,6 +577,72 @@ async def test_create_intent_success(valid_intent_create, mock_intent_response):
 
 
 @pytest.mark.anyio
+async def test_create_intent_response_carries_resolved_gpu_count():
+    """POST /api/intents persists and returns the resolved gpu_count.
+
+    The caller sent no explicit ``gpu_count``; validation derives it from
+    the sglang ``tp_size`` and the response (and the stored resources)
+    carry the resolved value — consumers never see a None count.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    payload = {
+        "alias": "tp-model",
+        "model_source": "repo://test:v1",
+        "replicas": 1,
+        "priority": "production",
+        "strategy": "rolling",
+        "backend": {"backend_type": "sglang", "tp_size": 2},
+        "resources": {"vram_gb": 30.0},
+    }
+    persisted: dict = {}
+
+    async def _create(**kwargs):
+        persisted.update(kwargs)
+        return IntentResponse(
+            id="550e8400-e29b-41d4-a716-446655440001",
+            alias=payload["alias"],
+            model_source=payload["model_source"],
+            replicas=1,
+            priority="production",
+            strategy="rolling",
+            backend=payload["backend"],
+            placement=PlacementConstraints(),
+            resources=ResourceRequirements(**kwargs["resources"]),
+            metadata={},
+            status=IntentStatus(
+                phase=IntentPhase.PENDING,
+                reconcile=ReconcileState.IDLE,
+                desired_replicas=1,
+            ),
+        )
+
+    with (
+        patch(
+            "app.routes.management.intents.intent_db.create_intent",
+            new=AsyncMock(side_effect=_create),
+        ),
+        patch(
+            "app.routes.management.intents.intent_db.check_alias_conflict",
+            new=AsyncMock(return_value=False),
+        ),
+    ):
+        response = TestClient(app).post(
+            "/api/intents",
+            json=payload,
+            headers={"X-API-Key": "change-me-management"},
+        )
+
+    assert response.status_code == 201
+    data = response.json()
+    assert data["resources"]["gpu_count"] == 2
+    # The dict handed to create_intent is the same resolved one.
+    assert persisted["resources"]["gpu_count"] == 2
+
+
+@pytest.mark.anyio
 async def test_create_intent_alias_conflict(valid_intent_create):
     """POST with duplicate alias returns 409."""
     with patch(
@@ -1145,6 +1211,49 @@ async def test_update_status_keeps_an_edit_that_landed_mid_pass():
     assert row.status_json["spec_changed_at"] == "2026-07-24T02:00:00Z"
     assert row.status_json["strategy_progress"] is None
     assert row.status_json["ready_replicas"] == 2
+
+
+@pytest.mark.anyio
+async def test_get_intent_derives_gpu_count_for_legacy_rows():
+    """A stored intent without gpu_count keeps its device count on read.
+
+    Intents created before S-058 have a resources JSON without the key;
+    hydration derives the count from the stored backend (here: sglang
+    tp_size=2) instead of defaulting every consumer to 1, which would hand
+    a multi-GPU intent one visible device at its next CREATE/RECREATE.
+    """
+    from app.database.intents import IntentDB
+
+    row = _intent_row(
+        backend={"backend_type": "sglang", "tp_size": 2},
+        resources={"vram_gb": 30.0},
+    )
+    db = IntentDB()
+    session = _FakeSession(row)
+
+    with patch.object(IntentDB, "_session", return_value=session):
+        result = await db.get_intent(row.id)
+
+    assert result is not None
+    assert result.resources.gpu_count == 2
+    # The raw stored JSON is untouched — derive-on-read, not a backfill.
+    assert "gpu_count" not in row.resources
+
+
+@pytest.mark.anyio
+async def test_get_intent_defaults_gpu_count_to_one_without_backend_signal():
+    """A legacy row with no multi-GPU signal hydrates to the default 1."""
+    from app.database.intents import IntentDB
+
+    row = _intent_row()  # backend llama.cpp, no devices list
+    db = IntentDB()
+    session = _FakeSession(row)
+
+    with patch.object(IntentDB, "_session", return_value=session):
+        result = await db.get_intent(row.id)
+
+    assert result is not None
+    assert result.resources.gpu_count == 1
 
 
 @pytest.mark.anyio
@@ -1842,7 +1951,13 @@ class TestMultiGpuFields:
             main_gpu=0,
         )
         assert validate_intent_create(data) == []
-        assert validate_intent_warnings(data) == []
+        warnings = validate_intent_warnings(data)
+        # S-058 advisory: a multi-GPU intent without a per-GPU VRAM
+        # footprint cannot be bin-packed by per-device placement.
+        assert any(
+            w["field"] == "resources.vram_gb" and "per-GPU" in w["message"]
+            for w in warnings
+        )
 
     def test_multi_gpu_fields_rejected_on_huggingface(self):
         data = {
@@ -1921,6 +2036,189 @@ class TestMultiGpuFields:
             backend = {"backend_type": "llamacpp", "tensor_split": value}
             with pytest.raises(HTTPException):
                 canonicalize_intent_backend(backend)
+
+
+class TestGpuCountValidation:
+    """S-058: resources.gpu_count — derivation, agreement, resolution."""
+
+    def _data(self, backend: dict, resources: dict | None = None) -> dict:
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": backend,
+            "resources": resources,
+        }
+        return data
+
+    def test_sglang_tp_size_derives_the_count(self):
+        data = self._data(
+            {"backend_type": "sglang", "tp_size": 2},
+            resources={"vram_gb": 30.0},
+        )
+        assert validate_intent_create(data) == []
+        # Resolved and persisted — consumers always see a concrete int.
+        assert data["resources"]["gpu_count"] == 2
+
+    def test_llamacpp_devices_derive_the_count(self):
+        data = self._data(
+            _llamacpp_backend(devices="0,1", split_mode="row"),
+            resources={"vram_gb": 30.0},
+        )
+        assert validate_intent_create(data) == []
+        assert data["resources"]["gpu_count"] == 2
+
+    def test_llamacpp_tensor_split_derives_when_devices_absent(self):
+        data = self._data(
+            _llamacpp_backend(tensor_split="1,1,1"),
+            resources={"vram_gb": 20.0},
+        )
+        assert validate_intent_create(data) == []
+        assert data["resources"]["gpu_count"] == 3
+
+    def test_explicit_and_derived_disagreement_is_422(self):
+        data = self._data(
+            {"backend_type": "sglang", "tp_size": 2},
+            resources={"vram_gb": 30.0, "gpu_count": 1},
+        )
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "resources.gpu_count" and "tp_size implies 2" in e["message"]
+            for e in errors
+        )
+
+    def test_llamacpp_disagreement_message_names_devices(self):
+        data = self._data(
+            _llamacpp_backend(devices="0,1"),
+            resources={"vram_gb": 30.0, "gpu_count": 3},
+        )
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "resources.gpu_count" and "devices implies 2" in e["message"]
+            for e in errors
+        )
+
+    def test_huggingface_must_stay_single_gpu(self):
+        data = self._data(
+            {"backend_type": "huggingface_causal", "model_id": "x"},
+            resources={"vram_gb": 20.0, "gpu_count": 2},
+        )
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "resources.gpu_count" and "single-GPU" in e["message"]
+            for e in errors
+        )
+
+    def test_huggingface_default_resolves_to_one(self):
+        data = self._data(
+            {"backend_type": "huggingface_causal", "model_id": "x"},
+            resources={"vram_gb": 20.0},
+        )
+        assert validate_intent_create(data) == []
+        assert data["resources"]["gpu_count"] == 1
+
+    def test_zero_or_negative_count_is_422(self):
+        for bad in (0, -1):
+            data = self._data(
+                _llamacpp_backend(),
+                resources={"gpu_count": bad},
+            )
+            errors = validate_intent_create(data)
+            assert any(e["field"] == "resources.gpu_count" for e in errors)
+
+    def test_multi_gpu_without_footprint_warns_per_gpu(self):
+        data = self._data(
+            {"backend_type": "sglang", "tp_size": 2},
+            resources={},
+        )
+        validate_intent_create(data)
+        warnings = validate_intent_warnings(data)
+        assert any(
+            w["field"] == "resources.vram_gb" and "per-GPU" in w["message"]
+            for w in warnings
+        )
+
+
+class TestGpuDevicePositions:
+    """S-058: llama.cpp device flags are positions within the chosen set.
+
+    ``CUDA_VISIBLE_DEVICES`` restricts the child to CUDA0..CUDA(n-1), so a
+    ``devices`` entry or ``main_gpu`` at or beyond the resolved
+    ``gpu_count`` names a device that does not exist in the process.
+    """
+
+    def _data(self, **backend_fields) -> dict:
+        return {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(**backend_fields),
+            "resources": {"vram_gb": 30.0, "gpu_count": 2},
+        }
+
+    def test_out_of_range_devices_entry_is_422(self):
+        data = self._data(devices="CUDA1,CUDA2", split_mode="row")
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "backend.devices" and "out of range" in e["message"]
+            for e in errors
+        )
+
+    def test_out_of_range_main_gpu_is_422(self):
+        data = self._data(main_gpu=2)
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "backend.main_gpu" and "out of range" in e["message"]
+            for e in errors
+        )
+
+    def test_in_range_positions_pass(self):
+        data = self._data(devices="CUDA0,CUDA1", split_mode="row", main_gpu=1)
+        assert validate_intent_create(data) == []
+
+    def test_devices_none_passes(self):
+        """'none' disables offloading — it is not a position, so never range-checked."""
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(devices="none", split_mode="none"),
+            "resources": {"vram_gb": 30.0, "gpu_count": 1},
+        }
+        assert validate_intent_create(data) == []
+
+    def test_warnings_flag_out_of_range_values(self):
+        """Advisory companion: an out-of-range stored value surfaces as a warning."""
+        data = self._data(devices="CUDA1,CUDA2")
+        warnings = validate_intent_warnings(data)
+        assert any(
+            w["field"] == "backend.devices" and "out of range" in w["message"]
+            for w in warnings
+        )
+
+    def test_update_grandfathers_unchanged_offending_devices(self):
+        """A pre-S-058 stored spec stays editable — the untouched field passes."""
+        stored = _llamacpp_backend(devices="CUDA1,CUDA2", split_mode="row")
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": dict(stored),  # carried over unchanged
+            "resources": {"vram_gb": 30.0, "gpu_count": 2},
+        }
+        errors = validate_intent_update(data, current_alias="t", current_backend=stored)
+        assert errors == []
+
+    def test_update_rejects_changed_offending_devices(self):
+        """Touching the field removes the grandfathering — the new value is checked."""
+        stored = _llamacpp_backend(devices="CUDA0,CUDA1", split_mode="row")
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(devices="CUDA1,CUDA2", split_mode="row"),
+            "resources": {"vram_gb": 30.0, "gpu_count": 2},
+        }
+        errors = validate_intent_update(data, current_alias="t", current_backend=stored)
+        assert any(
+            e["field"] == "backend.devices" and "out of range" in e["message"]
+            for e in errors
+        )
 
 
 class TestUpdateGrandfathersModalityRules:

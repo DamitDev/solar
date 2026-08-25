@@ -118,6 +118,13 @@ class Settings(BaseSettings):
     # subdirectory under it; when empty the file storage backend is skipped.
     sglang_prompt_cache_dir: str = ""
 
+    # GPU telemetry override (dev/test only, L2): a JSON array of
+    # {"index", "name", "total_gb", "used_gb"} describing the devices this
+    # host advertises. Lets the test suite exercise the whole GPU-aware
+    # chain (telemetry, placement, CUDA_VISIBLE_DEVICES enforcement) on
+    # machines without NVIDIA hardware. Never set in production.
+    gpu_telemetry_override: str = ""
+
 
 settings = Settings()
 

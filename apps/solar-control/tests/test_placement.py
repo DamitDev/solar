@@ -4,12 +4,22 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.models import DrainState, Host, HostResourceSnapshot, HostStatus
+from app.models import (
+    DrainState,
+    GpuInfo,
+    Host,
+    HostReservationSummary,
+    HostResourceSnapshot,
+    HostStatus,
+)
 from app.services.placement import (
     can_displace,
     find_candidates,
     find_displaceable_instances,
+    find_gpu_assignment,
     fits_resources,
+    gpu_headroom_by_device,
+    max_gpu_count_fittable,
 )
 
 # ── Fixtures ────────────────────────────────────────────────────
@@ -166,6 +176,26 @@ def test_fits_resources_vram_and_ram_together_against_ram_on_unified_host():
     assert fits_resources(snap, 20.0, 8.0, None) is True
     # 20 GB VRAM + 16 GB explicit RAM = 36 GB — does not fit.
     assert fits_resources(snap, 20.0, 16.0, None) is False
+
+
+def test_fits_resources_ignores_gpu_count_on_unified_memory_host():
+    """gpu_count is deliberately ignored on Mac/CPU hosts (spec §5): the
+    VRAM estimate folds into RAM as today. Mirror of the host-side
+    test_unified_memory_fold_ignores_gpu_count — a future reader "fixing"
+    the asymmetry by multiplying vram_gb * gpu_count would break Mac
+    placement with nothing failing."""
+    snap = HostResourceSnapshot(
+        host_id="h1",
+        host_name="test",
+        url="http://h:8000",
+        status=HostStatus.ONLINE,
+        reachable=True,
+        vram_available_gb=None,  # no dedicated VRAM (Mac)
+        ram_available_gb=32.0,
+    )
+    # 20 GB fits regardless of the count (20 * 3 = 60 would not).
+    assert fits_resources(snap, 20.0, None, None, gpu_count=3) is True
+    assert fits_resources(snap, 20.0, None, None, gpu_count=1) is True
 
 
 def test_fits_resources_vram_dimension_still_authoritative_on_gpu_host():
@@ -668,3 +698,250 @@ async def test_find_candidates_vram_beats_disk(host_a100, host_mps):
 
         assert candidates[0][0].id == "h-a100"
         assert candidates[1][0].id == "h-mps"
+
+
+# ── S-058: per-GPU placement ───────────────────────────────────────
+
+
+def _gpu_snap(
+    gpus: list[tuple[int, float]],
+    *,
+    reservations: list[HostReservationSummary] | None = None,
+    vram_available: float | None = 96.0,
+) -> HostResourceSnapshot:
+    """A reachable 3-GPU snapshot: (index, available_gb) per device."""
+    return HostResourceSnapshot(
+        host_id="h-gpu",
+        host_name="gpu",
+        url="http://gpu:8000",
+        status=HostStatus.ONLINE,
+        roles=["inference"],
+        gpu_type="nvidia_cuda",
+        reachable=True,
+        vram_available_gb=vram_available,
+        ram_available_gb=512.0,
+        gpus=[
+            GpuInfo(
+                index=idx,
+                name="RTX 4090",
+                total_gb=24.0,
+                used_gb=24.0 - free,
+                available_gb=free,
+            )
+            for idx, free in gpus
+        ],
+        reservations=reservations or [],
+    )
+
+
+def _reservation(
+    gpu_ids: list[int] | None,
+    vram_gb: float,
+    *,
+    actual_vram_gb: float | None = None,
+    gpu_count: int = 1,
+) -> HostReservationSummary:
+    return HostReservationSummary(
+        id=f"res-{len(gpu_ids or [])}-{vram_gb}",
+        job_id="job-1",
+        workload_type="training",
+        status="running" if actual_vram_gb is not None else "pending",
+        vram_gb=vram_gb,
+        gpu_ids=gpu_ids,
+        gpu_count=gpu_count,
+        actual_vram_gb=actual_vram_gb,
+    )
+
+
+class TestFindGpuAssignment:
+    def test_picks_most_free_first_lowest_index_tiebreak(self):
+        """L6: most free first; equal free → lowest index."""
+        snap = _gpu_snap([(0, 10.0), (1, 20.0), (2, 20.0)])
+        assert find_gpu_assignment(snap, 1, 5.0) == [1]
+        assert find_gpu_assignment(snap, 2, 5.0) == [1, 2]
+        assert find_gpu_assignment(snap, 3, 5.0) == [1, 2, 0]
+
+    def test_fragmentation_ranking_prefers_least_fragmented(self):
+        """Among fitting sets, the most-free devices win — not the lowest set."""
+        snap = _gpu_snap([(0, 8.0), (1, 8.0), (2, 30.0)])
+        assert find_gpu_assignment(snap, 1, 10.0) == [2]
+
+    def test_count_unmet_returns_none(self):
+        snap = _gpu_snap([(0, 10.0), (1, 10.0), (2, 3.0)])
+        assert find_gpu_assignment(snap, 3, 5.0) is None
+        assert find_gpu_assignment(snap, 2, 5.0) == [0, 1]
+
+    def test_empty_gpus_returns_none(self):
+        snap = _gpu_snap([], vram_available=None)
+        assert find_gpu_assignment(snap, 1, 5.0) is None
+        # gpu_count <= 0 is the aggregate path too.
+        snap2 = _gpu_snap([(0, 10.0)])
+        assert find_gpu_assignment(snap2, 0, 5.0) is None
+
+    def test_headroom_subtracted_per_device(self):
+        """L1: reservations with gpu_ids shrink exactly their devices."""
+        snap = _gpu_snap(
+            [(0, 20.0), (1, 20.0), (2, 20.0)],
+            reservations=[_reservation([0, 1], vram_gb=10.0)],
+        )
+        # Devices 0/1 have 10 free each; device 2 has 20 → the pick is 2.
+        assert find_gpu_assignment(snap, 1, 12.0) == [2]
+        assert find_gpu_assignment(snap, 1, 21.0) is None
+
+    def test_running_reservation_headroom_uses_actual_share(self):
+        snap = _gpu_snap(
+            [(0, 20.0), (1, 20.0), (2, 20.0)],
+            reservations=[_reservation([0, 1], vram_gb=10.0, actual_vram_gb=6.0)],
+        )
+        # 6 GB actual spread over 2 devices → 3 GB consumed raw, 7 headroom
+        # per device → 13 free each; a 14 GB request can only use device 2.
+        assert find_gpu_assignment(snap, 1, 14.0) == [2]
+
+    def test_unattributed_headroom_charged_to_every_device(self):
+        """L7: a reservation without gpu_ids shrinks every device."""
+        snap = _gpu_snap(
+            [(0, 20.0), (1, 20.0), (2, 20.0)],
+            reservations=[_reservation(None, vram_gb=10.0)],
+        )
+        # 10 headroom everywhere → 10 free per device.
+        assert find_gpu_assignment(snap, 1, 11.0) is None
+        assert find_gpu_assignment(snap, 1, 10.0) == [0]
+
+    def test_claims_subtracted_from_devices(self):
+        snap = _gpu_snap([(0, 20.0), (1, 20.0), (2, 20.0)])
+        claims = {0: 15.0, 1: 5.0}
+        # Device 0: 5 free; device 1: 15; device 2: 20.
+        assert find_gpu_assignment(snap, 1, 10.0, claims=claims) == [2]
+        assert find_gpu_assignment(snap, 2, 10.0, claims=claims) == [2, 1]
+
+    def test_max_gpu_count_fittable(self):
+        snap = _gpu_snap([(0, 10.0), (1, 10.0), (2, 3.0)])
+        assert max_gpu_count_fittable(snap, 5.0) == 2
+
+    def test_headroom_derivation_returns_unattributed_remainder(self):
+        snap = _gpu_snap(
+            [(0, 20.0), (1, 20.0)],
+            reservations=[
+                _reservation([0], vram_gb=4.0),
+                _reservation(None, vram_gb=6.0, gpu_count=2),
+            ],
+        )
+        per_device, unattributed = gpu_headroom_by_device(snap)
+        assert per_device == {0: 4.0}
+        assert unattributed == pytest.approx(12.0)  # 6 × gpu_count 2
+
+
+class TestFitsResourcesPerGpu:
+    def test_uses_per_gpu_path_when_gpus_present(self):
+        snap = _gpu_snap([(0, 30.0), (1, 30.0), (2, 4.0)])
+        # Aggregate free is 64 GB — an aggregate-only check would pass.
+        assert fits_resources(snap, 20.0, None, None) is True
+        assert fits_resources(snap, 20.0, None, None, gpu_count=2) is True
+        assert fits_resources(snap, 20.0, None, None, gpu_count=3) is False
+
+    def test_aggregate_fallback_without_gpus(self):
+        snap = HostResourceSnapshot(
+            host_id="h1",
+            host_name="test",
+            url="http://h:8000",
+            status=HostStatus.ONLINE,
+            reachable=True,
+            vram_available_gb=80.0,
+        )
+        assert fits_resources(snap, 20.0, None, None, gpu_count=2) is True
+
+    def test_aggregate_fallback_charges_vram_gb_times_gpu_count(self):
+        """§8.4: a host without a gpus list must fit vram_gb × gpu_count.
+
+        A pre-S-058 host drops the gpu_count we send it (its
+        ReservationRequest has no such field), so this comparison is the
+        only gate for those hosts — the 30 GB available cannot serve a
+        20 GB × 2 request even though a single copy would fit.
+        """
+        snap = HostResourceSnapshot(
+            host_id="h1",
+            host_name="test",
+            url="http://h:8000",
+            status=HostStatus.ONLINE,
+            reachable=True,
+            vram_available_gb=30.0,
+        )
+        assert fits_resources(snap, 20.0, None, None, gpu_count=2) is False
+        # Same snapshot, single GPU: the footprint fits untouched.
+        assert fits_resources(snap, 20.0, None, None) is True
+
+    def test_reachable_gate_still_applies(self):
+        snap = _gpu_snap([(0, 30.0)])
+        snap.reachable = False
+        assert fits_resources(snap, 10.0, None, None) is False
+
+
+class TestFindCandidatesPerGpu:
+    @pytest.mark.anyio
+    async def test_ranks_by_vram_available_to_this_request(self, host_a100):
+        """§8.4 amendment: per-GPU hosts rank by the chosen set's free sum.
+
+        h1 has more aggregate VRAM (60 vs 32) but its best single device is
+        smaller (20 vs 30) — aggregate ranking would pick h1, the per-GPU
+        key picks h2.
+        """
+        host_a100.id = "h1"
+        host_b = Host(
+            id="h2",
+            name="h2",
+            url="http://h2:8000",
+            api_key="k",
+            status=HostStatus.ONLINE,
+            gpu_type="nvidia_cuda",
+            roles=["inference"],
+        )
+        hosts = [host_a100, host_b]
+        snap_a = _gpu_snap([(0, 20.0), (1, 20.0), (2, 20.0)], vram_available=60.0)
+        snap_a.host_id = "h1"
+        snap_b = _gpu_snap([(0, 30.0), (1, 2.0)], vram_available=32.0)
+        snap_b.host_id = "h2"
+        snapshots = {"h1": snap_a, "h2": snap_b}
+
+        with (
+            patch("app.services.placement.host_store") as mock_store,
+            patch(
+                "app.services.reservation.gpu_claims_by_device",
+                new=AsyncMock(return_value={}),
+            ),
+        ):
+            mock_store.get_host_instances = AsyncMock(return_value=[])
+            candidates = await find_candidates(
+                hosts,
+                snapshots,
+                roles=["inference"],
+                vram_gb=8.0,
+                gpu_count=1,
+            )
+
+        # Chosen-device free: h2's device 0 has 30, h1's best has 20.
+        assert [c[0].id for c in candidates] == ["h2", "h1"]
+
+    @pytest.mark.anyio
+    async def test_host_short_of_the_device_set_is_not_a_candidate(self, host_a100):
+        host_a100.id = "h1"
+        hosts = [host_a100]
+        snap = _gpu_snap([(0, 10.0), (1, 4.0)])
+        snap.host_id = "h1"
+
+        with (
+            patch("app.services.placement.host_store") as mock_store,
+            patch(
+                "app.services.reservation.gpu_claims_by_device",
+                new=AsyncMock(return_value={}),
+            ),
+        ):
+            mock_store.get_host_instances = AsyncMock(return_value=[])
+            candidates = await find_candidates(
+                hosts,
+                {"h1": snap},
+                roles=["inference"],
+                vram_gb=8.0,
+                gpu_count=2,
+            )
+
+        assert candidates == []

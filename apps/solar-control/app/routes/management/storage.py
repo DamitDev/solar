@@ -38,6 +38,10 @@ class InstanceRef(BaseModel):
     instance_id: str
     alias: str
     status: str
+    gpu_ids: list[int] | None = Field(
+        default=None,
+        description="Physical devices the instance runs on (S-058, from the Redis instance cache)",
+    )
 
 
 class StoredFile(BaseModel):
@@ -181,6 +185,7 @@ async def _build_host_storage(host: Host) -> HostStorage:
                         instance_id=inst.get("id") or inst.get("instance_id") or "",
                         alias=inst.get("alias") or "",
                         status=inst.get("status") or "",
+                        gpu_ids=inst.get("gpu_ids"),
                     )
                 )
         models.append(

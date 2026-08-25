@@ -295,6 +295,7 @@ class SolarControlClient:
                     ),
                     "managed_by": instance.managed_by,
                     "intent_id": instance.intent_id,
+                    "gpu_ids": instance.gpu_ids,
                     "model_source": getattr(instance.config, "model_source", None),
                 }
             )
@@ -471,6 +472,7 @@ class SolarControlClient:
                     ),
                     "managed_by": instance.managed_by,
                     "intent_id": instance.intent_id,
+                    "gpu_ids": instance.gpu_ids,
                     "model_source": getattr(instance.config, "model_source", None),
                 }
             )

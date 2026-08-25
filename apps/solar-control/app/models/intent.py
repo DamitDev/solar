@@ -61,10 +61,19 @@ class PlacementConstraints(BaseModel):
 
 
 class ResourceRequirements(BaseModel):
-    """Resource hints for placement (S-039 §4.6)."""
+    """Resource hints for placement (S-039 §4.6).
+
+    S-058: ``vram_gb`` is a *per-GPU* footprint and ``gpu_count`` (optional,
+    default derived) is how many devices the intent needs. ``None`` rather
+    than a literal 1 keeps \"unset\" distinguishable from \"explicitly 1\" so
+    validation can derive the count from the backend and 422 on mismatch
+    (spec §5). The resolved value is persisted, so consumers always see a
+    concrete ``int >= 1``.
+    """
 
     vram_gb: float | None = None
     ram_gb: float | None = None
+    gpu_count: int | None = Field(default=None, ge=1)
 
 
 class IntentCreate(BaseModel):

@@ -31,6 +31,7 @@ from app.services.migration import execute_migration
 from app.services.placement import (
     find_candidates,
     find_displaceable_instances,
+    find_gpu_assignment,
     fits_resources,
 )
 
@@ -43,6 +44,8 @@ RESERVATION_MAP = "solar:reservations"  # reservation_id → {host_id, ...}
 async def _call_host_reserve(
     host: Host,
     request: ReservationRequest,
+    *,
+    gpu_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     """Proxy a reservation request to a Solar Host (S-034 POST /resources/reservations)."""
     payload: dict[str, Any] = {
@@ -51,6 +54,7 @@ async def _call_host_reserve(
         "job_id": request.job_id,
         "workload_type": request.workload_type,
         "requester": request.requester,
+        "gpu_count": request.gpu_count,
     }
     if request.disk_gb is not None:
         payload["disk_gb"] = request.disk_gb
@@ -58,6 +62,10 @@ async def _call_host_reserve(
         payload["ttl_seconds"] = request.ttl_seconds
     if request.expiration is not None:
         payload["expires_at"] = request.expiration
+    # S-058: placement decided the exact devices — the host does not
+    # self-assign when gpu_ids arrives.
+    if gpu_ids is not None:
+        payload["gpu_ids"] = gpu_ids
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -141,6 +149,8 @@ async def _store_reservation(
     host_id: str,
     host_reservation_id: str,
     request: ReservationRequest,
+    *,
+    gpu_ids: list[int] | None = None,
 ) -> None:
     """Store reservation metadata in Redis for later release/cancel."""
     r = redis_client()
@@ -153,6 +163,7 @@ async def _store_reservation(
         "vram_gb": request.vram_gb,
         "ram_gb": request.ram_gb,
         "disk_gb": request.disk_gb,
+        "gpu_ids": gpu_ids,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await r.hset(RESERVATION_MAP, reservation_id, json.dumps(data))
@@ -222,6 +233,8 @@ async def reserve_resources(
         ram_gb=request.ram_gb,
         disk_gb=request.disk_gb,
         exclude_alias=request.preserve_alias,
+        # S-058: the fit check must account for the device set.
+        gpu_count=request.gpu_count,
     )
 
     migration_details: list[dict[str, Any]] = []
@@ -271,7 +284,18 @@ async def reserve_resources(
 
                     # Check if other host can take this instance
                     inst_vram = float(inst.get("vram_gb", 0) or 0)
-                    if fits_resources(other_snap, inst_vram, None, None):
+                    # S-058: the instance dict carries gpu_ids from the host
+                    # payload, so judge the fit with the instance's real
+                    # device count — a 2-GPU instance must not be judged
+                    # against a host with one free device (default 1).
+                    inst_gpu_count = len(inst.get("gpu_ids") or []) or 1
+                    if fits_resources(
+                        other_snap,
+                        inst_vram,
+                        None,
+                        None,
+                        gpu_count=inst_gpu_count,
+                    ):
                         migration_evaluated += 1
                         try:
                             mig_result = await execute_migration(
@@ -302,6 +326,7 @@ async def reserve_resources(
                                     request.vram_gb,
                                     request.ram_gb,
                                     request.disk_gb,
+                                    gpu_count=request.gpu_count,
                                 ):
                                     target_host = host
                                     target_snapshot = snapshots[host.id]
@@ -360,12 +385,37 @@ async def reserve_resources(
             detail="Internal error: no target host after placement",
         )
 
-    host_result = await _call_host_reserve(target_host, request)
+    # S-058: pick the exact physical devices on the chosen host (same
+    # placement policy as the fit check) and send them to the host so it
+    # does not self-assign. Claims are re-fetched: find_candidates computed
+    # its own copy, and determinism only requires the same snapshot+claims.
+    gpu_ids: list[int] | None = None
+    if getattr(target_snapshot, "gpus", None):
+        claims = await gpu_claims_by_device(target_host.id, target_snapshot)
+        gpu_ids = find_gpu_assignment(
+            target_snapshot, request.gpu_count, request.vram_gb, claims=claims
+        )
+
+    host_result = await _call_host_reserve(target_host, request, gpu_ids=gpu_ids)
     host_reservation_id = host_result.get("reservation_id") or host_result.get("id", "")
+
+    # S-058: the host is authoritative for the resolved device set. When
+    # placement's fit check and the host's live ledger race, control may
+    # have sent no gpu_ids (L4) or a set the host had to adjust — the host
+    # echoes what it actually reserved, so that is what the response and
+    # the Redis record must carry. Reconciler cold starts always send
+    # gpu_ids, so those reservations echo the same set.
+    resolved = host_result.get("gpu_ids")
+    if isinstance(resolved, list) and resolved:
+        gpu_ids = [int(x) for x in resolved]
 
     # ── 6. Store tracking metadata ──────────────────────────────
     await _store_reservation(
-        reservation_id, target_host.id, host_reservation_id, request
+        reservation_id,
+        target_host.id,
+        host_reservation_id,
+        request,
+        gpu_ids=gpu_ids,
     )
 
     return ReservationResponse(
@@ -377,6 +427,7 @@ async def reserve_resources(
         vram_gb=request.vram_gb,
         ram_gb=request.ram_gb,
         disk_gb=request.disk_gb,
+        gpu_ids=gpu_ids,
         workload_type=request.workload_type,
         priority=request.priority,
         expiration=host_result.get("expires_at"),
@@ -441,10 +492,22 @@ async def release_reservation(
 
 RECONCILE_RESERVATION_PREFIX = "solar:reconcile:reservations"
 
+# S-058: reverse index — per-host cold-start GPU claims. The reservations
+# hash above is keyed by intent, so answering "what is claimed on host X"
+# would mean scanning every intent; this hash is keyed by host and written
+# in the same path, so per-device placement sees the claims of all intents
+# in flight on a host with one read.
+GPU_CLAIMS_PREFIX = "solar:reconcile:gpu_claims"
+
 
 def _reconcile_reservation_key(intent_id: str) -> str:
     """Redis hash key holding all reservations of one intent."""
     return f"{RECONCILE_RESERVATION_PREFIX}:{intent_id}"
+
+
+def _gpu_claims_key(host_id: str) -> str:
+    """Redis hash key holding all cold-start GPU claims on one host."""
+    return f"{GPU_CLAIMS_PREFIX}:{host_id}"
 
 
 async def reserve_host_capacity(
@@ -455,12 +518,15 @@ async def reserve_host_capacity(
     ttl_seconds: float | None = None,
     requester: str = "reconciler",
     job_id: str,
+    gpu_count: int = 1,
+    gpu_ids: list[int] | None = None,
 ) -> str:
     """Create a reservation directly on *host*; returns the host reservation id.
 
     The host's capacity check doubles as an early gate: a 409 means the
     host cannot fit the estimate, so the caller can abort before any model
-    download starts.
+    download starts. S-058: ``gpu_ids`` (chosen by control-side placement)
+    travel in the payload when the host reports per-device telemetry.
     """
     request = ReservationRequest(
         vram_gb=vram_gb,
@@ -468,10 +534,11 @@ async def reserve_host_capacity(
         job_id=job_id,
         workload_type="inference",
         requester=requester,
+        gpu_count=gpu_count,
     )
     if ttl_seconds is not None:
         request.ttl_seconds = int(ttl_seconds)
-    result = await _call_host_reserve(host, request)
+    result = await _call_host_reserve(host, request, gpu_ids=gpu_ids)
     return result.get("reservation_id") or result.get("id", "")
 
 
@@ -490,8 +557,15 @@ async def store_reconcile_reservation(
     host_reservation_id: str,
     vram_gb: float,
     ram_gb: float,
+    *,
+    gpu_ids: list[int] | None = None,
 ) -> None:
-    """Record a reconciler reservation for ``(intent_id, host_id)`` in Redis."""
+    """Record a reconciler reservation for ``(intent_id, host_id)`` in Redis.
+
+    S-058: when the reservation carries a device set, the host-keyed GPU
+    claim hash is written in the same path, so per-device placement counts
+    the devices held by in-flight cold starts.
+    """
     r = redis_client()
     data = {
         "host_reservation_id": host_reservation_id,
@@ -500,6 +574,14 @@ async def store_reconcile_reservation(
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await r.hset(_reconcile_reservation_key(intent_id), host_id, json.dumps(data))
+    if gpu_ids:
+        claim = {
+            "gpu_ids": list(gpu_ids),
+            "vram_gb": vram_gb,
+            "host_reservation_id": host_reservation_id,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+        await r.hset(_gpu_claims_key(host_id), intent_id, json.dumps(claim))
 
 
 async def get_reconcile_reservations(intent_id: str) -> dict[str, dict[str, Any]]:
@@ -516,6 +598,76 @@ async def get_reconcile_reservations(intent_id: str) -> dict[str, dict[str, Any]
 
 
 async def remove_reconcile_reservation(intent_id: str, host_id: str) -> None:
-    """Drop the reconciler reservation for ``(intent_id, host_id)`` from Redis."""
+    """Drop the reconciler reservation for ``(intent_id, host_id)``.
+
+    Clears both the intent-keyed tracking hash and the per-host GPU claim
+    (S-058), so the devices return to the pool for placement.
+    """
     r = redis_client()
     await r.hdel(_reconcile_reservation_key(intent_id), host_id)
+    await r.hdel(_gpu_claims_key(host_id), intent_id)
+
+
+async def get_host_gpu_claims(host_id: str) -> dict[str, dict[str, Any]]:
+    """All cold-start GPU claims on *host_id*: intent_id → claim dict."""
+    r = redis_client()
+    raw = await r.hgetall(_gpu_claims_key(host_id))
+    out: dict[str, dict[str, Any]] = {}
+    for intent_id, payload in raw.items():
+        if isinstance(intent_id, bytes):
+            intent_id = intent_id.decode()
+        try:
+            out[intent_id] = json.loads(payload)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+async def gpu_claims_by_device(
+    host_id: str, snapshot: HostResourceSnapshot
+) -> dict[int, float]:
+    """Per-device cold-start claim amounts on *host_id* (S-058 §6/§7).
+
+    Each claim blocks its full per-GPU ``vram_gb`` on every device in its
+    ``gpu_ids`` (pending reservation semantics — no actual usage yet).
+
+    A claim whose ``host_reservation_id`` already appears in
+    ``snapshot.reservations`` is skipped: the host-side headroom term now
+    accounts for it, so counting it again would shrink the device for
+    nothing. Claims older than the cold-start TTL
+    (``model_pull_timeout_s + host_start_timeout_s + 600``) are skipped as
+    leaked. Net effect: the claim covers exactly the window between
+    "control decided" and "the host's snapshot reflects it" — the
+    double-booking window spec §6 is about.
+    """
+    from app.config import settings
+
+    claims = await get_host_gpu_claims(host_id)
+    if not claims:
+        return {}
+    host_reservation_ids = {r.id for r in snapshot.reservations}
+    cutoff_s = settings.model_pull_timeout_s + settings.host_start_timeout_s + 600
+    now = datetime.now(timezone.utc)
+
+    per_device: dict[int, float] = {}
+    for claim in claims.values():
+        if claim.get("host_reservation_id") in host_reservation_ids:
+            continue
+        at = claim.get("at")
+        if at:
+            try:
+                age = (now - datetime.fromisoformat(at)).total_seconds()
+            except (TypeError, ValueError):
+                age = 0.0
+            if age > cutoff_s:
+                continue
+        try:
+            vram_gb = float(claim.get("vram_gb") or 0)
+            gpu_ids = [int(x) for x in (claim.get("gpu_ids") or [])]
+        except (TypeError, ValueError):
+            continue
+        if not gpu_ids or vram_gb <= 0:
+            continue
+        for idx in gpu_ids:
+            per_device[idx] = per_device.get(idx, 0.0) + vram_gb
+    return per_device

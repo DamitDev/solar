@@ -1108,7 +1108,12 @@ class Reconciler:
         from app.database.hosts import host_db
         from app.redis_state import host_store, registry_store
         from app.routes.management.resources import _fetch_host_resource_snapshot
-        from app.services.placement import find_candidates, find_displaceable_instances
+        from app.services.placement import (
+            filter_durable_hosts,
+            find_candidates,
+            find_displaceable_instances,
+        )
+        from app.services.reservation import gpu_claims_by_device
 
         alias = intent.alias
 
@@ -1257,6 +1262,13 @@ class Reconciler:
             if hasattr(resources, "ram_gb") and resources.ram_gb
             else None
         )
+        # S-058: how many physical devices this intent needs (resolved by
+        # intent validation; stored ints are always >= 1).
+        req_gpu_count = (
+            int(resources.gpu_count)
+            if hasattr(resources, "gpu_count") and resources.gpu_count
+            else 1
+        )
         req_roles = list(placement.roles) if placement.roles else ["inference"]
         req_gpu = _requested_gpu_type(placement)
         req_allow = (
@@ -1270,6 +1282,25 @@ class Reconciler:
             else None
         )
 
+        # S-058: pre-fetch the control-side cold-start GPU claims for the
+        # per-GPU durable hosts once, sharing one ledger between
+        # find_candidates below and _shortfall_reason (via
+        # observed["gpu_claims"]) — one Redis round trip per host per tick
+        # instead of one per placement consumer.
+        durable_hosts = filter_durable_hosts(
+            hosts,
+            roles=req_roles,
+            gpu_type=req_gpu,
+            host_allow=req_allow,
+            host_deny=req_deny,
+            backend_type=_intent_backend_type(intent),
+        )
+        gpu_claims: dict[str, dict[int, float]] = {}
+        for h in durable_hosts:
+            snap = snapshots.get(h.id)
+            if snap is not None and getattr(snap, "gpus", None):
+                gpu_claims[h.id] = await gpu_claims_by_device(h.id, snap)
+
         candidates = await find_candidates(
             hosts,
             snapshots,
@@ -1281,6 +1312,8 @@ class Reconciler:
             vram_gb=req_vram,
             ram_gb=req_ram,
             exclude_alias=alias,
+            gpu_count=req_gpu_count,
+            gpu_claims=gpu_claims,
         )
 
         # 5. Compute displaceable instances per host (for displacement evaluation)
@@ -1339,6 +1372,7 @@ class Reconciler:
             "gateway_aliases": gateway_aliases,
             "candidates": candidates,
             "displaceable_map": displaceable_map,
+            "gpu_claims": gpu_claims,
         }
 
     # ── Diff ───────────────────────────────────────────────────
@@ -1726,6 +1760,12 @@ class Reconciler:
             stop_source_instance,
         )
 
+        # S-058: the intent's device count and per-GPU footprint, used by
+        # every placement-y action below.
+        resources = intent.resources
+        req_vram = float(getattr(resources, "vram_gb", None) or 0)
+        req_gpu_count = int(getattr(resources, "gpu_count", None) or 1)
+
         if action.type == ActionType.NOOP:
             return None
 
@@ -1820,12 +1860,48 @@ class Reconciler:
                 logger.warning("Host %s not found for create action", action.host_id)
                 return None
 
-            instance_config = self._build_instance_config(intent, host)
+            # S-058: pick the physical devices on this host (None on hosts
+            # without per-device telemetry — aggregate path). When the host
+            # reports per-device telemetry but no device set fits, no create
+            # happens: the intent stays short and _shortfall_reason explains
+            # why (§10.2 stays truthful). A snapshot fetch failure degrades
+            # to the aggregate path — never abort a create for a telemetry
+            # hiccup; the host's own per-device 409 is the gate.
+            from app.routes.management.resources import _fetch_host_resource_snapshot
+
+            gpu_ids: list[int] | None = None
+            try:
+                snapshot = await _fetch_host_resource_snapshot(host)
+            except Exception:
+                logger.warning(
+                    "Could not fetch resource snapshot for %s during CREATE; "
+                    "creating without device constraints",
+                    host.name,
+                    exc_info=True,
+                )
+                snapshot = None
+            if snapshot is not None and getattr(snapshot, "gpus", None):
+                gpu_ids = await self._assign_gpus(
+                    action.host_id, snapshot, req_gpu_count, req_vram
+                )
+                if gpu_ids is None:
+                    logger.warning(
+                        "Cannot create %s on %s: needs %s GPU(s) with %.1f GB each, "
+                        "but no device set fits (shortfall)",
+                        intent.alias,
+                        host.name,
+                        req_gpu_count,
+                        req_vram,
+                    )
+                    return None
+
+            instance_config = self._build_instance_config(intent, host, gpu_ids=gpu_ids)
 
             # Hold the intent's estimated VRAM on this host while the pull +
             # start run: without a running instance yet, placement would
-            # otherwise see the host as free and oversubscribe it.
-            await self._reserve_cold_start(intent, action.host_id)
+            # otherwise see the host as free and oversubscribe it. The
+            # chosen devices travel with the reservation.
+            await self._reserve_cold_start(intent, action.host_id, gpu_ids=gpu_ids)
 
             logger.info(
                 "Creating instance for alias=%s on %s (reason: %s)",
@@ -1969,8 +2045,60 @@ class Reconciler:
             # Hold the intent's estimated VRAM on the target while the
             # pull + start run there. The source keeps serving during the
             # overlap, so the reservation covers the whole window.
+            # S-058: re-pick the physical devices on the target; a target
+            # that cannot supply the device set stalls exactly like a
+            # VRAM-short target does today. A host or snapshot lookup
+            # failure degrades to no device constraint — the host's own
+            # per-device 409 is the authoritative gate.
+            target_gpu_ids: list[int] | None = None
             if action.target_host_id:
-                await self._reserve_cold_start(intent, action.target_host_id)
+                try:
+                    target_host = await host_db.get_host(action.target_host_id)
+                except Exception:
+                    logger.warning(
+                        "Could not look up target host %s during evacuation; "
+                        "moving without device constraints",
+                        action.target_host_id,
+                        exc_info=True,
+                    )
+                    target_host = None
+                if target_host is not None:
+                    try:
+                        from app.routes.management.resources import (
+                            _fetch_host_resource_snapshot,
+                        )
+
+                        target_snapshot = await _fetch_host_resource_snapshot(
+                            target_host
+                        )
+                    except Exception:
+                        logger.warning(
+                            "Could not fetch resource snapshot for target %s "
+                            "during evacuation; moving without device constraints",
+                            action.target_host_id,
+                            exc_info=True,
+                        )
+                        target_snapshot = None
+                    if target_snapshot is not None and getattr(
+                        target_snapshot, "gpus", None
+                    ):
+                        target_gpu_ids = await self._assign_gpus(
+                            action.target_host_id,
+                            target_snapshot,
+                            req_gpu_count,
+                            req_vram,
+                        )
+                        if target_gpu_ids is None:
+                            await drain_service.record_stall(
+                                action.host_id,
+                                action.instance_id,
+                                f"target cannot supply {req_gpu_count} GPU(s) "
+                                f"with {req_vram:.1f} GB each",
+                            )
+                            return None
+                await self._reserve_cold_start(
+                    intent, action.target_host_id, gpu_ids=target_gpu_ids
+                )
             # Leave this intent alone while the evacuation brings the
             # target up and retires the source — otherwise the next diff
             # sees the two-replica overlap and acts on it (D-017 pattern).
@@ -1980,6 +2108,7 @@ class Reconciler:
                     instance_id=action.instance_id,
                     source_host_id=action.host_id,
                     target_host_id=action.target_host_id,
+                    gpu_ids=target_gpu_ids,
                 )
             except Exception:
                 logger.exception(
@@ -2130,6 +2259,7 @@ class Reconciler:
                 self._settle_until[displaced_intent_id] = (
                     time.monotonic() + _MIGRATE_SETTLE_S
                 )
+            target_gpu_ids: list[int] | None = None
             if displaced_intent_id:
                 # Hold capacity on the target while the migration's pull +
                 # start runs. Keyed by the DISPLACED intent — the instance
@@ -2139,13 +2269,38 @@ class Reconciler:
 
                 displaced = await intent_db.get_intent(displaced_intent_id)
                 if displaced is not None:
-                    await self._reserve_cold_start(displaced, target_host.id)
+                    if getattr(_tsnap, "gpus", None):
+                        # S-058: pick the physical devices on the target from
+                        # the displaced intent's requirements; thread the same
+                        # set into the reservation and the create.
+                        d_res = displaced.resources
+                        d_gpu_count = int(getattr(d_res, "gpu_count", None) or 1)
+                        d_vram = float(getattr(d_res, "vram_gb", None) or 0)
+                        target_gpu_ids = await self._assign_gpus(
+                            target_host.id, _tsnap, d_gpu_count, d_vram
+                        )
+                        if target_gpu_ids is None:
+                            logger.warning(
+                                "No migration target for %s (%s): %s cannot "
+                                "supply %s GPU(s) with %.1f GB each; leaving "
+                                "in place",
+                                action.instance_id,
+                                action.alias,
+                                target_host.name,
+                                d_gpu_count,
+                                d_vram,
+                            )
+                            return None
+                    await self._reserve_cold_start(
+                        displaced, target_host.id, gpu_ids=target_gpu_ids
+                    )
             try:
                 result = await execute_migration(
                     instance_id=action.instance_id,
                     source_host_id=action.host_id,
                     target_host_id=target_host.id,
                     allow_production=False,
+                    gpu_ids=target_gpu_ids,
                 )
                 # The source stays visible in the cache until the host's WS
                 # push lands; without a cooldown the next tick re-migrates
@@ -2203,7 +2358,33 @@ class Reconciler:
 
     # ── Cold-start reservations ─────────────────────────────────
 
-    async def _reserve_cold_start(self, intent: Any, host_id: str) -> None:
+    async def _assign_gpus(
+        self,
+        host_id: str,
+        snapshot: Any,
+        gpu_count: int,
+        vram_gb: float,
+    ) -> list[int] | None:
+        """Pick physical devices on *host_id* for one placement (S-058).
+
+        Fetches the control-side cold-start claims and runs the shared
+        ``find_gpu_assignment``. One computation per action, threaded
+        through the reservation and the create so the devices never change
+        between deciding and spawning.
+        """
+        from app.services.placement import find_gpu_assignment
+        from app.services.reservation import gpu_claims_by_device
+
+        claims = await gpu_claims_by_device(host_id, snapshot)
+        return find_gpu_assignment(snapshot, gpu_count, vram_gb, claims=claims)
+
+    async def _reserve_cold_start(
+        self,
+        intent: Any,
+        host_id: str,
+        *,
+        gpu_ids: list[int] | None = None,
+    ) -> None:
         """Reserve the intent's estimated VRAM on *host_id* before a cold start.
 
         The host has no running instance while the model downloads/loads,
@@ -2211,7 +2392,9 @@ class Reconciler:
         oversubscribe it. Idempotent per ``(intent, host)``: a retry after a
         timeout finds the existing reservation and does not stack a second
         one. The host's capacity check doubles as an early gate — a 409
-        aborts the action before any download starts.
+        aborts the action before any download starts. S-058: the chosen
+        device set travels with the reservation and is recorded as a
+        per-host GPU claim.
         """
         from app.database.hosts import host_db
         from app.services.reservation import (
@@ -2223,6 +2406,7 @@ class Reconciler:
         resources = intent.resources
         vram_gb = float(getattr(resources, "vram_gb", 0) or 0)
         ram_gb = float(getattr(resources, "ram_gb", 0) or 0)
+        gpu_count = int(getattr(resources, "gpu_count", None) or 1)
         if vram_gb <= 0:
             return
 
@@ -2244,6 +2428,8 @@ class Reconciler:
                 ttl_seconds=ttl,
                 requester=f"intent:{intent.alias}",
                 job_id=f"intent:{intent.id}",
+                gpu_count=gpu_count,
+                gpu_ids=gpu_ids,
             )
         except HTTPException:
             logger.warning(
@@ -2255,16 +2441,22 @@ class Reconciler:
             )
             raise
         await store_reconcile_reservation(
-            intent.id, host_id, host_reservation_id, vram_gb, ram_gb
+            intent.id,
+            host_id,
+            host_reservation_id,
+            vram_gb,
+            ram_gb,
+            gpu_ids=gpu_ids,
         )
         logger.info(
             "Cold-start reservation %s for intent %s on host %s "
-            "(vram=%.1f GB, ram=%.1f GB)",
+            "(vram=%.1f GB, ram=%.1f GB, gpu_ids=%s)",
             host_reservation_id,
             intent.id,
             host_id,
             vram_gb,
             ram_gb,
+            gpu_ids,
         )
 
     async def _release_finished_reservations(self, intent: Any) -> None:
@@ -2422,7 +2614,9 @@ class Reconciler:
 
     # ── Build instance config ──────────────────────────────────
 
-    def _build_instance_config(self, intent: Any, host: Any) -> dict[str, Any]:
+    def _build_instance_config(
+        self, intent: Any, host: Any, *, gpu_ids: list[int] | None = None
+    ) -> dict[str, Any]:
         """Compose a Solar Host InstanceConfig from the intent.
 
         Implements deployment-intent.md §6 mapping: alias, model_source,
@@ -2430,6 +2624,10 @@ class Reconciler:
 
         The host expects ``managed_by``, ``intent_id``, and ``priority``
         at the TOP LEVEL (outside ``config``), matching the Instance model.
+        S-058: ``gpu_ids`` and the per-GPU ``vram_gb`` are top-level too
+        (L5 — never inside ``config``, so the drift detector, which only
+        iterates ``intent.backend`` keys, cannot loop on them), and the
+        per-GPU footprint lets the host re-verify capacity at spawn.
         """
         config: dict[str, Any] = {
             "backend_type": intent.backend.get("backend_type", "llamacpp"),
@@ -2443,11 +2641,15 @@ class Reconciler:
                 continue
             config[key] = value
 
+        vram_gb = float(getattr(intent.resources, "vram_gb", None) or 0)
+
         return {
             "config": config,
             "managed_by": "intent",
             "intent_id": intent.id,
             "priority": intent.priority,
+            "gpu_ids": gpu_ids,
+            "vram_gb": vram_gb if vram_gb > 0 else None,
         }
 
     # ── Update status ──────────────────────────────────────────
@@ -2848,6 +3050,44 @@ def _shortfall_reason(intent: Any, observed: dict[str, Any]) -> str | None:
     # among durably eligible hosts, against the requested amount.
     vram_gb = float(getattr(intent.resources, "vram_gb", None) or 0)
     if vram_gb > 0:
+        # S-058: hosts reporting a GPU list are bin-packed per device —
+        # aggregate free can look fine while no single device fits the
+        # per-GPU footprint (D3). This check runs whenever any eligible
+        # host reports gpus, for every gpu_count: a single-GPU intent
+        # asking 50 GB against 3x20 GB devices must get the per-device
+        # message, not fall through to the misleading aggregate number.
+        gpu_count = int(getattr(intent.resources, "gpu_count", None) or 1)
+        per_gpu_hosts = [
+            h
+            for h in durable
+            if snapshots.get(h.id) is not None
+            and getattr(snapshots[h.id], "gpus", None)
+        ]
+        if per_gpu_hosts:
+            from app.services.placement import max_gpu_count_fittable
+
+            # Same control-side claim ledger the placement pass used
+            # (observed["gpu_claims"], pre-fetched in _observe), so the
+            # message counts only devices the claims leave free.
+            gpu_claims = observed.get("gpu_claims") or {}
+            best_devices = 0
+            for h in per_gpu_hosts:
+                snap = snapshots[h.id]
+                best_devices = max(
+                    best_devices,
+                    max_gpu_count_fittable(
+                        snap, vram_gb, claims=gpu_claims.get(h.id) or {}
+                    ),
+                )
+                if best_devices >= gpu_count:
+                    break
+            if best_devices < gpu_count:
+                plural = "s" if gpu_count != 1 else ""
+                return (
+                    f"needs {gpu_count} GPU{plural} with {vram_gb:g} GB each; "
+                    f"best eligible host offers {best_devices}"
+                )
+
         largest_vram = 0.0
         for h in durable:
             snap = snapshots.get(h.id)

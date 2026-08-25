@@ -23,6 +23,11 @@ class ReservationRequest(BaseModel):
     disk_gb: float | None = Field(
         default=None, gt=0, description="Requested disk in GB"
     )
+    # S-058: vram_gb is a *per-GPU* footprint; gpu_count defaults to 1 so
+    # legacy callers are untouched. The concrete device set is decided by
+    # placement — the coordinator sends it in the host POST payload, not
+    # through this request model.
+    gpu_count: int = Field(default=1, ge=1)
 
     # Workload & constraints
     workload_type: str = Field(
@@ -79,6 +84,9 @@ class ReservationResponse(BaseModel):
     vram_gb: float
     ram_gb: float | None = None
     disk_gb: float | None = None
+    # S-058: the physical devices the host-side reservation resolved, when
+    # the selected host reports per-device telemetry.
+    gpu_ids: list[int] | None = None
     workload_type: str
     priority: str
     expiration: str | None = None

@@ -184,9 +184,14 @@ async def test_no_target_ephemeral_stop(http_control, stack, clean_state):
         placement=pinned,
     )
 
+    # 90s (not 30s): these waits failed under 5x parallel suite load
+    # (2026-08-25 stress run) — with 5 integration stacks on one machine
+    # the reconciler's convergence (0.5s tick x fleet-wide observe) here
+    # exceeded 30s while still converging. The deadline must cover the
+    # slowest legitimate path; both waits exit early on the fast path.
     await wait_for(
         lambda: _degraded_with_shortfall(http_control, high["id"]),
-        timeout=30.0,
+        timeout=90.0,
         interval=0.5,
         description="high-priority intent degraded with shortfall",
     )
@@ -194,7 +199,7 @@ async def test_no_target_ephemeral_stop(http_control, stack, clean_state):
     # The ephemeral replica on the source host is stopped and deleted.
     await wait_for(
         lambda: _instance_gone(http_control, src["id"], displaced_instance_id),
-        timeout=30.0,
+        timeout=90.0,
         interval=0.5,
         description="displaced ephemeral replica removed",
     )

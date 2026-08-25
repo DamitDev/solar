@@ -88,6 +88,9 @@ async def _fleet_state(
         ),
         disk_gb=None,
         exclude_alias=None,
+        # S-058: the fleet warning must account for the device set, not
+        # just the aggregate VRAM pool.
+        gpu_count=int(resources.get("gpu_count") or 1),
     )
     return candidates, snapshots, durable
 
@@ -229,8 +232,9 @@ async def validate_intent_fleet(
                 {
                     "field": "resources.vram_gb",
                     "message": (
-                        f"requests {vram_gb:.1f} GB VRAM, but the largest "
-                        f"available among eligible hosts is {largest_vram:.1f} GB"
+                        f"requests {vram_gb:.1f} GB VRAM per GPU, but the "
+                        f"largest available among eligible hosts is "
+                        f"{largest_vram:.1f} GB"
                     ),
                 }
             )

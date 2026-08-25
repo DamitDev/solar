@@ -215,13 +215,15 @@ Implicit constraint (not configurable): **anti-affinity by alias** — at most o
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `vram_gb` | number \| null | Estimated VRAM the instance needs. Used to filter/rank candidate hosts by `memory_available_gb`. |
+| `vram_gb` | number \| null | Estimated VRAM the instance needs **per GPU** (S-058). Used to filter/rank candidate hosts by `memory_available_gb`. With `gpu_count: 1` (the default) the arithmetic is identical to the pre-S-058 total-VRAM reading. |
 | `ram_gb` | number \| null | Estimated system RAM (mainly relevant for Mac/`apple_mps` unified memory and CPU backends). |
+| `gpu_count` | integer \| null | (S-058) Explicit number of GPUs. When set it MUST match the count the backend implies (`tp_size` for `sglang`; `devices` list length, or the `tensor_split` entry count when `devices` is absent, for `llamacpp`) — a disagreement is a 422. May not exceed 1 for `huggingface_*` backends. When omitted, the derived count is resolved and stored at create time. Physical device ids are **never user-settable**; assignment is automatic (Section 8.4). |
 
 Semantics by phase:
 
 - **v1 (today):** best-effort hint. Placement reads per-host `memory_available_gb` / `disk_available_gb` (already reported via `host_health`) and skips hosts that cannot fit the request. No hard reservation is taken.
 - **After S-035/S-038:** the reconciler should consult `GET /api/resources` for the aggregated `available = total - Σeffective` view (per S-034: `effective = max(actual, requested)` per running job) and may take a reservation through the S-038 coordinator before creating an instance. This spec keeps the field stable so the upgrade is non-breaking.
+- **After S-058:** on a host reporting per-device telemetry, `vram_gb` is the footprint **of one device**. The reconciler bin-packs a set of exactly `gpu_count` devices (Section 8.4), reserves that set with the host, pins the instance to it via `gpu_ids` (`CUDA_VISIBLE_DEVICES` in the spawned process), and the aggregate ledger charge is `vram_gb × gpu_count`.
 
 If `resources` is omitted, placement uses only role/gpu/allow-deny filters and ranks by free memory.
 
@@ -627,6 +629,33 @@ The **durable-eligibility filter** (roles / reachability / drain exclusion
 per [host-draining.md](host-draining.md) §4.1) is extracted as a single
 shared helper (`filter_durable_hosts`) reused by the fleet-aware intent
 validation (Section 4.7.2) and placement — one filter, one semantics.
+
+**S-058: per-device placement.** When a host snapshot reports a `gpus`
+list (per-device telemetry), the `fits(host, resources)` check becomes
+bin-packing over devices: the host can serve `resources` iff there exists
+a set of exactly `gpu_count` devices, each with at least `vram_gb` free.
+"Free" is the device's reported `available_gb` minus reservation headroom
+charged to it — reservation with `gpu_ids` charge their per-GPU footprint
+to exactly those devices (`vram_gb − actual_share`, the share being
+`actual_vram_gb ÷ gpu_count` for running reservations); a reservation
+without `gpu_ids` (legacy/aggregate hosts) charges `vram_gb × gpu_count`
+pessimistically to **every** device, safe rather than double-booking.
+Devices are selected most-free-first with the lowest index as tie-break,
+and that order is the assignment order (backend flags like `main_gpu: 0`
+or `--tp-size` index the *visible* set, so renumbering is exactly what
+makes them positions within the chosen devices).
+
+Ranking (§8.4 amendment): the primary key becomes **VRAM available to
+this request** — the sum of free memory over the chosen device set for
+per-GPU hosts, `vram_available_gb` otherwise (aggregate free is
+meaningless for fit on a multi-GPU box; for a single-GPU or no-`gpus`
+host the key is unchanged). Hosts that cannot supply the requested
+device set are not candidates.
+
+Hosts without a `gpus` list (Mac/CPU hosts, or older agents) keep the
+aggregate path unchanged — `vram_gb × gpu_count` against
+`vram_available_gb`. The D6 aggregate fallback makes the feature a pure
+additive for heterogeneous fleets.
 
 ### 8.5 Priority-aware displacement (conservative)
 
