@@ -94,12 +94,15 @@ class RegistryEntry(BaseModel):
         cls,
         host_id: str,
         host_url: str,
+        host_api_key: str,
         instance: dict[str, Any],
     ) -> "RegistryEntry | None":
         """Build from an HTTP-polled instance dict (solar-host REST API).
 
-        These have a nested ``config`` dict containing ``alias``,
-        ``api_key``, and ``backend_type``.
+        These have a nested ``config`` dict containing ``alias`` and
+        ``backend_type``. The host strips ``api_key`` from instance configs
+        on purpose (instances use the host API key), so the host key is the
+        fallback — mirroring :meth:`from_ws_instance`.
         """
         port = instance.get("port")
         if not port:
@@ -111,7 +114,7 @@ class RegistryEntry(BaseModel):
             host_id=host_id,
             instance_id=instance["id"],
             url=instance_url,
-            api_key=config.get("api_key", ""),
+            api_key=config.get("api_key") or host_api_key,
             model_alias=config.get("alias", "unknown"),
             supported_endpoints=instance.get(
                 "supported_endpoints", cls.DEFAULT_ENDPOINTS

@@ -241,7 +241,7 @@ class OpenAIGateway:
                                 for instance in instances:
                                     if instance.get("status") == "running":
                                         entry = RegistryEntry.from_http_instance(
-                                            host.id, host.url, instance
+                                            host.id, host.url, host.api_key, instance
                                         )
                                         if entry:
                                             result_entries.append(entry)

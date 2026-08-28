@@ -584,11 +584,12 @@ class TestRegistryEntry:
         entry = RegistryEntry.from_http_instance(
             host_id="host-1",
             host_url="http://test-host:8000",
+            host_api_key="k",
             instance={
                 "id": "inst-1",
                 "port": 3500,
                 "served_model_name": SERVED,
-                "config": {"alias": ALIAS, "backend_type": "sglang", "api_key": "k"},
+                "config": {"alias": ALIAS, "backend_type": "sglang"},
             },
         )
 

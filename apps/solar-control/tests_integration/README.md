@@ -348,4 +348,17 @@ passes; the WS seam should be re-verified once the host fixes are merged.
    starts (host-side `404 Instance not found after start`, `exit -15`
    SIGTERMs) and candidate flapping. Fixed by preserving the ownership
    fields in the conversion (matching the WS push shape).
+4. **Redis restart left every registry entry with an empty API key**
+   (DamitDev/solar#57): the registry and connection maps are redis-backed,
+   so after a redis restart every host looked disconnected and the refresh
+   rebuilt the registry via the HTTP `/instances` poll — where the API key
+   came from the instance config that solar-host deliberately strips
+   (instances use the host API key). Every entry landed with an empty key
+   and routed requests 401'd until pod restart. Fixed by passing the host
+   key into the poll path: `RegistryEntry.from_http_instance` gained a
+   `host_api_key` fallback, mirroring `from_ws_instance`. Covered by
+   `test_registry_rebuilds_with_host_api_key_after_redis_flush`, which
+   flushes the connection/instance/registry maps (sids/connected included)
+   and asserts the registry rebuilds with the host key — no control
+   restart.
 
