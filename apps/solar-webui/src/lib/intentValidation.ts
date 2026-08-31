@@ -298,6 +298,87 @@ function validateDevice(
   return [];
 }
 
+/**
+ * S-058: mirror the server's `derive_gpu_count` — the GPU count the
+ * backend implies: sglang `tp_size`; llama.cpp `devices` list length or
+ * the `tensor_split` count when devices is absent.
+ */
+function deriveGpuCount(backend: Record<string, any>): number | null {
+  if (!backend || typeof backend !== 'object') return null;
+  const backendType = backend.backend_type;
+  if (backendType === 'sglang') {
+    const tpSize = backend.tp_size;
+    if (Number.isInteger(tpSize) && tpSize >= 1) return tpSize;
+    return null;
+  }
+  if (backendType === 'llamacpp') {
+    const devices = backend.devices;
+    if (typeof devices === 'string' && devices.trim()) {
+      const parts = devices.split(',').filter((p) => p.trim());
+      if (parts.length > 0) return parts.length;
+    }
+    const tensorSplit = backend.tensor_split;
+    if (typeof tensorSplit === 'string' && tensorSplit.trim()) {
+      const parts = tensorSplit.split(',').filter((p) => p.trim());
+      if (parts.length > 0) return parts.length;
+    }
+  }
+  return null;
+}
+
+/**
+ * Device-name suffix of a llama.cpp `devices` entry ('CUDA0' → suffix 0).
+ * Entries without a numeric suffix ('none', and anything non-CUDA) do not
+ * match and stay legal — they never index a visible device.
+ */
+const DEVICE_NAME_RE = /^([A-Za-z]+)(\d+)$/;
+
+/**
+ * S-058: mirror the server's `_validate_gpu_device_positions`.
+ *
+ * After `CUDA_VISIBLE_DEVICES` the child process only ever sees
+ * CUDA0..CUDA(n-1), so a `devices` entry or `main_gpu` at or beyond the
+ * resolved `gpu_count` names a device that does not exist in the process.
+ * Fields an edit carries over unchanged are skipped via `unchanged`,
+ * matching the server's grandfathering.
+ */
+function validateGpuDevicePositions(
+  backend: Record<string, any>,
+  resolvedGpuCount: number,
+  unchanged: readonly string[],
+): IntentFieldError[] {
+  const errors: IntentFieldError[] = [];
+  if (backend?.backend_type !== 'llamacpp' || resolvedGpuCount < 1) return errors;
+  const upper = resolvedGpuCount - 1;
+
+  const devices = backend.devices;
+  if (typeof devices === 'string' && devices.trim() && !unchanged.includes('devices')) {
+    for (const part of devices.split(',')) {
+      const trimmed = part.trim();
+      if (!trimmed) continue;
+      const m = DEVICE_NAME_RE.exec(trimmed);
+      if (!m) continue; // 'none' and other non-CUDA tokens stay legal
+      if (Number(m[2]) > upper) {
+        errors.push({
+          field: 'backend.devices',
+          message: `devices entry '${trimmed}' is out of range — device flags are positions within the chosen set (0..${upper}); physical ids are not selectable`,
+        });
+        break;
+      }
+    }
+  }
+
+  const mainGpu = backend.main_gpu;
+  if (Number.isInteger(mainGpu) && mainGpu > upper && !unchanged.includes('main_gpu')) {
+    errors.push({
+      field: 'backend.main_gpu',
+      message: `main_gpu ${mainGpu} is out of range — device flags are positions within the chosen set (0..${upper}); physical ids are not selectable`,
+    });
+  }
+
+  return errors;
+}
+
 export function validateIntentRequest(
   req: IntentCreateRequest,
   unchangedFields: readonly string[] = [],
@@ -411,6 +492,48 @@ export function validateIntentRequest(
       field: 'placement.host_allow',
       message: `Host${contradictory.length > 1 ? 's' : ''} both allowed and denied: ${contradictory.join(', ')}`,
     });
+  }
+
+  // S-058: resources.gpu_count mirrors the server's `_validate_gpu_count`:
+  // an integer >= 1 that must agree with the backend-derived count;
+  // HuggingFace backends stay single-GPU.
+  const resources = req.resources ?? {};
+  const explicitGpuCount = resources.gpu_count;
+  let gpuCountError = false;
+  if (explicitGpuCount !== undefined && explicitGpuCount !== null) {
+    if (!Number.isInteger(explicitGpuCount) || explicitGpuCount < 1) {
+      errors.push({ field: 'resources.gpu_count', message: 'gpu_count must be an integer >= 1' });
+      gpuCountError = true;
+    } else {
+      const derived = deriveGpuCount(req.backend);
+      if (derived !== null && explicitGpuCount !== derived) {
+        const backendType = req.backend?.backend_type;
+        const hint =
+          backendType === 'sglang' ? 'backend.tp_size' : backendType === 'llamacpp' ? 'backend.devices' : 'backend';
+        errors.push({
+          field: 'resources.gpu_count',
+          message: `resources.gpu_count is ${explicitGpuCount} but ${hint} implies ${derived} — they must agree`,
+        });
+        // The server skips the position check on any gpu_count error —
+        // an unresolved/contested range makes the check meaningless.
+        gpuCountError = true;
+      }
+      if (String(req.backend?.backend_type ?? '').startsWith('huggingface') && explicitGpuCount > 1) {
+        errors.push({
+          field: 'resources.gpu_count',
+          message: 'HuggingFace backends stay single-GPU — gpu_count must be 1',
+        });
+      }
+    }
+  }
+
+  // S-058: llama.cpp device flags are positions within the chosen set —
+  // mirror the server's `_validate_gpu_device_positions`, which skips the
+  // check when gpu_count validation already failed (unknown range).
+  if (!gpuCountError && req.backend) {
+    errors.push(
+      ...validateGpuDevicePositions(req.backend, explicitGpuCount ?? deriveGpuCount(req.backend) ?? 1, unchangedFields),
+    );
   }
 
   return errors;

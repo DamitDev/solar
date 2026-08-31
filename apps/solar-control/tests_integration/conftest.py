@@ -343,12 +343,16 @@ class Stack:
             return self.secrets["host_b"]
         return f"test-host-{letter}-{self.run_id}-key"
 
-    async def spawn_extra_host(self, letter: str) -> str:
+    async def spawn_extra_host(
+        self, letter: str, *, env_extra: dict[str, str] | None = None
+    ) -> str:
         """Spawn an additional host subprocess and register it in control.
 
         Used by tests that need more hosts than the default two (e.g. the
         shortfall test: 3 replicas on 2 hosts -> 3rd host fills to ready).
-        Returns the host URL.
+        ``env_extra`` layers extra environment over the standard host env
+        (S-058: the GPU-aware test fakes a 3-device NVIDIA host through
+        ``GPU_TELEMETRY_OVERRIDE``). Returns the host URL.
         """
         if letter in self.extra_hosts:
             return self.extra_host_urls[letter]
@@ -375,6 +379,7 @@ class Stack:
             LOG_DIR=str(self.tmp_dir / f"logs-{letter}"),
             MODELS_DIR=str(self.tmp_dir / f"models-{letter}"),
             START_PORT=str(35300 + (ord(letter) - ord("a")) * 100),
+            **(env_extra or {}),
         )
         svc, actual_port = spawn_service(
             name=f"host-{letter}",
@@ -412,11 +417,22 @@ class Stack:
         migration tests that follow assume exactly two hosts (their
         "no target" displacement scenario must have no third host for the
         MIGRATE target search to find).
+
+        The host's persistent config file is removed too: solar-host
+        auto-restarts its recorded instances on boot, and the config path
+        is shared per letter across the session — without the purge, a
+        previous test's instances would resurrect inside the next test's
+        freshly spawned host.
         """
         svc = self.extra_hosts.pop(letter, None)
         if svc is not None:
             svc.terminate()
         self.extra_host_urls.pop(letter, None)
+        config_file = self.tmp_dir / f"config-{letter}.json"
+        try:
+            config_file.unlink(missing_ok=True)
+        except OSError:
+            pass
         import psycopg2
 
         conn = psycopg2.connect(self.db_env["control_db"])
@@ -770,13 +786,18 @@ async def _ensure_model_registered(stack: Stack) -> None:
 
 
 def _control_client(base_url: str, api_key: str):
-    """Return an httpx.AsyncClient for control's management API."""
+    """Return an httpx.AsyncClient for control's management API.
+
+    30s: control's routes can legitimately take >15s under parallel-runner
+    load (a ReadTimeout on the catalog test under 5x suite load); the
+    suite's per-test timeout is the real bound for wedged routes.
+    """
     import httpx
 
     return httpx.AsyncClient(
         base_url=base_url,
         headers={"X-API-Key": api_key},
-        timeout=15.0,
+        timeout=30.0,
     )
 
 

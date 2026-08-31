@@ -61,10 +61,17 @@ async def _instance_ids(http_control, intent_id: str) -> set[str]:
     }
 
 
+# 600s overrides the suite's 420s default: this test's settle loop races a
+# documented 600s deadline (an HF restart takes 3-6 min under stack load),
+# which 420s would cut short mid-wait.
+@pytest.mark.timeout(600)
 async def test_backend_edit_settles_without_churn(http_control, clean_state):
     """Edit a backend field -> replicas stay stable, spec_changed_at clears."""
     intent = await create_intent(http_control, alias=_alias())
-    ready = await wait_intent_ready(http_control, intent["id"])
+    # 300s: an HF server cold start took >180s under 5x parallel suite load;
+    # the wait exits early on the fast path. The settle loop below races its
+    # own 600s deadline, padded by the per-test 600s timeout mark.
+    ready = await wait_intent_ready(http_control, intent["id"], timeout=300.0)
     ids_before = await _instance_ids(http_control, intent["id"])
     assert len(ids_before) == 1
 

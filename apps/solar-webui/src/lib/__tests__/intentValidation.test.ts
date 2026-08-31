@@ -427,3 +427,116 @@ describe('sanitizeIntentBackend', () => {
     expect(cleaned).toEqual({ backend_type: 'llamacpp', threads: 4 });
   });
 });
+
+describe('resources.gpu_count (S-058 mirror of app/validation.py)', () => {
+  const sglang = { backend_type: 'sglang', tp_size: 2 };
+  const llamacpp = { backend_type: 'llamacpp', devices: '0,1' };
+
+  it('never errors on a missing explicit count; the server derives it', () => {
+    const payload: any = {
+      ...validRequest,
+      backend: sglang,
+      resources: { vram_gb: 30 },
+    };
+    // No explicit gpu_count → nothing to disagree with; the server resolves
+    // gpu_count=2 from tp_size at create time (validation.py).
+    expect(validateIntentRequest(payload)).toEqual([]);
+  });
+
+  it('derives from llamacpp devices', () => {
+    const errors = errorsFor({ backend: llamacpp });
+    expect(errors).toEqual([]);
+  });
+
+  it('rejects an explicit count that disagrees with sglang tp_size', () => {
+    const errors = errorsFor({ backend: sglang, resources: { vram_gb: 30, gpu_count: 1 } });
+    const err = errors.find((e) => e.field === 'resources.gpu_count');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('tp_size');
+    expect(err!.message).toContain('2');
+  });
+
+  it('rejects an explicit count that disagrees with llamacpp devices', () => {
+    const errors = errorsFor({ backend: llamacpp, resources: { vram_gb: 30, gpu_count: 3 } });
+    const err = errors.find((e) => e.field === 'resources.gpu_count');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('devices');
+    expect(err!.message).toContain('2');
+  });
+
+  it('keeps huggingface single-GPU by default and rejects multi-GPU', () => {
+    expect(fieldNames({ resources: { gpu_count: 1 } })).not.toContain('resources.gpu_count');
+    const errors = errorsFor({ resources: { vram_gb: 20, gpu_count: 2 } });
+    expect(errors.some((e) => e.field === 'resources.gpu_count' && e.message.includes('single-GPU'))).toBe(true);
+  });
+
+  it('rejects zero or negative counts', () => {
+    for (const bad of [0, -1]) {
+      expect(fieldNames({ resources: { gpu_count: bad } })).toContain('resources.gpu_count');
+    }
+  });
+});
+
+describe('llama.cpp device positions (S-058 mirror of _validate_gpu_device_positions)', () => {
+  const base = { backend_type: 'llamacpp', split_mode: 'row' };
+
+  it('rejects a devices entry beyond the resolved count', () => {
+    const errors = errorsFor({
+      backend: { ...base, devices: 'CUDA1,CUDA2' },
+      resources: { vram_gb: 30, gpu_count: 2 },
+    });
+    const err = errors.find((e) => e.field === 'backend.devices');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('out of range');
+  });
+
+  it('rejects main_gpu beyond the resolved count', () => {
+    const errors = errorsFor({
+      backend: { ...base, main_gpu: 2 },
+      resources: { vram_gb: 30, gpu_count: 2 },
+    });
+    const err = errors.find((e) => e.field === 'backend.main_gpu');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('out of range');
+  });
+
+  it('accepts in-range positions', () => {
+    const errors = errorsFor({
+      backend: { ...base, devices: 'CUDA0,CUDA1', main_gpu: 1 },
+      resources: { vram_gb: 30, gpu_count: 2 },
+    });
+    expect(errors).toEqual([]);
+  });
+
+  it('leaves devices "none" alone', () => {
+    // 'none' disables offloading — it is not a position, so never range-checked.
+    const errors = errorsFor({
+      backend: { ...base, devices: 'none', split_mode: 'none' },
+      resources: { vram_gb: 30, gpu_count: 1 },
+    });
+    expect(errors).toEqual([]);
+  });
+
+  it('grandfathers an unchanged offending value on update', () => {
+    const current = { backend_type: 'llamacpp', devices: 'CUDA1,CUDA2', split_mode: 'row' };
+    const payload: any = {
+      ...validRequest,
+      backend: { ...current },
+      resources: { vram_gb: 30, gpu_count: 2 },
+    };
+    const unchanged = unchangedBackendFields(payload.backend, current);
+    expect(validateIntentRequest(payload, unchanged)).toEqual([]);
+  });
+
+  it('rejects a changed offending value on update', () => {
+    const current = { backend_type: 'llamacpp', devices: 'CUDA0,CUDA1', split_mode: 'row' };
+    const payload: any = {
+      ...validRequest,
+      backend: { ...current, devices: 'CUDA1,CUDA2' },
+      resources: { vram_gb: 30, gpu_count: 2 },
+    };
+    const unchanged = unchangedBackendFields(payload.backend, current);
+    const errors = validateIntentRequest(payload, unchanged);
+    expect(errors.some((e) => e.field === 'backend.devices' && e.message.includes('out of range'))).toBe(true);
+  });
+});

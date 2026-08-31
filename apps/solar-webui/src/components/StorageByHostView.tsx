@@ -48,14 +48,21 @@ function UsedByChips({ model }: { model: StoredModel }) {
   return (
     <span className="flex flex-wrap gap-1">
       {model.in_use_by.map((ref) => (
-        <Link
-          key={ref.instance_id}
-          to="/hosts"
-          title={`${ref.status} · ${ref.instance_id}`}
-          className="bg-nord-2 text-nord-4 rounded px-2 py-0.5 text-xs hover:text-nord-6 hover:bg-nord-3 transition-colors"
-        >
-          {ref.alias || ref.instance_id.slice(0, 8)}
-        </Link>
+        <span key={ref.instance_id} className="flex items-center gap-1">
+          <Link
+            to="/hosts"
+            title={`${ref.status} · ${ref.instance_id}`}
+            className="bg-nord-2 text-nord-4 rounded px-2 py-0.5 text-xs hover:text-nord-6 hover:bg-nord-3 transition-colors"
+          >
+            {ref.alias || ref.instance_id.slice(0, 8)}
+          </Link>
+          {/* S-058: assigned physical devices */}
+          {ref.gpu_ids?.length ? (
+            <span className="bg-nord-3 text-nord-4 rounded px-1.5 py-0.5 text-[10px] font-mono">
+              GPU {ref.gpu_ids.join(', ')}
+            </span>
+          ) : null}
+        </span>
       ))}
     </span>
   );

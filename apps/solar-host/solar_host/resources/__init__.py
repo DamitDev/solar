@@ -6,6 +6,7 @@ from solar_host.resources.manager import (
     ResourceManager,
 )
 from solar_host.resources.models import (
+    GpuInfo,
     Reservation,
     ReservationRequest,
     ReservationView,
@@ -16,6 +17,7 @@ from solar_host.resources.models import (
 
 __all__ = [
     "CapacityExceededError",
+    "GpuInfo",
     "Reservation",
     "ReservationRequest",
     "ReservationRunningError",

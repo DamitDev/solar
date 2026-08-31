@@ -94,6 +94,9 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
   const [hostDeny, setHostDeny] = useState<string[]>(seed?.placement?.host_deny ?? []);
   const [vramGb, setVramGb] = useState<string>(numberToInput(seed?.resources?.vram_gb));
   const [ramGb, setRamGb] = useState<string>(numberToInput(seed?.resources?.ram_gb));
+  // S-058: how many GPUs the intent needs; empty = let the server derive it
+  // from the backend (sglang tp_size / llama.cpp devices).
+  const [gpuCount, setGpuCount] = useState<string>(numberToInput(seed?.resources?.gpu_count));
   const [metadataRows, setMetadataRows] = useState<MetadataRow[]>(() =>
     Object.entries(seed?.metadata ?? {}).map(([key, value]) => ({ key, value })),
   );
@@ -107,7 +110,9 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
   const [placementOpen, setPlacementOpen] = useState(
     () => gpuType !== '' || hostAllow.length > 0 || hostDeny.length > 0 || roles.join() !== 'inference',
   );
-  const [extrasOpen, setExtrasOpen] = useState(() => vramGb !== '' || ramGb !== '' || metadataRows.length > 0);
+  const [extrasOpen, setExtrasOpen] = useState(
+    () => vramGb !== '' || ramGb !== '' || gpuCount !== '' || metadataRows.length > 0,
+  );
 
   const [hosts, setHosts] = useState<Host[]>([]);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -262,6 +267,7 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
       resources: {
         vram_gb: vramGb === '' ? null : Number(vramGb),
         ram_gb: ramGb === '' ? null : Number(ramGb),
+        gpu_count: gpuCount === '' ? null : Number(gpuCount),
       },
       metadata,
     };
@@ -693,10 +699,31 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
                     onChange={(e) => setVramGb(e.target.value)}
                     min="0"
                     step="0.5"
-                    placeholder="Estimated VRAM per replica"
+                    placeholder="Estimated VRAM per GPU"
                     className={inputClass}
                   />
                   {fieldError('resources.vram_gb')}
+                </div>
+                {/* S-058: GPU count with automatic device selection. Physical
+                    device ids are never user-settable; the backend's own
+                    multi-GPU fields (devices/main_gpu/tp_size) are positions
+                    within the scheduler-chosen set. */}
+                <div>
+                  <label className="block text-sm font-medium text-nord-4 mb-1">GPU count</label>
+                  <input
+                    type="number"
+                    value={gpuCount}
+                    onChange={(e) => setGpuCount(e.target.value)}
+                    min="1"
+                    step="1"
+                    placeholder="Auto (from backend)"
+                    className={inputClass}
+                  />
+                  <p className="text-[10px] text-nord-4 mt-1">
+                    Physical device selection is automatic — llama.cpp devices/main_gpu are positions within the chosen
+                    set.
+                  </p>
+                  {fieldError('resources.gpu_count')}
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-nord-4 mb-1">RAM (GB)</label>

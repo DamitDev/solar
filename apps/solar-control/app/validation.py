@@ -7,6 +7,7 @@ the codebase.
 
 import json
 import math
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -635,6 +636,216 @@ def _validate_sglang(
     return errors
 
 
+def derive_gpu_count(data: dict[str, Any]) -> int | None:
+    """Derive the implied GPU count from the backend (S-058 spec §5).
+
+    sglang → ``tp_size``; llama.cpp → the ``devices`` list length, or the
+    ``tensor_split`` count when ``devices`` is absent (the host's
+    ``check_tensor_split`` validator already enforces they agree). Returns
+    None when the backend carries no count signal.
+    """
+    backend = data.get("backend")
+    if not isinstance(backend, dict):
+        return None
+    backend_type = backend.get("backend_type")
+
+    if backend_type == "sglang":
+        tp_size = backend.get("tp_size")
+        if isinstance(tp_size, int) and not isinstance(tp_size, bool) and tp_size >= 1:
+            return tp_size
+        return None
+
+    if backend_type == "llamacpp":
+        devices = backend.get("devices")
+        if isinstance(devices, str) and devices.strip():
+            parts = [p.strip() for p in devices.split(",") if p.strip()]
+            if parts:
+                return len(parts)
+        tensor_split = backend.get("tensor_split")
+        if isinstance(tensor_split, str) and tensor_split.strip():
+            parts = [p.strip() for p in tensor_split.split(",") if p.strip()]
+            if parts:
+                return len(parts)
+    return None
+
+
+def _validate_gpu_count(data: dict[str, Any], errors: list[dict[str, str]]) -> None:
+    """Validate and resolve ``resources.gpu_count`` (S-058 spec §5).
+
+    - Derive from the backend when not explicit (sglang ``tp_size``;
+      llama.cpp ``devices`` list length / ``tensor_split`` count).
+    - Explicit and derived disagreement → 422.
+    - Explicit ``> 1`` with a ``huggingface_*`` backend → 422 (HF stays
+      single-GPU).
+    - Resolve in place (``data[\"resources\"][\"gpu_count\"]``) so the route
+      persists the concrete count and every consumer sees an ``int >= 1``.
+    """
+    resources = data.get("resources")
+    if not isinstance(resources, dict):
+        return
+
+    explicit = resources.get("gpu_count")
+    if explicit is not None and (
+        not isinstance(explicit, int) or isinstance(explicit, bool) or explicit < 1
+    ):
+        errors.append(
+            {
+                "field": "resources.gpu_count",
+                "message": "gpu_count must be an integer >= 1",
+            }
+        )
+        return
+
+    derived = derive_gpu_count(data)
+    backend_type = (data.get("backend") or {}).get("backend_type")
+
+    if explicit is not None and derived is not None and explicit != derived:
+        if backend_type == "sglang":
+            hint = "backend.tp_size"
+        elif backend_type == "llamacpp":
+            hint = "backend.devices"
+        else:
+            hint = "backend"
+        errors.append(
+            {
+                "field": "resources.gpu_count",
+                "message": (
+                    f"resources.gpu_count is {explicit} but {hint} implies "
+                    f"{derived} — they must agree"
+                ),
+            }
+        )
+        return
+
+    resolved = explicit if explicit is not None else (derived or 1)
+    resources["gpu_count"] = resolved
+
+    if (
+        isinstance(backend_type, str)
+        and backend_type.startswith("huggingface")
+        and resolved > 1
+    ):
+        errors.append(
+            {
+                "field": "resources.gpu_count",
+                "message": (
+                    "HuggingFace backends stay single-GPU — gpu_count must be 1"
+                ),
+            }
+        )
+
+
+# Device-name suffix of a llama.cpp ``devices`` entry ('CUDA0' → suffix 0).
+# Entries without a numeric suffix ('none', and anything non-CUDA) do not
+# match and stay legal — they never index a visible device.
+_DEVICE_NAME_RE = re.compile(r"^([A-Za-z]+)(\d+)$")
+
+
+def _gpu_device_position_issues(
+    backend: dict[str, Any],
+    gpu_count: int,
+    *,
+    first_only: bool = False,
+    exempt_fields: frozenset[str] = frozenset(),
+) -> list[dict[str, str]]:
+    """Out-of-range llama.cpp device flags as issue dicts (S-058).
+
+    After ``CUDA_VISIBLE_DEVICES`` the child process only ever sees
+    ``CUDA0..CUDA(n-1)`` (spec §8 F1/D5): ``devices`` entries and
+    ``main_gpu`` are *positions within the chosen set*, never physical
+    indices, so the range is ``0..gpu_count-1``.
+
+    Shared by the hard-error path (:func:`_validate_gpu_device_positions`)
+    and the advisory warning in :func:`validate_intent_warnings` so the
+    message wording cannot drift between the two. *first_only* limits the
+    ``devices`` loop to the first offending entry (the advisory path
+    reports one; ``main_gpu`` is still checked afterwards); *exempt_fields*
+    grandfathers backend fields an update carries over unchanged.
+    """
+    issues: list[dict[str, str]] = []
+    upper = gpu_count - 1
+
+    devices = backend.get("devices")
+    if isinstance(devices, str) and devices.strip() and "devices" not in exempt_fields:
+        for entry in (p.strip() for p in devices.split(",") if p.strip()):
+            m = _DEVICE_NAME_RE.match(entry)
+            if m is None:
+                continue  # 'none' and other non-CUDA tokens stay legal
+            if int(m.group(2)) > upper:
+                issues.append(
+                    {
+                        "field": "backend.devices",
+                        "message": (
+                            f"devices entry '{entry}' is out of range — "
+                            f"device flags are positions within the chosen set "
+                            f"(0..{upper}); physical ids are not selectable"
+                        ),
+                    }
+                )
+                if first_only:
+                    break
+
+    main_gpu = backend.get("main_gpu")
+    if (
+        isinstance(main_gpu, int)
+        and not isinstance(main_gpu, bool)
+        and main_gpu > upper
+        and "main_gpu" not in exempt_fields
+    ):
+        issues.append(
+            {
+                "field": "backend.main_gpu",
+                "message": (
+                    f"main_gpu {main_gpu} is out of range — device flags are "
+                    f"positions within the chosen set (0..{upper}); physical "
+                    f"ids are not selectable"
+                ),
+            }
+        )
+    return issues
+
+
+def _validate_gpu_device_positions(
+    data: dict[str, Any],
+    errors: list[dict[str, str]],
+    *,
+    exempt_fields: frozenset[str],
+) -> None:
+    """Reject llama.cpp device flags outside the scheduler-chosen set (S-058).
+
+    After ``CUDA_VISIBLE_DEVICES`` the child process only ever sees
+    ``CUDA0..CUDA(n-1)`` (spec §8 F1/D5): ``devices`` entries and
+    ``main_gpu`` are *positions within the chosen set*, never physical
+    indices. A stored ``devices: \"CUDA1,CUDA2\"`` with ``gpu_count=2``
+    derives the right count, gets two cards, then passes ``--device
+    CUDA1,CUDA2`` into a process where ``CUDA2`` does not exist.
+
+    Runs after :func:`_validate_gpu_count` (which resolves
+    ``resources.gpu_count`` in place) and only when that call produced no
+    ``resources.gpu_count`` error — an unresolved count makes the range
+    unknown. Backend fields an update carries over unchanged are
+    grandfathered via ``exempt_fields`` (the create-time rule already
+    blocked them; see :func:`_unchanged_backend_fields`), leaving the
+    advisory warning in :func:`validate_intent_warnings` as the signal for
+    an already-stored broken value.
+    """
+    backend = data.get("backend")
+    if not isinstance(backend, dict) or backend.get("backend_type") != "llamacpp":
+        return
+    # _validate_gpu_count already failed → its message is the answer.
+    if any(e.get("field") == "resources.gpu_count" for e in errors):
+        return
+    resources = data.get("resources")
+    if not isinstance(resources, dict):
+        return
+    gpu_count = resources.get("gpu_count")
+    if not isinstance(gpu_count, int) or isinstance(gpu_count, bool) or gpu_count < 1:
+        return
+    errors.extend(
+        _gpu_device_position_issues(backend, gpu_count, exempt_fields=exempt_fields)
+    )
+
+
 def validate_intent_warnings(data: dict[str, Any]) -> list[dict[str, str]]:
     """Static (non-fleet) advisory warnings for an intent payload (C3).
 
@@ -644,41 +855,86 @@ def validate_intent_warnings(data: dict[str, Any]) -> list[dict[str, str]]:
     """
     warnings: list[dict[str, str]] = []
     backend = data.get("backend", {})
-    if not isinstance(backend, dict) or backend.get("backend_type") != "llamacpp":
-        return warnings
 
-    if backend.get("pooling") is not None and backend.get("model_type") != "embedding":
-        warnings.append(
-            {
-                "field": "backend.pooling",
-                "message": (
-                    "pooling is only meaningful with model_type "
-                    "'embedding' (llama.cpp tolerates it, but it will "
-                    "have no effect)"
-                ),
-            }
-        )
+    if isinstance(backend, dict) and backend.get("backend_type") == "llamacpp":
+        if (
+            backend.get("pooling") is not None
+            and backend.get("model_type") != "embedding"
+        ):
+            warnings.append(
+                {
+                    "field": "backend.pooling",
+                    "message": (
+                        "pooling is only meaningful with model_type "
+                        "'embedding' (llama.cpp tolerates it, but it will "
+                        "have no effect)"
+                    ),
+                }
+            )
 
-    split_mode = backend.get("split_mode")
-    if backend.get("tensor_split") is not None and split_mode == "none":
-        warnings.append(
-            {
-                "field": "backend.tensor_split",
-                "message": (
-                    "tensor_split has no effect with split_mode 'none' — "
-                    "that mode puts the whole model on main_gpu"
-                ),
-            }
-        )
-    if backend.get("main_gpu") is not None and split_mode in ("layer", "tensor"):
-        warnings.append(
-            {
-                "field": "backend.main_gpu",
-                "message": (
-                    f"main_gpu has no effect with split_mode '{split_mode}' — "
-                    "it only applies to split_mode 'none' or 'row'"
-                ),
-            }
+        split_mode = backend.get("split_mode")
+        if backend.get("tensor_split") is not None and split_mode == "none":
+            warnings.append(
+                {
+                    "field": "backend.tensor_split",
+                    "message": (
+                        "tensor_split has no effect with split_mode 'none' — "
+                        "that mode puts the whole model on main_gpu"
+                    ),
+                }
+            )
+        if backend.get("main_gpu") is not None and split_mode in ("layer", "tensor"):
+            warnings.append(
+                {
+                    "field": "backend.main_gpu",
+                    "message": (
+                        f"main_gpu has no effect with split_mode '{split_mode}' — "
+                        "it only applies to split_mode 'none' or 'row'"
+                    ),
+                }
+            )
+
+    # S-058 advisory: a multi-GPU intent without a per-GPU footprint cannot
+    # be bin-packed by per-device placement.
+    resources = data.get("resources") or {}
+    if isinstance(resources, dict):
+        gpu_count = resources.get("gpu_count")
+        if gpu_count is None:
+            gpu_count = derive_gpu_count(data)
+        vram_gb = resources.get("vram_gb")
+        if (gpu_count or 1) > 1 and (
+            vram_gb is None or not isinstance(vram_gb, (int, float)) or vram_gb <= 0
+        ):
+            warnings.append(
+                {
+                    "field": "resources.vram_gb",
+                    "message": (
+                        f"gpu_count is {gpu_count} but no per-GPU vram_gb is set — "
+                        "placement cannot bin-pack a device set without a "
+                        "per-device footprint"
+                    ),
+                }
+            )
+
+    # S-058 advisory: llama.cpp device flags are positions within the
+    # chosen set. Validation only sees what it is asked to validate, so an
+    # already-stored out-of-range value is never blocked (the update path
+    # grandfathers untouched fields) — this warning is the only signal such
+    # an intent gets. Mirrors the hard rule's scope: no resources object,
+    # no resolved count, no check (the create-time validator behaves the
+    # same way on a payload without resources). Implementation shared with
+    # the hard-error path via _gpu_device_position_issues (first issue
+    # only, no exempt fields — warnings never block an edit).
+    if (
+        isinstance(backend, dict)
+        and backend.get("backend_type") == "llamacpp"
+        and isinstance(data.get("resources"), dict)
+    ):
+        gpu_count = resources.get("gpu_count")
+        if not isinstance(gpu_count, int) or isinstance(gpu_count, bool):
+            gpu_count = derive_gpu_count(data) or 1
+        warnings.extend(
+            _gpu_device_position_issues(backend, gpu_count, first_only=True)
         )
     return warnings
 
@@ -891,6 +1147,14 @@ def validate_intent_create(
         )
         errors.extend(_validate_backend_speculative_decoding(backend))
         errors.extend(_validate_sglang(backend, data))
+
+    # resources.gpu_count (S-058): derive from the backend, reject
+    # disagreement, and resolve the concrete count in place.
+    _validate_gpu_count(data, errors)
+    # S-058: llama.cpp device flags are positions within the chosen set —
+    # out-of-range entries would name devices that do not exist in the
+    # CUDA_VISIBLE_DEVICES-restricted process.
+    _validate_gpu_device_positions(data, errors, exempt_fields=ownership_exempt_fields)
 
     return errors
 

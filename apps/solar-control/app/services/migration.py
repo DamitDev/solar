@@ -741,7 +741,12 @@ async def _settle_owning_intent(alias: str) -> None:
         reconciler.settle_intent(intent.id, _MIGRATE_SETTLE_S)
 
 
-def _build_target_create(instance_config: dict[str, Any], path: str) -> dict[str, Any]:
+def _build_target_create(
+    instance_config: dict[str, Any],
+    path: str,
+    *,
+    gpu_ids: list[int] | None = None,
+) -> dict[str, Any]:
     """Build the create wrapper for a migration/evacuation target.
 
     Shared by ``execute_migration`` and ``execute_evacuation`` so the
@@ -750,6 +755,10 @@ def _build_target_create(instance_config: dict[str, Any], path: str) -> dict[str
     and the ownership markers (``managed_by``/``intent_id``, S-037/D-017
     G3) plus ``priority`` preserved at top level — they are host-level
     instance fields (S-036), not config keys.
+
+    S-058: the chosen ``gpu_ids`` land top-level (never inside ``config``,
+    L5), and the captured per-GPU ``vram_gb`` is carried so the target's
+    spawn-time re-verification still guards migrated instances.
     """
     config = instance_config.get("config", instance_config)
 
@@ -772,6 +781,11 @@ def _build_target_create(instance_config: dict[str, Any], path: str) -> dict[str
             "busy",
             "prefill_progress",
             "active_slots",
+            # S-058: top-level placement fields, not config keys — filtered
+            # from the payload copy and re-added explicitly below.
+            "gpu_ids",
+            "vram_gb",
+            "gpu_count",
         }
     )
     create_payload: dict[str, Any] = {
@@ -797,11 +811,92 @@ def _build_target_create(instance_config: dict[str, Any], path: str) -> dict[str
                 create_payload[key] = val
 
     create_wrapper: dict[str, Any] = {"config": create_payload}
-    for field in ("managed_by", "intent_id", "priority"):
+    for field in ("managed_by", "intent_id", "priority", "vram_gb"):
         val = _config_field(instance_config, field)
         if val is not None:
             create_wrapper[field] = val
+    if gpu_ids is not None:
+        create_wrapper["gpu_ids"] = gpu_ids
     return create_wrapper
+
+
+async def _derive_target_gpu_assignment(
+    target_host: Host, instance_config: dict[str, Any]
+) -> tuple[list[int] | None, bool]:
+    """Pick devices on *target_host* for the migrated instance (S-058).
+
+    Re-derivation used by the explicit migration API (``POST
+    /api/instances/migrate``) when the caller did not supply ``gpu_ids``:
+    same placement policy as the reconciler path, from the captured
+    instance's own device count and footprint.
+
+    Returns ``(assignment, constrained)``:
+
+    - ``(None, False)`` — the target has no ``gpus`` list (aggregate
+      path, D6) or the instance carries no footprint to enforce: an
+      unpinned create is correct.
+    - ``(list[int], True)`` — the target is per-GPU and the instance
+      fits; the ids are the devices to pin.
+    - ``(None, True)`` — the target is per-GPU *and* cannot fit the
+      instance's device set. This is a genuine shortfall: the caller
+      must fail the step rather than create the instance unpinned,
+      which would silently oversubscribe devices.
+    """
+    from app.routes.management.resources import _fetch_host_resource_snapshot
+    from app.services.placement import find_gpu_assignment
+    from app.services.reservation import gpu_claims_by_device
+
+    snapshot = await _fetch_host_resource_snapshot(target_host)
+    if not getattr(snapshot, "gpus", None):
+        return None, False
+    inst_gpu_ids = instance_config.get("gpu_ids") or []
+    gpu_count = (
+        len(inst_gpu_ids)
+        if inst_gpu_ids
+        else int(instance_config.get("gpu_count") or 1)
+    )
+    vram_gb = float(instance_config.get("vram_gb") or 0)
+    if gpu_count <= 0 or vram_gb <= 0:
+        return None, False
+    claims = await gpu_claims_by_device(target_host.id, snapshot)
+    assignment = find_gpu_assignment(snapshot, gpu_count, vram_gb, claims=claims)
+    return assignment, True
+
+
+async def _resolve_target_gpu_ids(
+    target_host: Host, instance_config: dict[str, Any], gpu_ids: list[int] | None
+) -> list[int] | None:
+    """Resolve the device set for a target create, failing on a real shortfall.
+
+    The reconciler passes its assignment; direct callers get the same
+    derivation as the migration path. ``None`` is only returned when the
+    target is not per-GPU-constrained (no ``gpus`` list, or the instance
+    carries no footprint) — an unpinned create is then correct. A
+    per-GPU target that cannot fit the instance's device set raises
+    instead of creating the instance unpinned, which would silently
+    oversubscribe devices (S-058 review).
+    """
+    if gpu_ids is not None:
+        return gpu_ids
+    derived, constrained = await _derive_target_gpu_assignment(
+        target_host, instance_config
+    )
+    if constrained and derived is None:
+        inst_gpu_ids = instance_config.get("gpu_ids") or []
+        count = (
+            len(inst_gpu_ids)
+            if inst_gpu_ids
+            else int(instance_config.get("gpu_count") or 1)
+        )
+        vram = float(instance_config.get("vram_gb") or 0)
+        raise HTTPException(
+            status_code=507,
+            detail=(
+                f"Target host '{target_host.name}' cannot fit the instance's "
+                f"device set: needs {count} GPU(s) with {vram:.1f} GB each"
+            ),
+        )
+    return derived
 
 
 async def execute_migration(
@@ -810,12 +905,22 @@ async def execute_migration(
     source_host_id: str,
     target_host_id: str,
     allow_production: bool = False,
+    gpu_ids: list[int] | None = None,
 ) -> MigrationResult:
     """Execute a full migration of *instance_id* from source to target host.
 
     Orchestrates all validation, model distribution, stop, and create
     steps. Returns a ``MigrationResult`` with per-step status on success.
     Raises ``HTTPException`` for fatal errors.
+
+    S-058: ``gpu_ids`` is the device set chosen on the target (reconciler
+    displacement/evacuation pass their assignment). When the caller passes
+    nothing (the explicit ``POST /api/instances/migrate`` route), the set
+    is re-derived on the target with the shared placement policy, so the
+    API path is GPU-aware too. The resolution happens at step 3, next to
+    the other target-fitness 507s: a device-set shortfall must fail the
+    migration *before* the source is stopped and disowned, or the instance
+    would end up stopped and unmanaged on neither host.
     """
     migration_id = str(uuid.uuid4())
     steps: list[MigrationStep] = []
@@ -907,6 +1012,14 @@ async def execute_migration(
         instance_config,
         allow_production=allow_production,
         source_gpu_type=source_gpu_type,
+    )
+    # S-058: resolve the device set here, not at step 7 — a shortfall
+    # must fail before the source is stopped and disowned (S-037/D-017
+    # would otherwise leave the instance stopped, released from the
+    # intent, and absent from the target). The 507 propagates uncaught,
+    # like the sibling fitness errors above.
+    target_gpu_ids = await _resolve_target_gpu_ids(
+        target_host, instance_config, gpu_ids
     )
     steps.append(MigrationStep(step="validate_target", status="ok"))
 
@@ -1011,7 +1124,12 @@ async def execute_migration(
     # ── 7. Create target instance ───────────────────────────────
     target_instance: dict[str, Any]
     try:
-        create_wrapper = _build_target_create(instance_config, path)
+        # target_gpu_ids was resolved at step 3 — the devices may go stale
+        # while the model transfers (step 5), but the host's spawn-time
+        # verify_gpu_capacity is the guard for that.
+        create_wrapper = _build_target_create(
+            instance_config, path, gpu_ids=target_gpu_ids
+        )
         target_instance = await create_instance_on_host(target_host, create_wrapper)
     except HTTPException as e:
         steps.append(
@@ -1080,6 +1198,7 @@ async def execute_evacuation(
     instance_id: str,
     source_host_id: str,
     target_host_id: str,
+    gpu_ids: list[int] | None = None,
 ) -> MigrationResult:
     """Evacuate *instance_id* off a draining *source_host* (S-043 §4.2).
 
@@ -1095,8 +1214,12 @@ async def execute_evacuation(
     invisible to the reconciler and become a permanent manual-instance
     conflict (host-draining.md §4.2).
 
+    S-058: ``gpu_ids`` is the device set the reconciler already reserved
+    on the target; when absent (direct API use) it is re-derived on the
+    target before the create.
+
     Returns a ``MigrationResult`` with per-step status. On any step
-    failure the result is ``status=\"failed\"`` with the failing step
+    failure the result is ``status="failed"`` with the failing step
     marked; the source is only touched after the target is confirmed
     running.
     """
@@ -1239,7 +1362,12 @@ async def execute_evacuation(
     # The source is still serving at this point; it only goes down after
     # the target is confirmed running (step 7).
     try:
-        create_wrapper = _build_target_create(instance_config, path)
+        target_gpu_ids = await _resolve_target_gpu_ids(
+            target_host, instance_config, gpu_ids
+        )
+        create_wrapper = _build_target_create(
+            instance_config, path, gpu_ids=target_gpu_ids
+        )
         target_instance = await create_instance_on_host(target_host, create_wrapper)
     except HTTPException as e:
         steps.append(

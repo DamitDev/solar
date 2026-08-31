@@ -14,8 +14,26 @@ from app.models.intent import (
     ResourceRequirements,
 )
 
+from ..validation import derive_gpu_count
 from .connection import get_session_factory
 from .tables import IntentRow
+
+
+def _hydrate_resources(row: IntentRow) -> ResourceRequirements:
+    """Hydrate a stored intent's resources, deriving ``gpu_count`` when absent.
+
+    Intents stored before S-058 carry no ``gpu_count`` key in their
+    ``resources`` JSON. Deriving the count here — from the stored backend
+    (sglang ``tp_size``; llama.cpp ``devices`` / ``tensor_split``) rather
+    than via an Alembic backfill — also covers rows an older control
+    replica writes during a rolling upgrade. Every consumer (reconciler,
+    cold-start reservations, fleet validation, the API response) inherits
+    the resolved count with one change of layer.
+    """
+    data = dict(row.resources or {})
+    if data.get("gpu_count") is None:
+        data["gpu_count"] = derive_gpu_count({"backend": row.backend or {}}) or 1
+    return ResourceRequirements(**data)
 
 
 class _Unset:
@@ -42,7 +60,7 @@ class IntentDB:
             strategy=row.strategy,
             backend=row.backend or {},
             placement=PlacementConstraints(**(row.placement or {})),
-            resources=ResourceRequirements(**(row.resources or {})),
+            resources=_hydrate_resources(row),
             metadata=row.metadata_ or {},
             status=IntentStatus(
                 phase=IntentPhase(row.phase),

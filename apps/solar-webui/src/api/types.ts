@@ -352,6 +352,8 @@ export interface Instance {
   // depends on solar-control version — check both locations defensively).
   managed_by?: string | null;
   intent_id?: string | null;
+  /** S-058: physical devices this instance runs on. */
+  gpu_ids?: number[] | null;
 }
 
 export interface Host {
@@ -758,6 +760,9 @@ export interface IntentPlacement {
 export interface IntentResources {
   vram_gb?: number | null;
   ram_gb?: number | null;
+  /** S-058: how many physical devices the intent needs; derived from the
+   * backend when unset. Physical device ids are never user-settable. */
+  gpu_count?: number | null;
 }
 
 export interface IntentCreateRequest {
@@ -912,6 +917,16 @@ export interface HostInstanceSummary {
   /** 'intent' for reconciler-managed replicas, absent for manual instances (S-043) */
   managed_by?: string | null;
   intent_id?: string | null;
+  /** S-058: physical devices the instance runs on (from the WS payload). */
+  gpu_ids?: number[] | null;
+}
+
+export interface GpuInfo {
+  index: number;
+  name: string;
+  total_gb: number;
+  used_gb: number;
+  available_gb: number;
 }
 
 export interface HostReservationSummary {
@@ -922,6 +937,9 @@ export interface HostReservationSummary {
   vram_gb?: number;
   ram_gb?: number;
   disk_gb?: number | null;
+  /** S-058: resolved device set (host-side decision for training reservations). */
+  gpu_ids?: number[] | null;
+  gpu_count?: number;
   actual_vram_gb?: number | null; // set only for running reservations
   actual_ram_gb?: number | null;
   actual_disk_gb?: number | null;
@@ -956,6 +974,9 @@ export interface HostResourceSnapshot {
   disk_available_gb?: number | null;
   instance_count: number;
   running_instance_count: number;
+  /** S-058: per-device GPU telemetry; empty on Mac/CPU hosts and on hosts
+   * without the new agent (D6 aggregate fallback). */
+  gpus?: GpuInfo[];
   instances: HostInstanceSummary[]; // PR #62 — aliases included
   active_jobs: ActiveJobSummary[];
   reservation_count: number;
@@ -1025,6 +1046,8 @@ export interface StoredInstanceRef {
   instance_id: string;
   alias: string;
   status: string;
+  /** S-058: physical devices the instance runs on. */
+  gpu_ids?: number[] | null;
 }
 
 /** One file inside a stored model directory (relative name + size). */

@@ -3,7 +3,7 @@
 | Field       | Value                          |
 |-------------|--------------------------------|
 | Issue       | S-058                          |
-| Status      | Draft                          |
+| Status      | Implemented (2026-08-25)       |
 | Created     | 2026-08-18                     |
 | Depends on  | S-034, S-035, S-037, S-038, S-041 |
 | Depended by | (none yet)                     |
@@ -211,6 +211,17 @@ them in the storage manifest per-instance rows.
 
 ## 8. Enforcement and races
 
+- **Spike outcome (D5, confirmed against a permuted device set).** With
+  `CUDA_VISIBLE_DEVICES` set, llama.cpp `--main-gpu`/`--device`/`--tensor-split`
+  and sglang `--tp-size` all index the **visible** set — positions, not
+  physical ids. Renumbering the visible set is exactly what turns backend
+  flags into positions within the scheduler-chosen devices (L6).
+- **F1 — `CUDA_DEVICE_ORDER=PCI_BUS_ID` is pinned alongside
+  `CUDA_VISIBLE_DEVICES`.** pynvml enumerates devices by PCI bus order while
+  CUDA's default enumeration can differ; the pin makes the host's reported
+  indices (the ones placement chooses) and the backend's view of the
+  visible set the same space. Without it, `CUDA_VISIBLE_DEVICES=2` could
+  name a different physical device than GpuInfo index 2.
 - **Environment injection.** Each backend runner's `build_env` sets
   `CUDA_VISIBLE_DEVICES` to the comma-joined physical indices in the chosen
   order (sglang: `backends/sglang.py::build_env`; llama.cpp and HuggingFace:
@@ -252,9 +263,13 @@ them in the storage manifest per-instance rows.
 
 - `docs/specs/deployment-intent.md` §4.6 (ResourceRequirements) gains
   `gpu_count` and the per-GPU `vram_gb` semantics; §8.4 (placement policy)
-  gains the per-GPU selection and ranking rules.
-- S-034/S-035 resource accounting docs gain the per-device `available`
-  formula (Section 6 above).
+  gains the per-GPU selection and ranking rules. **Done in the S-058
+  implementation.**
+- The per-device `available` formula (Section 6 above) lives in
+  `apps/solar-host/solar_host/resources/manager.py` (module docstring,
+  per-device variant) and in deployment-intent §8.4 — the originally
+  referenced S-034/S-035 resource accounting docs do not exist as separate
+  documents.
 - `AGENTS.md` references list gains this spec.
 
 ## 12. Testing and verification
@@ -273,18 +288,16 @@ them in the storage manifest per-instance rows.
   `CUDA_VISIBLE_DEVICES=2`, and reports `gpu_ids` to the WS payload; a
   training reservation through the S-038 coordinator holds the chosen
   devices; migration carries `gpu_ids` to the target.
-- **Spike (before implementation):** on ai04 (3x RTX PRO 6000), confirm
-  llama.cpp honors `CUDA_VISIBLE_DEVICES` for `--device`/`--main-gpu`
-  ordering and sglang TP serves correctly from a reordered subset
-  (`CUDA_VISIBLE_DEVICES=2,0` with `tp_size=2`). This validates D5 on real
-  hardware before any code is written around it.
 
 ## 13. Rollout
 
 solar-host and solar-control ship together. During the transition, hosts
 without a `gpus` list use the aggregate path (D6), so nothing regresses.
-The intent `gpu_count` field is optional; existing intents default to 1 and
-behave identically.
+The intent `gpu_count` field is optional: on read, an intent stored without
+it derives the count from its backend (sglang `tp_size`; llama.cpp
+`devices` / `tensor_split`), defaulting to 1 — so existing single-GPU
+intents behave identically, and existing multi-GPU intents keep their
+device count instead of falling back to one.
 
 ## 14. Out of scope / future
 
@@ -293,3 +306,35 @@ behave identically.
 - MIG slicing / per-GPU quotas.
 - NUMA or PCIe topology awareness.
 - Explicit device pinning by the user (deliberately removed by D1).
+
+## 15. Implementation decisions (locked during implementation, L1–L7)
+
+- **L1 — `GpuInfo` stays exactly the five spec fields** (`index`, `name`,
+  `total_gb`, `used_gb`, `available_gb`). Per-device reservation headroom is
+  derived in solar-control from `snapshot.reservations[].gpu_ids` +
+  `actual_vram_gb`, matching §6 literally.
+- **L2 — solar-host gets a documented dev/test telemetry hook**
+  (`GPU_TELEMETRY_OVERRIDE`, JSON device list). It is the only way the
+  integration suite (real solar-host subprocesses, no GPUs on CI) can
+  exercise the whole chain including the spawn environment.
+- **L3 — host `ReservationRequest.vram_gb` is per-GPU** (D3, D2: one
+  resource model). Aggregate ledger charge becomes `vram_gb * gpu_count`;
+  with the default `gpu_count: 1` the arithmetic is byte-identical to
+  before S-058.
+- **L4 — the host self-assigns `gpu_ids` when a reservation omits them.**
+  Legacy SuperNova/step callers POST straight to `/resources/reservations`
+  with no coordinator involved; the host picks the least-loaded devices
+  using the same preference as placement so every reservation stays
+  attributable per device. This is *not* placement for instances — control
+  always sends `gpu_ids` for those.
+- **L5 — `gpu_ids` never enters `intent.backend` or the instance `config`.**
+  It is a top-level `InstanceCreate`/`Instance` field.
+  `_detect_backend_drift` only iterates `intent.backend` keys, so this keeps
+  the drift breaker out of a REPLACE loop.
+- **L6 — assignment order is preference order, not ascending index.** Most
+  free first, lowest index as tie-break. `CUDA_VISIBLE_DEVICES` is emitted
+  in that order, so `main_gpu: 0` means "the most-free chosen GPU" and the
+  D5 renumbering makes backend flags positions in the visible set (F1).
+- **L7 — un-attributed VRAM headroom is charged pessimistically to every
+  device.** Only reachable if a new-enough host reports `gpus` but a
+  reservation lacks `gpu_ids`; safe rather than double-booking.

@@ -121,7 +121,48 @@ class TestReserveColdStart:
         assert args.kwargs["vram_gb"] == 16.0
         assert args.kwargs["job_id"] == "intent:intent-001"
         assert args.kwargs["ttl_seconds"] is not None
-        store.assert_awaited_once_with("intent-001", "host-1", "res-1", 16.0, 0.0)
+        # S-058: the default device count and no resolved set yet.
+        assert args.kwargs["gpu_count"] == 1
+        assert args.kwargs["gpu_ids"] is None
+        store.assert_awaited_once_with(
+            "intent-001", "host-1", "res-1", 16.0, 0.0, gpu_ids=None
+        )
+
+    @pytest.mark.anyio
+    async def test_multi_gpu_intent_threads_count_and_devices(self):
+        """A 2-GPU intent carries gpu_count and the chosen gpu_ids into
+        the host reservation and the tracking entry (S-058)."""
+        intent = _make_intent(resources=ResourceRequirements(vram_gb=30.0))
+        # Hydration resolves gpu_count from the backend — simulate what a
+        # stored sglang intent with tp_size=2 looks like after hydration.
+        intent.resources.gpu_count = 2
+        with (
+            patch(
+                "app.services.reservation.reserve_host_capacity",
+                new=AsyncMock(return_value="res-1"),
+            ) as reserve,
+            patch(
+                "app.services.reservation.get_reconcile_reservations",
+                new=AsyncMock(return_value={}),
+            ),
+            patch(
+                "app.services.reservation.store_reconcile_reservation",
+                new=AsyncMock(),
+            ) as store,
+            patch(
+                "app.database.hosts.host_db.get_host",
+                new=AsyncMock(return_value=SimpleNamespace(id="host-1", name="h1")),
+            ),
+        ):
+            await _reconciler()._reserve_cold_start(intent, "host-1", gpu_ids=[2, 0])
+
+        args = reserve.await_args
+        assert args.kwargs["vram_gb"] == 30.0
+        assert args.kwargs["gpu_count"] == 2
+        assert args.kwargs["gpu_ids"] == [2, 0]
+        store.assert_awaited_once_with(
+            "intent-001", "host-1", "res-1", 30.0, 0.0, gpu_ids=[2, 0]
+        )
 
     @pytest.mark.anyio
     async def test_skips_intent_without_vram_estimate(self):

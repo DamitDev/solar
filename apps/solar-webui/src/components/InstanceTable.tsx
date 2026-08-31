@@ -88,6 +88,7 @@ export function InstanceTable({
               <th className="px-2 py-2 text-center">Backend</th>
               <th className="px-2 py-2 text-center">Status</th>
               <th className="px-2 py-2 text-center">Port</th>
+              <th className="px-2 py-2 text-center">GPU</th>
               <th className="px-2 py-2 text-left">Uptime</th>
               <th className="px-2 py-2 text-center">Actions</th>
             </tr>
@@ -158,6 +159,17 @@ export function InstanceTable({
 
                     {/* Port */}
                     <td className="px-2 py-1 text-center font-mono text-nord-8 text-xs">{instance.port ?? '—'}</td>
+
+                    {/* S-058: assigned physical devices */}
+                    <td className="px-2 py-1 text-center">
+                      {instance.gpu_ids?.length ? (
+                        <span className="inline-block px-1.5 py-0.5 rounded bg-nord-2 text-nord-4 text-[10px] font-mono whitespace-nowrap">
+                          GPU {instance.gpu_ids.join(', ')}
+                        </span>
+                      ) : (
+                        <span className="text-nord-4 text-xs">—</span>
+                      )}
+                    </td>
 
                     {/* Uptime */}
                     <td className="px-2 py-1 font-mono text-xs text-nord-8 whitespace-nowrap">
@@ -240,7 +252,7 @@ export function InstanceTable({
                   {instance.error_message && (
                     <tr key={`${instance.id}-error`} className="bg-nord-11 bg-opacity-10">
                       <td
-                        colSpan={onMoveUp || onMoveDown ? 8 : 7}
+                        colSpan={onMoveUp || onMoveDown ? 9 : 8}
                         className="px-3 py-1 text-xs text-nord-11 border-l-2 border-nord-11"
                       >
                         {instance.error_message}

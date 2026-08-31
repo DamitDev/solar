@@ -106,13 +106,41 @@ class BackendRunner(ABC):
         backends configured through the environment rather than argv (e.g.
         SGLang's venv activation and prompt cache directory).
 
+        The base implementation contributes the GPU visibility block (S-058):
+        when the instance carries ``gpu_ids`` the child sees exactly those
+        physical devices, in the chosen order, so backend device flags
+        (``--main-gpu``, ``--device``, ``--tp-size``) keep their meaning as
+        positions within the scheduler-chosen set (D5).
+
         Args:
             instance: The Instance object containing config and runtime info.
 
         Returns:
             Mapping of variable name to value; empty by default.
         """
-        return {}
+        return self.gpu_visibility_env(instance)
+
+    @staticmethod
+    def gpu_visibility_env(instance: Any) -> dict[str, str]:
+        """GPU visibility environment for *instance* (empty when unassigned).
+
+        One implementation, three runners: llama.cpp and HuggingFace inherit
+        it unchanged; SGLang starts from ``super().build_env()`` so
+        ``config.extra_env`` still wins last. ``HIP_VISIBLE_DEVICES`` stays
+        out of scope — only CUDA hosts ever get ``gpu_ids``.
+        """
+        ids = getattr(instance, "gpu_ids", None) or []
+        if not ids:
+            return {}
+        return {
+            "CUDA_VISIBLE_DEVICES": ",".join(str(int(i)) for i in ids),
+            # F1 (spike finding): CUDA_VISIBLE_DEVICES indices are resolved
+            # in CUDA_DEVICE_ORDER, which defaults to FASTEST_FIRST, while
+            # placement's indices come from pynvml's PCI-bus enumeration.
+            # Pin the order so "pynvml index N is the card CUDA calls N" is
+            # an invariant everywhere.
+            "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+        }
 
     def initialize_context(self) -> dict[str, Any]:
         """Initialize the parsing context for a new instance.

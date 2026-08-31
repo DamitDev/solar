@@ -17,7 +17,7 @@ from solar_host.resources.manager import (
     ReservationRunningError,
     ResourceManager,
 )
-from solar_host.resources.models import ReservationRequest, WorkloadType
+from solar_host.resources.models import GpuInfo, ReservationRequest, WorkloadType
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -46,6 +46,7 @@ def _make_request(
     ram_gb: float = 2.0,
     disk_gb: float | None = None,
     ttl_seconds: float | None = None,
+    gpu_count: int = 1,
 ) -> ReservationRequest:
     return ReservationRequest(
         job_id=job_id,
@@ -54,6 +55,7 @@ def _make_request(
         ram_gb=ram_gb,
         disk_gb=disk_gb,
         ttl_seconds=ttl_seconds,
+        gpu_count=gpu_count,
     )
 
 
@@ -445,3 +447,153 @@ class TestUnifiedMemoryFold:
         stored = mgr._reservations[res.id]
         assert stored.vram_gb == 4.0
         assert stored.ram_gb == 1.0
+
+
+# ---------------------------------------------------------------------------
+# S-058: GPU-aware reservations (per-device headroom, L4 self-assignment)
+# ---------------------------------------------------------------------------
+
+_MEM_VRAM_MULTI = {
+    "used_gb": 6.0,
+    "total_gb": 72.0,  # 3 × 24 GB
+    "available_gb": 66.0,
+    "percent": 8.33,
+    "memory_type": "VRAM",
+}
+
+_GPU_LIST = [
+    GpuInfo(index=0, name="RTX 4090", total_gb=24.0, used_gb=20.0, available_gb=4.0),
+    GpuInfo(index=1, name="RTX 4090", total_gb=24.0, used_gb=12.0, available_gb=12.0),
+    GpuInfo(index=2, name="RTX 4090", total_gb=24.0, used_gb=0.0, available_gb=24.0),
+]
+
+
+@pytest.fixture
+def _multi_gpu_host(monkeypatch):
+    """A 3-GPU fake host: only device 2 is genuinely free."""
+    monkeypatch.setattr(
+        "solar_host.resources.manager.get_memory_info", lambda: _MEM_VRAM_MULTI
+    )
+    monkeypatch.setattr(
+        "solar_host.resources.manager.get_gpu_list", lambda: list(_GPU_LIST)
+    )
+
+
+class TestGpuAwareReservations:
+    def test_self_assignment_picks_least_loaded(self, _multi_gpu_host):
+        """L4/L6: most free first — a 5 GB request lands on device 2."""
+        mgr = _make_manager()
+        res = mgr.create(_make_request(vram_gb=5.0, ram_gb=1.0))
+        stored = mgr._reservations[res.id]
+        assert stored.gpu_ids == [2]
+        # The view carries the resolved devices.
+        snap = mgr.snapshot()
+        view = next(v for v in snap.reservations if v.id == res.id)
+        assert view.gpu_ids == [2]
+
+    def test_explicit_gpu_ids_are_honored(self, _multi_gpu_host):
+        mgr = _make_manager()
+        req = _make_request(vram_gb=5.0, ram_gb=1.0)
+        req.gpu_ids = [1]
+        res = mgr.create(req)
+        assert mgr._reservations[res.id].gpu_ids == [1]
+
+    def test_per_device_capacity_failure_names_the_device(self, _multi_gpu_host):
+        mgr = _make_manager()
+        # Device 2 (24 free) is the pick, but 25 GB cannot fit it.
+        with pytest.raises(CapacityExceededError) as exc:
+            mgr.create(_make_request(vram_gb=25.0, ram_gb=1.0))
+        assert exc.value.dimension == "vram"
+        assert exc.value.device_index == 2
+        assert "on GPU 2" in str(exc.value)
+
+    def test_gpu_count_multiplies_aggregate_charge(self, _multi_gpu_host):
+        """D3: the ledger charge is vram_gb * gpu_count."""
+        mgr = _make_manager()
+        req = _make_request(vram_gb=4.0, ram_gb=1.0, gpu_count=2)
+        req.gpu_ids = [0, 1]
+        res = mgr.create(req)
+        stored = mgr._reservations[res.id]
+        assert stored.gpu_ids == [0, 1]
+        assert mgr._headroom_unlocked("vram") == pytest.approx(8.0)
+        snap = mgr.snapshot()
+        assert snap.vram is not None
+        assert snap.vram.reserved_headroom_gb == pytest.approx(8.0)
+        assert snap.vram.available_gb == pytest.approx(72.0 - 6.0 - 8.0)
+
+    def test_per_device_headroom_math(self, _multi_gpu_host):
+        """L1 formula: max(vram_gb − actual_share, 0) per reserved device."""
+        mgr = _make_manager()
+        req = _make_request(vram_gb=10.0, ram_gb=1.0, gpu_count=2)
+        req.gpu_ids = [1, 2]
+        res = mgr.create(req)
+        stored = mgr._reservations[res.id]
+        assert mgr._gpu_headroom_unlocked() == {1: 10.0, 2: 10.0}
+        # A running reservation spreads its actual usage evenly.
+        running = stored.model_copy(update={"actual_vram_gb": 4.0})
+        mgr._reservations[res.id] = running
+        assert mgr._gpu_headroom_unlocked() == {1: 8.0, 2: 8.0}
+
+    def test_double_booking_a_device_is_rejected(self, _multi_gpu_host):
+        """Holding device 2 for 20 GB leaves 4 GB — a 15 GB request must not
+        land anywhere, and the error names the device it tried."""
+        mgr = _make_manager()
+        first = _make_request(vram_gb=20.0, ram_gb=1.0)
+        first.gpu_ids = [2]
+        mgr.create(first)
+
+        with pytest.raises(CapacityExceededError) as exc:
+            mgr.create(_make_request(vram_gb=15.0, ram_gb=1.0))
+        assert exc.value.device_index == 1  # best remaining device: 12 GB free
+        assert "on GPU 1" in str(exc.value)
+
+    def test_self_assignment_short_of_gpu_count_is_rejected(self, _multi_gpu_host):
+        """A device set shorter than gpu_count is a capacity error.
+
+        ``_pick_devices_unlocked`` slices ``ranked[:gpu_count]`` and can
+        return 3 devices for a 4-GPU request; storing that would carry a
+        ``gpu_count=4`` reservation with only 3 attributable devices. The
+        message names the shortage, and nothing is registered.
+        """
+        mgr = _make_manager()
+        with pytest.raises(CapacityExceededError) as exc:
+            mgr.create(_make_request(vram_gb=2.0, ram_gb=1.0, gpu_count=4))
+        assert exc.value.dimension == "vram"
+        assert "Requested 4 GPUs but the host has 3 device(s)" in str(exc.value)
+        assert mgr._reservations == {}
+
+    def test_gpu_ids_count_must_match_gpu_count(self):
+        with pytest.raises(ValueError):
+            ReservationRequest(
+                job_id="job-001",
+                workload_type=WorkloadType.training,
+                vram_gb=4.0,
+                ram_gb=2.0,
+                gpu_count=1,
+                gpu_ids=[0, 1],
+            )
+
+    def test_gpu_ids_must_not_contain_duplicates(self):
+        with pytest.raises(ValueError):
+            ReservationRequest(
+                job_id="job-001",
+                workload_type=WorkloadType.training,
+                vram_gb=4.0,
+                ram_gb=2.0,
+                gpu_count=2,
+                gpu_ids=[0, 0],
+            )
+
+    def test_unified_memory_fold_ignores_gpu_count(self, monkeypatch):
+        """Spec §5: gpu_count means nothing on a unified-memory host."""
+        monkeypatch.setattr(
+            "solar_host.resources.manager.get_memory_info", lambda: _MEM_RAM
+        )
+        mgr = _make_manager()
+        req = _make_request(vram_gb=4.0, ram_gb=1.0)
+        req.gpu_count = 2
+        res = mgr.create(req)
+        stored = mgr._reservations[res.id]
+        assert stored.vram_gb == 0.0
+        assert stored.ram_gb == pytest.approx(5.0)
+        assert stored.gpu_ids == []

@@ -81,6 +81,8 @@ async def create_instance(data: InstanceCreate):
             priority=data.priority,
             managed_by=data.managed_by,
             intent_id=data.intent_id,
+            gpu_ids=data.gpu_ids,
+            vram_gb=data.vram_gb,
         )
         # Push the new instance so solar-control's Redis cache learns about
         # it immediately (flat WS shape); otherwise the gateway's HTTP poll

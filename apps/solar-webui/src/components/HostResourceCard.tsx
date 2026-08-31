@@ -17,6 +17,7 @@ import { ActiveJobSummary, HostDrainStatus, HostResourceSnapshot } from '@/api/t
 import { cn, getStatusColor, getGpuTypeLabel, getGpuTypeBadgeClass, getRoleBadgeClass } from '@/lib/utils';
 import { DrainHostModal } from './DrainHostModal';
 import { ResourceBar, ResourceBarSegment } from './ResourceBar';
+import { MiniBar } from './resources/HostResourceRow';
 
 const DIM_LABELS: Record<'vram' | 'ram' | 'disk', string> = {
   vram: 'VRAM',
@@ -327,6 +328,25 @@ export function HostResourceCard({
         );
       })}
 
+      {/* S-058: per-device GPU telemetry — one compact row per device,
+          shown only when the host reports a gpus list (Mac/CPU hosts look
+          exactly as before). */}
+      {(snapshot.gpus?.length ?? 0) > 0 && (
+        <div className="border-t border-nord-3 pt-3">
+          <h4 className="mb-2 text-xs font-medium uppercase tracking-wide text-nord-4">GPUs</h4>
+          <div className="space-y-1.5">
+            {snapshot.gpus!.map((gpu) => (
+              <MiniBar
+                key={gpu.index}
+                label={`GPU ${gpu.index} · ${gpu.name}`}
+                totalGb={gpu.total_gb}
+                availableGb={gpu.available_gb}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Workloads panel */}
       <div className="border-t border-nord-3 pt-3">
         <button
@@ -393,6 +413,12 @@ export function HostResourceCard({
                           </span>
                           {inst.backend_type && <span className="text-xs text-nord-4">{inst.backend_type}</span>}
                           {inst.port != null && <span className="font-mono text-xs text-nord-4">:{inst.port}</span>}
+                          {/* S-058: assigned physical devices */}
+                          {inst.gpu_ids?.length ? (
+                            <span className="px-1.5 py-0.5 rounded bg-nord-2 text-nord-4 text-xs font-mono">
+                              GPU {inst.gpu_ids.join(', ')}
+                            </span>
+                          ) : null}
                         </li>
                       ))}
                     </ul>

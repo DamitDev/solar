@@ -1916,3 +1916,129 @@ class TestPerIntentStateIsPruned:
         reconciler._prune_intent_state({"live"})
 
         assert set(reconciler._displace_cooldown) == {"inst-live"}
+
+
+class TestActCreateGpuAware:
+    """S-058: the CREATE action threads gpu_ids through reservation + create."""
+
+    def _action(self) -> Action:
+        return Action(
+            type=ActionType.CREATE,
+            intent_id="intent-001",
+            alias="test-model",
+            host_id="h1",
+            reason="shortfall 1/1",
+        )
+
+    def _intent(self) -> IntentResponse:
+        return _make_intent(
+            replicas=1,
+            resources=ResourceRequirements(vram_gb=16.0, gpu_count=1),
+        )
+
+    def _gpu_snapshot(self) -> SimpleNamespace:
+        """A per-GPU snapshot where device 2 is the only free one."""
+        return SimpleNamespace(
+            gpus=[
+                SimpleNamespace(index=0, available_gb=4.0),
+                SimpleNamespace(index=1, available_gb=4.0),
+                SimpleNamespace(index=2, available_gb=24.0),
+            ],
+            reservations=[],
+        )
+
+    @pytest.mark.anyio
+    async def test_create_threads_gpu_ids_into_reservation_and_payload(self):
+        reconciler = Reconciler()
+        host = _HostStub(id="h1", name="h1")
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch(
+                "app.routes.management.resources._fetch_host_resource_snapshot",
+                new=AsyncMock(return_value=self._gpu_snapshot()),
+            ),
+            patch.object(
+                reconciler,
+                "_assign_gpus",
+                new=AsyncMock(return_value=[2]),
+            ) as mock_assign,
+            patch.object(
+                reconciler, "_reserve_cold_start", new=AsyncMock()
+            ) as mock_reserve,
+            patch(
+                "app.services.migration.create_instance_on_host",
+                new=AsyncMock(return_value={"instance": {"id": "inst-new"}}),
+            ) as mock_create,
+            patch.object(reconciler, "_start_instance", new=AsyncMock()),
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+            await reconciler._act(self._intent(), self._action())
+
+        mock_assign.assert_awaited_once_with(
+            "h1", mock_assign.await_args.args[1], 1, 16.0
+        )
+        # The reservation and the create carry the SAME assignment.
+        assert mock_reserve.await_args.kwargs["gpu_ids"] == [2]
+        payload = mock_create.await_args.args[1]
+        assert payload["gpu_ids"] == [2]
+        assert payload["vram_gb"] == 16.0
+        # L5: never inside config — the drift detector iterates backend keys.
+        assert "gpu_ids" not in payload["config"]
+
+    @pytest.mark.anyio
+    async def test_create_shortfalls_when_no_device_set_fits(self):
+        """A per-GPU host that cannot supply the set → no create at all."""
+        reconciler = Reconciler()
+        host = _HostStub(id="h1", name="h1")
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch(
+                "app.routes.management.resources._fetch_host_resource_snapshot",
+                new=AsyncMock(return_value=self._gpu_snapshot()),
+            ),
+            patch.object(reconciler, "_assign_gpus", new=AsyncMock(return_value=None)),
+            patch.object(
+                reconciler, "_reserve_cold_start", new=AsyncMock()
+            ) as mock_reserve,
+            patch(
+                "app.services.migration.create_instance_on_host", new=AsyncMock()
+            ) as mock_create,
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+            result = await reconciler._act(self._intent(), self._action())
+
+        assert result is None
+        mock_create.assert_not_called()
+        mock_reserve.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_create_aggregate_path_when_telemetry_unavailable(self):
+        """No gpus list (or a failed fetch) → create without device constraints."""
+        reconciler = Reconciler()
+        host = _HostStub(id="h1", name="h1")
+
+        with (
+            patch("app.database.hosts.host_db") as mock_db,
+            patch(
+                "app.routes.management.resources._fetch_host_resource_snapshot",
+                new=AsyncMock(return_value=SimpleNamespace(gpus=[], reservations=[])),
+            ),
+            patch.object(reconciler, "_assign_gpus", new=AsyncMock()) as mock_assign,
+            patch.object(
+                reconciler, "_reserve_cold_start", new=AsyncMock()
+            ) as mock_reserve,
+            patch(
+                "app.services.migration.create_instance_on_host",
+                new=AsyncMock(return_value={"instance": {"id": "inst-new"}}),
+            ) as mock_create,
+            patch.object(reconciler, "_start_instance", new=AsyncMock()),
+        ):
+            mock_db.get_host = AsyncMock(return_value=host)
+            await reconciler._act(self._intent(), self._action())
+
+        mock_assign.assert_not_called()
+        assert mock_reserve.await_args.kwargs["gpu_ids"] is None
+        payload = mock_create.await_args.args[1]
+        assert payload["gpu_ids"] is None

@@ -138,3 +138,70 @@ def test_other_runners_contribute_no_environment() -> None:
 
     instance = SimpleNamespace(config=None, port=8080, id="inst-1")
     assert LlamaCppRunner().build_env(instance) == {}
+
+
+# ── S-058: CUDA_VISIBLE_DEVICES enforcement ─────────────────────
+
+
+def _gpu_instance(gpu_ids: list[int] | None) -> SimpleNamespace:
+    """An instance carrying a device assignment (or none)."""
+    return SimpleNamespace(
+        gpu_ids=gpu_ids,
+        port=8080,
+        id="inst-1",
+        config=SimpleNamespace(alias="test-model", extra_env=None),
+    )
+
+
+def test_cuda_visibility_emitted_in_given_order_for_all_runners() -> None:
+    """One implementation, three runners: gpu_ids → CUDA_VISIBLE_DEVICES."""
+    from solar_host.backends.huggingface import HuggingFaceRunner
+    from solar_host.backends.llamacpp import LlamaCppRunner
+
+    for runner in (
+        LlamaCppRunner(),
+        HuggingFaceRunner(),
+        SglangRunner(),
+    ):
+        env = runner.build_env(_gpu_instance(gpu_ids=[2, 0]))
+        assert env["CUDA_VISIBLE_DEVICES"] == "2,0"
+        # F1: the index space is pinned to PCI-bus enumeration.
+        assert env["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+
+
+def test_cuda_visibility_propagates_a_permuted_set() -> None:
+    """A reordered set (L6 emits preference order) stays verbatim."""
+    from solar_host.backends.llamacpp import LlamaCppRunner
+
+    env = LlamaCppRunner().build_env(_gpu_instance(gpu_ids=[1, 0]))
+    assert env["CUDA_VISIBLE_DEVICES"] == "1,0"
+
+
+def test_no_gpu_ids_means_no_visibility_block(venv) -> None:
+    """Aggregate hosts (D6) get no CUDA keys from any runner."""
+    from solar_host.backends.huggingface import HuggingFaceRunner
+    from solar_host.backends.llamacpp import LlamaCppRunner
+
+    for runner in (
+        LlamaCppRunner(),
+        HuggingFaceRunner(),
+        SglangRunner(),
+    ):
+        env = runner.build_env(_gpu_instance(gpu_ids=None))
+        assert "CUDA_VISIBLE_DEVICES" not in env
+        assert "CUDA_DEVICE_ORDER" not in env
+
+
+def test_extra_env_still_wins_last(venv) -> None:
+    """An operator's per-instance override beats the automatic block."""
+    instance = SimpleNamespace(
+        gpu_ids=[0],
+        port=8080,
+        id="inst-1",
+        config=SimpleNamespace(
+            alias="test-model",
+            extra_env={"CUDA_VISIBLE_DEVICES": "3"},
+        ),
+    )
+    env = SglangRunner().build_env(instance)
+    assert env["CUDA_VISIBLE_DEVICES"] == "3"

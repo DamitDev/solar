@@ -38,6 +38,22 @@ class MemoryInfo(BaseModel):
     memory_type: str = Field(..., description="Type of memory (VRAM or RAM)")
 
 
+class GpuInfo(BaseModel):
+    """Per-device GPU telemetry (S-058).
+
+    Mirror of solar-host's ``GpuInfo`` (L1: exactly the five spec fields).
+    ``available_gb`` is live nvidia-smi free memory, *before* reservation
+    headroom; placement derives the per-device headroom from
+    ``snapshot.reservations[].gpu_ids`` + ``actual_vram_gb``.
+    """
+
+    index: int
+    name: str
+    total_gb: float
+    used_gb: float
+    available_gb: float
+
+
 class Host(BaseModel):
     """Solar host information"""
 
@@ -184,6 +200,10 @@ class HostInstanceSummary(BaseModel):
     intent_id: str | None = Field(
         default=None, description="Owning intent id when managed_by == 'intent'"
     )
+    gpu_ids: list[int] | None = Field(
+        default=None,
+        description="Physical devices the instance runs on (S-058, from the WS payload)",
+    )
 
 
 class HostReservationSummary(BaseModel):
@@ -202,6 +222,11 @@ class HostReservationSummary(BaseModel):
     vram_gb: float = 0.0
     ram_gb: float = 0.0
     disk_gb: float | None = None
+    gpu_ids: list[int] | None = Field(
+        default=None,
+        description="Resolved device set (host-side, S-058); None when the host predates GPU-aware reservations",
+    )
+    gpu_count: int = 1
     actual_vram_gb: float | None = None
     actual_ram_gb: float | None = None
     actual_disk_gb: float | None = None
@@ -268,6 +293,10 @@ class HostResourceSnapshot(BaseModel):
     # Running workloads (from Redis instance cache)
     instance_count: int = 0
     running_instance_count: int = 0
+
+    # S-058: per-device GPU telemetry; empty on Mac/CPU hosts and on hosts
+    # without the new agent (D6 aggregate fallback).
+    gpus: list[GpuInfo] = Field(default_factory=list)
 
     # Inference workload details (U-004 — from Redis instance cache)
     instances: list[HostInstanceSummary] = Field(default_factory=list)

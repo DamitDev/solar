@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +22,21 @@ from solar_host.routes import instances, jobs, models, resources, websockets
 from solar_host.ws_client import broadcast_health, get_client, get_clients, init_clients
 
 logger = logging.getLogger(__name__)
+
+# The host runs under uvicorn's log config, which configures only its own
+# loggers — without a root handler, app-level INFO records (the S-058 spawn
+# record, for instance) are dropped before they reach stderr. Give the app
+# a root handler so operational records flow like the uvicorn ones. Same
+# LOG_LEVEL handling and format as solar-control so one environment
+# variable tunes both services.
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logging.getLogger("uvicorn").setLevel(getattr(logging, log_level, logging.INFO))
+logging.getLogger("uvicorn.error").setLevel(getattr(logging, log_level, logging.INFO))
+logging.getLogger("uvicorn.access").setLevel(getattr(logging, log_level, logging.INFO))
 
 
 async def health_report_loop(app: FastAPI):

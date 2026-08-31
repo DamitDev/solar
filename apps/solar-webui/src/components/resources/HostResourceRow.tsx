@@ -96,8 +96,12 @@ export function HostResourceRow({ snapshot, expanded, onToggle }: Props) {
   );
 }
 
-/** Used fraction only: at this size, segment breakdown is noise. */
-function MiniBar({
+/** Used fraction only: at this size, segment breakdown is noise.
+ *
+ * Exported for HostResourceCard's per-GPU rows (S-058) — one MiniBar per
+ * device keeps the resources page consistent with the compact row style.
+ */
+export function MiniBar({
   label,
   totalGb,
   availableGb,

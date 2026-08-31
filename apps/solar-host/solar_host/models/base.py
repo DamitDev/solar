@@ -205,6 +205,15 @@ class Instance(BaseModel):
     # upstream's own advertisement untouched.
     capabilities: list[str] | None = Field(default=None)
 
+    # GPU placement (S-058): the physical device indices solar-control chose
+    # for this instance and the per-GPU VRAM footprint used for spawn-time
+    # re-verification. Persisted via ConfigManager so a manual restart of a
+    # stopped instance reuses the same devices. Both are deliberately NOT on
+    # InstanceUpdate — a device change means a new placement, i.e. a new
+    # instance.
+    gpu_ids: list[int] | None = Field(default=None)
+    vram_gb: float | None = Field(default=None)
+
     # Ephemeral runtime fields (not persisted to disk)
     busy: bool = Field(default=False, exclude=True)
     prefill_progress: float | None = Field(default=None, exclude=True)
@@ -221,6 +230,8 @@ class InstanceCreate(BaseModel):
     priority: str | None = None
     managed_by: str | None = None
     intent_id: str | None = None
+    gpu_ids: list[int] | None = None
+    vram_gb: float | None = None
 
 
 class InstanceUpdate(BaseModel):

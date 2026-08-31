@@ -69,14 +69,19 @@ async def create_reservation(req: ReservationRequest, request: Request) -> Any:
     try:
         reservation = manager.create(req)
     except CapacityExceededError as exc:
+        content: dict[str, Any] = {
+            "error": "capacity_exceeded",
+            "dimension": exc.dimension,
+            "requested_gb": exc.requested_gb,
+            "available_gb": exc.available_gb,
+        }
+        # S-058: present on per-device VRAM failures, omitted otherwise so
+        # existing consumers see the same shape as before.
+        if exc.device_index is not None:
+            content["device_index"] = exc.device_index
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
-            content={
-                "error": "capacity_exceeded",
-                "dimension": exc.dimension,
-                "requested_gb": exc.requested_gb,
-                "available_gb": exc.available_gb,
-            },
+            content=content,
         )
 
     # Build the view from the snapshot (picks up status from JobStore).
@@ -94,6 +99,8 @@ async def create_reservation(req: ReservationRequest, request: Request) -> Any:
         vram_gb=reservation.vram_gb,
         ram_gb=reservation.ram_gb,
         disk_gb=reservation.disk_gb,
+        gpu_ids=reservation.gpu_ids or None,
+        gpu_count=reservation.gpu_count,
         expires_at=reservation.expires_at,
     )
 

@@ -17,6 +17,9 @@ from .host import (
     DrainState as DrainState,
 )
 from .host import (
+    GpuInfo as GpuInfo,
+)
+from .host import (
     Host as Host,
 )
 from .host import (

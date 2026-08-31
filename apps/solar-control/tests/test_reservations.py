@@ -117,6 +117,42 @@ async def test_reserve_happy_path(host_gpu, reservation_request):
 
 
 @pytest.mark.anyio
+async def test_reserve_uses_host_resolved_gpu_ids(host_gpu, reservation_request):
+    """The host's echoed gpu_ids win over control's (possibly None) guess.
+
+    The snapshot has no ``gpus`` list, so control's fit check runs on the
+    aggregate path and sends no gpu_ids — the host L4-self-assigns and
+    echoes ``[1]``. The response and the Redis record must carry the
+    host's resolved set, not control's ``None``.
+    """
+    with (
+        patch("app.services.reservation.host_db") as mock_db,
+        patch(
+            "app.routes.management.resources._fetch_host_resource_snapshot"
+        ) as mock_fetch,
+        patch("app.services.reservation._call_host_reserve") as mock_reserve,
+        patch("app.services.reservation._store_reservation") as mock_store,
+        patch("app.services.placement.host_store") as mock_host_store,
+    ):
+        mock_db.get_all_hosts = AsyncMock(return_value=[host_gpu])
+        mock_fetch.return_value = _snap(host_gpu)
+        mock_reserve.return_value = {
+            "reservation_id": "host-res-1",
+            "gpu_ids": [1],
+        }
+        mock_store.return_value = None
+        mock_host_store.get_host_instances = AsyncMock(return_value=[])
+
+        result = await reserve_resources(reservation_request)
+
+        assert result.gpu_ids == [1]
+        # Control passed no gpu_ids (aggregate snapshot) and the host answered.
+        assert mock_reserve.call_args.kwargs["gpu_ids"] is None
+        mock_store.assert_called_once()
+        assert mock_store.call_args.kwargs["gpu_ids"] == [1]
+
+
+@pytest.mark.anyio
 async def test_reserve_no_hosts():
     """No hosts registered returns deterministic failure."""
     with patch("app.services.reservation.host_db") as mock_db:
