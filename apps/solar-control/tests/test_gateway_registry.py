@@ -542,6 +542,7 @@ def test_http_instance_payload_carries_capabilities():
     entry = RegistryEntry.from_http_instance(
         host_id="host-1",
         host_url="http://test-host:8000",
+        host_api_key="k",
         instance={
             "id": "inst-1",
             "port": 3500,
@@ -549,7 +550,6 @@ def test_http_instance_payload_carries_capabilities():
             "config": {
                 "alias": "qwen3.6:35b",
                 "backend_type": "sglang",
-                "api_key": "k",
             },
         },
     )
@@ -583,3 +583,102 @@ def test_an_older_host_leaves_capabilities_unset():
     )
 
     assert entry.capabilities is None
+
+
+class TestRegistryApiKey:
+    """HTTP-poll entries must carry the host key — solar-host strips api_key."""
+
+    def test_http_instance_without_config_key_uses_host_key(self):
+        entry = RegistryEntry.from_http_instance(
+            host_id="host-1",
+            host_url="http://test-host:8000",
+            host_api_key="host-api-key",
+            instance={
+                "id": "inst-1",
+                "status": "running",
+                "port": 3500,
+                "config": {"alias": "model-a", "backend_type": "llamacpp"},
+            },
+        )
+
+        assert entry.api_key == "host-api-key"
+
+    def test_http_instance_with_config_key_keeps_it(self):
+        """Fallback semantics: a legacy config key still wins if present."""
+        entry = RegistryEntry.from_http_instance(
+            host_id="host-1",
+            host_url="http://test-host:8000",
+            host_api_key="host-api-key",
+            instance={
+                "id": "inst-1",
+                "status": "running",
+                "port": 3500,
+                "config": {
+                    "alias": "model-a",
+                    "backend_type": "llamacpp",
+                    "api_key": "instance-api-key",
+                },
+            },
+        )
+
+        assert entry.api_key == "instance-api-key"
+
+
+@pytest.mark.anyio
+async def test_refresh_http_poll_entries_carry_host_api_key(host):
+    """After a Redis restart hosts look disconnected; the HTTP-poll rebuild
+    must stamp entries with the host key, not an empty config key."""
+    instances = [
+        {
+            "id": "inst-1",
+            "status": "running",
+            "port": 3500,
+            "supported_endpoints": ["/v1/chat/completions", "/v1/models"],
+            "config": {"alias": "model-a", "backend_type": "llamacpp"},
+        }
+    ]
+
+    gateway = OpenAIGateway()
+    gateway.session = _Session(_Response(200, instances))
+
+    with (
+        patch("app.gateway.host_db.get_all_hosts", AsyncMock(return_value=[host])),
+        patch("app.gateway.host_db.update_host_status", AsyncMock()),
+        patch(
+            "app.socketio_app.host_handlers.is_host_connected",
+            AsyncMock(return_value=False),
+        ),
+        patch(
+            "app.socketio_app.host_handlers.get_host_instances",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "app.gateway.host_store.get_disconnect_time", AsyncMock(return_value=None)
+        ),
+        patch("app.gateway.host_store.get_host_instances", AsyncMock(return_value=[])),
+        patch("app.gateway.host_store.set_host_instances", AsyncMock()),
+        # Previous registry carried forward when polling fails — with the
+        # incident's empty-key entry, so a reverted call site fails the
+        # assertion below instead of an unrelated Redis error.
+        patch(
+            "app.gateway.registry_store.get_registry",
+            AsyncMock(
+                return_value={
+                    "model-a": [
+                        RegistryEntry(
+                            host_id="host-1",
+                            instance_id="inst-1",
+                            url="http://test-host:3500",
+                            api_key="",
+                            model_alias="model-a",
+                        )
+                    ]
+                }
+            ),
+        ),
+        patch("app.gateway.registry_store.set_registry", AsyncMock()) as set_registry,
+    ):
+        await gateway.refresh_model_registry()
+
+    registry = set_registry.await_args.args[0]
+    assert registry["model-a"][0].api_key == "host-api-key"
