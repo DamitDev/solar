@@ -36,7 +36,7 @@ dev = [
     "black>=26.5.1",
     # Pinned: ruff 0.16 changed the default rule set and flags the codebase's
     # existing style (248 errors). Bumping this is a deliberate lint cleanup PR.
-    "ruff==0.16.4",
+    "ruff==0.16.5",
 ]
 
 [tool.setuptools.packages.find]
