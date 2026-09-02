@@ -1,0 +1,31 @@
+# Solar — server-side routing state branch progress
+
+## US-001 — Instance state Redis store (DONE)
+
+Added `app/redis_state/instance_states.py` exposing `InstanceStatesStore`
+with `set`/`get`/`delete`/`get_all` keyed by `host:instance` (prefix
+`solar:istate:`), storing the `InstanceStatePayload` shape
+(`{host_id, host_name, instance_id, timestamp, data}`). Each write issues a
+TTL (`ISTATE_TTL_S = 300`) so a host that stops reporting expires its recorded
+state. Registered on `app/redis_state/__init__.py` as `instance_states_store`
+and exported in `__all__`.
+
+Write paths wired at both relay choke points in
+`app/socketio_app/host_handlers.py`:
+- `host_instance_state` (single-event emitter)
+- `host_instance_state_batch` (batched emitter, per-entry via
+  `asyncio.gather` alongside the WS emit)
+
+Tests:
+- Unit: `tests/test_instance_states.py` (7 tests) — dict-based fake Redis,
+  patches the store's own namespace, asserts set/get values, delete, that a
+  TTL is issued on write (default + custom), and get_all.
+- Integration: `tests_integration/infrastructure/test_instance_state_ttl.py`
+  — round-trips a real write against the live session Redis with a short TTL
+  and confirms expiry after the TTL while a long-TTL sibling survives.
+- `solar:istate:` added to the volatile-redis flush list in
+  `tests_integration/conftest.py::_flush_volatile_redis`.
+
+Feedback loops: ruff + black pass, full solar-control unit suite green
+(1021 passed). Integration suite requires Docker; collected/compiled cleanly
+but not executed here.
