@@ -18,8 +18,8 @@
         "ruff and black pass"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": "Choke points are the single-instance emitter (host_instance_state) and the batched emitter (host_instance_state_batch). TTL guards against hosts that die mid-stream."
+      "passes": true,
+      "notes": "Choke points are the single-instance emitter (host_instance_state) and the batched emitter (host_instance_state_batch). TTL guards against hosts that die mid-stream. Done: app/redis_state/instance_states.py (InstanceStatesStore, solar:istate: prefix, ISTATE_TTL_S=300), registered on app/redis_state/__init__.py; write paths wired at both choke points in host_handlers.py; unit tests tests/test_instance_states.py (7, anyio) + integration tests_integration/infrastructure/test_instance_state_ttl.py; solar:istate: added to clean_state redis flush; ruff/black pass, full unit suite green."
     },
     {
       "id": "US-002",
