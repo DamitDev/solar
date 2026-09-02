@@ -1,0 +1,152 @@
+{
+  "project": "Solar",
+  "branchName": "feature/server-side-routing-state",
+  "description": "Server-side authoritative routing/instance state for the WebUI - Instead of the WebUI building its routing view model client-side from whatever Socket.IO events it happens to receive, solar-control becomes the authoritative source of fleet runtime state. It gains two Redis-backed stores (per-instance runtime state, per-request active registry), a typed versioned snapshot builder, a snapshot event on connect plus a REST mirror for fallback polling, and the WebUI resets to the snapshot and applies deltas on top. This makes the Routing page reconcile correctly after tab sleep or socket disconnects.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Instance state Redis store",
+      "description": "As a developer, I need solar-control to persist the latest runtime state per host:instance at the relay choke points so instance load bars do not freeze when the WebUI reconnects after sleeping or a socket drop.",
+      "acceptanceCriteria": [
+        "Add Redis module app/redis_state/instance_states.py exposing an InstanceStateStore (e.g. InstanceStatesStore) with set/get/delete keyed by host:instance",
+        "Store entries as {host_id, host_name, instance_id, timestamp, data} matching the existing InstanceStatePayload (app/models/socketio.py:195)",
+        "Entries carry a TTL so a host that stops reporting expires its recorded state",
+        "Write paths are called at both relay choke points: host_instance_state and host_instance_state_batch (app/socketio_app/host_handlers.py ~339-434)",
+        "Store registered on app/redis_state/__init__.py instance and exported in __all__",
+        "Unit tests follow the existing redis_state test pattern (patch the store's own namespace) asserting set/get values and that a TTL is issued on write (mock redis to verify expire called with the TTL)",
+        "Integration test under tests_integration/infrastructure/ round-trips a real write and confirms expiry after the TTL, so 'TTL expiry' is proven against a real store, not a mocked client",
+        "ruff and black pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": "Choke points are the single-instance emitter (host_instance_state) and the batched emitter (host_instance_state_batch). TTL guards against hosts that die mid-stream."
+    },
+    {
+      "id": "US-002",
+      "title": "Active request Redis store",
+      "description": "As a developer, I need a fleet-wide replica-consistent per-request registry written at the single broadcast choke point so the active-request view becomes server-authoritative instead of deriving from the transient WS stream a reconnecting client has missed.",
+      "acceptanceCriteria": [
+        "Add Redis-backed per-request active registry to app/redis_state/routing.py (RoutingStore) with create/update/delete/list operations keyed by request_id",
+        "request_start creates an entry; request_routed updates host/instance/resolved_model; request_reroute updates host/instance/resolved_model/attempt; request_success/request_error deletes it",
+        "Writes happen at the single broadcast choke point app/gateway.py::_broadcast_routing_event (~1078-1106) branching on event_data.type",
+        "TTL mirrors ACTIVE_TTL_S (300 s) for auto-cleanup of crashed replica state",
+        "Cross-pod delete semantics: a terminal event on any replica removes the registry entry regardless of which replica created it",
+        "Unit tests cover create/update/reroute/delete lifecycle plus cross-pod delete semantics, following the existing redis_state test pattern",
+        "ruff and black pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "This replaces the WebUI's client-side derivation of active requests from the WS stream (which is lost on reconnect); GatewayLogger._inflight (app/database/logs.py:176-386) is per-pod and not consumed by the routing view, so it is unaffected by this story. TTL self-heals if a terminal event is lost."
+    },
+    {
+      "id": "US-003",
+      "title": "Snapshot builder service",
+      "description": "As a developer, I need a single typed, versioned payload builder that composes hosts, instances, instance states, active requests with tallies, endpoints, and pending hosts into one authoritative snapshot with a published schema shared by the WS emit and REST mirror.",
+      "acceptanceCriteria": [
+        "Add service app/services/render_state.py that builds a typed, versioned snapshot payload with schema_version and generated_at",
+        "Snapshot composes: hosts (status + drain + health), instances per host, instance states, active requests, endpoints, pending hosts",
+        "Active-request aggregates (inFlight per instance/host/model/endpoint, queued/processing/errored totals) are computed server-side, moving the logic currently in apps/solar-webui/src/components/routing/workload.ts",
+        "Return a Pydantic payload shared by both the WS emit and the REST mirror, with a documented field contract mapping each snapshot field to the WebUI maps it initializes (requests, instanceStates, endpoints) so consumers in US-006/007/009 code against a stable schema",
+        "Unit tests cover the builder output shape and tallies, following the existing service test pattern",
+        "ruff and black pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "schema_version/generated_at make the payload future-proof and measurable. The field contract is a precondition for the client stories, so landscapes (which field feeds requests vs instanceStates vs endpoints) are agreed here."
+    },
+    {
+      "id": "US-004",
+      "title": "Connect snapshot event",
+      "description": "As a developer, I need solar-control to emit the snapshot to a freshly connected WebUI client before any deltas flow so a late-joining or reconnecting client always reconciles.",
+      "acceptanceCriteria": [
+        "In app/socketio_app/webui_handlers.py::webui_connect (~44-75), after initial_status but before any request/instance deltas can be delivered, emit a routing_snapshot event to the sid",
+        "The emitted payload is produced by the render_state snapshot builder",
+        "Ordering guarantees the snapshot is delivered to the sid before any request_*/instance_state deltas reach that client (snapshot first, then deltas)",
+        "Unit test verifies routing_snapshot is emitted on connect",
+        "ruff and black pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "Ordering matters: reset + apply is only correct if the snapshot precedes deltas; connection-filtered delivery (emit to=sid) keeps other clients unaffected."
+    },
+    {
+      "id": "US-005",
+      "title": "REST snapshot mirror",
+      "description": "As a developer, I need a REST mirror of the snapshot so the WebUI can fall back to server state when the socket is down.",
+      "acceptanceCriteria": [
+        "Add GET /api/routing/state under app/routes/management/routing.py returning the same snapshot payload produced by the builder",
+        "Route registered in app/routes/management/__init__.py under the /api prefix",
+        "Uses the same auth as the other management routes",
+        "Returns the identical payload shape as the WS routing_snapshot event",
+        "Unit test verifies the endpoint returns the snapshot payload and enforces management auth",
+        "ruff and black pass"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": "routing.py does not yet exist under management; it must be created and added to the include_router block."
+    },
+    {
+      "id": "US-006",
+      "title": "WebUI snapshot consumer",
+      "description": "As a user, I want the Routing page to reset to the authoritative snapshot on connect and apply deltas on top, so stale requests stop appearing as processing after a reconnect.",
+      "acceptanceCriteria": [
+        "In apps/solar-webui/src/hooks/useEventStream.ts, on socket connect reset the event-derived Maps (requests, instanceStates, endpoints)",
+        "On connect set an awaitingSnapshot flag; while set, gated/buffered deltas (request_*, instance_state) are dropped or queued until routing_snapshot arrives",
+        "Apply the snapshot wholesale on receipt (initializing requests, instanceStates, endpoints per the US-003 field contract), then clear awaitingSnapshot and resume delta processing",
+        "Reuse the existing bindEvent pattern for the new routing_snapshot event",
+        "Add routing_snapshot to WSMessageType union and EventHandlers",
+        "WebUI vitest covers reset-on-connect, delta gating until the snapshot is applied, and applying the snapshot then resuming deltas",
+        "pnpm lint and typecheck pass"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "Gating prevents deltas that race a reconnect (arriving before the snapshot) from being lost or applied on top of a stale base. Relies on US-004's snapshot-before-deltas server ordering."
+    },
+    {
+      "id": "US-007",
+      "title": "WebUI REST fallback polling",
+      "description": "As a user, I want the Routing page to keep showing correct live state by polling the snapshot endpoint when the socket is down.",
+      "acceptanceCriteria": [
+        "Switch useFallbackPolling consumers (e.g. RoutingFlow.tsx ~88-107) to poll GET /api/routing/state when the socket is down",
+        "The REST fallback uses the same payload shape as the WS routing_snapshot event",
+        "Keep the enabled: !isConnected gating and interval from the existing useFallbackPolling hook",
+        "Remove the now-redundant dual path in RoutingFlow.tsx where the endpoint list and request aggregates were fetched separately via getEndpoints()/endpoints_update; the snapshot supplies both for the routing view",
+        "WebUI vitest covers the fallback polling switching behavior",
+        "pnpm lint and typecheck pass"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "Session-local filters (host_ids) continue to apply on the client after applying the snapshot. Gateway-history UI is untouched and still uses its own event source."
+    },
+    {
+      "id": "US-008",
+      "title": "Ticker backfill after snapshot",
+      "description": "As a user, I want the ticker to show recent terminal events immediately after a snapshot is applied instead of appearing empty until new events arrive.",
+      "acceptanceCriteria": [
+        "After applying a routing_snapshot, backfill recent terminal events for the ticker via the existing GET /api/gateway/events/recent (client wrapper already present in apps/solar-webui/src/api/client.ts:312)",
+        "Live active requests for the ticker come from the snapshot's active-request aggregates",
+        "Update tickerRequests consumers to source terminal history from the backfill and active requests from the snapshot",
+        "WebUI vitest covers the backfill behavior",
+        "pnpm lint and typecheck pass"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "Only terminal-history backfill is added; gateway history UI itself is out of scope."
+    },
+    {
+      "id": "US-009",
+      "title": "Derive routing view from snapshot aggregates",
+      "description": "As a user, I want the Routing page load bars and totals to be computed from the server snapshot aggregates so they are consistent fleet-wide.",
+      "acceptanceCriteria": [
+        "apps/solar-webui/src/components/routing/workload.ts and routing/graph.ts consume the snapshot's aggregates (inFlight, totals) instead of re-deriving from the client request Map",
+        "graph.ts tallyTraffic (line ~189/421) and workload.ts countInFlightByInstance/summarizeFlow read snapshot-provided inFlight and totals rather than tallying the client request Map",
+        "Search, expand, trace, and layout logic remains client-side",
+        "WebUI vitest verifies cells/totals are derived from snapshot aggregates",
+        "pnpm lint and typecheck pass"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "Depends on US-006/007 landing snapshot-derived aggregates into the state the components read; this is the final consumer story after stores, builder, and client wiring are complete. View-state features (graph layout, search, expand/collapse, traces, minimap) remain client-side and are out of scope for changes."
+    }
+  ]
+}
