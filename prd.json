@@ -51,8 +51,8 @@
         "ruff and black pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": "schema_version/generated_at make the payload future-proof and measurable. The field contract is a precondition for the client stories, so landscapes (which field feeds requests vs instanceStates vs endpoints) are agreed here."
+      "passes": true,
+      "notes": "Done: app/models/routing_snapshot.py (RoutingSnapshot + RoutingHost/InstanceStateEntry/ActiveRequestEntry/RequestAggregates, schema_version=1, generated_at; exported via app/models/__init__.py) and app/services/render_state.py (build_routing_snapshot()) compose hosts/instances/instance-states/active-requests-with-tallies/endpoints/pending-hosts; aggregate arithmetic (by_instance/by_host/by_model/by_endpoint + queued/processing/errored totals) moved server-side from WebUI workload.ts/graph.ts. Field contract: active_requests->requests Map, instance_states->instanceStates Map, endpoints->endpoints list, aggregates->server tallies, hosts/pending_hosts->host status. Unit tests tests/test_render_state.py (7, anyio); ruff/black pass, full unit suite green (1036 passed)."
     },
     {
       "id": "US-004",
