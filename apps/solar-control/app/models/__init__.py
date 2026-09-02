@@ -124,6 +124,24 @@ from .openai import (
 from .reservation import (
     MigrationCandidate as MigrationCandidate,
 )
+from .routing_snapshot import (
+    ActiveRequestEntry as ActiveRequestEntry,
+)
+from .routing_snapshot import (
+    RequestAggregates as RequestAggregates,
+)
+from .routing_snapshot import (
+    RoutingHost as RoutingHost,
+)
+from .routing_snapshot import (
+    RoutingSnapshot as RoutingSnapshot,
+)
+from .routing_snapshot import (
+    SCHEMA_VERSION as SCHEMA_VERSION,
+)
+from .routing_snapshot import (
+    InstanceStateEntry as InstanceStateEntry,
+)
 from .reservation import (
     ReservationFailure as ReservationFailure,
 )
