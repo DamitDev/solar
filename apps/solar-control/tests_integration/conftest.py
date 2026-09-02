@@ -932,6 +932,7 @@ async def _flush_volatile_redis(redis_url: str) -> None:
             "solar:registry",
             "solar:health:",
             "solar:istate:",
+            "solar:active-req:",
             "solar:active:",
             "solar:weight:",
             "solar:rr:",

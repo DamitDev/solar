@@ -29,3 +29,45 @@ Tests:
 Feedback loops: ruff + black pass, full solar-control unit suite green
 (1021 passed). Integration suite requires Docker; collected/compiled cleanly
 but not executed here.
+
+## US-002 — Active request Redis store (DONE)
+
+Added a per-request active registry to `RoutingStore` in
+`app/redis_state/routing.py` (prefix `solar:active-req:`), the server-authoritative
+source for the WebUI's active-request view:
+- `create_request` — records an in-flight request on `request_start`
+  (model/endpoint/client_ip/timestamp)
+- `update_request` — merges routing details on `request_routed`/`request_reroute`
+  (host_id/host_name/instance_id/resolved_model/attempt), returns None if the
+  request is unknown
+- `delete_request` — removes the entry on `request_success`/`request_error`
+- `get_request` / `list_requests` — read individual or all live entries
+  (used by snapshotting in later stories)
+
+Each write issues a TTL mirroring `ACTIVE_TTL_S` (300 s, overridable per-write)
+so a replica that crashes mid-request expires its entry instead of showing a
+stuck 'processing' request. Cross-pod delete semantics fall out naturally from
+shared Redis: a terminal event on any replica removes the key regardless of
+which replica created it.
+
+Writes wired at the single broadcast choke point in
+`app/gateway.py::_broadcast_routing_event`, which now branches on
+`event_data.type` and dispatches to the new `_update_active_registry` helper.
+Registry-update failures are swallowed so a Redis hiccup never breaks the
+actual event broadcast/logging.
+
+Tests:
+- Unit: `tests/test_routing_registry.py` (7 tests) — dict-based fake Redis,
+  patches the store's own namespace, asserts create/update/delete lifecycle,
+  custom TTL on write, cross-pod delete semantics (two store instances), and
+  list_requests excluding deleted/expired.
+- Integration: `tests_integration/infrastructure/test_routing_registry_ttl.py`
+  — round-trips a real write against the live session Redis with a short TTL,
+  confirms expiry after the TTL while a long-TTL sibling survives, and that a
+  terminal delete removes the entry.
+- `solar:active-req:` added to the volatile-redis flush list in
+  `tests_integration/conftest.py::_flush_volatile_redis`.
+
+Feedback loops: ruff + black pass, full solar-control unit suite green
+(1028 passed). Integration suite requires Docker; collected/compiled cleanly
+but not executed here.

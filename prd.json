@@ -35,8 +35,8 @@
         "ruff and black pass"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": "This replaces the WebUI's client-side derivation of active requests from the WS stream (which is lost on reconnect); GatewayLogger._inflight (app/database/logs.py:176-386) is per-pod and not consumed by the routing view, so it is unaffected by this story. TTL self-heals if a terminal event is lost."
+      "passes": true,
+      "notes": "This replaces the WebUI's client-side derivation of active requests from the WS stream (which is lost on reconnect); GatewayLogger._inflight (app/database/logs.py:176-386) is per-pod and not consumed by the routing view, so it is unaffected by this story. TTL self-heals if a terminal event is lost. Done: per-request registry on RoutingStore in app/redis_state/routing.py (solar:active-req: prefix, create_request/update_request/delete_request/get_request/list_requests), TTL mirrors ACTIVE_TTL_S (300 s, overridable per-write); wired at the single broadcast choke point app/gateway.py::_broadcast_routing_event branching on event_data.type via the _update_active_registry helper (registry failures swallowed so broadcast/logging are never broken); unit tests tests/test_routing_registry.py (7, anyio) covering lifecycle + cross-pod delete + custom TTL + list; integration tests_integration/infrastructure/test_routing_registry_ttl.py (real write, TTL expiry, terminal delete); solar:active-req: added to volatile-redis flush list; ruff/black pass, full unit suite green."
     },
     {
       "id": "US-003",
