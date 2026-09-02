@@ -1248,7 +1248,14 @@ class OpenAIGateway:
     async def _broadcast_routing_event(
         self, event_data: dict[str, Any], *, endpoint_id: str | None = None
     ) -> None:
-        """Broadcast a routing event to WebUI via Socket.IO and log to database."""
+        """Broadcast a routing event to WebUI via Socket.IO and log to database.
+
+        Also maintains the server-authoritative per-request registry at this
+        single choke point: ``request_start`` creates an entry,
+        ``request_routed``/``request_reroute`` update host/instance/model/attempt,
+        and ``request_success``/``request_error`` delete it (a terminal event on
+        any replica removes the entry regardless of which replica created it).
+        """
         from dataclasses import asdict
 
         from app.database.logs import gateway_logger
@@ -1256,6 +1263,15 @@ class OpenAIGateway:
             broadcast_gateway_request,
             broadcast_to_webui,
         )
+
+        event_type = event_data.get("type", "unknown")
+        data = dict(event_data.get("data", {}))
+        request_id = data.get("request_id")
+        if request_id:
+            try:
+                await self._update_active_registry(event_type, data)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Failed to update active request registry: %s", e)
 
         try:
             summary = await gateway_logger.log_event(
@@ -1267,13 +1283,39 @@ class OpenAIGateway:
             logger.error("Logging error: %s", e)
 
         try:
-            event_type = event_data.get("type", "unknown")
             data = dict(event_data.get("data", {}))
             if endpoint_id is not None:
                 data["endpoint_id"] = endpoint_id
             await broadcast_to_webui(event_type, data)
         except Exception as e:  # noqa: BLE001
             logger.warning("Failed to broadcast routing event to WebUI: %s", e)
+
+    async def _update_active_registry(
+        self, event_type: str, data: dict[str, Any]
+    ) -> None:
+        """Apply an incoming routing event to the per-request active registry."""
+        request_id = data.get("request_id")
+        if not request_id:
+            return
+        if event_type == "request_start":
+            await routing_store.create_request(
+                request_id,
+                model=data.get("model", ""),
+                endpoint=data.get("endpoint", ""),
+                client_ip=data.get("client_ip", ""),
+                timestamp=data.get("timestamp", ""),
+            )
+        elif event_type in ("request_routed", "request_reroute"):
+            await routing_store.update_request(
+                request_id,
+                host_id=data.get("host_id"),
+                host_name=data.get("host_name"),
+                instance_id=data.get("instance_id"),
+                resolved_model=data.get("resolved_model"),
+                attempt=data.get("attempt"),
+            )
+        elif event_type in ("request_success", "request_error"):
+            await routing_store.delete_request(request_id)
 
     def _ts(self) -> str:
         return datetime.now(timezone.utc).isoformat()
