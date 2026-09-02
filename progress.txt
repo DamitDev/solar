@@ -71,3 +71,38 @@ Tests:
 Feedback loops: ruff + black pass, full solar-control unit suite green
 (1028 passed). Integration suite requires Docker; collected/compiled cleanly
 but not executed here.
+
+## US-003 — Snapshot builder service (DONE)
+
+Added the typed, versioned snapshot payload model and its builder:
+
+- `app/models/routing_snapshot.py` — `RoutingSnapshot` + sub-models
+  (`RoutingHost`, `InstanceStateEntry`, `ActiveRequestEntry`,
+  `RequestAggregates`) with `schema_version` (1) and `generated_at`. The same
+  payload is shared by the WS emit (US-004) and REST mirror (US-005).
+  Field contract to the WebUI (documented in the module docstring):
+  `active_requests` → requests Map, `instance_states` → instanceStates Map,
+  `endpoints` → endpoints list, `aggregates` → server-computed inFlight/totals,
+  `hosts`/`pending_hosts` → host status + pending-approval hosts. Exported via
+  `app/models/__init__.py`.
+- `app/services/render_state.py` — `build_routing_snapshot()` composes
+  hosts (status + drain + health + instance cache from `host_store`),
+  per-instance states (`instance_states_store.get_all`), active requests
+  (`routing_store.list_requests`), server-computed tallies, endpoints
+  (`endpoint_db.get_all_endpoints`, shape matches `endpoints_update`), and
+  pending hosts (`host_store.get_all_pending`).
+- Aggregate arithmetic moved server-side (mirrors WebUI `workload.ts` /
+  `graph.ts`): `by_instance` (`host:instance` cell keys), `by_host`,
+  `by_model` (uses `resolved_model` with `model` fallback), `by_endpoint`,
+  plus `queued`/`processing` (an entry carrying host+instance is
+  `processing`, otherwise `queued`) and `errored` (0 — terminal requests are
+  deleted from the registry). Endpoint loading degrades to empty on failure.
+
+Tests: `tests/test_render_state.py` (7 tests, anyio) — placeholder-shaped
+snapshot, host status/drain/health + connected + instance cache, instance
+state data/timestamp, tallies by instance/host/model/endpoint, unrouted
+request counting as queued, resolved_model fallback, endpoints + pending
+hosts pass-through.
+
+Feedback loops: ruff + black pass, full solar-control unit suite green
+(1036 passed).
