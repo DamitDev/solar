@@ -8,6 +8,8 @@
  * - log: Instance log messages from hosts
  * - instance_state: Instance runtime state updates from hosts
  * - request_start, request_routed, request_success, request_error, request_reroute: Routing events
+ * - routing_snapshot: Authoritative fleet state on connect (requests, instance
+ *   states, endpoints) that resets and seeds the routing view before deltas flow
  * - gateway_request: Completed request summaries (filterable)
  * - filter_status: Current filter configuration acknowledgement
  */
@@ -29,6 +31,7 @@ import {
 // Event type definitions
 export type WSMessageType =
   | 'initial_status'
+  | 'routing_snapshot'
   | 'host_status'
   | 'host_pending'
   | 'host_pending_removed'
@@ -221,6 +224,40 @@ export interface RoutingEventData {
   decode_tps?: number;
 }
 
+/** One in-flight request as authored by the server snapshot. */
+export interface ActiveRequestSnapshot {
+  request_id: string;
+  model?: string | null;
+  resolved_model?: string | null;
+  host_id?: string | null;
+  host_name?: string | null;
+  instance_id?: string | null;
+  attempt?: number | null;
+  timestamp?: string | null;
+  /** 'queued' when not yet routed, else 'processing'. */
+  status: 'queued' | 'processing';
+}
+
+/** One host:instance runtime state as authored by the server snapshot. */
+export interface InstanceStateSnapshot {
+  host_id: string;
+  instance_id: string;
+  timestamp?: string | null;
+  data: InstanceStateData;
+}
+
+/** The authoritative fleet-state snapshot pushed to a freshly connected client. */
+export interface RoutingSnapshot {
+  schema_version: number;
+  generated_at: string;
+  hosts?: unknown[];
+  active_requests: ActiveRequestSnapshot[];
+  instance_states: InstanceStateSnapshot[];
+  endpoints: ApiEndpoint[];
+  aggregates?: { [k: string]: unknown };
+  pending_hosts?: unknown[];
+}
+
 // Gateway request summary (completed request)
 export interface GatewayRequestSummary {
   request_id: string;
@@ -295,6 +332,7 @@ export interface EventHandlers {
   onLog?: (hostId: string, instanceId: string, data: LogEventData) => void;
   onInstanceState?: (hostId: string, instanceId: string, data: InstanceStateData) => void;
   onRoutingEvent?: (type: WSMessageType, data: RoutingEventData) => void;
+  onRoutingSnapshot?: (snapshot: RoutingSnapshot) => void;
   onGatewayRequest?: (data: GatewayRequestSummary) => void;
   onFilterStatus?: (filter: GatewayFilter) => void;
   onIntentUpdate?: (intent: Intent) => void;
@@ -331,6 +369,10 @@ export function useEventStream(handlers: EventHandlers = {}) {
   const socketRef = useRef<Socket | null>(null);
   const handlersRef = useRef(handlers);
   const gatewayFilterRef = useRef(gatewayFilter);
+  // While true, request_*/instance_state deltas are gated until the
+  // authoritative routing_snapshot arrives (a delta that races the connect can
+  // otherwise land on a stale base and be lost or double-applied).
+  const awaitingSnapshotRef = useRef(false);
 
   // Keep refs updated
   useEffect(() => {
@@ -390,6 +432,37 @@ export function useEventStream(handlers: EventHandlers = {}) {
             });
             setHosts(hostMap);
             h.onInitialStatus?.(event.data);
+          }
+          break;
+
+        case 'routing_snapshot':
+          if (event.data) {
+            // Reset the routing view to the authoritative server snapshot.
+            const snap = event.data as RoutingSnapshot;
+            const requestMap = new Map<string, RequestState>();
+            (snap.active_requests ?? []).forEach((r) => {
+              requestMap.set(r.request_id, {
+                request_id: r.request_id,
+                model: r.model ?? undefined,
+                resolved_model: r.resolved_model ?? undefined,
+                host_id: r.host_id ?? undefined,
+                host_name: r.host_name ?? undefined,
+                instance_id: r.instance_id ?? undefined,
+                timestamp: r.timestamp ?? new Date().toISOString(),
+                status: r.status === 'queued' ? 'pending' : 'processing',
+              });
+            });
+            setRequests(requestMap);
+            const states = new Map<string, InstanceStateData>();
+            (snap.instance_states ?? []).forEach((s) => {
+              states.set(`${s.host_id}:${s.instance_id}`, s.data);
+            });
+            setInstanceStates(states);
+            if (Array.isArray(snap.endpoints)) {
+              setEndpoints(snap.endpoints);
+            }
+            awaitingSnapshotRef.current = false;
+            h.onRoutingSnapshot?.(snap);
           }
           break;
 
@@ -455,6 +528,9 @@ export function useEventStream(handlers: EventHandlers = {}) {
           break;
 
         case 'instance_state':
+          // Dropped while awaiting the authoritative snapshot; the snapshot
+          // provides the reset base and raced deltas would corrupt it.
+          if (awaitingSnapshotRef.current) break;
           if (event.host_id && event.instance_id && event.data) {
             const key = `${event.host_id}:${event.instance_id}`;
             setInstanceStates((prev) => {
@@ -493,6 +569,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
           break;
 
         case 'request_start':
+          if (awaitingSnapshotRef.current) break;
           if (event.data?.request_id) {
             updateRequest(event.data.request_id, {
               model: event.data.model,
@@ -508,6 +585,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
           break;
 
         case 'request_routed':
+          if (awaitingSnapshotRef.current) break;
           if (event.data?.request_id) {
             updateRequest(event.data.request_id, {
               host_id: event.data.host_id,
@@ -523,6 +601,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
           break;
 
         case 'request_success':
+          if (awaitingSnapshotRef.current) break;
           if (event.data?.request_id) {
             updateRequest(event.data.request_id, {
               status: 'success',
@@ -537,6 +616,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
           break;
 
         case 'request_error':
+          if (awaitingSnapshotRef.current) break;
           if (event.data?.request_id) {
             updateRequest(event.data.request_id, {
               status: 'error',
@@ -690,6 +770,12 @@ export function useEventStream(handlers: EventHandlers = {}) {
       webuiSocket.on('connect', () => {
         console.log('EventStream: Connected');
         setIsConnected(true);
+        // Reset the routing view before the authoritative snapshot lands so any
+        // delta that races the connect has no stale base to corrupt.
+        awaitingSnapshotRef.current = true;
+        setRequests(new Map());
+        setInstanceStates(new Map());
+        setEndpoints([]);
       });
 
       webuiSocket.on('disconnect', (reason) => {
@@ -710,6 +796,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
       };
 
       bindEvent('initial_status', (payload) => ({ type: 'initial_status', data: payload }));
+      bindEvent('routing_snapshot', (payload) => ({ type: 'routing_snapshot', data: payload }));
       bindEvent('host_status', (payload) => ({ type: 'host_status', data: payload }));
       bindEvent('host_pending', (payload) => ({ type: 'host_pending', data: payload }));
       bindEvent('host_pending_removed', (payload) => ({ type: 'host_pending_removed', data: payload }));
