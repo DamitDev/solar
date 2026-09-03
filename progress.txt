@@ -151,13 +151,17 @@ server state when the Socket.IO connection is down.
 
 Circular import fix: importing `render_state` directly exposed a latent cycle
 (`render_state` → `host_handlers` → `socketio_app/server.py` →
-`webui_handlers` → `render_state`). Since `render_state` only needs three
-`host_handlers` helpers (`get_connected_host_ids`, `get_host_instances`,
-`get_pending_hosts`) at call time, those imports were moved into the functions
-that use them (`_build_hosts`, `build_routing_snapshot`) — now
-`render_state` loads independently of the socketio_app package, breaking the
-cycle for any entry point. `test_render_state.py` patch targets updated from
-`app.services.render_state.get_*` to `app.socketio_app.host_handlers.get_*`.
+`webui_handlers` → `render_state`). The root cause was architectural:
+`render_state` reached into the Socket.IO presentation layer
+(`host_handlers`) for three accessors that are thin wrappers over the Redis
+`host_store` (`get_host_instances` → `host_store.get_host_instances`,
+`get_connected_host_ids` → `host_store.get_connected_host_ids`,
+`get_pending_hosts` → `host_store.get_all_pending`). Fixed structurally by
+having `render_state` call `host_store` directly (it already imported from
+`app.redis_state`), so the service no longer depends on socketio at all and the
+cycle cannot form for any entry point. `test_render_state.py` patch targets
+updated from `app.socketio_app.host_handlers.get_*` to
+`app.services.render_state.host_store.get_*`.
 
 Tests: new `tests/test_routing_rest.py` (2 tests) — 401 without the management
 key, and 200 with the key returning the snapshot payload (schema_version,
