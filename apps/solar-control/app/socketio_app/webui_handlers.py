@@ -15,7 +15,7 @@ from app.config import settings
 from app.database.hosts import host_db
 from app.models.socketio import InstancesUpdatePayload
 from app.services.host_status import build_host_status_payload
-from app.services.render_state import build_routing_snapshot
+from app.services.routing_snapshot_builder import build_routing_snapshot
 from app.socketio_app.host_handlers import (
     get_connected_host_ids,
     get_host_instances,

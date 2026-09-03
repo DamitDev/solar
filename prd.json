@@ -43,7 +43,7 @@
       "title": "Snapshot builder service",
       "description": "As a developer, I need a single typed, versioned payload builder that composes hosts, instances, instance states, active requests with tallies, endpoints, and pending hosts into one authoritative snapshot with a published schema shared by the WS emit and REST mirror.",
       "acceptanceCriteria": [
-        "Add service app/services/render_state.py that builds a typed, versioned snapshot payload with schema_version and generated_at",
+        "Add service app/services/routing_snapshot_builder.py that builds a typed, versioned snapshot payload with schema_version and generated_at",
         "Snapshot composes: hosts (status + drain + health), instances per host, instance states, active requests, endpoints, pending hosts",
         "Active-request aggregates (inFlight per instance/host/model/endpoint, queued/processing/errored totals) are computed server-side, moving the logic currently in apps/solar-webui/src/components/routing/workload.ts",
         "Return a Pydantic payload shared by both the WS emit and the REST mirror, with a documented field contract mapping each snapshot field to the WebUI maps it initializes (requests, instanceStates, endpoints) so consumers in US-006/007/009 code against a stable schema",
@@ -52,7 +52,7 @@
       ],
       "priority": 3,
       "passes": true,
-      "notes": "Done: app/models/routing_snapshot.py (RoutingSnapshot + RoutingHost/InstanceStateEntry/ActiveRequestEntry/RequestAggregates, schema_version=1, generated_at; exported via app/models/__init__.py) and app/services/render_state.py (build_routing_snapshot()) compose hosts/instances/instance-states/active-requests-with-tallies/endpoints/pending-hosts; aggregate arithmetic (by_instance/by_host/by_model/by_endpoint + queued/processing/errored totals) moved server-side from WebUI workload.ts/graph.ts. Field contract: active_requests->requests Map, instance_states->instanceStates Map, endpoints->endpoints list, aggregates->server tallies, hosts/pending_hosts->host status. Unit tests tests/test_render_state.py (7, anyio); ruff/black pass, full unit suite green (1036 passed)."
+      "notes": "Done: app/models/routing_snapshot.py (RoutingSnapshot + RoutingHost/InstanceStateEntry/ActiveRequestEntry/RequestAggregates, schema_version=1, generated_at; exported via app/models/__init__.py) and app/services/routing_snapshot_builder.py (build_routing_snapshot()) compose hosts/instances/instance-states/active-requests-with-tallies/endpoints/pending-hosts; aggregate arithmetic (by_instance/by_host/by_model/by_endpoint + queued/processing/errored totals) moved server-side from WebUI workload.ts/graph.ts. Field contract: active_requests->requests Map, instance_states->instanceStates Map, endpoints->endpoints list, aggregates->server tallies, hosts/pending_hosts->host status. Unit tests tests/test_routing_snapshot_builder.py (7, anyio); ruff/black pass, full unit suite green (1036 passed)."
     },
     {
       "id": "US-004",
@@ -60,7 +60,7 @@
       "description": "As a developer, I need solar-control to emit the snapshot to a freshly connected WebUI client before any deltas flow so a late-joining or reconnecting client always reconciles.",
       "acceptanceCriteria": [
         "In app/socketio_app/webui_handlers.py::webui_connect (~44-75), after initial_status but before any request/instance deltas can be delivered, emit a routing_snapshot event to the sid",
-        "The emitted payload is produced by the render_state snapshot builder",
+        "The emitted payload is produced by the routing snapshot builder",
         "Ordering guarantees the snapshot is delivered to the sid before any request_*/instance_state deltas reach that client (snapshot first, then deltas)",
         "Unit test verifies routing_snapshot is emitted on connect",
         "ruff and black pass"
@@ -83,7 +83,7 @@
       ],
       "priority": 5,
       "passes": true,
-      "notes": "Done: app/routes/management/routing.py (GET /api/routing/state, response_model=RoutingSnapshot, returns build_routing_snapshot()) registered on app/routes/management/__init__.py under /api; auth is the shared management-key check (401 without X-API-Key); payload identical to the WS routing_snapshot event. Also broke a latent circular import that importing render_state directly exposed: render_state no longer depends on socketio — it calls the Redis host_store directly for the state accessors (get_host_instances/get_connected_host_ids/get_all_pending) instead of going through host_handlers. Tests tests/test_routing_rest.py (2: auth 401 + payload shape). ruff/black pass, full unit suite green (1040 passed)."
+      "notes": "Done: app/routes/management/routing.py (GET /api/routing/state, response_model=RoutingSnapshot, returns build_routing_snapshot()) registered on app/routes/management/__init__.py under /api; auth is the shared management-key check (401 without X-API-Key); payload identical to the WS routing_snapshot event. Also broke a latent circular import that importing routing_snapshot_builder directly exposed: the builder no longer depends on socketio — it calls the Redis host_store directly for the state accessors (get_host_instances/get_connected_host_ids/get_all_pending) instead of going through host_handlers. Tests tests/test_routing_rest.py (2: auth 401 + payload shape). ruff/black pass, full unit suite green (1040 passed)."
     },
     {
       "id": "US-006",
