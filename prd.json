@@ -147,6 +147,19 @@
       "priority": 9,
       "passes": false,
       "notes": "Depends on US-006/007 landing snapshot-derived aggregates into the state the components read; this is the final consumer story after stores, builder, and client wiring are complete. View-state features (graph layout, search, expand/collapse, traces, minimap) remain client-side and are out of scope for changes."
+    },
+    {
+      "id": "US-010",
+      "title": "Trim included comments",
+      "description": "As a developer, I want the comments included on this branch trimmed so the code documents only important things.",
+      "acceptanceCriteria": [
+        "Revisit the comments added on this branch and remove all US-* references",
+        "Condense verbose comments to only what matters, dropping the rest",
+        "ruff and black pass"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "US-* ids belong in the PRD, not the code. Only this branch's committed comments are in scope."
     }
   ]
 }
