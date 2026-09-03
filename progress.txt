@@ -174,3 +174,35 @@ generated_at, active_requests, hosts), patching the route's
 
 Feedback loops: ruff + black pass (ruff not executable on NixOS; verified by
 review + black), full solar-control unit suite green (1040 passed).
+
+## US-006 — WebUI snapshot consumer (DONE)
+
+The WebUI's `useEventStream` hook now resets the routing view to the
+authoritative server snapshot on connect and applies deltas on top, so a
+reconnecting client no longer shows stale requests as 'processing'.
+
+In `apps/solar-webui/src/hooks/useEventStream.ts`:
+- Added `routing_snapshot` to the `WSMessageType` union and `onRoutingSnapshot`
+  to `EventHandlers`.
+- Added typed `RoutingSnapshotData` / `SnapshotActiveRequest` /
+  `SnapshotInstanceState` wire contracts mirroring the US-003 server payload.
+- On socket `connect`, reset `requests`/`instanceStates`/`endpoints` and set an
+  `awaitingSnapshotRef` gate, so a delta that races the connect has no stale
+  base to corrupt.
+- While the gate is set, `request_start`/`request_routed`/`request_success`/
+  `request_error` and `instance_state` deltas are dropped; they all resume once
+  the snapshot lands (US-004 guarantees snapshot-before-deltas).
+- A new `routing_snapshot` case applies the payload wholesale: `active_requests`
+  → were built into the `requests` Map (`queued`→`pending`, `processing` kept),
+  `instance_states` → `instanceStates` Map keyed `host:instance`, `endpoints` →
+  the `endpoints` list, then clears the gate and invokes `onRoutingSnapshot`.
+- Bound via the existing `bindEvent` pattern (`{'type':'routing_snapshot'}`).
+
+Tests: `apps/solar-webui/src/hooks/__tests__/useEventStream.test.ts` (2 tests)
+mock `socket.io-client` and `@/api/client` and assert (a) reset-on-connect plus
+delta gating until the snapshot arrives, and (b) wholesale snapshot application
+(requests/instance-states/endpoints, queued→pending) then resumed delta
+processing.
+
+Feedback loops: `pnpm lint` (eslint + prettier) and `tsc` pass; full webui
+vitest suite green (505 passed). No US-* references left in the code.

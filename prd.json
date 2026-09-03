@@ -99,8 +99,8 @@
         "pnpm lint and typecheck pass"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": "Gating prevents deltas that race a reconnect (arriving before the snapshot) from being lost or applied on top of a stale base. Relies on US-004's snapshot-before-deltas server ordering."
+      "passes": true,
+      "notes": "Gating prevents deltas that race a reconnect (arriving before the snapshot) from being lost or applied on top of a stale base. Relies on US-004's snapshot-before-deltas server ordering. Done: apps/solar-webui/src/hooks/useEventStream.ts adds routing_snapshot to WSMessageType/EventHandlers (onRoutingSnapshot), a RoutingSnapshotData model, an awaitingSnapshotRef gating request_*/instance_state deltas while unset-snapshot, resets requests/instanceStates/endpoints on connect, a routing_snapshot case that applies active_requests/instance_states/endpoints wholesale (queued->pending mapping) then clears the gate, bound via the existing bindEvent pattern; tests tests/__tests__/useEventStream.test.ts (mock socket.io-client + solarClient) cover reset+gating and apply-then-resume; pnpm lint + tsc + vitest green (505 tests)."
     },
     {
       "id": "US-007",
