@@ -1,6 +1,6 @@
 """Typed, versioned snapshot of fleet runtime state (US-003).
 
-Composed by :func:`app.services.render_state.build_routing_snapshot` from the
+Composed by :func:`app.services.routing_snapshot_builder.build_routing_snapshot` from the
 Redis stores and the endpoints/hosts tables. The same payload is shared by the
 WebUI ``routing_snapshot`` WS event (US-004) and the ``GET /api/routing/state``
 REST mirror (US-005), so consumers in US-006/007/009 code against one stable
