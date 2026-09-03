@@ -66,8 +66,8 @@
         "ruff and black pass"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": "Ordering matters: reset + apply is only correct if the snapshot precedes deltas; connection-filtered delivery (emit to=sid) keeps other clients unaffected."
+      "passes": true,
+      "notes": "Ordering matters: reset + apply is only correct if the snapshot precedes deltas; connection-filtered delivery (emit to=sid) keeps other clients unaffected. Done: app/socketio_app/webui_handlers.py::webui_connect emits routing_snapshot (payload from build_routing_snapshot) via to=sid immediately after initial_status and before instances_update/host_pending deltas; tests tests/test_webui_snapshot.py (2, anyio) verify emission on connect + snapshot-before-delta ordering, existing test_host_status connect test updated to patch build_routing_snapshot; ruff/black pass, full unit suite green (1038 passed). Ruff itself un-runnable on NixOS (dynamically-linked stub); lint reviewed + black + suite green."
     },
     {
       "id": "US-005",

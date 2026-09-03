@@ -260,6 +260,11 @@ async def test_webui_initial_status_includes_active_jobs(training_host, job_defi
         ),
         patch.object(webui_handlers, "get_pending_hosts", AsyncMock(return_value=[])),
         patch.object(
+            webui_handlers,
+            "build_routing_snapshot",
+            AsyncMock(return_value=SimpleNamespace(model_dump=lambda: {})),
+        ),
+        patch.object(
             job_db, "get_active_by_host", AsyncMock(return_value=[_job(job_definition)])
         ),
         patch.object(webui_handlers.sio, "emit", AsyncMock()) as mock_emit,

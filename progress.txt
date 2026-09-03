@@ -106,3 +106,32 @@ hosts pass-through.
 
 Feedback loops: ruff + black pass, full solar-control unit suite green
 (1036 passed).
+
+## US-004 — Connect snapshot event (DONE)
+
+`solar-control` now emits the authoritative `routing_snapshot` to a freshly
+connected WebUI client before any request/instance deltas flow, so a
+late-joining or reconnecting client always reconciles against fleet state
+instead of a stale/partial base.
+
+In `app/socketio_app/webui_handlers.py::webui_connect`, immediately after
+`initial_status` and before the `instances_update`/`host_pending` deltas, the
+handler builds the snapshot via the US-003 builder
+(`build_routing_snapshot()`) and emits it to the connecting `sid`:
+
+- Emitted payload is `snapshot.model_dump()` of the same `RoutingSnapshot`
+  produced by `build_routing_snapshot()`.
+- Connection-filtered emit (`to=sid`) keeps other clients unaffected.
+- Ordering guarantees: `initial_status` → `routing_snapshot` →
+  `instances_update`/`host_pending`, so the snapshot always precedes the deltas.
+
+Tests:
+- New `tests/test_webui_snapshot.py` (2 tests, anyio) patches the emit surface
+  and verifies (a) `routing_snapshot` is emitted on connect with the builder's
+  payload (`schema_version`, `generated_at`, active requests, `to=sid`) and
+  (b) it is emitted strictly before the `instances_update` delta.
+- Updated existing `tests/test_host_status.py::test_webui_initial_status_includes_active_jobs`
+  to patch `build_routing_snapshot` (the connect handler now calls it).
+- Ruff + black pass; full solar-control unit suite green (1038 passed). Ruff
+  could not be executed on this NixOS machine (dynamically-linked binary stub);
+  lint verified by review + black, full suite green.
