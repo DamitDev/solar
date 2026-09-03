@@ -88,10 +88,10 @@ async def test_hosts_compiled_with_status_drain_and_health():
     h = _host(host_id="host-1", name="box-a")
     overrides = {
         "app.services.render_state.host_db.get_all_hosts": AsyncMock(return_value=[h]),
-        "app.services.render_state.get_connected_host_ids": AsyncMock(
+        "app.socketio_app.host_handlers.get_connected_host_ids": AsyncMock(
             return_value=["host-1"]
         ),
-        "app.services.render_state.get_host_instances": AsyncMock(
+        "app.socketio_app.host_handlers.get_host_instances": AsyncMock(
             return_value=[{"id": "inst-1", "alias": "a"}]
         ),
     }
@@ -231,7 +231,7 @@ async def test_endpoints_and_pending_hosts_passed_through():
         "app.services.render_state.endpoint_db.get_all_endpoints": AsyncMock(
             return_value=[endpoint]
         ),
-        "app.services.render_state.get_pending_hosts": AsyncMock(
+        "app.socketio_app.host_handlers.get_pending_hosts": AsyncMock(
             return_value=[pending]
         ),
     }
@@ -255,14 +255,18 @@ class _patched:
             "app.services.render_state.host_db.get_all_hosts": AsyncMock(
                 return_value=[]
             ),
+            "app.socketio_app.host_handlers.get_connected_host_ids": AsyncMock(
+                return_value=[]
+            ),
+            "app.socketio_app.host_handlers.get_host_instances": AsyncMock(
+                return_value=[]
+            ),
+            "app.socketio_app.host_handlers.get_pending_hosts": AsyncMock(
+                return_value=[]
+            ),
             "app.services.render_state.endpoint_db.get_all_endpoints": AsyncMock(
                 return_value=[]
             ),
-            "app.services.render_state.get_connected_host_ids": AsyncMock(
-                return_value=[]
-            ),
-            "app.services.render_state.get_host_instances": AsyncMock(return_value=[]),
-            "app.services.render_state.get_pending_hosts": AsyncMock(return_value=[]),
             "app.services.render_state.instance_states_store.get_all": AsyncMock(
                 return_value=[]
             ),

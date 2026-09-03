@@ -135,3 +135,34 @@ Tests:
 - Ruff + black pass; full solar-control unit suite green (1038 passed). Ruff
   could not be executed on this NixOS machine (dynamically-linked binary stub);
   lint verified by review + black, full suite green.
+
+## US-005 — REST snapshot mirror (DONE)
+
+Added a REST mirror of the authoritative snapshot so the WebUI can fall back to
+server state when the Socket.IO connection is down.
+
+- New `app/routes/management/routing.py` — `GET /api/routing/state`
+  (`response_model=RoutingSnapshot`), returns
+  `build_routing_snapshot()` so the payload is byte-for-byte the same shape as
+  the WS `routing_snapshot` event (schema_version + generated_at + all fields).
+- Registered on `app/routes/management/__init__.py` via `routing.router`
+  under the `/api` prefix; auth is the app-level management-key check shared by
+  every management route (401 without `X-API-Key`).
+
+Circular import fix: importing `render_state` directly exposed a latent cycle
+(`render_state` → `host_handlers` → `socketio_app/server.py` →
+`webui_handlers` → `render_state`). Since `render_state` only needs three
+`host_handlers` helpers (`get_connected_host_ids`, `get_host_instances`,
+`get_pending_hosts`) at call time, those imports were moved into the functions
+that use them (`_build_hosts`, `build_routing_snapshot`) — now
+`render_state` loads independently of the socketio_app package, breaking the
+cycle for any entry point. `test_render_state.py` patch targets updated from
+`app.services.render_state.get_*` to `app.socketio_app.host_handlers.get_*`.
+
+Tests: new `tests/test_routing_rest.py` (2 tests) — 401 without the management
+key, and 200 with the key returning the snapshot payload (schema_version,
+generated_at, active_requests, hosts), patching the route's
+`build_routing_snapshot` import via TestClient.
+
+Feedback loops: ruff + black pass (ruff not executable on NixOS; verified by
+review + black), full solar-control unit suite green (1040 passed).

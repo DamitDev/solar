@@ -82,8 +82,8 @@
         "ruff and black pass"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": "routing.py does not yet exist under management; it must be created and added to the include_router block."
+      "passes": true,
+      "notes": "Done: app/routes/management/routing.py (GET /api/routing/state, response_model=RoutingSnapshot, returns build_routing_snapshot()) registered on app/routes/management/__init__.py under /api; auth is the shared management-key check (401 without X-API-Key); payload identical to the WS routing_snapshot event. Also broke a latent circular import that importing render_state directly exposed: render_state's three host_handlers helper imports (get_connected_host_ids/get_host_instances/get_pending_hosts) moved to be lazy inside the functions that use them so render_state no longer pulls in the socketio_app package at module load; test_render_state.py patch targets moved to app.socketio_app.host_handlers.*. Tests tests/test_routing_rest.py (2: auth 401 + payload shape). ruff/black pass, full unit suite green (1040 passed)."
     },
     {
       "id": "US-006",
