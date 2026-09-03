@@ -150,6 +150,23 @@
     },
     {
       "id": "US-010",
+      "title": "Remove obsolete client-side routing aggregation",
+      "description": "As a developer, I want the dead client-side aggregation that the snapshot now replaces removed, so the routing view has a single source of truth and no competing tallies on screen.",
+      "acceptanceCriteria": [
+        "In apps/solar-webui/src/components/routing/workload.ts, remove countInFlightByInstance and the request-Map-derived totals (pending/processing/errored portions that summarizeFlow previously tallied from the client request Map); keep the client-side view helpers (buildCells, instanceAlias, modelOf, loadFraction, phaseLabel, search/runningOnly/filter logic)",
+        "In apps/solar-webui/src/components/routing/graph.ts, remove tallyTraffic and its request-Map derivation; the graph now reads inFlight/totals from snapshot aggregates supplied by US-009",
+        "Remove the now-redundant getEndpoints()/endpoints_update handling that supplied the routing view (already partly covered by US-007's snapshot-supplied endpoints); the routing view consumes endpoints from the snapshot only",
+        "Leave the endpoints dashboard untouched: EndpointsDashboard.tsx getEndpoints() (client.ts:448) and the WS endpoints_update/api_keys_update events stay because those dashboards still depend on them",
+        "Leave GatewayLogger._inflight (app/database/logs.py) untouched: it is per-pod and consumed only by gateway stats",
+        "Remove any dead imports/exports (RequestState request Map) and WebUI vitest tests that asserted the removed tally functions; remaining coverage for cells/totals is provided by the US-009 snapshot-derived tests",
+        "pnpm lint and typecheck pass"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Depends on US-007 (routing-view endpoints from snapshot) and US-009 (routing view derives from snapshot aggregates), without which removing the derivations would break the page. KEEP list is explicit so cleanup does not remove the endpoints dashboard or gateway-stats code that still needs the old sources."
+    },
+    {
+      "id": "US-011",
       "title": "Trim included comments",
       "description": "As a developer, I want the comments included on this branch trimmed so the code documents only important things.",
       "acceptanceCriteria": [
