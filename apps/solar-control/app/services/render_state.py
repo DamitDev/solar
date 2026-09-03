@@ -29,11 +29,6 @@ from app.redis_state import (
     instance_states_store,
     routing_store,
 )
-from app.socketio_app.host_handlers import (
-    get_connected_host_ids,
-    get_host_instances,
-    get_pending_hosts,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -49,13 +44,15 @@ def _host_connected(h: Host, connected_ids: set[str]) -> bool:
 
 async def _build_hosts() -> list[RoutingHost]:
     """Compose one :class:`RoutingHost` per DB host, with its instance cache."""
+    from app.socketio_app import host_handlers
+
     hosts = await host_db.get_all_hosts()
     if not hosts:
         return []
-    connected = set(await get_connected_host_ids())
+    connected = set(await host_handlers.get_connected_host_ids())
     built: list[RoutingHost] = []
     for h in hosts:
-        instances = await get_host_instances(h.id)
+        instances = await host_handlers.get_host_instances(h.id)
         built.append(
             RoutingHost(
                 host_id=h.id,
@@ -193,11 +190,13 @@ async def build_routing_snapshot() -> RoutingSnapshot:
     (endpoints); Redis/DB reads that fail upstream propagate so the caller can
     decide how to surface the outage.
     """
+    from app.socketio_app import host_handlers
+
     hosts = await _build_hosts()
     instance_states = await _build_instance_states()
     active_requests, aggregates = await _build_active_requests_and_aggregates()
     endpoints = await _build_endpoints()
-    pending_hosts = await get_pending_hosts()
+    pending_hosts = await host_handlers.get_pending_hosts()
 
     return RoutingSnapshot(
         generated_at=datetime.now(timezone.utc).isoformat(),
