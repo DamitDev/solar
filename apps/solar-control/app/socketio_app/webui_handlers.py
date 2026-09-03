@@ -15,6 +15,7 @@ from app.config import settings
 from app.database.hosts import host_db
 from app.models.socketio import InstancesUpdatePayload
 from app.services.host_status import build_host_status_payload
+from app.services.render_state import build_routing_snapshot
 from app.socketio_app.host_handlers import (
     get_connected_host_ids,
     get_host_instances,
@@ -61,6 +62,18 @@ async def webui_connect(
         )
         initial.append(payload.model_dump())
     await sio.emit("initial_status", initial, to=sid, namespace="/webui")
+
+    # Authoritative snapshot first, before any request_*/instance_state deltas,
+    # so a late-joining or reconnecting client resets to fleet state and then
+    # applies deltas on top (US-004). Connection-filtered emit keeps other
+    # clients unaffected.
+    snapshot = await build_routing_snapshot()
+    await sio.emit(
+        "routing_snapshot",
+        snapshot.model_dump(),
+        to=sid,
+        namespace="/webui",
+    )
 
     for hid in await get_connected_host_ids():
         instances = await get_host_instances(hid)
