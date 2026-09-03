@@ -3,13 +3,13 @@
 ``GET /api/routing/state`` mirrors the authoritative fleet snapshot over REST so
 the WebUI can fall back to server state when the Socket.IO connection is down.
 The payload is identical to the ``routing_snapshot`` WS event, both produced by
-:func:`app.services.render_state.build_routing_snapshot`.
+:func:`app.services.routing_snapshot_builder.build_routing_snapshot`.
 """
 
 from fastapi import APIRouter
 
 from app.models.routing_snapshot import RoutingSnapshot
-from app.services.render_state import build_routing_snapshot
+from app.services.routing_snapshot_builder import build_routing_snapshot
 
 router = APIRouter(prefix="/routing", tags=["routing"])
 

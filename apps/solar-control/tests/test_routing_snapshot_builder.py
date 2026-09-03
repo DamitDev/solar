@@ -1,4 +1,4 @@
-"""Tests for app.services.render_state — the snapshot builder (US-003).
+"""Tests for app.services.routing_snapshot_builder — the snapshot builder (US-003).
 
 Patches the store/db namespaces the builder imports directly and verifies the
 composed payload shape, the server-computed tallies, and the field contract the
@@ -13,7 +13,7 @@ import pytest
 
 from app.models import Host, HostStatus
 from app.models.routing_snapshot import SCHEMA_VERSION
-from app.services.render_state import build_routing_snapshot
+from app.services.routing_snapshot_builder import build_routing_snapshot
 
 
 def _host(*, host_id: str = "host-1", name: str = "host-one", **kw) -> Host:
@@ -87,11 +87,13 @@ async def test_empty_snapshot_shapes():
 async def test_hosts_compiled_with_status_drain_and_health():
     h = _host(host_id="host-1", name="box-a")
     overrides = {
-        "app.services.render_state.host_db.get_all_hosts": AsyncMock(return_value=[h]),
-        "app.services.render_state.host_store.get_connected_host_ids": AsyncMock(
+        "app.services.routing_snapshot_builder.host_db.get_all_hosts": AsyncMock(
+            return_value=[h]
+        ),
+        "app.services.routing_snapshot_builder.host_store.get_connected_host_ids": AsyncMock(
             return_value=["host-1"]
         ),
-        "app.services.render_state.host_store.get_host_instances": AsyncMock(
+        "app.services.routing_snapshot_builder.host_store.get_host_instances": AsyncMock(
             return_value=[{"id": "inst-1", "alias": "a"}]
         ),
     }
@@ -111,7 +113,7 @@ async def test_hosts_compiled_with_status_drain_and_health():
 @_cm
 async def test_instance_states_carry_data_and_timestamp():
     overrides = {
-        "app.services.render_state.instance_states_store.get_all": AsyncMock(
+        "app.services.routing_snapshot_builder.instance_states_store.get_all": AsyncMock(
             return_value=[_istate_entry(host_id="host-1", instance_id="inst-1")]
         )
     }
@@ -151,7 +153,7 @@ async def test_aggregates_count_inflight_by_instance_host_model_endpoint():
         ),
     ]
     overrides = {
-        "app.services.render_state.routing_store.list_requests": AsyncMock(
+        "app.services.routing_snapshot_builder.routing_store.list_requests": AsyncMock(
             return_value=requests
         )
     }
@@ -186,7 +188,7 @@ async def test_unrouted_request_counts_as_queued():
         )
     ]
     overrides = {
-        "app.services.render_state.routing_store.list_requests": AsyncMock(
+        "app.services.routing_snapshot_builder.routing_store.list_requests": AsyncMock(
             return_value=requests
         )
     }
@@ -210,7 +212,7 @@ async def test_aggregates_use_resolved_model_fallback_and_no_endpoint():
         )
     ]
     overrides = {
-        "app.services.render_state.routing_store.list_requests": AsyncMock(
+        "app.services.routing_snapshot_builder.routing_store.list_requests": AsyncMock(
             return_value=requests
         )
     }
@@ -228,10 +230,10 @@ async def test_endpoints_and_pending_hosts_passed_through():
     )
     pending = {"pending_id": "p-1", "host_name": "pending-box"}
     overrides = {
-        "app.services.render_state.endpoint_db.get_all_endpoints": AsyncMock(
+        "app.services.routing_snapshot_builder.endpoint_db.get_all_endpoints": AsyncMock(
             return_value=[endpoint]
         ),
-        "app.services.render_state.host_store.get_all_pending": AsyncMock(
+        "app.services.routing_snapshot_builder.host_store.get_all_pending": AsyncMock(
             return_value=[pending]
         ),
     }
@@ -252,25 +254,25 @@ class _patched:
 
     def __enter__(self):
         defaults = {
-            "app.services.render_state.host_db.get_all_hosts": AsyncMock(
+            "app.services.routing_snapshot_builder.host_db.get_all_hosts": AsyncMock(
                 return_value=[]
             ),
-            "app.services.render_state.host_store.get_connected_host_ids": AsyncMock(
+            "app.services.routing_snapshot_builder.host_store.get_connected_host_ids": AsyncMock(
                 return_value=[]
             ),
-            "app.services.render_state.host_store.get_host_instances": AsyncMock(
+            "app.services.routing_snapshot_builder.host_store.get_host_instances": AsyncMock(
                 return_value=[]
             ),
-            "app.services.render_state.host_store.get_all_pending": AsyncMock(
+            "app.services.routing_snapshot_builder.host_store.get_all_pending": AsyncMock(
                 return_value=[]
             ),
-            "app.services.render_state.endpoint_db.get_all_endpoints": AsyncMock(
+            "app.services.routing_snapshot_builder.endpoint_db.get_all_endpoints": AsyncMock(
                 return_value=[]
             ),
-            "app.services.render_state.instance_states_store.get_all": AsyncMock(
+            "app.services.routing_snapshot_builder.instance_states_store.get_all": AsyncMock(
                 return_value=[]
             ),
-            "app.services.render_state.routing_store.list_requests": AsyncMock(
+            "app.services.routing_snapshot_builder.routing_store.list_requests": AsyncMock(
                 return_value=[]
             ),
         }

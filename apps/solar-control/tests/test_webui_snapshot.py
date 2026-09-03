@@ -1,7 +1,7 @@
 """Tests for the WebUI connect snapshot emit (US-004).
 
 Verifies that a freshly connected WebUI client receives the authoritative
-``routing_snapshot`` (produced by the render_state builder) before any
+``routing_snapshot`` (produced by the routing snapshot builder) before any
 request/instance deltas, so a late-joining or reconnecting client always
 reconciles. Follows the existing ``webui_handlers`` test pattern by patching
 the emitted-event surface.
