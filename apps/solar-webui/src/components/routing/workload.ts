@@ -7,7 +7,7 @@
  */
 
 import { HostStatus, HostWithInstances, Instance, InstanceStatus, getModelCategory, RoutingState } from '@/api/types';
-import { InstanceStateData, RequestState } from '@/hooks/useEventStream';
+import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
 
 /** Statuses that mean a request is still occupying capacity. */
 const ACTIVE_STATUSES: ReadonlySet<RequestState['status']> = new Set(['pending', 'routed', 'processing']);

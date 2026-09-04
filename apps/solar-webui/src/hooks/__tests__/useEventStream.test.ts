@@ -40,7 +40,7 @@ vi.mock('@/api/client', () => ({
 
 // ---- the unit under test -------------------------------------------------
 
-import { useEventStream } from '@/hooks/useEventStream';
+import { useEventStream } from '@/hooks/eventStream/useEventStream';
 
 function snapshotPayload(overrides: Partial<any> = {}) {
   return {

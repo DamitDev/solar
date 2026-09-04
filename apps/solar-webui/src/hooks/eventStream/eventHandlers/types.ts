@@ -10,7 +10,7 @@ import type {
   PullProgressEvent,
   RequestState,
   WSEvent,
-} from '@/hooks/useEventStream';
+} from '@/hooks/eventStream/useEventStream';
 
 /** Stable React values a handler needs to apply an event to hook state. */
 export interface DispatchContext {

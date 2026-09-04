@@ -1,5 +1,5 @@
 import type { PendingHost } from '@/api/types';
-import type { HostStatusData } from '@/hooks/useEventStream';
+import type { HostStatusData } from '@/hooks/eventStream/useEventStream';
 import type { RegisteredHandler } from './types';
 
 export const handleInitialStatus: RegisteredHandler = (event, ctx) => {

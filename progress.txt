@@ -277,8 +277,10 @@ rather than editing a growing branch.
   through `handleEvent` → the registry.
 
 Follow-up refinement: the handler implementations were extracted out of
-`useEventStream.ts` into `apps/solar-webui/src/hooks/eventHandlers/`, so the
-hook is no longer a large block of inline closures:
+`useEventStream.ts` into the sibling `eventHandlers/` folder, so the hook is no
+longer a large block of inline closures. Both live under
+`apps/solar-webui/src/hooks/eventStream/` (the hook is `eventStream/`
+`useEventStream.ts`, its handlers in `eventStream/eventHandlers/`):
 - `types.ts` — `DispatchContext` (bundles every stable React value a handler
   touches: all 12 state setters, `awaitingSnapshotRef`/`gatewayFilterRef`/
   `handlersRef`, `updateRequest`, `removeRequest`) and `RegisteredHandler`
@@ -296,6 +298,10 @@ hook is no longer a large block of inline closures:
   (useEventStream → registry → pulls → useEventStream); `useEventStream.ts`
   re-exports them so consumers (`IntentDetail`, `IntentsPage`,
   `PullProgress.test`) are unchanged.
+- Directory layout: `src/hooks/eventStream/useEventStream.ts` +
+  `src/hooks/eventStream/eventHandlers/{types,registry,request,hosts,
+  instanceState,gateway,intents,pulls,pullProgress}.ts`; all consumers'
+  `@/hooks/useEventStream` imports updated to `@/hooks/eventStream/useEventStream`.
 - `useEventStream.ts` now builds a stable `DispatchContext` (`useMemo`) once,
   seeds the registry via `Object.assign(registryRef.current, buildRegistry())`
   on mount, and `handleEvent` dispatches `(event, ctx)`. `registerHandler`

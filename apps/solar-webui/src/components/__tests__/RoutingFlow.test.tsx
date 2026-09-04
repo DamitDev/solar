@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import solarClient from '@/api/client';
 import { ApiEndpoint, HostWithInstances, Instance, RoutingState } from '@/api/types';
-import { RequestState } from '@/hooks/useEventStream';
+import { RequestState } from '@/hooks/eventStream/useEventStream';
 
 /**
  * React Flow needs a measured container, which jsdom cannot give it, so the
