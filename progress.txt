@@ -405,3 +405,69 @@ carry the identical payload by design, US-005).
 
 Feedback loops: `tsc --noEmit` clean, `pnpm lint` (eslint 0 errors + prettier)
 green, full webui vitest suite green (508 passed).
+
+## US-009 — Derive routing view from snapshot aggregates (DONE)
+
+The Routing page's load bars and totals are now computed from the authoritative
+server snapshot aggregates instead of being re-derived from the transient client
+request Map.
+
+Backend (US-003) already produced a `RequestAggregates` payload (`by_instance`,
+`by_host`, `by_model`, `by_endpoint`, `queued`, `processing`, `errored`) on every
+snapshot; the WebUI stored nothing but the request/state Maps, so those tallies
+were ignored. This story threads the aggregates through and makes them the
+source of truth for the cell loads and the header/gateway numbers.
+
+- `useEventStream.ts`:
+  - Adds an `aggregates` state (`RoutingStateAggregates | null`), exposed on the
+    returned hook.
+  - Adds `setAggregates` to the `DispatchContext` passed to handlers.
+  - Resets `aggregates` to `null` on socket connect, alongside the existing
+    request/instance-state/endpoint reset.
+  - re-exports `RoutingStateAggregates` from `@/api/types`.
+- `eventHandlers/types.ts`: `DispatchContext` gains `setAggregates`.
+- `eventHandlers/instanceState.ts` `handleRoutingSnapshot`: after applying the
+  snapshot, stores `snap.aggregates ?? null` so the connected view always has
+  the server-correct tallies.
+- `EventStreamContext.tsx` / `RoutingEventsContext.tsx`: both expose
+  `aggregates` in their context values.
+- `RoutingFlow.tsx`: derives `aggregates` per mode — connected mode uses the
+  WS-seeded `wsAggregates` from the routing context, disconnected mode the REST
+  mirror's `fallback.aggregates` — and passes it to `buildFlowGraph` and
+  `summarizeFlow`.
+- `workload.ts`:
+  - `buildCells` accepts an optional `aggregates`; when present the cell
+    `inFlight` reads `aggregates.by_instance["host:instance"]` instead of
+    `countInFlightByInstance(requests)`; otherwise it falls back to the Map.
+  - `summarizeFlow` accepts an optional `aggregates`; `pending`/`processing`/
+    `errored` come from `queued`/`processing`/`errored`. Host/instance counts
+    still come from `hosts` (the aggregates carry no per-host fleet topology).
+- `graph.ts`:
+  - `buildFlowGraph` accepts an optional `aggregates` and passes it through to
+    `buildCells` and `tallyTraffic`.
+  - `tallyTraffic` with aggregates present: seeds `by_endpoint`/`by_model` from
+    `by_endpoint`/`by_model`, derives the model→host binding loads from
+    `by_instance` grouped per host, and takes `queued`/`processing`/`errored`
+    from the aggregates. Per-hop `errors` (the red error tone) still come from
+    the request Map because the aggregates carry only an aggregate `errored`
+    total, not a per-hop breakdown. Without aggregates it falls back to the
+    prior request-Map tally, preserving backward behaviour.
+
+View-only concerns (search, expand/collapse, host selection, trace traversal,
+layout) stay client-side, per the contract.
+
+Tests (`apps/solar-webui/src/components/routing/__tests__`):
+- `workload.test.ts` (+3): `buildCells` reads per-cell load from
+  `aggregates.by_instance` with a deliberately empty request Map; `buildCells`
+  falls back to the Map without aggregates; `summarizeFlow` uses the server
+  totals instead of tallying the client Map; spread of host/instance counts
+  alongside aggregate totals.
+- `graph.test.ts` (+3): `buildFlowGraph` weights the endpoint/model/host hops
+  and the gateway tallies from the aggregates with an empty request Map; keeps
+  per-hop error tone from the request Map while the in-flight load comes from
+  the aggregates; does not double-count the aggregate `errored` total when error
+  requests are present.
+
+Feedback loops: `tsc --noEmit` clean, `pnpm lint` (eslint 0 errors + prettier)
+green, full webui vitest suite green (520 passed). No new US-* references in
+code.

@@ -40,6 +40,10 @@ interface EventStreamContextValue {
   endpoints: ApiEndpoint[];
   // API key records, event-driven (api_keys_update).
   apiKeys: ApiKey[];
+  // Server-computed routing aggregates from the authoritative snapshot; the
+  // routing view's load bars and totals read these instead of re-deriving them
+  // from the client request Map.
+  aggregates: ReturnType<typeof useEventStream>['aggregates'];
   getInstanceLogs: (hostId: string, instanceId: string) => LogMessage[];
   getInstanceState: (hostId: string, instanceId: string) => InstanceStateData | undefined;
   getPullProgress: (hostId: string | null | undefined, sourceUri: string) => PullProgressEvent | undefined;

@@ -145,8 +145,8 @@
         "pnpm lint and typecheck pass"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": "Depends on US-006/007 landing snapshot-derived aggregates into the state the components read; this is the final consumer story after stores, builder, and client wiring are complete. View-state features (graph layout, search, expand/collapse, traces, minimap) remain client-side and are out of scope for changes."
+      "passes": true,
+      "notes": "Depends on US-006/007 landing snapshot-derived aggregates into the state the components read; this is the final consumer story after stores, builder, and client wiring are complete. View-state features (graph layout, search, expand/collapse, traces, minimap) remain client-side and are out of scope for changes. Done: useEventStream stores the snapshot's aggregates (aggregates state, setAggregates on the DispatchContext, null reset on connect, re-exports RoutingStateAggregates); handleRoutingSnapshot persists snap.aggregates; EventStreamContext + RoutingEventsContext expose aggregates; RoutingFlow derives aggregates per mode (WS-seeded connected, fallback REST disconnected) and passes them to buildFlowGraph + summarizeFlow; workload.buildCells reads cell inFlight from aggregates.by_instance and summarizeFlow reads queued/processing/errored from the aggregates (falling back to the request Map when absent); graph.tallyTraffic seeds by_endpoint/by_model from the aggregates, derives model->host binding loads from by_instance, and takes queued/processing/errored from the aggregates while still deriving per-hop errors from the request Map (no per-hop error breakdown in the aggregates) and preserving the old tally path as a no-aggregates fallback. View-only logic stays client-side. Tests: workload.test.ts +3, graph.test.ts +3 covering aggregate-derived cells/totals with an empty request Map, error tone from the request Map, and no double-count of the errored total. Feedback loops: tsc clean, pnpm lint (0 errors), full webui vitest green (520 passed)."
     },
     {
       "id": "US-010",

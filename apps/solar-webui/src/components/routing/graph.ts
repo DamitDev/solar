@@ -11,7 +11,7 @@
  * boxes collided as soon as one grew a line of text.
  */
 
-import { HostStatus, HostWithInstances, InstanceStatus } from '@/api/types';
+import { HostStatus, HostWithInstances, InstanceStatus, RoutingStateAggregates } from '@/api/types';
 import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
 import { seriesColor } from '@/components/charts/chartTheme';
 import { InstanceCell, buildCells, collator, isActiveRequest } from './workload';
@@ -132,6 +132,11 @@ export interface BuildGraphOptions {
   requests: RequestState[];
   endpoints: { id: string; name: string }[];
   getInstanceState: (hostId: string, instanceId: string) => InstanceStateData | null | undefined;
+  /** Server-computed in-flight/totals. When supplied the hops read their load
+   * and the gateway its tallies from these instead of tallying the client
+   * request Map; the request Map still drives per-hop error tone and the
+   * view-only trace/search logic. */
+  aggregates?: RoutingStateAggregates | null;
   search?: string;
   runningOnly?: boolean;
   /** Aliases whose host column is drawn. */
@@ -177,16 +182,17 @@ export function buildFlowGraph({
   requests,
   endpoints,
   getInstanceState,
+  aggregates,
   search = '',
   runningOnly = false,
   expanded,
   expandAll = false,
   showAllHosts,
 }: BuildGraphOptions): FlowGraph {
-  const cells = buildCells({ hosts, requests, getInstanceState, search, runningOnly });
+  const cells = buildCells({ hosts, requests, getInstanceState, aggregates, search, runningOnly });
   const models = groupByAlias(cells);
   const aliasOfCell = new Map(cells.map((cell) => [cell.key, cell.alias]));
-  const traffic = tallyTraffic(requests, aliasOfCell, new Set(models.keys()));
+  const traffic = tallyTraffic(aggregates, requests, aliasOfCell, new Set(models.keys()));
 
   const nodes: FlowGraphNode[] = [];
   const edges: FlowGraphEdge[] = [];
@@ -417,8 +423,15 @@ interface Traffic {
  * Rolls live requests onto the hops they occupy. A request names its instance
  * once routed; before that it can still be placed on a model by name, which is
  * what makes a queued request visible where it is actually waiting.
+ *
+ * With the server snapshot's `aggregates`, the in-flight loads and the gateway
+ * totals come from those authoritative counts because the fragments the client
+ * holds can race or go stale. The request Map is still read for per-hop errors
+ * (the aggregates carry no per-hop error breakdown) and as the fallback tally
+ * source when no aggregates are supplied.
  */
 function tallyTraffic(
+  aggregates: RoutingStateAggregates | undefined | null,
   requests: Iterable<RequestState>,
   aliasOfCell: Map<string, string>,
   knownAliases: ReadonlySet<string>,
@@ -427,10 +440,35 @@ function tallyTraffic(
     byEndpoint: new Map(),
     byModel: new Map(),
     byBinding: new Map(),
-    queued: 0,
-    processing: 0,
-    errored: 0,
+    queued: aggregates?.queued ?? 0,
+    processing: aggregates?.processing ?? 0,
+    errored: aggregates?.errored ?? 0,
   };
+
+  const seed = (map: Map<string, Tally>, record: Record<string, number> | undefined) => {
+    if (!record) return;
+    for (const [key, inFlight] of Object.entries(record)) {
+      const current = map.get(key) ?? { inFlight: 0, errors: 0 };
+      current.inFlight += inFlight;
+      map.set(key, current);
+    }
+  };
+
+  if (aggregates) {
+    seed(traffic.byEndpoint, aggregates.by_endpoint);
+    seed(traffic.byModel, aggregates.by_model);
+    // Derive the model->host binding loads from per-instance counts so an
+    // opened model's host cells stay in step with the authoritative numbers.
+    for (const [cellKey, inFlight] of Object.entries(aggregates.by_instance ?? {})) {
+      const alias = aliasOfCell.get(cellKey);
+      const sep = cellKey.indexOf(':');
+      if (!alias || sep === -1) continue;
+      const key = bindingKey(alias, cellKey.slice(0, sep));
+      const current = traffic.byBinding.get(key) ?? { inFlight: 0, errors: 0 };
+      current.inFlight += inFlight;
+      traffic.byBinding.set(key, current);
+    }
+  }
 
   const bump = (map: Map<string, Tally>, key: string, field: keyof Tally) => {
     const current = map.get(key) ?? { inFlight: 0, errors: 0 };
@@ -444,17 +482,29 @@ function tallyTraffic(
     const failed = request.status === 'error';
     if (!active && !failed) continue;
 
-    const field: keyof Tally = failed ? 'errors' : 'inFlight';
-    if (failed) traffic.errored += 1;
-    else if (request.status === 'pending') traffic.queued += 1;
-    else traffic.processing += 1;
+    // Per-hop errors always come from the request Map: the aggregates only
+    // carry an aggregate `errored` total, which is already applied above.
+    if (failed) {
+      if (!aggregates) traffic.errored += 1;
+      if (request.endpoint_id) bump(traffic.byEndpoint, request.endpoint_id, 'errors');
+      const alias = aliasFor(request, aliasOfCell, knownAliases);
+      if (alias) {
+        bump(traffic.byModel, alias, 'errors');
+        if (request.host_id) bump(traffic.byBinding, bindingKey(alias, request.host_id), 'errors');
+      }
+      continue;
+    }
 
-    if (request.endpoint_id) bump(traffic.byEndpoint, request.endpoint_id, field);
-
-    const alias = aliasFor(request, aliasOfCell, knownAliases);
-    if (!alias) continue;
-    bump(traffic.byModel, alias, field);
-    if (request.host_id) bump(traffic.byBinding, bindingKey(alias, request.host_id), field);
+    if (!aggregates) {
+      if (request.status === 'pending') traffic.queued += 1;
+      else traffic.processing += 1;
+      if (request.endpoint_id) bump(traffic.byEndpoint, request.endpoint_id, 'inFlight');
+      const alias = aliasFor(request, aliasOfCell, knownAliases);
+      if (alias) {
+        bump(traffic.byModel, alias, 'inFlight');
+        if (request.host_id) bump(traffic.byBinding, bindingKey(alias, request.host_id), 'inFlight');
+      }
+    }
   }
 
   return traffic;

@@ -1,5 +1,13 @@
 import type { MutableRefObject } from 'react';
-import type { ApiEndpoint, ApiKey, GatewayRequestSummary, Intent, LogMessage, PendingHost } from '@/api/types';
+import type {
+  ApiEndpoint,
+  ApiKey,
+  GatewayRequestSummary,
+  Intent,
+  LogMessage,
+  PendingHost,
+  RoutingStateAggregates,
+} from '@/api/types';
 import type {
   EventHandlers,
   GatewayFilter,
@@ -26,6 +34,7 @@ export interface DispatchContext {
   setPullProgress: (updater: (prev: Map<string, PullProgressEvent>) => Map<string, PullProgressEvent>) => void;
   setEndpoints: (updater: (prev: ApiEndpoint[]) => ApiEndpoint[]) => void;
   setApiKeys: (updater: (prev: ApiKey[]) => ApiKey[]) => void;
+  setAggregates: (aggregates: RoutingStateAggregates | null) => void;
   awaitingSnapshotRef: MutableRefObject<boolean>;
   gatewayFilterRef: MutableRefObject<GatewayFilter>;
   handlersRef: MutableRefObject<EventHandlers>;

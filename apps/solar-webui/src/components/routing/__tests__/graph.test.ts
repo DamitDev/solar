@@ -12,7 +12,7 @@ import {
   traceRequest,
   traceThrough,
 } from '../graph';
-import { HostWithInstances, Instance } from '@/api/types';
+import { HostWithInstances, Instance, RoutingStateAggregates } from '@/api/types';
 import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
 
 function instance(id: string, alias: string, model = alias, status: Instance['status'] = 'running') {
@@ -235,6 +235,67 @@ describe('buildFlowGraph', () => {
 
     expect(graph.aliases).toEqual(['embed']);
     expect(graph.instanceCount).toBe(1);
+  });
+});
+
+describe('buildFlowGraph snapshot aggregates', () => {
+  // chat on h1/i1, h2/i3; embed on h1/i2. Load told by the server aggregates,
+  // independent of the (stale/empty) client request Map.
+  const aggregates: RoutingStateAggregates = {
+    by_instance: { 'h1:i1': 2, 'h1:i2': 0, 'h2:i3': 3 },
+    by_host: { h1: 2, h2: 3 },
+    by_model: { chat: 5, embed: 0 },
+    by_endpoint: { e1: 3, e2: 2 },
+    queued: 1,
+    processing: 4,
+    errored: 1,
+  };
+
+  it('weights the hops and gateway from the aggregates', () => {
+    const graph = buildFlowGraph({
+      hosts,
+      requests: [],
+      endpoints,
+      getInstanceState: noState,
+      aggregates,
+      expanded: new Set(['chat']),
+    });
+
+    expect(graph.edges.find((edge) => edge.source === endpointNodeId('e1'))!.inFlight).toBe(3);
+    expect(graph.edges.find((edge) => edge.target === modelNodeId('chat'))!.inFlight).toBe(5);
+    expect(graph.edges.find((edge) => edge.target === hostNodeId('chat', 'h1'))!.inFlight).toBe(2);
+    expect(graph.edges.find((edge) => edge.target === hostNodeId('chat', 'h2'))!.inFlight).toBe(3);
+    expect(graph.nodes.find((node) => node.id === GATEWAY_NODE_ID)!.data).toMatchObject({
+      queued: 1,
+      processing: 4,
+      errored: 1,
+    });
+  });
+
+  it('keeps per-hop error tone from the request Map even with aggregates', () => {
+    const graph = buildFlowGraph({
+      hosts,
+      requests: [request({ status: 'error', endpoint_id: 'e1', host_id: 'h1', instance_id: 'i1' })],
+      endpoints,
+      getInstanceState: noState,
+      aggregates,
+      expanded: new Set(['chat']),
+    });
+
+    const edge = graph.edges.find((candidate) => candidate.target === hostNodeId('chat', 'h1'))!;
+    expect(edge).toMatchObject({ inFlight: 2, errors: 1, tone: 'error' });
+  });
+
+  it('does not double-count the aggregate errored total from error requests', () => {
+    const graph = buildFlowGraph({
+      hosts,
+      requests: [request({ status: 'error', endpoint_id: 'e1' })],
+      endpoints,
+      getInstanceState: noState,
+      aggregates,
+    });
+
+    expect(graph.nodes.find((node) => node.id === GATEWAY_NODE_ID)!.data).toMatchObject({ errored: 1 });
   });
 });
 

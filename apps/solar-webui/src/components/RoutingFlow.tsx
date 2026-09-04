@@ -77,7 +77,12 @@ export function RoutingFlow() {
 }
 
 function RoutingFlowCanvas() {
-  const { requests: wsRequests, removeRequest, registerRoutingSnapshotHandler } = useRoutingEventsContext();
+  const {
+    requests: wsRequests,
+    removeRequest,
+    registerRoutingSnapshotHandler,
+    aggregates: wsAggregates,
+  } = useRoutingEventsContext();
   const { getInstanceState, endpoints: eventEndpoints, isConnected } = useEventStreamContext();
   const { hosts, loading } = useInstances();
   const { fitBounds } = useReactFlow();
@@ -135,6 +140,14 @@ function RoutingFlowCanvas() {
     [isConnected, eventEndpoints, fallback],
   );
 
+  // Server-computed aggregates are authoritative for the routing view's load
+  // bars and totals: connected mode uses the ones the WS snapshot carried,
+  // disconnected mode the REST mirror's.
+  const aggregates = useMemo(
+    () => (isConnected ? wsAggregates : (fallback?.aggregates ?? null)),
+    [isConnected, wsAggregates, fallback],
+  );
+
   const fallbackStates = useMemo(() => snapshotInstanceStates(fallback), [fallback]);
 
   const getState = useCallback(
@@ -156,13 +169,14 @@ function RoutingFlowCanvas() {
         requests: requestList,
         endpoints,
         getInstanceState: getState,
+        aggregates,
         search,
         runningOnly,
         expanded,
         expandAll: searching,
         showAllHosts,
       }),
-    [hosts, requestList, endpoints, getState, search, runningOnly, expanded, searching, showAllHosts],
+    [hosts, requestList, endpoints, getState, aggregates, search, runningOnly, expanded, searching, showAllHosts],
   );
 
   const layout = useStableLayout(graph);
@@ -171,8 +185,8 @@ function RoutingFlowCanvas() {
 
   const ticker = useMemo(() => tickerRequests([...requestList, ...recentTerminal]), [requestList, recentTerminal]);
   const totals = useMemo(
-    () => summarizeFlow(hosts, requestList, endpoints.length),
-    [hosts, requestList, endpoints.length],
+    () => summarizeFlow(hosts, requestList, endpoints.length, aggregates),
+    [hosts, requestList, endpoints.length, aggregates],
   );
 
   // A trace frames its own path: fitting the whole fleet around it would zoom
