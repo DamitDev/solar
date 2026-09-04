@@ -130,8 +130,8 @@
         "pnpm lint and typecheck pass"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": "Only terminal-history backfill is added; gateway history UI itself is out of scope."
+      "passes": true,
+      "notes": "Only terminal-history backfill is added; gateway history UI itself is out of scope. Done: RoutingFlow now backfills the ticker's terminal history on every applied snapshot — connected mode through a new registerRoutingSnapshotHandler subscription on the event stream (added to DispatchContext + EventStreamContext + RoutingEventsContext; handleRoutingSnapshot runs registered listeners after applying the snapshot), disconnected mode keyed on each new fallback snapshot from the REST poll. workload.ts adds terminalRequests(events) mapping recent request_error gateway events onto status:'error' RequestState rows and merges them into the existing tickerRequests list (which keeps its original signature). Live in-flight rows continue to come from the snapshot's active-request aggregates (snapshotRequests). Tests: workload.test.ts adds 3 terminalRequests cases (error mapping, ignores non-terminal, skips missing id + limit) and RoutingFlow.test.tsx adds 2 backfill cases (connected snapshot listener triggers backfill so the ticker is not empty; disconnected fallback polls it too). Feedback loops: tsc clean, pnpm lint (0 errors), full webui vitest green (513 passed)."
     },
     {
       "id": "US-009",

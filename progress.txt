@@ -250,7 +250,58 @@ Tests (`apps/solar-webui/src/components/__tests__/RoutingFlow.test.tsx`):
   `active_requests` show up in the request ticker.
 
 Feedback loops: `tsc --noEmit` clean, `pnpm lint` (eslint 0 errors + prettier)
-green, full webui vitest suite green (506 passed).
+green, full webui vitest suite green (508 passed).
+
+## US-008 — Ticker backfill after snapshot (DONE)
+
+The Routing page's live-request ticker no longer sits empty the moment a
+snapshot is applied. The authoritative snapshot only carries in-flight
+requests (US-003), so right after a (re)connect the ticker had no terminal
+history until a fresh delta flowed. Now each applied snapshot backfills recent
+terminal (`request_error`) events from `GET /api/gateway/events/recent` and
+merges them with the live active-request aggregates.
+
+- New snapshot-listener channel on the event stream, so the connected Routing
+  view can react to a just-applied authoritative snapshot without overriding
+  the built-in `routing_snapshot` handler:
+  - `useEventStream` gains `snapshotListenersRef` and a stable
+    `registerRoutingSnapshotHandler(listener)` (returns an unsubscribe);
+    `snapshotListenersRef` is added to the `DispatchContext` so
+    `handleRoutingSnapshot` can run registered listeners after it applies the
+    snapshot (alongside the existing `h.onRoutingSnapshot` callback).
+  - `eventHandlers/types.ts` adds `snapshotListenersRef` to `DispatchContext`;
+    `eventHandlers/instanceState.ts` invokes every registered listener after
+    applying the snapshot.
+  - `EventStreamContext` / `RoutingEventsContext` expose
+    `registerRoutingSnapshotHandler` in their values.
+- `workload.ts`:
+  - NEW `terminalRequests(events, limit)` — maps recent `request_error`
+    `GatewayEventDTO`s onto `status:'error'` `RequestState` rows (model,
+    host, error_message, duration, timestamp); ignores non-terminal event
+    types and entries without a request_id.
+  - `tickerRequests` keeps its original `(requests, limit)` signature; the
+    caller passes the merged `[active, ...terminal]` list.
+- `RoutingFlow.tsx`:
+  - Adds `recentTerminal` state and a `backfillTerminal()` callback that calls
+    `solarClient.getRecentGatewayEvents({ to: now, limit: 40, types:
+    'request_error' })` and maps via `terminalRequests`.
+  - Connected: subscribes via `registerRoutingSnapshotHandler(backfillTerminal)`
+    so every authoritative WS snapshot refills the terminal history.
+  - Disconnected: an effect keyed on each new fallback snapshot keeps the
+    terminal history in step with the REST poll.
+  - The ticker memo sources live in-flight rows from the existing
+    `requestList` (snapshot aggregates) plus `recentTerminal`.
+
+Tests:
+- `workload.test.ts`: 3 new `terminalRequests` cases — error-event mapping,
+  non-terminal types ignored, missing-request-id skipped + limit honored.
+- `RoutingFlow.test.tsx`: 2 new backfill cases — (a) invoking the captured
+  `registerRoutingSnapshotHandler` listener after a connected render triggers
+  `getRecentGatewayEvents` and the terminal row renders in the ticker; (b) with
+  the socket down the fallback poll also backfills terminal history.
+
+Feedback loops: `tsc --noEmit` clean, `pnpm lint` (eslint 0 errors + prettier)
+green, full webui vitest suite green (513 passed). No US-* references in code.
 
 ## US-012 — Dynamically registered event handler registry (DONE)
 

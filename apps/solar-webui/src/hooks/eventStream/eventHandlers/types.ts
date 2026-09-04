@@ -8,6 +8,7 @@ import type {
   InstanceSummary,
   PullProgressEvent,
   RequestState,
+  RoutingState,
   WSEvent,
 } from '@/hooks/eventStream/useEventStream';
 
@@ -28,6 +29,7 @@ export interface DispatchContext {
   awaitingSnapshotRef: MutableRefObject<boolean>;
   gatewayFilterRef: MutableRefObject<GatewayFilter>;
   handlersRef: MutableRefObject<EventHandlers>;
+  snapshotListenersRef: MutableRefObject<Set<(snapshot: RoutingState) => void>>;
   updateRequest: (requestId: string, updates: Partial<RequestState>) => void;
   removeRequest: (requestId: string) => void;
 }

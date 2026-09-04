@@ -6,7 +6,15 @@
  * it both untestable and prone to overlap.
  */
 
-import { HostStatus, HostWithInstances, Instance, InstanceStatus, getModelCategory, RoutingState } from '@/api/types';
+import {
+  HostStatus,
+  HostWithInstances,
+  Instance,
+  InstanceStatus,
+  GatewayEventDTO,
+  getModelCategory,
+  RoutingState,
+} from '@/api/types';
 import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
 
 /** Statuses that mean a request is still occupying capacity. */
@@ -164,13 +172,50 @@ export function summarizeFlow(
 
 /**
  * Newest first, capped: under load the request map turns over faster than
- * anyone can read, so an unbounded list is just a scroll bar.
+ * anyone can read, so an unbounded list is just a scroll bar. The trailing
+ * terminal-history entries (from `terminalRequests`) are passed in the same
+ * iterable the caller builds, so the finished-and-failed rows show next to the
+ * snapshot's live active requests.
  */
 export function tickerRequests(requests: Iterable<RequestState>, limit = 40): RequestState[] {
   return [...requests]
     .filter((r) => isActiveRequest(r) || r.status === 'error')
     .sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? ''))
     .slice(0, limit);
+}
+
+/**
+ * Maps recent gateway terminal events onto the ticker's request shape.
+ *
+ * The authoritative snapshot only carries in-flight requests, so right after a
+ * (re)connect the ticker would be blank until the first new event flows. Recent
+ * `request_error` events backfill that terminal history so recent failures show
+ * immediately. Only terminal error events are kept; active work comes from the
+ * snapshot's active-request aggregates via `tickerRequests`.
+ */
+export function terminalRequests(events: GatewayEventDTO[], limit = 40): RequestState[] {
+  const terminal: RequestState[] = [];
+  for (const event of events) {
+    if (event.type !== 'request_error') continue;
+    const data = (event.data ?? {}) as Record<string, unknown>;
+    const timestamp = (typeof data.timestamp === 'string' ? data.timestamp : event.timestamp) ?? '';
+    const requestId = typeof data.request_id === 'string' ? data.request_id : undefined;
+    if (!requestId) continue;
+    terminal.push({
+      request_id: requestId,
+      model: typeof data.model === 'string' ? data.model : undefined,
+      resolved_model: typeof data.resolved_model === 'string' ? data.resolved_model : undefined,
+      host_id: typeof data.host_id === 'string' ? data.host_id : undefined,
+      host_name: typeof data.host_name === 'string' ? data.host_name : undefined,
+      instance_id: typeof data.instance_id === 'string' ? data.instance_id : undefined,
+      error_message: typeof data.error_message === 'string' ? data.error_message : undefined,
+      duration: typeof data.duration === 'number' ? data.duration : undefined,
+      status: 'error',
+      timestamp,
+    });
+    if (terminal.length >= limit) break;
+  }
+  return terminal;
 }
 
 /**

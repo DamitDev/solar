@@ -12,6 +12,7 @@ import {
   InstanceStateData,
   InstanceSummary,
   RequestState,
+  RoutingState,
   WSMessageType,
   RoutingEventData,
   LogEventData,
@@ -46,6 +47,9 @@ interface EventStreamContextValue {
   removeRequest: (requestId: string) => void;
   setFilter: (filter: Partial<GatewayFilter>) => void;
   clearGatewayRequests: () => void;
+  // Subscribe to freshly-applied authoritative routing snapshots; returns an
+  // unsubscribe. Consumers use this to react (e.g. backfill the ticker).
+  registerRoutingSnapshotHandler: (listener: (snapshot: RoutingState) => void) => () => void;
 }
 
 const EventStreamContext = createContext<EventStreamContextValue | null>(null);

@@ -58,6 +58,13 @@ const eventStream = {
 const routingEvents = {
   requests: new Map<string, RequestState>(),
   removeRequest: vi.fn(),
+  snapshotListener: null as ((snapshot: unknown) => void) | null,
+  registerRoutingSnapshotHandler: (listener: (snapshot: unknown) => void) => {
+    routingEvents.snapshotListener = listener;
+    return () => {
+      routingEvents.snapshotListener = null;
+    };
+  },
 };
 
 const instancesHook = {
@@ -128,6 +135,7 @@ beforeEach(() => {
   eventStream.endpoints = [endpoint('e1', 'prod'), endpoint('e2', 'dev')];
   eventStream.isConnected = true;
   routingEvents.requests = new Map();
+  routingEvents.snapshotListener = null;
   instancesHook.hosts = [
     host('h1', 'alpha', [instance('i1', 'chat', 'qwen3.6:35b'), instance('i2', 'embed', 'iris:110m')]),
     host('h2', 'beta', [instance('i3', 'chat', 'qwen3.6:35b')]),
@@ -419,5 +427,52 @@ describe('RoutingFlow at fleet scale', () => {
 
     expect(screen.getByText('Loading routing flow...')).toBeInTheDocument();
     expect(screen.queryByTestId('react-flow')).not.toBeInTheDocument();
+  });
+});
+
+describe('RoutingFlow ticker backfill', () => {
+  function spyRecentEvents(items: unknown[]) {
+    vi.spyOn(solarClient, 'getRecentGatewayEvents').mockResolvedValue({
+      from: '2026-08-13T11:00:00Z',
+      to: '2026-08-13T12:00:00Z',
+      types: ['request_error'],
+      items: items as never[],
+    });
+  }
+
+  it('backfills recent terminal events after a connected snapshot so the ticker is not empty', async () => {
+    spyRecentEvents([
+      { type: 'request_error', timestamp: '2026-08-13T12:00:00Z', data: { request_id: 'f1', model: 'chat' } },
+    ]);
+    await renderPage();
+    await waitFor(() => expect(nodeIds()).toContain('model:chat'));
+
+    act(() => routingEvents.snapshotListener?.({}));
+
+    await waitFor(() => expect(solarClient.getRecentGatewayEvents).toHaveBeenCalled());
+    expect(within(screen.getByTestId('request-ticker')).getAllByText('chat', { exact: false }).length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  it('backfills terminal history from the fallback snapshot while the socket is down', async () => {
+    spyGetRoutingState(
+      [endpoint('e1', 'prod')],
+      [{ request_id: 'live', model: 'chat', host_id: 'h1', instance_id: 'i1', status: 'processing' }],
+    );
+    spyRecentEvents([
+      { type: 'request_error', timestamp: '2026-08-13T12:00:00Z', data: { request_id: 'f1', model: 'chat' } },
+    ]);
+    setConnected(false);
+    vi.useFakeTimers();
+    await renderPage();
+    await act(async () => void vi.advanceTimersByTime(10000));
+    await act(() => Promise.resolve());
+    vi.useRealTimers();
+
+    expect(solarClient.getRoutingState).toHaveBeenCalled();
+    await waitFor(() => expect(solarClient.getRecentGatewayEvents).toHaveBeenCalled());
+    const ticker = screen.getByTestId('request-ticker');
+    expect(within(ticker).getAllByText('chat', { exact: false }).length).toBeGreaterThan(0);
   });
 });
