@@ -413,6 +413,24 @@ export interface InstanceRuntimeState {
   timestamp: string;
 }
 
+/** Atomic per-instance runtime state carried by an instance_state snapshot
+ *  entry. Shared by the REST snapshot (GET /api/routing/state) and the WS
+ *  routing_snapshot event, so its shape is defined once. */
+export interface InstanceStateData {
+  busy: boolean;
+  phase?: string | null;
+  prefill_progress?: number | null;
+  active_slots: number;
+  slot_id?: number | null;
+  task_id?: number | null;
+  prefill_prompt_tokens?: number | null;
+  generated_tokens?: number | null;
+  decode_tps?: number | null;
+  decode_ms_per_token?: number | null;
+  checkpoint_index?: number | null;
+  checkpoint_total?: number | null;
+}
+
 export interface InstanceStateEvent {
   seq: number;
   timestamp: string;
@@ -599,7 +617,7 @@ export interface RoutingStateInstance {
   host_id: string;
   instance_id: string;
   timestamp?: string | null;
-  data: Record<string, unknown>;
+  data: InstanceStateData;
 }
 
 /** Server-computed routing aggregates (replaces client-side re-derivation). */
