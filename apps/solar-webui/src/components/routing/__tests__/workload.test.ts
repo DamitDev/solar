@@ -8,9 +8,10 @@ import {
   loadFraction,
   phaseLabel,
   summarizeFlow,
+  terminalRequests,
   tickerRequests,
 } from '../workload';
-import { HostWithInstances, Instance } from '@/api/types';
+import { GatewayEventDTO, HostWithInstances, Instance } from '@/api/types';
 import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
 
 function instance(id: string, alias: string, model = 'qwen3.6:35b', status: Instance['status'] = 'running') {
@@ -225,6 +226,52 @@ describe('tickerRequests', () => {
     );
 
     expect(tickerRequests(many, 10)).toHaveLength(10);
+  });
+});
+
+describe('terminalRequests', () => {
+  const errorEvent = (over: Record<string, unknown>): GatewayEventDTO =>
+    ({
+      type: 'request_error',
+      data: { request_id: 'r1', ...over },
+      timestamp: '2026-08-13T12:00:00Z',
+    }) as GatewayEventDTO;
+
+  it('maps request_error events onto terminal ticker rows', () => {
+    const rows = terminalRequests([
+      errorEvent({ error_message: 'boom', host_id: 'h1', host_name: 'alpha', instance_id: 'i1' }),
+    ]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      request_id: 'r1',
+      status: 'error',
+      error_message: 'boom',
+      host_id: 'h1',
+      host_name: 'alpha',
+      timestamp: '2026-08-13T12:00:00Z',
+    });
+  });
+
+  it('ignores non-terminal events', () => {
+    const rows = terminalRequests([
+      { type: 'request_reroute', data: { request_id: 'r2' }, timestamp: '2026-08-13T12:00:00Z' },
+    ]);
+
+    expect(rows).toHaveLength(0);
+  });
+
+  it('skips entries without a request id and honors the limit', () => {
+    const rows = terminalRequests(
+      [
+        { type: 'request_error', data: {} } as GatewayEventDTO,
+        errorEvent({ request_id: 'a' }),
+        errorEvent({ request_id: 'b', timestamp: '2026-08-13T11:00:00Z' }),
+      ],
+      1,
+    );
+
+    expect(rows.map((r) => r.request_id)).toEqual(['a']);
   });
 });
 
