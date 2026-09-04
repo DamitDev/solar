@@ -14,9 +14,11 @@
  * - filter_status: Current filter configuration acknowledgement
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { io, Socket } from 'socket.io-client';
 import solarClient from '@/api/client';
+import { buildRegistry } from '@/hooks/eventHandlers/registry';
+import type { DispatchContext, RegisteredHandler } from '@/hooks/eventHandlers/types';
 import {
   ApiEndpoint,
   ApiKey,
@@ -53,103 +55,16 @@ export type WSMessageType =
   | 'api_keys_update'
   | 'keepalive';
 
-/** C4: model pull progress pushed by a host and rebroadcast by control. */
-export interface PullProgressData {
-  source_uri: string;
-  phase: 'resolving' | 'downloading' | 'verifying' | 'finalizing' | 'completed' | 'failed' | string;
-  bytes_done?: number | null;
-  bytes_total?: number | null;
-  speed_bps?: number | null;
-  error?: string | null;
-}
-
-export interface PullProgressEvent {
-  host_id: string;
-  host_name?: string | null;
-  timestamp?: string;
-  data: PullProgressData;
-}
-
-/** A pull that ended: nothing further will arrive on this key. */
-export function isTerminalPullPhase(phase: string | undefined): boolean {
-  return phase === 'completed' || phase === 'failed';
-}
-
-/**
- * Labels for the phases a pull passes through before it ends (C4).
- *
- * Only `downloading` carries byte counts; the others report progress by name
- * alone, and `verifying` in particular walks the whole artifact, so a large
- * model can sit there long enough that showing nothing reads as a stall.
- */
-export const PULL_PHASE_LABELS: Record<string, string> = {
-  resolving: 'Resolving',
-  downloading: 'Downloading',
-  verifying: 'Verifying',
-  finalizing: 'Finalizing',
-};
-
-/**
- * How long a finished pull stays visible before it is dropped (C4).
- *
- * Deliberately shorter than the server's `pull_progress_terminal_grace_s`
- * (300 s). The server grace exists so a client that loads mid-pull still gets
- * the outcome from `GET /api/pulls`; this one only has to cover how long a
- * viewer already on the page should keep seeing "completed" before the row
- * disappears.
- */
-export const PULL_PROGRESS_TERMINAL_GRACE_MS = 60_000;
-/**
- * How long a pull may go silent before it stops counting as in flight.
- *
- * Mirrors the server's `pull_progress_stale_after_s` (180 s) plus the same
- * margin `GET /api/pulls` applies, so a host that dies mid-download does not
- * leave a frozen byte count on screen — and so the two sides do not disagree
- * about which pulls are live.
- */
-export const PULL_PROGRESS_STALE_MS = 360_000;
-/** Hard ceiling on tracked pulls, mirroring the per-instance log cap. */
-const MAX_PULL_PROGRESS_ENTRIES = 200;
-
-/**
- * Keep the pull-progress map bounded.
- *
- * Every (host, model) pair a session ever sees adds a key that nothing else
- * removes, and a stale entry would otherwise be reported as current forever.
- * Finished pulls age out after a grace so a late-arriving viewer still sees
- * the outcome; unfinished ones age out once the host has stopped reporting,
- * which is the only signal a host that died mid-pull ever gives. *keepKey* is
- * never dropped so the entry just written always survives.
- */
-export function prunePullProgress(
-  entries: Map<string, PullProgressEvent>,
-  keepKey?: string,
-  now: number = Date.now(),
-): Map<string, PullProgressEvent> {
-  for (const [key, entry] of entries) {
-    if (key === keepKey) continue;
-    const terminal = isTerminalPullPhase(entry.data?.phase);
-    const at = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
-    if (Number.isNaN(at)) {
-      // A terminal entry we cannot age is exactly the one that would linger
-      // forever. An unstamped in-flight one may simply be brand new, so it is
-      // left to the size cap below rather than guessed at.
-      if (terminal) entries.delete(key);
-      continue;
-    }
-    const limit = terminal ? PULL_PROGRESS_TERMINAL_GRACE_MS : PULL_PROGRESS_STALE_MS;
-    if (now - at > limit) {
-      entries.delete(key);
-    }
-  }
-  if (entries.size <= MAX_PULL_PROGRESS_ENTRIES) return entries;
-  const oldestFirst = [...entries.entries()].sort((a, b) => (a[1].timestamp ?? '').localeCompare(b[1].timestamp ?? ''));
-  for (const [key] of oldestFirst) {
-    if (entries.size <= MAX_PULL_PROGRESS_ENTRIES) break;
-    if (key !== keepKey) entries.delete(key);
-  }
-  return entries;
-}
+// Pull-progress utilities/types live in eventHandlers/pullProgress.ts.
+import type { PullProgressEvent } from '@/hooks/eventHandlers/pullProgress';
+export type { PullProgressData, PullProgressEvent } from '@/hooks/eventHandlers/pullProgress';
+export {
+  PULL_PHASE_LABELS,
+  PULL_PROGRESS_TERMINAL_GRACE_MS,
+  PULL_PROGRESS_STALE_MS,
+  isTerminalPullPhase,
+  prunePullProgress,
+} from '@/hooks/eventHandlers/pullProgress';
 
 export interface InstanceSummary {
   id: string;
@@ -421,335 +336,55 @@ export function useEventStream(handlers: EventHandlers = {}) {
 
   // ---- event handler registry -------------------------------------------------
   // Each WS event type is a single registered handler instead of a growing
-  // switch branch. Built-ins are seeded once on mount; consumers can extend the
-  // registry via the public registerHandler without editing this hook's dispatch.
-
-  type RegisteredHandler = (event: WSEvent) => void;
-
+  // switch branch. Built-ins live in apps/solar-webui/src/hooks/eventHandlers/
+  // and are seeded once into the registry; consumers can extend or override it
+  // via the public registerHandler without editing the dispatch.
   const registryRef = useRef<Partial<Record<WSMessageType, RegisteredHandler>>>({});
 
-  const registerHandler = useCallback((type: WSMessageType, handler: RegisteredHandler) => {
-    registryRef.current[type] = handler;
+  const registerHandler = useCallback((type: WSMessageType, handler: (event: WSEvent) => void) => {
+    registryRef.current[type] = (event) => handler(event);
   }, []);
 
-  // Seeded once: every captured value (state setters, refs, and the stable
-  // updateRequest/removeRequest callbacks) is render-stable, so the registry
-  // never needs rebuilding.
+  // A context bundling every stable React value the handlers touch (state
+  // setters, refs, and the stable updateRequest/removeRequest callbacks), all
+  // of which keep the same identity across renders. Building it once means the
+  // built-in registry never needs rebuilding.
+  const ctx: DispatchContext = useMemo(
+    () => ({
+      setHosts,
+      setPendingHosts,
+      setHostInstances,
+      setRequests,
+      setInstanceStates,
+      setLogs,
+      setGatewayRequests,
+      setGatewayFilter,
+      setIntents,
+      setPullProgress,
+      setEndpoints,
+      setApiKeys,
+      awaitingSnapshotRef,
+      gatewayFilterRef,
+      handlersRef,
+      updateRequest,
+      removeRequest,
+    }),
+    [updateRequest, removeRequest],
+  );
+
+  // Seed the built-in handlers once on mount. Mutation (Object.assign) keeps
+  // the same ref object alive so later registerHandler overrides persist.
   useEffect(() => {
-    const register = (type: WSMessageType, handler: RegisteredHandler) => {
-      registryRef.current[type] = handler;
-    };
-
-    register('initial_status', (event) => {
-      const h = handlersRef.current;
-      if (Array.isArray(event.data)) {
-        const hostMap = new Map<string, HostStatusData>();
-        event.data.forEach((host: HostStatusData) => {
-          hostMap.set(host.host_id, host);
-        });
-        setHosts(hostMap);
-        h.onInitialStatus?.(event.data);
-      }
-    });
-
-    register('routing_snapshot', (event) => {
-      const h = handlersRef.current;
-      if (event.data) {
-        // Reset the routing view to the authoritative server snapshot.
-        const snap = event.data as RoutingSnapshot;
-        const requestMap: Map<string, RequestState> = (snap.active_requests ?? []).reduce((acc, r) => {
-          acc.set(r.request_id, {
-            request_id: r.request_id,
-            model: r.model ?? undefined,
-            resolved_model: r.resolved_model ?? undefined,
-            host_id: r.host_id ?? undefined,
-            host_name: r.host_name ?? undefined,
-            instance_id: r.instance_id ?? undefined,
-            timestamp: r.timestamp ?? new Date().toISOString(),
-            status: r.status === 'queued' ? 'pending' : 'processing',
-          });
-          return acc;
-        }, new Map());
-        setRequests(requestMap);
-        const states: Map<string, InstanceStateData> = (snap.instance_states ?? []).reduce((acc, s) => {
-          acc.set(`${s.host_id}:${s.instance_id}`, s.data);
-          return acc;
-        }, new Map());
-        setInstanceStates(states);
-        if (Array.isArray(snap.endpoints)) {
-          setEndpoints(snap.endpoints);
-        }
-        awaitingSnapshotRef.current = false;
-        h.onRoutingSnapshot?.(snap);
-      }
-    });
-
-    register('host_status', (event) => {
-      const h = handlersRef.current;
-      if (event.data) {
-        setHosts((prev) => {
-          const newMap = new Map(prev);
-          newMap.set(event.data.host_id, event.data);
-          return newMap;
-        });
-        h.onHostStatus?.(event.data);
-      }
-    });
-
-    register('host_pending', (event) => {
-      if (event.data?.pending_id) {
-        setPendingHosts((prev) => {
-          const newMap = new Map(prev);
-          newMap.set(event.data.pending_id, event.data as PendingHost);
-          return newMap;
-        });
-      }
-    });
-
-    register('host_pending_removed', (event) => {
-      if (event.data?.pending_id) {
-        setPendingHosts((prev) => {
-          const newMap = new Map(prev);
-          newMap.delete(event.data.pending_id);
-          return newMap;
-        });
-      }
-    });
-
-    register('instances_update', (event) => {
-      if (event.data?.host_id && Array.isArray(event.data?.instances)) {
-        setHostInstances((prev) => {
-          const newMap = new Map(prev);
-          newMap.set(event.data.host_id, event.data.instances);
-          return newMap;
-        });
-      }
-    });
-
-    register('log', (event) => {
-      const h = handlersRef.current;
-      if (event.host_id && event.instance_id && event.data) {
-        const key = `${event.host_id}:${event.instance_id}`;
-        const logMsg: LogMessage = {
-          seq: event.data.seq,
-          timestamp: event.timestamp || new Date().toISOString(),
-          line: event.data.line,
-        };
-        setLogs((prev) => {
-          const newMap = new Map(prev);
-          const existing = newMap.get(key) || [];
-          // Keep last 1000 logs
-          const updated = [...existing, logMsg].slice(-1000);
-          newMap.set(key, updated);
-          return newMap;
-        });
-        h.onLog?.(event.host_id, event.instance_id, event.data);
-      }
-    });
-
-    register('instance_state', (event) => {
-      const h = handlersRef.current;
-      // Dropped while awaiting the authoritative snapshot; the snapshot
-      // provides the reset base and raced deltas would corrupt it.
-      if (awaitingSnapshotRef.current) return;
-      if (event.host_id && event.instance_id && event.data) {
-        const key = `${event.host_id}:${event.instance_id}`;
-        setInstanceStates((prev) => {
-          const newMap = new Map(prev);
-          newMap.set(key, event.data);
-          return newMap;
-        });
-        h.onInstanceState?.(event.host_id, event.instance_id, event.data);
-      }
-    });
-
-    register('host_health', (event) => {
-      if (event.host_id && event.data) {
-        const hostId = event.host_id;
-        setHosts((prev) => {
-          const newMap = new Map(prev);
-          const existing = newMap.get(hostId);
-          if (existing) {
-            newMap.set(hostId, {
-              ...existing,
-              memory: event.data.memory ?? existing.memory,
-              ...(event.data.gpu_type && { gpu_type: event.data.gpu_type }),
-              ...(event.data.roles && { roles: event.data.roles }),
-              ...(event.data.disk_total_gb != null && { disk_total_gb: event.data.disk_total_gb }),
-              ...(event.data.disk_used_gb != null && { disk_used_gb: event.data.disk_used_gb }),
-              ...(event.data.disk_available_gb != null && { disk_available_gb: event.data.disk_available_gb }),
-              ...(event.data.memory_available_gb != null && {
-                memory_available_gb: event.data.memory_available_gb,
-              }),
-              ...(event.data.version && { version: event.data.version }),
-            });
-          }
-          return newMap;
-        });
-      }
-    });
-
-    register('request_start', (event) => {
-      const h = handlersRef.current;
-      if (awaitingSnapshotRef.current) return;
-      if (event.data?.request_id) {
-        updateRequest(event.data.request_id, {
-          model: event.data.model,
-          endpoint: event.data.endpoint,
-          endpoint_id: event.data.endpoint_id,
-          status: 'pending',
-          timestamp: event.data.timestamp,
-          stream: event.data.stream,
-          client_ip: event.data.client_ip,
-        });
-        h.onRoutingEvent?.(event.type, event.data);
-      }
-    });
-
-    register('request_routed', (event) => {
-      const h = handlersRef.current;
-      if (awaitingSnapshotRef.current) return;
-      if (event.data?.request_id) {
-        updateRequest(event.data.request_id, {
-          host_id: event.data.host_id,
-          host_name: event.data.host_name,
-          instance_id: event.data.instance_id,
-          instance_url: event.data.instance_url,
-          resolved_model: event.data.resolved_model,
-          endpoint_id: event.data.endpoint_id,
-          status: 'processing',
-        });
-        h.onRoutingEvent?.(event.type, event.data);
-      }
-    });
-
-    register('request_success', (event) => {
-      const h = handlersRef.current;
-      if (awaitingSnapshotRef.current) return;
-      if (event.data?.request_id) {
-        updateRequest(event.data.request_id, {
-          status: 'success',
-          duration: event.data.duration,
-        });
-        h.onRoutingEvent?.(event.type, event.data);
-        // Auto-remove after 5 seconds
-        setTimeout(() => {
-          removeRequest(event.data.request_id);
-        }, 5000);
-      }
-    });
-
-    register('request_error', (event) => {
-      const h = handlersRef.current;
-      if (awaitingSnapshotRef.current) return;
-      if (event.data?.request_id) {
-        updateRequest(event.data.request_id, {
-          status: 'error',
-          error_message: event.data.error_message,
-          duration: event.data.duration,
-          host_id: event.data.host_id,
-          instance_id: event.data.instance_id,
-        });
-        h.onRoutingEvent?.(event.type, event.data);
-      }
-    });
-
-    register('request_reroute', (event) => {
-      const h = handlersRef.current;
-      h.onRoutingEvent?.(event.type, event.data);
-    });
-
-    register('gateway_request', (event) => {
-      const h = handlersRef.current;
-      // Completed request summary (client-side filter by endpoint_id)
-      if (event.data) {
-        const summary: GatewayRequestSummary = event.data;
-        const filterEp = gatewayFilterRef.current.endpoint_id;
-        if (filterEp && summary.endpoint_id !== filterEp) {
-          return;
-        }
-        setGatewayRequests((prev) => {
-          const updated = [summary, ...prev].slice(0, 500);
-          return updated;
-        });
-        h.onGatewayRequest?.(summary);
-      }
-    });
-
-    register('filter_status', (event) => {
-      const h = handlersRef.current;
-      // Filter configuration acknowledgement
-      if (event.filter) {
-        setGatewayFilter(event.filter);
-        h.onFilterStatus?.(event.filter);
-      }
-    });
-
-    register('intent_update', (event) => {
-      const h = handlersRef.current;
-      // Full intent record (reconciler emits the bare record — bindEvent wraps it in data)
-      if (event.data?.id) {
-        setIntents((prev) => {
-          const m = new Map(prev);
-          m.set(event.data.id, event.data as Intent);
-          return m;
-        });
-        h.onIntentUpdate?.(event.data as Intent);
-      }
-    });
-
-    register('intent_removed', (event) => {
-      const h = handlersRef.current;
-      if (event.data?.id) {
-        setIntents((prev) => {
-          const m = new Map(prev);
-          m.delete(event.data.id);
-          return m;
-        });
-        h.onIntentRemoved?.(event.data.id, event.data.alias);
-      }
-    });
-
-    register('pull_progress', (event) => {
-      // C4: latest pull progress per host|source_uri, as rebroadcast
-      // by control ({host_id, host_name, timestamp, data}).
-      if (event.host_id && event.data?.source_uri) {
-        const key = `${event.host_id}|${event.data.source_uri}`;
-        setPullProgress((prev) => {
-          const m = new Map(prev);
-          m.set(key, {
-            host_id: event.host_id!,
-            host_name: event.host_name ?? null,
-            timestamp: event.timestamp,
-            data: event.data,
-          });
-          return prunePullProgress(m, key);
-        });
-      }
-    });
-
-    register('endpoints_update', (event) => {
-      // C5: endpoint records change only on edits — event-driven.
-      if (Array.isArray(event.data?.endpoints)) {
-        setEndpoints(event.data.endpoints as ApiEndpoint[]);
-      }
-    });
-
-    register('api_keys_update', (event) => {
-      // Key records change only on explicit key CRUD.
-      if (Array.isArray(event.data?.api_keys)) {
-        setApiKeys(event.data.api_keys as ApiKey[]);
-      }
-    });
-
-    // keepalive intentionally has no registered handler (no-op).
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleEvent = useCallback((event: WSEvent) => {
-    // Dispatch through the registry; unregistered types fall back to a no-op.
-    registryRef.current[event.type]?.(event);
+    Object.assign(registryRef.current, buildRegistry());
   }, []);
 
+  const handleEvent = useCallback(
+    (event: WSEvent) => {
+      // Dispatch through the registry; unregistered types fall back to a no-op.
+      registryRef.current[event.type]?.(event, ctx);
+    },
+    [ctx],
+  );
   const setFilter = useCallback((filter: Partial<GatewayFilter>) => {
     setGatewayFilter((prevFilter) => {
       return { ...prevFilter, ...filter };

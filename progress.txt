@@ -276,6 +276,32 @@ rather than editing a growing branch.
 - The `bindEvent` wiring in the connect effect is unchanged and still routes
   through `handleEvent` → the registry.
 
+Follow-up refinement: the handler implementations were extracted out of
+`useEventStream.ts` into `apps/solar-webui/src/hooks/eventHandlers/`, so the
+hook is no longer a large block of inline closures:
+- `types.ts` — `DispatchContext` (bundles every stable React value a handler
+  touches: all 12 state setters, `awaitingSnapshotRef`/`gatewayFilterRef`/
+  `handlersRef`, `updateRequest`, `removeRequest`) and `RegisteredHandler`
+  (`(event, ctx) => void`).
+- Per-domain files: `request.ts` (request_start/routed/success/error/reroute),
+  `hosts.ts` (initial_status/host_status/host_pending/host_pending_removed/
+  instances_update/host_health), `instanceState.ts` (log/instance_state/
+  routing_snapshot), `gateway.ts` (gateway_request/filter_status/
+  endpoints_update/api_keys_update), `intents.ts` (intent_update/intent_removed),
+  `pulls.ts` (pull_progress).
+- `registry.ts` — `buildRegistry()` composes every built-in handler into the
+  `Partial<Record<WSMessageType, RegisteredHandler>>` seed.
+- `pullProgress.ts` — pull-progress types/constants/`prunePullProgress` moved
+  here from `useEventStream.ts` to break the runtime circular import
+  (useEventStream → registry → pulls → useEventStream); `useEventStream.ts`
+  re-exports them so consumers (`IntentDetail`, `IntentsPage`,
+  `PullProgress.test`) are unchanged.
+- `useEventStream.ts` now builds a stable `DispatchContext` (`useMemo`) once,
+  seeds the registry via `Object.assign(registryRef.current, buildRegistry())`
+  on mount, and `handleEvent` dispatches `(event, ctx)`. `registerHandler`
+  still takes a plain `(event) => void` for external consumers; built-in
+  handlers use the richer `(event, ctx)` signature.
+
 Tests (`apps/solar-webui/src/hooks/__tests__/useEventStream.test.ts`):
 - New: (a) a consumer-registered handler (`registerHandler('host_status', fn)`)
   is dispatched for a bound socket event; (b) an event type with no registered
