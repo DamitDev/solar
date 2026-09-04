@@ -440,7 +440,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
             // Reset the routing view to the authoritative server snapshot.
             const snap = event.data as RoutingSnapshot;
             const requestMap = new Map<string, RequestState>();
-            (snap.active_requests ?? []).forEach((r) => {
+            for (const r of snap.active_requests ?? []) {
               requestMap.set(r.request_id, {
                 request_id: r.request_id,
                 model: r.model ?? undefined,
@@ -451,12 +451,12 @@ export function useEventStream(handlers: EventHandlers = {}) {
                 timestamp: r.timestamp ?? new Date().toISOString(),
                 status: r.status === 'queued' ? 'pending' : 'processing',
               });
-            });
+            }
             setRequests(requestMap);
             const states = new Map<string, InstanceStateData>();
-            (snap.instance_states ?? []).forEach((s) => {
+            for (const s of snap.instance_states ?? []) {
               states.set(`${s.host_id}:${s.instance_id}`, s.data);
-            });
+            }
             setInstanceStates(states);
             if (Array.isArray(snap.endpoints)) {
               setEndpoints(snap.endpoints);
