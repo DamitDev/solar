@@ -68,5 +68,6 @@ export const handleRoutingSnapshot: RegisteredHandler = (event, ctx) => {
     }
     ctx.awaitingSnapshotRef.current = false;
     h.onRoutingSnapshot?.(snap);
+    ctx.snapshotListenersRef.current.forEach((listener) => listener(snap));
   }
 };

@@ -220,6 +220,9 @@ export function useEventStream(handlers: EventHandlers = {}) {
   // authoritative routing_snapshot arrives (a delta that races the connect can
   // otherwise land on a stale base and be lost or double-applied).
   const awaitingSnapshotRef = useRef(false);
+  // Consumers that react to a freshly-applied authoritative snapshot (e.g. the
+  // Routing page backs the ticker with recent terminal events after one lands).
+  const snapshotListenersRef = useRef<Set<(snapshot: RoutingState) => void>>(new Set());
 
   // Keep refs updated
   useEffect(() => {
@@ -277,6 +280,19 @@ export function useEventStream(handlers: EventHandlers = {}) {
     registryRef.current[type] = (event) => handler(event);
   }, []);
 
+  /**
+   * Subscribe to fresh authoritative snapshots. `handleRoutingSnapshot` runs
+   * these after applying the snapshot, so consumers (e.g. the Routing page's
+   * ticker backfill) react to the same state the view just reset to. Returns an
+   * unsubscribe that drops the listener.
+   */
+  const registerRoutingSnapshotHandler = useCallback((listener: (snapshot: RoutingState) => void) => {
+    snapshotListenersRef.current.add(listener);
+    return () => {
+      snapshotListenersRef.current.delete(listener);
+    };
+  }, []);
+
   // A context bundling every stable React value the handlers touch (state
   // setters, refs, and the stable updateRequest/removeRequest callbacks), all
   // of which keep the same identity across renders. Building it once means the
@@ -298,6 +314,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
       awaitingSnapshotRef,
       gatewayFilterRef,
       handlersRef,
+      snapshotListenersRef,
       updateRequest,
       removeRequest,
     }),
@@ -536,5 +553,6 @@ export function useEventStream(handlers: EventHandlers = {}) {
     setFilter,
     clearGatewayRequests,
     registerHandler,
+    registerRoutingSnapshotHandler,
   };
 }

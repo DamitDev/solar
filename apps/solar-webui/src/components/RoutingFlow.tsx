@@ -27,7 +27,13 @@ import { SummaryBar } from './routing/SummaryBar';
 import { FlowGraph, ModelNodeData, aliasOfRequest, buildFlowGraph, traceRequest, traceThrough } from './routing/graph';
 import { Bounds, LayoutResult, atLeast, boundsOf, layoutGraph } from './routing/layout';
 import { EndpointNode, GatewayNode, HostNode, ModelNode, OverflowNode } from './routing/nodes';
-import { snapshotInstanceStates, snapshotRequests, summarizeFlow, tickerRequests } from './routing/workload';
+import {
+  snapshotInstanceStates,
+  snapshotRequests,
+  summarizeFlow,
+  terminalRequests,
+  tickerRequests,
+} from './routing/workload';
 
 const EDGE_COLORS = { idle: '#434C5E', ready: '#4C566A', active: '#88C0D0', error: '#BF616A' } as const;
 
@@ -71,7 +77,7 @@ export function RoutingFlow() {
 }
 
 function RoutingFlowCanvas() {
-  const { requests: wsRequests, removeRequest } = useRoutingEventsContext();
+  const { requests: wsRequests, removeRequest, registerRoutingSnapshotHandler } = useRoutingEventsContext();
   const { getInstanceState, endpoints: eventEndpoints, isConnected } = useEventStreamContext();
   const { hosts, loading } = useInstances();
   const { fitBounds } = useReactFlow();
@@ -97,6 +103,26 @@ function RoutingFlowCanvas() {
     },
     { enabled: !isConnected, intervalMs: 10000 },
   );
+
+  // The authoritative snapshot only carries in-flight requests, so right after
+  // a (re)connect the ticker would sit empty until the first delta flows. Each
+  // fresh snapshot backfills the recent terminal history so finished-and-failed
+  // requests show immediately, alongside the snapshot's live aggregates.
+  const [recentTerminal, setRecentTerminal] = useState<RequestState[]>([]);
+  const backfillTerminal = useCallback(() => {
+    solarClient
+      .getRecentGatewayEvents({ to: new Date().toISOString(), limit: 40, types: 'request_error' })
+      .then((res) => setRecentTerminal(terminalRequests(res.items ?? [])))
+      .catch((err) => console.error('Failed to backfill recent events:', err));
+  }, []);
+
+  // Connected: refill on every authoritative WS snapshot applied.
+  useEffect(() => registerRoutingSnapshotHandler(backfillTerminal), [registerRoutingSnapshotHandler, backfillTerminal]);
+  // Disconnected: the fallback poll applies a new snapshot each tick, so keep
+  // the terminal history in step with it too.
+  useEffect(() => {
+    if (!isConnected && fallback) backfillTerminal();
+  }, [isConnected, fallback, backfillTerminal]);
 
   const requests = useMemo(
     () => (isConnected ? wsRequests : snapshotRequests(fallback)),
@@ -143,7 +169,7 @@ function RoutingFlowCanvas() {
   const nodes = useMemo(() => toFlowNodes(graph, layout, trace), [graph, layout, trace]);
   const edges = useMemo(() => toFlowEdges(graph, trace), [graph, trace]);
 
-  const ticker = useMemo(() => tickerRequests(requestList), [requestList]);
+  const ticker = useMemo(() => tickerRequests([...requestList, ...recentTerminal]), [requestList, recentTerminal]);
   const totals = useMemo(
     () => summarizeFlow(hosts, requestList, endpoints.length),
     [hosts, requestList, endpoints.length],
