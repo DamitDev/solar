@@ -419,306 +419,336 @@ export function useEventStream(handlers: EventHandlers = {}) {
     }, 350);
   }, []);
 
-  const handleEvent = useCallback(
-    (event: WSEvent) => {
+  // ---- event handler registry -------------------------------------------------
+  // Each WS event type is a single registered handler instead of a growing
+  // switch branch. Built-ins are seeded once on mount; consumers can extend the
+  // registry via the public registerHandler without editing this hook's dispatch.
+
+  type RegisteredHandler = (event: WSEvent) => void;
+
+  const registryRef = useRef<Partial<Record<WSMessageType, RegisteredHandler>>>({});
+
+  const registerHandler = useCallback((type: WSMessageType, handler: RegisteredHandler) => {
+    registryRef.current[type] = handler;
+  }, []);
+
+  // Seeded once: every captured value (state setters, refs, and the stable
+  // updateRequest/removeRequest callbacks) is render-stable, so the registry
+  // never needs rebuilding.
+  useEffect(() => {
+    const register = (type: WSMessageType, handler: RegisteredHandler) => {
+      registryRef.current[type] = handler;
+    };
+
+    register('initial_status', (event) => {
       const h = handlersRef.current;
-
-      switch (event.type) {
-        case 'initial_status':
-          if (Array.isArray(event.data)) {
-            const hostMap = new Map<string, HostStatusData>();
-            event.data.forEach((host: HostStatusData) => {
-              hostMap.set(host.host_id, host);
-            });
-            setHosts(hostMap);
-            h.onInitialStatus?.(event.data);
-          }
-          break;
-
-        case 'routing_snapshot':
-          if (event.data) {
-            // Reset the routing view to the authoritative server snapshot.
-            const snap = event.data as RoutingSnapshot;
-            const requestMap: Map<string, RequestState> = (snap.active_requests ?? []).reduce((acc, r) => {
-              acc.set(r.request_id, {
-                request_id: r.request_id,
-                model: r.model ?? undefined,
-                resolved_model: r.resolved_model ?? undefined,
-                host_id: r.host_id ?? undefined,
-                host_name: r.host_name ?? undefined,
-                instance_id: r.instance_id ?? undefined,
-                timestamp: r.timestamp ?? new Date().toISOString(),
-                status: r.status === 'queued' ? 'pending' : 'processing',
-              });
-              return acc;
-            }, new Map());
-            setRequests(requestMap);
-            const states: Map<string, InstanceStateData> = (snap.instance_states ?? []).reduce((acc, s) => {
-              acc.set(`${s.host_id}:${s.instance_id}`, s.data);
-              return acc;
-            }, new Map());
-            setInstanceStates(states);
-            if (Array.isArray(snap.endpoints)) {
-              setEndpoints(snap.endpoints);
-            }
-            awaitingSnapshotRef.current = false;
-            h.onRoutingSnapshot?.(snap);
-          }
-          break;
-
-        case 'host_status':
-          if (event.data) {
-            setHosts((prev) => {
-              const newMap = new Map(prev);
-              newMap.set(event.data.host_id, event.data);
-              return newMap;
-            });
-            h.onHostStatus?.(event.data);
-          }
-          break;
-
-        case 'host_pending':
-          if (event.data?.pending_id) {
-            setPendingHosts((prev) => {
-              const newMap = new Map(prev);
-              newMap.set(event.data.pending_id, event.data as PendingHost);
-              return newMap;
-            });
-          }
-          break;
-
-        case 'host_pending_removed':
-          if (event.data?.pending_id) {
-            setPendingHosts((prev) => {
-              const newMap = new Map(prev);
-              newMap.delete(event.data.pending_id);
-              return newMap;
-            });
-          }
-          break;
-
-        case 'instances_update':
-          if (event.data?.host_id && Array.isArray(event.data?.instances)) {
-            setHostInstances((prev) => {
-              const newMap = new Map(prev);
-              newMap.set(event.data.host_id, event.data.instances);
-              return newMap;
-            });
-          }
-          break;
-
-        case 'log':
-          if (event.host_id && event.instance_id && event.data) {
-            const key = `${event.host_id}:${event.instance_id}`;
-            const logMsg: LogMessage = {
-              seq: event.data.seq,
-              timestamp: event.timestamp || new Date().toISOString(),
-              line: event.data.line,
-            };
-            setLogs((prev) => {
-              const newMap = new Map(prev);
-              const existing = newMap.get(key) || [];
-              // Keep last 1000 logs
-              const updated = [...existing, logMsg].slice(-1000);
-              newMap.set(key, updated);
-              return newMap;
-            });
-            h.onLog?.(event.host_id, event.instance_id, event.data);
-          }
-          break;
-
-        case 'instance_state':
-          // Dropped while awaiting the authoritative snapshot; the snapshot
-          // provides the reset base and raced deltas would corrupt it.
-          if (awaitingSnapshotRef.current) break;
-          if (event.host_id && event.instance_id && event.data) {
-            const key = `${event.host_id}:${event.instance_id}`;
-            setInstanceStates((prev) => {
-              const newMap = new Map(prev);
-              newMap.set(key, event.data);
-              return newMap;
-            });
-            h.onInstanceState?.(event.host_id, event.instance_id, event.data);
-          }
-          break;
-
-        case 'host_health':
-          if (event.host_id && event.data) {
-            const hostId = event.host_id;
-            setHosts((prev) => {
-              const newMap = new Map(prev);
-              const existing = newMap.get(hostId);
-              if (existing) {
-                newMap.set(hostId, {
-                  ...existing,
-                  memory: event.data.memory ?? existing.memory,
-                  ...(event.data.gpu_type && { gpu_type: event.data.gpu_type }),
-                  ...(event.data.roles && { roles: event.data.roles }),
-                  ...(event.data.disk_total_gb != null && { disk_total_gb: event.data.disk_total_gb }),
-                  ...(event.data.disk_used_gb != null && { disk_used_gb: event.data.disk_used_gb }),
-                  ...(event.data.disk_available_gb != null && { disk_available_gb: event.data.disk_available_gb }),
-                  ...(event.data.memory_available_gb != null && {
-                    memory_available_gb: event.data.memory_available_gb,
-                  }),
-                  ...(event.data.version && { version: event.data.version }),
-                });
-              }
-              return newMap;
-            });
-          }
-          break;
-
-        case 'request_start':
-          if (awaitingSnapshotRef.current) break;
-          if (event.data?.request_id) {
-            updateRequest(event.data.request_id, {
-              model: event.data.model,
-              endpoint: event.data.endpoint,
-              endpoint_id: event.data.endpoint_id,
-              status: 'pending',
-              timestamp: event.data.timestamp,
-              stream: event.data.stream,
-              client_ip: event.data.client_ip,
-            });
-            h.onRoutingEvent?.(event.type, event.data);
-          }
-          break;
-
-        case 'request_routed':
-          if (awaitingSnapshotRef.current) break;
-          if (event.data?.request_id) {
-            updateRequest(event.data.request_id, {
-              host_id: event.data.host_id,
-              host_name: event.data.host_name,
-              instance_id: event.data.instance_id,
-              instance_url: event.data.instance_url,
-              resolved_model: event.data.resolved_model,
-              endpoint_id: event.data.endpoint_id,
-              status: 'processing',
-            });
-            h.onRoutingEvent?.(event.type, event.data);
-          }
-          break;
-
-        case 'request_success':
-          if (awaitingSnapshotRef.current) break;
-          if (event.data?.request_id) {
-            updateRequest(event.data.request_id, {
-              status: 'success',
-              duration: event.data.duration,
-            });
-            h.onRoutingEvent?.(event.type, event.data);
-            // Auto-remove after 5 seconds
-            setTimeout(() => {
-              removeRequest(event.data.request_id);
-            }, 5000);
-          }
-          break;
-
-        case 'request_error':
-          if (awaitingSnapshotRef.current) break;
-          if (event.data?.request_id) {
-            updateRequest(event.data.request_id, {
-              status: 'error',
-              error_message: event.data.error_message,
-              duration: event.data.duration,
-              host_id: event.data.host_id,
-              instance_id: event.data.instance_id,
-            });
-            h.onRoutingEvent?.(event.type, event.data);
-          }
-          break;
-
-        case 'request_reroute':
-          h.onRoutingEvent?.(event.type, event.data);
-          break;
-
-        case 'gateway_request':
-          // Completed request summary (client-side filter by endpoint_id)
-          if (event.data) {
-            const summary: GatewayRequestSummary = event.data;
-            const filterEp = gatewayFilterRef.current.endpoint_id;
-            if (filterEp && summary.endpoint_id !== filterEp) {
-              break;
-            }
-            setGatewayRequests((prev) => {
-              const updated = [summary, ...prev].slice(0, 500);
-              return updated;
-            });
-            h.onGatewayRequest?.(summary);
-          }
-          break;
-
-        case 'filter_status':
-          // Filter configuration acknowledgement
-          if (event.filter) {
-            setGatewayFilter(event.filter);
-            h.onFilterStatus?.(event.filter);
-          }
-          break;
-
-        case 'intent_update':
-          // Full intent record (reconciler emits the bare record — bindEvent wraps it in data)
-          if (event.data?.id) {
-            setIntents((prev) => {
-              const m = new Map(prev);
-              m.set(event.data.id, event.data as Intent);
-              return m;
-            });
-            h.onIntentUpdate?.(event.data as Intent);
-          }
-          break;
-
-        case 'intent_removed':
-          if (event.data?.id) {
-            setIntents((prev) => {
-              const m = new Map(prev);
-              m.delete(event.data.id);
-              return m;
-            });
-            h.onIntentRemoved?.(event.data.id, event.data.alias);
-          }
-          break;
-
-        case 'pull_progress':
-          // C4: latest pull progress per host|source_uri, as rebroadcast
-          // by control ({host_id, host_name, timestamp, data}).
-          if (event.host_id && event.data?.source_uri) {
-            const key = `${event.host_id}|${event.data.source_uri}`;
-            setPullProgress((prev) => {
-              const m = new Map(prev);
-              m.set(key, {
-                host_id: event.host_id!,
-                host_name: event.host_name ?? null,
-                timestamp: event.timestamp,
-                data: event.data,
-              });
-              return prunePullProgress(m, key);
-            });
-          }
-          break;
-
-        case 'endpoints_update':
-          // C5: endpoint records change only on edits — event-driven.
-          if (Array.isArray(event.data?.endpoints)) {
-            setEndpoints(event.data.endpoints as ApiEndpoint[]);
-          }
-          break;
-
-        case 'api_keys_update':
-          // Key records change only on explicit key CRUD.
-          if (Array.isArray(event.data?.api_keys)) {
-            setApiKeys(event.data.api_keys as ApiKey[]);
-          }
-          break;
-
-        case 'keepalive':
-          // Ignore keepalives
-          break;
+      if (Array.isArray(event.data)) {
+        const hostMap = new Map<string, HostStatusData>();
+        event.data.forEach((host: HostStatusData) => {
+          hostMap.set(host.host_id, host);
+        });
+        setHosts(hostMap);
+        h.onInitialStatus?.(event.data);
       }
-    },
-    [updateRequest, removeRequest],
-  );
+    });
+
+    register('routing_snapshot', (event) => {
+      const h = handlersRef.current;
+      if (event.data) {
+        // Reset the routing view to the authoritative server snapshot.
+        const snap = event.data as RoutingSnapshot;
+        const requestMap: Map<string, RequestState> = (snap.active_requests ?? []).reduce((acc, r) => {
+          acc.set(r.request_id, {
+            request_id: r.request_id,
+            model: r.model ?? undefined,
+            resolved_model: r.resolved_model ?? undefined,
+            host_id: r.host_id ?? undefined,
+            host_name: r.host_name ?? undefined,
+            instance_id: r.instance_id ?? undefined,
+            timestamp: r.timestamp ?? new Date().toISOString(),
+            status: r.status === 'queued' ? 'pending' : 'processing',
+          });
+          return acc;
+        }, new Map());
+        setRequests(requestMap);
+        const states: Map<string, InstanceStateData> = (snap.instance_states ?? []).reduce((acc, s) => {
+          acc.set(`${s.host_id}:${s.instance_id}`, s.data);
+          return acc;
+        }, new Map());
+        setInstanceStates(states);
+        if (Array.isArray(snap.endpoints)) {
+          setEndpoints(snap.endpoints);
+        }
+        awaitingSnapshotRef.current = false;
+        h.onRoutingSnapshot?.(snap);
+      }
+    });
+
+    register('host_status', (event) => {
+      const h = handlersRef.current;
+      if (event.data) {
+        setHosts((prev) => {
+          const newMap = new Map(prev);
+          newMap.set(event.data.host_id, event.data);
+          return newMap;
+        });
+        h.onHostStatus?.(event.data);
+      }
+    });
+
+    register('host_pending', (event) => {
+      if (event.data?.pending_id) {
+        setPendingHosts((prev) => {
+          const newMap = new Map(prev);
+          newMap.set(event.data.pending_id, event.data as PendingHost);
+          return newMap;
+        });
+      }
+    });
+
+    register('host_pending_removed', (event) => {
+      if (event.data?.pending_id) {
+        setPendingHosts((prev) => {
+          const newMap = new Map(prev);
+          newMap.delete(event.data.pending_id);
+          return newMap;
+        });
+      }
+    });
+
+    register('instances_update', (event) => {
+      if (event.data?.host_id && Array.isArray(event.data?.instances)) {
+        setHostInstances((prev) => {
+          const newMap = new Map(prev);
+          newMap.set(event.data.host_id, event.data.instances);
+          return newMap;
+        });
+      }
+    });
+
+    register('log', (event) => {
+      const h = handlersRef.current;
+      if (event.host_id && event.instance_id && event.data) {
+        const key = `${event.host_id}:${event.instance_id}`;
+        const logMsg: LogMessage = {
+          seq: event.data.seq,
+          timestamp: event.timestamp || new Date().toISOString(),
+          line: event.data.line,
+        };
+        setLogs((prev) => {
+          const newMap = new Map(prev);
+          const existing = newMap.get(key) || [];
+          // Keep last 1000 logs
+          const updated = [...existing, logMsg].slice(-1000);
+          newMap.set(key, updated);
+          return newMap;
+        });
+        h.onLog?.(event.host_id, event.instance_id, event.data);
+      }
+    });
+
+    register('instance_state', (event) => {
+      const h = handlersRef.current;
+      // Dropped while awaiting the authoritative snapshot; the snapshot
+      // provides the reset base and raced deltas would corrupt it.
+      if (awaitingSnapshotRef.current) return;
+      if (event.host_id && event.instance_id && event.data) {
+        const key = `${event.host_id}:${event.instance_id}`;
+        setInstanceStates((prev) => {
+          const newMap = new Map(prev);
+          newMap.set(key, event.data);
+          return newMap;
+        });
+        h.onInstanceState?.(event.host_id, event.instance_id, event.data);
+      }
+    });
+
+    register('host_health', (event) => {
+      if (event.host_id && event.data) {
+        const hostId = event.host_id;
+        setHosts((prev) => {
+          const newMap = new Map(prev);
+          const existing = newMap.get(hostId);
+          if (existing) {
+            newMap.set(hostId, {
+              ...existing,
+              memory: event.data.memory ?? existing.memory,
+              ...(event.data.gpu_type && { gpu_type: event.data.gpu_type }),
+              ...(event.data.roles && { roles: event.data.roles }),
+              ...(event.data.disk_total_gb != null && { disk_total_gb: event.data.disk_total_gb }),
+              ...(event.data.disk_used_gb != null && { disk_used_gb: event.data.disk_used_gb }),
+              ...(event.data.disk_available_gb != null && { disk_available_gb: event.data.disk_available_gb }),
+              ...(event.data.memory_available_gb != null && {
+                memory_available_gb: event.data.memory_available_gb,
+              }),
+              ...(event.data.version && { version: event.data.version }),
+            });
+          }
+          return newMap;
+        });
+      }
+    });
+
+    register('request_start', (event) => {
+      const h = handlersRef.current;
+      if (awaitingSnapshotRef.current) return;
+      if (event.data?.request_id) {
+        updateRequest(event.data.request_id, {
+          model: event.data.model,
+          endpoint: event.data.endpoint,
+          endpoint_id: event.data.endpoint_id,
+          status: 'pending',
+          timestamp: event.data.timestamp,
+          stream: event.data.stream,
+          client_ip: event.data.client_ip,
+        });
+        h.onRoutingEvent?.(event.type, event.data);
+      }
+    });
+
+    register('request_routed', (event) => {
+      const h = handlersRef.current;
+      if (awaitingSnapshotRef.current) return;
+      if (event.data?.request_id) {
+        updateRequest(event.data.request_id, {
+          host_id: event.data.host_id,
+          host_name: event.data.host_name,
+          instance_id: event.data.instance_id,
+          instance_url: event.data.instance_url,
+          resolved_model: event.data.resolved_model,
+          endpoint_id: event.data.endpoint_id,
+          status: 'processing',
+        });
+        h.onRoutingEvent?.(event.type, event.data);
+      }
+    });
+
+    register('request_success', (event) => {
+      const h = handlersRef.current;
+      if (awaitingSnapshotRef.current) return;
+      if (event.data?.request_id) {
+        updateRequest(event.data.request_id, {
+          status: 'success',
+          duration: event.data.duration,
+        });
+        h.onRoutingEvent?.(event.type, event.data);
+        // Auto-remove after 5 seconds
+        setTimeout(() => {
+          removeRequest(event.data.request_id);
+        }, 5000);
+      }
+    });
+
+    register('request_error', (event) => {
+      const h = handlersRef.current;
+      if (awaitingSnapshotRef.current) return;
+      if (event.data?.request_id) {
+        updateRequest(event.data.request_id, {
+          status: 'error',
+          error_message: event.data.error_message,
+          duration: event.data.duration,
+          host_id: event.data.host_id,
+          instance_id: event.data.instance_id,
+        });
+        h.onRoutingEvent?.(event.type, event.data);
+      }
+    });
+
+    register('request_reroute', (event) => {
+      const h = handlersRef.current;
+      h.onRoutingEvent?.(event.type, event.data);
+    });
+
+    register('gateway_request', (event) => {
+      const h = handlersRef.current;
+      // Completed request summary (client-side filter by endpoint_id)
+      if (event.data) {
+        const summary: GatewayRequestSummary = event.data;
+        const filterEp = gatewayFilterRef.current.endpoint_id;
+        if (filterEp && summary.endpoint_id !== filterEp) {
+          return;
+        }
+        setGatewayRequests((prev) => {
+          const updated = [summary, ...prev].slice(0, 500);
+          return updated;
+        });
+        h.onGatewayRequest?.(summary);
+      }
+    });
+
+    register('filter_status', (event) => {
+      const h = handlersRef.current;
+      // Filter configuration acknowledgement
+      if (event.filter) {
+        setGatewayFilter(event.filter);
+        h.onFilterStatus?.(event.filter);
+      }
+    });
+
+    register('intent_update', (event) => {
+      const h = handlersRef.current;
+      // Full intent record (reconciler emits the bare record — bindEvent wraps it in data)
+      if (event.data?.id) {
+        setIntents((prev) => {
+          const m = new Map(prev);
+          m.set(event.data.id, event.data as Intent);
+          return m;
+        });
+        h.onIntentUpdate?.(event.data as Intent);
+      }
+    });
+
+    register('intent_removed', (event) => {
+      const h = handlersRef.current;
+      if (event.data?.id) {
+        setIntents((prev) => {
+          const m = new Map(prev);
+          m.delete(event.data.id);
+          return m;
+        });
+        h.onIntentRemoved?.(event.data.id, event.data.alias);
+      }
+    });
+
+    register('pull_progress', (event) => {
+      // C4: latest pull progress per host|source_uri, as rebroadcast
+      // by control ({host_id, host_name, timestamp, data}).
+      if (event.host_id && event.data?.source_uri) {
+        const key = `${event.host_id}|${event.data.source_uri}`;
+        setPullProgress((prev) => {
+          const m = new Map(prev);
+          m.set(key, {
+            host_id: event.host_id!,
+            host_name: event.host_name ?? null,
+            timestamp: event.timestamp,
+            data: event.data,
+          });
+          return prunePullProgress(m, key);
+        });
+      }
+    });
+
+    register('endpoints_update', (event) => {
+      // C5: endpoint records change only on edits — event-driven.
+      if (Array.isArray(event.data?.endpoints)) {
+        setEndpoints(event.data.endpoints as ApiEndpoint[]);
+      }
+    });
+
+    register('api_keys_update', (event) => {
+      // Key records change only on explicit key CRUD.
+      if (Array.isArray(event.data?.api_keys)) {
+        setApiKeys(event.data.api_keys as ApiKey[]);
+      }
+    });
+
+    // keepalive intentionally has no registered handler (no-op).
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleEvent = useCallback((event: WSEvent) => {
+    // Dispatch through the registry; unregistered types fall back to a no-op.
+    registryRef.current[event.type]?.(event);
+  }, []);
 
   const setFilter = useCallback((filter: Partial<GatewayFilter>) => {
     setGatewayFilter((prevFilter) => {
@@ -938,5 +968,6 @@ export function useEventStream(handlers: EventHandlers = {}) {
     removeRequest,
     setFilter,
     clearGatewayRequests,
+    registerHandler,
   };
 }

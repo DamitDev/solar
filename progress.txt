@@ -251,3 +251,38 @@ Tests (`apps/solar-webui/src/components/__tests__/RoutingFlow.test.tsx`):
 
 Feedback loops: `tsc --noEmit` clean, `pnpm lint` (eslint 0 errors + prettier)
 green, full webui vitest suite green (506 passed).
+
+## US-012 — Dynamically registered event handler registry (DONE)
+
+`useEventStream.ts` now dispatches socket events through a handler registry
+keyed by `WSMessageType` instead of the single hardcoded `switch` in
+`handleEvent`, so adding or overriding an event type is a one-line registration
+rather than editing a growing branch.
+
+- `registryRef` — `Partial<Record<WSMessageType, RegisteredHandler>>`, the
+  dispatch table. Built-in handlers are seeded once on mount (every captured
+  value — state setters, refs, and the stable `updateRequest`/`removeRequest`
+  callbacks — is render-stable, so the registry never needs rebuilding).
+- `registerHandler(type, fn)` — public helper (exposed on the returned hook
+  object) that writes a handler into the registry; consumers can register a new
+  type or override a built-in without touching the switch.
+- `handleEvent` — now a stable `[]` callback that resolves
+  `registryRef.current[event.type]?.(event)` and falls back to a no-op for
+  unregistered event types instead of leaving a case unhandled or crashing.
+- Each former `switch` case became a `register('<type>', handler)` entry with
+  byte-for-byte identical behaviour. The `awaitingSnapshotRef` gating is
+  preserved per `request_*`/`instance_state` handler (gated handlers `return`
+  early). `keepalive` registers no handler (no-op).
+- The `bindEvent` wiring in the connect effect is unchanged and still routes
+  through `handleEvent` → the registry.
+
+Tests (`apps/solar-webui/src/hooks/__tests__/useEventStream.test.ts`):
+- New: (a) a consumer-registered handler (`registerHandler('host_status', fn)`)
+  is dispatched for a bound socket event; (b) an event type with no registered
+  handler no-ops without crashing.
+- Existing US-006 snapshot consumer tests pass unchanged, proving the refactor
+  is behaviour-neutral for every prior event type.
+
+Feedback loops: `tsc --noEmit` clean, `pnpm lint` (eslint 0 errors + prettier)
+green, full webui vitest suite green (508 passed). No US-* references left in
+the code.
