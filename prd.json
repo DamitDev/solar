@@ -193,6 +193,24 @@
       "priority": 6,
       "passes": false,
       "notes": "Pure structural refactor: it must not change observable routing-view behaviour or the snapshot-gating semantics added in US-006. This is a precondition that keeps US-010 (removing now dead request-start aggregation) and any future event types cheap, since an event costs one registration instead of a switch clause. WebUI vitest for the existing event behaviours must stay green unchanged."
+    },
+    {
+      "id": "US-013",
+      "title": "Unify duplicate client-side type declarations",
+      "description": "As a developer, I want the snapshot and gateway-request wire shapes declared once instead of twice — once for the REST API client (api/types.ts) and again for the websocket client (useEventStream.ts) — so consumers of both paths code against a single source of truth and the two cannot drift.",
+      "acceptanceCriteria": [
+        "In apps/solar-webui/src/api/types.ts, keep one authoritative declaration for the routing snapshot payload and its sub-shapes (active request, instance state), currently duplicated as RoutingState/RoutingStateActiveRequest/RoutingStateInstance in api/types.ts vs RoutingSnapshot/ActiveRequestSnapshot/InstanceStateSnapshot in useEventStream.ts",
+        "The atomic instance-state data field is typed as the more specific InstanceStateData (not Record<string, unknown>) in the shared declaration, so snapshot instance-state consumers keep the stronger type",
+        "useEventStream.ts imports the shared snapshot types from @/api/types (via the existing type imports from @/api/types) instead of redeclaring them; its routing_snapshot handler and the snapshot-apply logic (requests/instanceStates/endpoints/build) compile against the shared schema with no behavior change",
+        "apps/solar-webui/src/components/routing/workload.ts snapshotRequests/snapshotInstanceStates (US-007) and the RoutingFlow fallback keep working unchanged against the unified type",
+        "GatewayRequestSummary is declared once in api/types.ts and imported by useEventStream.ts, removing the verbatim duplicate there",
+        "WS-only presentation types (RequestState, InstanceStateData, HostStatusData, GatewayFilter, InstanceSummary, LogEventData, etc.) stay defined in useEventStream.ts and are NOT moved, since they carry client-side view state (e.g. removing) the REST models do not",
+        "No new runtime circular import is introduced: api/types.ts must not import from useEventStream.ts",
+        "pnpm lint and typecheck pass; full webui vitest suite stays green"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "GET /api/routing/state and the WS routing_snapshot event intentionally carry the identical payload (US-005: 'returns the identical payload shape as the WS routing_snapshot event'), so the two declarations describe the same server wire contract and are candidates for a single source of truth. The duplicate GatewayRequestSummary predates the snapshot work but is the same shape, so fold it in. KEEP list: WS presentation types stay in useEventStream.ts. This is a pure type-structure refactor and does not change runtime behaviour; it is a precondition that makes US-009/010 consumers less fragile. Should be done as its own refactor, not folded into a feature story."
     }
   ]
 }
