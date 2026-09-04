@@ -17,8 +17,8 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { io, Socket } from 'socket.io-client';
 import solarClient from '@/api/client';
-import { buildRegistry } from '@/hooks/eventHandlers/registry';
-import type { DispatchContext, RegisteredHandler } from '@/hooks/eventHandlers/types';
+import { buildRegistry } from '@/hooks/eventStream/eventHandlers/registry';
+import type { DispatchContext, RegisteredHandler } from '@/hooks/eventStream/eventHandlers/types';
 import {
   ApiEndpoint,
   ApiKey,
@@ -55,16 +55,17 @@ export type WSMessageType =
   | 'api_keys_update'
   | 'keepalive';
 
-// Pull-progress utilities/types live in eventHandlers/pullProgress.ts.
-import type { PullProgressEvent } from '@/hooks/eventHandlers/pullProgress';
-export type { PullProgressData, PullProgressEvent } from '@/hooks/eventHandlers/pullProgress';
+// Pull-progress utilities/types live in eventHandlers/pullProgress.ts (this
+// module re-exports them so consumers keep importing from here).
+import type { PullProgressEvent } from '@/hooks/eventStream/eventHandlers/pullProgress';
+export type { PullProgressData, PullProgressEvent } from '@/hooks/eventStream/eventHandlers/pullProgress';
 export {
   PULL_PHASE_LABELS,
   PULL_PROGRESS_TERMINAL_GRACE_MS,
   PULL_PROGRESS_STALE_MS,
   isTerminalPullPhase,
   prunePullProgress,
-} from '@/hooks/eventHandlers/pullProgress';
+} from '@/hooks/eventStream/eventHandlers/pullProgress';
 
 export interface InstanceSummary {
   id: string;
@@ -336,7 +337,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
 
   // ---- event handler registry -------------------------------------------------
   // Each WS event type is a single registered handler instead of a growing
-  // switch branch. Built-ins live in apps/solar-webui/src/hooks/eventHandlers/
+  // switch branch. Built-ins live in this module's sibling eventHandlers/ dir
   // and are seeded once into the registry; consumers can extend or override it
   // via the public registerHandler without editing the dispatch.
   const registryRef = useRef<Partial<Record<WSMessageType, RegisteredHandler>>>({});

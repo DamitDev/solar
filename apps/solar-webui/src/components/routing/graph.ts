@@ -12,7 +12,7 @@
  */
 
 import { HostStatus, HostWithInstances, InstanceStatus } from '@/api/types';
-import { InstanceStateData, RequestState } from '@/hooks/useEventStream';
+import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
 import { seriesColor } from '@/components/charts/chartTheme';
 import { InstanceCell, buildCells, collator, isActiveRequest } from './workload';
 

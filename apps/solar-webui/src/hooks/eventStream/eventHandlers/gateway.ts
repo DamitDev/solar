@@ -1,5 +1,5 @@
 import type { ApiEndpoint, ApiKey } from '@/api/types';
-import type { GatewayRequestSummary } from '@/hooks/useEventStream';
+import type { GatewayRequestSummary } from '@/hooks/eventStream/useEventStream';
 import type { RegisteredHandler } from './types';
 
 export const handleGatewayRequest: RegisteredHandler = (event, ctx) => {

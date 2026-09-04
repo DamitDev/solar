@@ -1,5 +1,5 @@
 import type { LogMessage } from '@/api/types';
-import type { InstanceStateData, RequestState, RoutingSnapshot } from '@/hooks/useEventStream';
+import type { InstanceStateData, RequestState, RoutingSnapshot } from '@/hooks/eventStream/useEventStream';
 import type { RegisteredHandler } from './types';
 
 export const handleLog: RegisteredHandler = (event, ctx) => {

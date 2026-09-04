@@ -11,7 +11,7 @@ import {
   tickerRequests,
 } from '../workload';
 import { HostWithInstances, Instance } from '@/api/types';
-import { InstanceStateData, RequestState } from '@/hooks/useEventStream';
+import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
 
 function instance(id: string, alias: string, model = 'qwen3.6:35b', status: Instance['status'] = 'running') {
   return {

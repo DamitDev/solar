@@ -20,7 +20,7 @@ import { useEventStreamContext } from '@/context/EventStreamContext';
 import { useRoutingEventsContext } from '@/context/RoutingEventsContext';
 import { useFallbackPolling } from '@/hooks/useFallbackPolling';
 import { useInstances } from '@/hooks/useInstances';
-import { InstanceStateData, RequestState } from '@/hooks/useEventStream';
+import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
 import { cn } from '@/lib/utils';
 import { RequestTicker } from './routing/RequestTicker';
 import { SummaryBar } from './routing/SummaryBar';

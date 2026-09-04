@@ -1,4 +1,4 @@
-import { prunePullProgress } from '@/hooks/eventHandlers/pullProgress';
+import { prunePullProgress } from '@/hooks/eventStream/eventHandlers/pullProgress';
 import type { RegisteredHandler } from './types';
 
 export const handlePullProgress: RegisteredHandler = (event, ctx) => {
