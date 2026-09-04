@@ -177,6 +177,22 @@
       "priority": 10,
       "passes": false,
       "notes": "US-* ids belong in the PRD, not the code. Only this branch's committed comments are in scope."
+    },
+    {
+      "id": "US-012",
+      "title": "Dynamically registered event handler registry",
+      "description": "As a developer, I want useEventStream.ts to dispatch socket events through a registry of handlers registered per event type instead of the single hardcoded switch in handleEvent, so adding or removing an event type becomes a declarative one-line registration rather than editing a growing branch.",
+      "acceptanceCriteria": [
+        "In apps/solar-webui/src/hooks/useEventStream.ts, replace the hardcoded switch inside handleEvent with a handler registry mapping WSMessageType to a handler function, where each case in the current switch becomes a registered handler keyed by event type",
+        "Provide a public registration helper (e.g. registerHandler(type, fn)) and a private-by-default dispatch path (e.g. handleEvent/emit) so the hook can register built-in handlers and consumers can extend without editing the switch",
+        "Registry resolution falls back to a no-op for unregistered event types instead of leaving a case unhandled or crashing",
+        "All existing event types currently in the switch (initial_status, routing_snapshot, host_status, host_pending, host_pending_removed, instances_update, log, instance_state, host_health, request_start, request_routed, request_success, request_error, request_reroute, gateway_request, filter_status, intent_update, intent_removed, pull_progress, endpoints_update, api_keys_update, keepalive) retain the exact same behaviour after the refactor",
+        "The awaitingSnapshotRef gating currently checked per request_*/instance_state case is preserved intact for those registered handlers",
+        "Existing useEventStream.bindEvent wiring in the connect effect stays unchanged and still routes through the registry"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "Pure structural refactor: it must not change observable routing-view behaviour or the snapshot-gating semantics added in US-006. This is a precondition that keeps US-010 (removing now dead request-start aggregation) and any future event types cheap, since an event costs one registration instead of a switch clause. WebUI vitest for the existing event behaviours must stay green unchanged."
     }
   ]
 }
