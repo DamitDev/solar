@@ -11,7 +11,7 @@ import {
   terminalRequests,
   tickerRequests,
 } from '../workload';
-import { GatewayEventDTO, HostWithInstances, Instance } from '@/api/types';
+import { GatewayEventDTO, HostWithInstances, Instance, RoutingStateAggregates } from '@/api/types';
 import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
 
 function instance(id: string, alias: string, model = 'qwen3.6:35b', status: Instance['status'] = 'running') {
@@ -167,6 +167,70 @@ describe('buildCells', () => {
     const cells = buildCells({ hosts: [host('h1', 'alpha', [bare])], requests: [], getInstanceState: noState });
 
     expect(cells[0].alias).toBe('i7');
+  });
+});
+
+describe('buildCells snapshot aggregates', () => {
+  const hosts = [
+    host('h1', 'alpha', [instance('i1', 'chat', 'qwen3.6:35b'), instance('i2', 'embed', 'iris:110m')]),
+    host('h2', 'beta', [instance('i3', 'chat', 'qwen3.6:35b')]),
+  ];
+  const aggregates: RoutingStateAggregates = {
+    by_instance: { 'h1:i1': 2, 'h1:i2': 0, 'h2:i3': 5 },
+    by_host: { h1: 2, h2: 5 },
+    by_model: { chat: 7, embed: 0 },
+    by_endpoint: {},
+    queued: 1,
+    processing: 6,
+    errored: 0,
+  };
+
+  it('reads per-cell in-flight load from the aggregates, not the request Map', () => {
+    // The request Map is deliberately empty/stale here; the aggregates win.
+    const cells = buildCells({ hosts, requests: [], getInstanceState: noState, aggregates });
+
+    expect(cells.find((c) => c.instanceId === 'i1')!.inFlight).toBe(2);
+    expect(cells.find((c) => c.instanceId === 'i3')!.inFlight).toBe(5);
+  });
+
+  it('falls back to the request Map when no aggregates are supplied', () => {
+    const cells = buildCells({
+      hosts,
+      requests: [request({ host_id: 'h1', instance_id: 'i2' }) as RequestState],
+      getInstanceState: noState,
+    });
+
+    expect(cells.find((c) => c.instanceId === 'i2')!.inFlight).toBe(1);
+  });
+});
+
+describe('summarizeFlow snapshot aggregates', () => {
+  const hosts = [host('h1', 'alpha', [instance('i1', 'a')], 'online')];
+
+  it('uses the server totals instead of tallying the client Map', () => {
+    const totals = summarizeFlow(
+      hosts,
+      // A stale/empty client map must not drive the header numbers.
+      [],
+      2,
+      { by_instance: {}, by_host: {}, by_model: {}, by_endpoint: {}, queued: 3, processing: 4, errored: 1 },
+    );
+
+    expect(totals).toMatchObject({ pending: 3, processing: 4, errored: 1, endpoints: 2 });
+  });
+
+  it('still counts hosts and instances fleet-wide alongside aggregate totals', () => {
+    const totals = summarizeFlow(hosts, [], 0, {
+      by_instance: {},
+      by_host: {},
+      by_model: {},
+      by_endpoint: {},
+      queued: 0,
+      processing: 0,
+      errored: 0,
+    });
+
+    expect(totals).toMatchObject({ hostsOnline: 1, hostsTotal: 1, instancesRunning: 1, instancesTotal: 1 });
   });
 });
 

@@ -14,6 +14,7 @@ import {
   GatewayEventDTO,
   getModelCategory,
   RoutingState,
+  RoutingStateAggregates,
 } from '@/api/types';
 import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
 
@@ -68,6 +69,9 @@ interface BuildOptions {
   hosts: HostWithInstances[];
   requests: Iterable<RequestState>;
   getInstanceState: (hostId: string, instanceId: string) => InstanceStateData | null | undefined;
+  /** Server-computed "host:instance" -> in-flight counts. When supplied, the
+   * cell load bars read these instead of the client request Map. */
+  aggregates?: RoutingStateAggregates | null;
   /** Substring match over instance alias, model, and host name. */
   search?: string;
   /** Drop instances that are not running. */
@@ -85,10 +89,14 @@ export function buildCells({
   hosts,
   requests,
   getInstanceState,
+  aggregates,
   search = '',
   runningOnly = false,
 }: BuildOptions): InstanceCell[] {
-  const inFlight = countInFlightByInstance(requests);
+  const inFlight =
+    aggregates?.by_instance != null
+      ? new Map(Object.entries(aggregates.by_instance))
+      : countInFlightByInstance(requests);
   const terms = search.toLowerCase().split(/\s+/).filter(Boolean);
   const cells: InstanceCell[] = [];
 
@@ -138,15 +146,23 @@ export function summarizeFlow(
   hosts: HostWithInstances[],
   requests: Iterable<RequestState>,
   endpointCount: number,
+  aggregates?: RoutingStateAggregates | null,
 ): FlowTotals {
-  let pending = 0;
-  let processing = 0;
-  let errored = 0;
-  for (const request of requests) {
-    if (request.removing) continue;
-    if (request.status === 'pending') pending += 1;
-    else if (request.status === 'processing' || request.status === 'routed') processing += 1;
-    else if (request.status === 'error') errored += 1;
+  // When the server snapshot's aggregates are available they are authoritative
+  // for the request tallies; otherwise fall back to the client Map.
+  let pending = aggregates?.queued ?? 0;
+  let processing = aggregates?.processing ?? 0;
+  let errored = aggregates?.errored ?? 0;
+  if (!aggregates) {
+    pending = 0;
+    processing = 0;
+    errored = 0;
+    for (const request of requests) {
+      if (request.removing) continue;
+      if (request.status === 'pending') pending += 1;
+      else if (request.status === 'processing' || request.status === 'routed') processing += 1;
+      else if (request.status === 'error') errored += 1;
+    }
   }
 
   let instancesRunning = 0;
