@@ -439,9 +439,8 @@ export function useEventStream(handlers: EventHandlers = {}) {
           if (event.data) {
             // Reset the routing view to the authoritative server snapshot.
             const snap = event.data as RoutingSnapshot;
-            const requestMap = new Map<string, RequestState>();
-            for (const r of snap.active_requests ?? []) {
-              requestMap.set(r.request_id, {
+            const requestMap: Map<string, RequestState> = (snap.active_requests ?? []).reduce((acc, r) => {
+              acc.set(r.request_id, {
                 request_id: r.request_id,
                 model: r.model ?? undefined,
                 resolved_model: r.resolved_model ?? undefined,
@@ -451,12 +450,13 @@ export function useEventStream(handlers: EventHandlers = {}) {
                 timestamp: r.timestamp ?? new Date().toISOString(),
                 status: r.status === 'queued' ? 'pending' : 'processing',
               });
-            }
+              return acc;
+            }, new Map());
             setRequests(requestMap);
-            const states = new Map<string, InstanceStateData>();
-            for (const s of snap.instance_states ?? []) {
-              states.set(`${s.host_id}:${s.instance_id}`, s.data);
-            }
+            const states: Map<string, InstanceStateData> = (snap.instance_states ?? []).reduce((acc, s) => {
+              acc.set(`${s.host_id}:${s.instance_id}`, s.data);
+              return acc;
+            }, new Map());
             setInstanceStates(states);
             if (Array.isArray(snap.endpoints)) {
               setEndpoints(snap.endpoints);
