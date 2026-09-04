@@ -66,6 +66,7 @@ export const handleRoutingSnapshot: RegisteredHandler = (event, ctx) => {
     if (Array.isArray(snap.endpoints)) {
       ctx.setEndpoints(() => snap.endpoints);
     }
+    ctx.setAggregates(snap.aggregates ?? null);
     ctx.awaitingSnapshotRef.current = false;
     h.onRoutingSnapshot?.(snap);
     ctx.snapshotListenersRef.current.forEach((listener) => listener(snap));

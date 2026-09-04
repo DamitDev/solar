@@ -30,6 +30,7 @@ import {
   DrainState,
   InstanceStateData,
   RoutingState,
+  RoutingStateAggregates,
   GatewayRequestSummary,
 } from '@/api/types';
 
@@ -37,7 +38,7 @@ import {
 // (REST client and this WS client code against the same schema, so they cannot
 // drift). Re-exported here so existing consumers can keep importing from this
 // module unchanged.
-export type { InstanceStateData, RoutingState, GatewayRequestSummary } from '@/api/types';
+export type { InstanceStateData, RoutingState, RoutingStateAggregates, GatewayRequestSummary } from '@/api/types';
 
 // Event type definitions
 export type WSMessageType =
@@ -212,6 +213,10 @@ export function useEventStream(handlers: EventHandlers = {}) {
   // API key records, event-driven (api_keys_update; cascades on
   // endpoint delete arrive as a list refresh from the same endpoint).
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
+  // Server-computed routing aggregates: the authoritative source for the routing
+  // view's load bars and totals, so they stay consistent fleet-wide instead of
+  // being re-derived from the transient client Map.
+  const [aggregates, setAggregates] = useState<RoutingStateAggregates | null>(null);
 
   const socketRef = useRef<Socket | null>(null);
   const handlersRef = useRef(handlers);
@@ -311,6 +316,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
       setPullProgress,
       setEndpoints,
       setApiKeys,
+      setAggregates,
       awaitingSnapshotRef,
       gatewayFilterRef,
       handlersRef,
@@ -390,6 +396,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
         setRequests(new Map());
         setInstanceStates(new Map());
         setEndpoints([]);
+        setAggregates(null);
       });
 
       webuiSocket.on('disconnect', (reason) => {
@@ -545,6 +552,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
     pullProgress,
     endpoints,
     apiKeys,
+    aggregates,
     getInstanceLogs,
     getInstanceState,
     getPullProgress,
