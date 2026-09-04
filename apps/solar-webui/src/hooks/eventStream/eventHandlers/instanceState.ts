@@ -1,5 +1,5 @@
-import type { LogMessage } from '@/api/types';
-import type { InstanceStateData, RequestState, RoutingSnapshot } from '@/hooks/eventStream/useEventStream';
+import type { LogMessage, RoutingState } from '@/api/types';
+import type { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
 import type { RegisteredHandler } from './types';
 
 export const handleLog: RegisteredHandler = (event, ctx) => {
@@ -43,7 +43,7 @@ export const handleRoutingSnapshot: RegisteredHandler = (event, ctx) => {
   const h = ctx.handlersRef.current;
   if (event.data) {
     // Reset the routing view to the authoritative server snapshot.
-    const snap = event.data as RoutingSnapshot;
+    const snap = event.data as RoutingState;
     const requestMap: Map<string, RequestState> = (snap.active_requests ?? []).reduce((acc, r) => {
       acc.set(r.request_id, {
         request_id: r.request_id,

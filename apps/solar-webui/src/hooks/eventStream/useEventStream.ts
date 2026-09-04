@@ -28,7 +28,16 @@ import {
   Intent,
   ActiveJobSummary,
   DrainState,
+  InstanceStateData,
+  RoutingState,
+  GatewayRequestSummary,
 } from '@/api/types';
+
+// Wire shapes describing the shared server contract live once in @/api/types
+// (REST client and this WS client code against the same schema, so they cannot
+// drift). Re-exported here so existing consumers can keep importing from this
+// module unchanged.
+export type { InstanceStateData, RoutingState, GatewayRequestSummary } from '@/api/types';
 
 // Event type definitions
 export type WSMessageType =
@@ -103,21 +112,6 @@ export interface LogEventData {
   level?: string;
 }
 
-export interface InstanceStateData {
-  busy: boolean;
-  phase?: string | null;
-  prefill_progress?: number | null;
-  active_slots: number;
-  slot_id?: number | null;
-  task_id?: number | null;
-  prefill_prompt_tokens?: number | null;
-  generated_tokens?: number | null;
-  decode_tps?: number | null;
-  decode_ms_per_token?: number | null;
-  checkpoint_index?: number | null;
-  checkpoint_total?: number | null;
-}
-
 export interface RoutingEventData {
   request_id: string;
   model?: string;
@@ -138,69 +132,6 @@ export interface RoutingEventData {
   completion_tokens?: number;
   total_tokens?: number;
   decode_tps?: number;
-}
-
-/** One in-flight request as authored by the server snapshot. */
-export interface ActiveRequestSnapshot {
-  request_id: string;
-  model?: string | null;
-  resolved_model?: string | null;
-  host_id?: string | null;
-  host_name?: string | null;
-  instance_id?: string | null;
-  attempt?: number | null;
-  timestamp?: string | null;
-  /** 'queued' when not yet routed, else 'processing'. */
-  status: 'queued' | 'processing';
-}
-
-/** One host:instance runtime state as authored by the server snapshot. */
-export interface InstanceStateSnapshot {
-  host_id: string;
-  instance_id: string;
-  timestamp?: string | null;
-  data: InstanceStateData;
-}
-
-/** The authoritative fleet-state snapshot pushed to a freshly connected client. */
-export interface RoutingSnapshot {
-  schema_version: number;
-  generated_at: string;
-  hosts?: unknown[];
-  active_requests: ActiveRequestSnapshot[];
-  instance_states: InstanceStateSnapshot[];
-  endpoints: ApiEndpoint[];
-  aggregates?: { [k: string]: unknown };
-  pending_hosts?: unknown[];
-}
-
-// Gateway request summary (completed request)
-export interface GatewayRequestSummary {
-  request_id: string;
-  request_type?: string; // chat, completion, embedding, classification, etc.
-  status: 'success' | 'error' | 'missed';
-  model?: string;
-  resolved_model?: string;
-  endpoint?: string;
-  endpoint_id?: string;
-  client_ip?: string;
-  stream?: boolean;
-  attempts: number;
-  start_timestamp?: string;
-  end_timestamp: string;
-  duration_s?: number;
-  host_id?: string;
-  host_name?: string;
-  instance_id?: string;
-  instance_url?: string;
-  error_message?: string;
-  prompt_tokens?: number;
-  /** Prompt-cache hit portion of prompt_tokens; absent = not cache-aware. */
-  cached_tokens?: number;
-  completion_tokens?: number;
-  total_tokens?: number;
-  decode_tps?: number;
-  decode_ms_per_token?: number;
 }
 
 // Gateway filter configuration
@@ -248,7 +179,7 @@ export interface EventHandlers {
   onLog?: (hostId: string, instanceId: string, data: LogEventData) => void;
   onInstanceState?: (hostId: string, instanceId: string, data: InstanceStateData) => void;
   onRoutingEvent?: (type: WSMessageType, data: RoutingEventData) => void;
-  onRoutingSnapshot?: (snapshot: RoutingSnapshot) => void;
+  onRoutingSnapshot?: (snapshot: RoutingState) => void;
   onGatewayRequest?: (data: GatewayRequestSummary) => void;
   onFilterStatus?: (filter: GatewayFilter) => void;
   onIntentUpdate?: (intent: Intent) => void;

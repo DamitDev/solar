@@ -318,3 +318,39 @@ Tests (`apps/solar-webui/src/hooks/__tests__/useEventStream.test.ts`):
 Feedback loops: `tsc --noEmit` clean, `pnpm lint` (eslint 0 errors + prettier)
 green, full webui vitest suite green (508 passed). No US-* references left in
 the code.
+
+## US-013 — Unify duplicate client-side type declarations (DONE)
+
+The snapshot and gateway-request wire shapes are now declared once, in
+`apps/solar-webui/src/api/types.ts`, so the REST client (`getRoutingState`) and
+the WS client (`useEventStream`) code against a single source of truth and the
+two cannot drift (GET /api/routing/state and the WS `routing_snapshot` event
+carry the identical payload by design, US-005).
+
+- `api/types.ts` now owns the authoritative snapshot family. The atomic
+  instance-state data field is typed as the specific `InstanceStateData` (it
+  was `Record<string, unknown>` in `RoutingStateInstance`); `InstanceStateData`
+  itself moved here so the shared declaration can reference it without
+  `api/types.ts` importing from `useEventStream.ts`. The shared
+  `RoutingStateActiveRequest` includes `endpoint`, matching the server's
+  `ActiveRequestEntry` (the old WS `ActiveRequestSnapshot` was missing it).
+- `useEventStream.ts` imports `InstanceStateData`, `RoutingState` and
+  `GatewayRequestSummary` from `@/api/types` instead of redeclaring them, and
+  re-exports `InstanceStateData`/`RoutingState`/`GatewayRequestSummary` so
+  consumers that keep importing from the hook module are unchanged. The
+  duplicate `GatewayRequestSummary` and the duplicate snapshot interfaces
+  (`RoutingSnapshot`/`ActiveRequestSnapshot`/`InstanceStateSnapshot`) are gone.
+- `eventHandlers/instanceState.ts` (routing_snapshot handler), `gateway.ts`
+  and `types.ts` now import `RoutingState`/`GatewayRequestSummary` from
+  `@/api/types` directly.
+- WS-only presentation types (`RequestState`, `HostStatusData`, `InstanceSummary`,
+  `LogEventData`, `GatewayFilter`, etc.) stay defined in `useEventStream.ts`;
+  they are not folded into the REST models because they carry client-side view
+  state (e.g. `removing`) the wire contract does not.
+- `workload.ts::snapshotInstanceStates` lost the now-redundant
+  `data as unknown as InstanceStateData` cast (the field is already typed).
+- No circular import introduced: `api/types.ts` does not import from
+  `useEventStream.ts`.
+
+Feedback loops: `tsc --noEmit` clean, `pnpm lint` (eslint 0 errors + prettier)
+green, full webui vitest suite green (508 passed).
