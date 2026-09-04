@@ -1,9 +1,8 @@
 import type { MutableRefObject } from 'react';
-import type { ApiEndpoint, ApiKey, Intent, LogMessage, PendingHost } from '@/api/types';
+import type { ApiEndpoint, ApiKey, GatewayRequestSummary, Intent, LogMessage, PendingHost } from '@/api/types';
 import type {
   EventHandlers,
   GatewayFilter,
-  GatewayRequestSummary,
   HostStatusData,
   InstanceStateData,
   InstanceSummary,

@@ -202,7 +202,7 @@ export function snapshotRequests(snapshot: RoutingState | null): Map<string, Req
 export function snapshotInstanceStates(snapshot: RoutingState | null): Map<string, InstanceStateData> {
   if (!snapshot) return new Map();
   return (snapshot.instance_states ?? []).reduce((acc, s) => {
-    acc.set(`${s.host_id}:${s.instance_id}`, s.data as unknown as InstanceStateData);
+    acc.set(`${s.host_id}:${s.instance_id}`, s.data);
     return acc;
   }, new Map<string, InstanceStateData>());
 }
