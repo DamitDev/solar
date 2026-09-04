@@ -206,3 +206,48 @@ processing.
 
 Feedback loops: `pnpm lint` (eslint + prettier) and `tsc` pass; full webui
 vitest suite green (505 passed). No US-* references left in the code.
+
+## US-007 — WebUI REST fallback polling (DONE)
+
+The Routing page now polls the authoritative snapshot when the socket is down,
+so it keeps showing correct live state instead of the last WS-derived frame.
+
+- `apps/solar-webui/src/api/client.ts` adds `getRoutingState()` hitting
+  `GET /api/routing/state`, returning a typed `RoutingState` added to
+  `apps/solar-webui/src/api/types.ts` that mirrors the US-003/05 snapshot shape
+  (`active_requests`, `instance_states`, `endpoints`, `aggregates`,
+  `schema_version`, `generated_at`).
+- `apps/solar-webui/src/components/routing/workload.ts` adds two snapshot
+  adapters reused by the fallback: `snapshotRequests()` — maps
+  `active_requests` onto the client `requests` Map with the exact US-006
+  mapping (`queued`→`pending`, `processing` kept) — and
+  `snapshotInstanceStates()` — maps `instance_states` onto the `host:instance`
+  Map.
+- `apps/solar-webui/src/components/RoutingFlow.tsx` now derives the routing view
+  solely from the snapshot (connected mode uses the US-006 WS-seeded
+  eventEndpoints + context requests; disconnected mode swaps to a
+  `useFallbackPolling(enabled: !isConnected, 10s)` poll of `getRoutingState()`).
+
+  Removed the now-redundant dual path: the local `endpoints` state, the
+  `getEndpoints()` fallback poll, and the `eventEndpoints`/`getEndpoints()`
+  bootstrap effect. `endpoints_update`/`getEndpoints()` are no longer fetched
+  for the routing view — the snapshot (WS or REST) supplies both the endpoints
+  and the active requests. `getInstanceState` is honoured from the snapshot's
+  `instance_states` while disconnected so load bars stay fresh.
+
+  The old `getEndpoints()`-style bootstrap on a connected-but-silent socket is
+  intentionally gone: the US-006 `routing_snapshot` events are what seed the
+  connected view now.
+
+- The endpoints dashboard and gateway-stats code are untouched (out of scope).
+
+Tests (`apps/solar-webui/src/components/__tests__/RoutingFlow.test.tsx`):
+- Existing tests updated to seed `eventStream.endpoints` (the WS-snapshot source)
+  instead of stubbing `getEndpoints()`.
+- New: (a) connected mode prefers event endpoints and never calls
+  `getRoutingState`; (b) when disconnected, RoutingFlow polls `getRoutingState`
+  and the snapshot's endpoints render; (c) when disconnected, the snapshot's
+  `active_requests` show up in the request ticker.
+
+Feedback loops: `tsc --noEmit` clean, `pnpm lint` (eslint 0 errors + prettier)
+green, full webui vitest suite green (506 passed).

@@ -15,19 +15,19 @@ import ReactFlow, {
 import 'reactflow/dist/style.css';
 import { Activity, Search, X } from 'lucide-react';
 import solarClient from '@/api/client';
-import { ApiEndpoint } from '@/api/types';
+import { RoutingState } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
 import { useRoutingEventsContext } from '@/context/RoutingEventsContext';
 import { useFallbackPolling } from '@/hooks/useFallbackPolling';
 import { useInstances } from '@/hooks/useInstances';
-import { RequestState } from '@/hooks/useEventStream';
+import { InstanceStateData, RequestState } from '@/hooks/useEventStream';
 import { cn } from '@/lib/utils';
 import { RequestTicker } from './routing/RequestTicker';
 import { SummaryBar } from './routing/SummaryBar';
 import { FlowGraph, ModelNodeData, aliasOfRequest, buildFlowGraph, traceRequest, traceThrough } from './routing/graph';
 import { Bounds, LayoutResult, atLeast, boundsOf, layoutGraph } from './routing/layout';
 import { EndpointNode, GatewayNode, HostNode, ModelNode, OverflowNode } from './routing/nodes';
-import { summarizeFlow, tickerRequests } from './routing/workload';
+import { snapshotInstanceStates, snapshotRequests, summarizeFlow, tickerRequests } from './routing/workload';
 
 const EDGE_COLORS = { idle: '#434C5E', ready: '#4C566A', active: '#88C0D0', error: '#BF616A' } as const;
 
@@ -71,42 +71,53 @@ export function RoutingFlow() {
 }
 
 function RoutingFlowCanvas() {
-  const { requests, removeRequest } = useRoutingEventsContext();
+  const { requests: wsRequests, removeRequest } = useRoutingEventsContext();
   const { getInstanceState, endpoints: eventEndpoints, isConnected } = useEventStreamContext();
   const { hosts, loading } = useInstances();
   const { fitBounds } = useReactFlow();
   const canvas = { width: useStore(canvasWidth), height: useStore(canvasHeight) };
 
-  const [endpoints, setEndpoints] = useState<ApiEndpoint[]>([]);
   const [search, setSearch] = useState('');
   const [runningOnly, setRunningOnly] = useState(false);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [showAllHosts, setShowAllHosts] = useState<ReadonlySet<string>>(new Set());
   const [trace, setTrace] = useState<Trace | null>(null);
 
-  // endpoints_update only fires on CRUD, so a fresh socket has no list yet.
+  // While the socket is down the routing view falls back to the authoritative
+  // snapshot, which supplies both the endpoints and the active requests in a
+  // single payload. The WS `routing_snapshot` already seeds eventEndpoints on
+  // connect, so a healthy socket never needs the REST side.
+  const [fallback, setFallback] = useState<RoutingState | null>(null);
   useFallbackPolling(
     () => {
       solarClient
-        .getEndpoints()
-        .then(setEndpoints)
-        .catch((err) => console.error('Failed to fetch endpoints:', err));
+        .getRoutingState()
+        .then(setFallback)
+        .catch((err) => console.error('Failed to fetch routing state:', err));
     },
     { enabled: !isConnected, intervalMs: 10000 },
   );
 
-  useEffect(() => {
-    if (eventEndpoints.length > 0) {
-      setEndpoints(eventEndpoints);
-      return;
-    }
-    solarClient
-      .getEndpoints()
-      .then(setEndpoints)
-      .catch((err) => console.error('Failed to fetch endpoints:', err));
-  }, [eventEndpoints]);
-
+  const requests = useMemo(
+    () => (isConnected ? wsRequests : snapshotRequests(fallback)),
+    [isConnected, wsRequests, fallback],
+  );
   const requestList = useMemo(() => Array.from(requests.values()), [requests]);
+
+  const endpoints = useMemo(
+    () => (isConnected ? eventEndpoints : (fallback?.endpoints ?? [])),
+    [isConnected, eventEndpoints, fallback],
+  );
+
+  const fallbackStates = useMemo(() => snapshotInstanceStates(fallback), [fallback]);
+
+  const getState = useCallback(
+    (hostId: string, instanceId: string): InstanceStateData | null | undefined => {
+      if (isConnected) return getInstanceState(hostId, instanceId);
+      return fallbackStates.get(`${hostId}:${instanceId}`) ?? null;
+    },
+    [isConnected, getInstanceState, fallbackStates],
+  );
 
   // A search is already a narrow answer, so showing its hosts costs nothing
   // and saves opening each match by hand.
@@ -118,14 +129,14 @@ function RoutingFlowCanvas() {
         hosts,
         requests: requestList,
         endpoints,
-        getInstanceState,
+        getInstanceState: getState,
         search,
         runningOnly,
         expanded,
         expandAll: searching,
         showAllHosts,
       }),
-    [hosts, requestList, endpoints, getInstanceState, search, runningOnly, expanded, searching, showAllHosts],
+    [hosts, requestList, endpoints, getState, search, runningOnly, expanded, searching, showAllHosts],
   );
 
   const layout = useStableLayout(graph);

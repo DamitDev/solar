@@ -115,8 +115,8 @@
         "pnpm lint and typecheck pass"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": "Session-local filters (host_ids) continue to apply on the client after applying the snapshot. Gateway-history UI is untouched and still uses its own event source."
+      "passes": true,
+      "notes": "Session-local filters (host_ids) continue to apply on the client after applying the snapshot. Gateway-history UI is untouched and still uses its own event source. Done: api/client.ts adds getRoutingState() hitting GET /api/routing/state (typed api/types.ts RoutingState mirroring the WS routing_snapshot payload); RoutingFlow.tsx now sources the routing view solely from the snapshot — connected mode uses the WS-seeded eventEndpoints + context requests (US-006), disconnected mode swaps to useFallbackPolling(enabled:!isConnected, 10s) that fetches getRoutingState() and derives requests/endpoints/instance-states from it via workload.ts snapshotRequests/snapshotInstanceStates helpers (queued->pending mapping identical to US-006); removed the old local endpoints state, the getEndpoints() bootstrap effect, and the getEndpoints()/endpoints_update dual path. Tests: RoutingFlow.test.tsx updated to seed eventEndpoints (WS snapshot) instead of getEndpoints(), and new fallback tests assert (a) event endpoints preferred while connected with no REST call, (b) getRoutingState polled when the socket is down and its endpoints render, (c) snapshot active_requests appear in the ticker; workload.ts getEndpoints import dropped. Feedback loops: tsc clean, pnpm lint (0 errors), full webui vitest green (506 passed)."
     },
     {
       "id": "US-008",
