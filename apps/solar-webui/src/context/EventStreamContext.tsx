@@ -19,7 +19,7 @@ import {
   GatewayRequestSummary,
   GatewayFilter,
   PullProgressEvent,
-} from '@/hooks/useEventStream';
+} from '@/hooks/eventStream/useEventStream';
 import { LogMessage, PendingHost, Intent, ApiEndpoint, ApiKey } from '@/api/types';
 
 interface EventStreamContextValue {

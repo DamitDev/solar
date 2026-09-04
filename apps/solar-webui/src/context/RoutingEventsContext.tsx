@@ -8,7 +8,7 @@
 
 import { createContext, useCallback, useContext, useMemo, useState, ReactNode } from 'react';
 import { EventStreamProvider, useEventStreamContext, HostStatusData, RequestState } from './EventStreamContext';
-import { InstanceSummary } from '@/hooks/useEventStream';
+import { InstanceSummary } from '@/hooks/eventStream/useEventStream';
 import { PendingHost } from '@/api/types';
 
 export interface RoutingEvent {

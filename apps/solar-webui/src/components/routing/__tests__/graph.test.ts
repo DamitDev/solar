@@ -13,7 +13,7 @@ import {
   traceThrough,
 } from '../graph';
 import { HostWithInstances, Instance } from '@/api/types';
-import { InstanceStateData, RequestState } from '@/hooks/useEventStream';
+import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
 
 function instance(id: string, alias: string, model = alias, status: Instance['status'] = 'running') {
   return {

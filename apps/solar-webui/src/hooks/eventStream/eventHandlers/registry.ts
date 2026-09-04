@@ -1,4 +1,4 @@
-import type { WSMessageType } from '@/hooks/useEventStream';
+import type { WSMessageType } from '@/hooks/eventStream/useEventStream';
 import type { RegisteredHandler } from './types';
 import { handleApiKeysUpdate, handleEndpointsUpdate, handleGatewayRequest, handleFilterStatus } from './gateway';
 import {
