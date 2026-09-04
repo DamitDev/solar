@@ -115,3 +115,39 @@ describe('useEventStream snapshot consumer (US-006)', () => {
     expect(result.current.requests.get('fresh')?.host_id).toBe('h2');
   });
 });
+
+describe('useEventStream handler registry', () => {
+  beforeEach(() => {
+    socketHandlers = {};
+    connectCallback = null;
+    vi.clearAllMocks();
+  });
+
+  it('routes events through a consumer-registered handler via registerHandler', () => {
+    const custom = vi.fn();
+    const { result } = renderHook(() => useEventStream());
+    act(() => {
+      triggerConnect();
+      // Override a bound built-in event with a consumer handler.
+      result.current.registerHandler('host_status', custom);
+    });
+    act(() => {
+      emit('host_status', { host_id: 'h1', status: 'online' });
+    });
+    expect(custom).toHaveBeenCalledTimes(1);
+    expect(custom.mock.calls[0][0]).toMatchObject({ type: 'host_status', data: { host_id: 'h1' } });
+  });
+
+  it('no-ops without crashing for an event type with no registered handler', () => {
+    const { result } = renderHook(() => useEventStream());
+    act(() => {
+      triggerConnect();
+    });
+    expect(() => {
+      act(() => {
+        emit('request_start', { request_id: 'never-gated' });
+      });
+    }).not.toThrow();
+    expect(result.current.requests.get('never-gated')).toBeUndefined();
+  });
+});
