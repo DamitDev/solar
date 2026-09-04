@@ -6,7 +6,7 @@
  * it both untestable and prone to overlap.
  */
 
-import { HostStatus, HostWithInstances, Instance, InstanceStatus, getModelCategory } from '@/api/types';
+import { HostStatus, HostWithInstances, Instance, InstanceStatus, getModelCategory, RoutingState } from '@/api/types';
 import { InstanceStateData, RequestState } from '@/hooks/useEventStream';
 
 /** Statuses that mean a request is still occupying capacity. */
@@ -171,6 +171,40 @@ export function tickerRequests(requests: Iterable<RequestState>, limit = 40): Re
     .filter((r) => isActiveRequest(r) || r.status === 'error')
     .sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? ''))
     .slice(0, limit);
+}
+
+/**
+ * Maps a server routing snapshot's active requests onto the client request Map.
+ *
+ * The REST fallback reuses the exact same mapping the WS `routing_snapshot`
+ * handler applies, so a disconnected client sees the same view it
+ * would over a healthy socket. `queued` becomes `pending` (not yet routed);
+ * `processing` is kept as-is.
+ */
+export function snapshotRequests(snapshot: RoutingState | null): Map<string, RequestState> {
+  if (!snapshot) return new Map();
+  return (snapshot.active_requests ?? []).reduce((acc, r) => {
+    acc.set(r.request_id, {
+      request_id: r.request_id,
+      model: r.model ?? undefined,
+      resolved_model: r.resolved_model ?? undefined,
+      host_id: r.host_id ?? undefined,
+      host_name: r.host_name ?? undefined,
+      instance_id: r.instance_id ?? undefined,
+      timestamp: r.timestamp ?? new Date().toISOString(),
+      status: r.status === 'queued' ? 'pending' : 'processing',
+    });
+    return acc;
+  }, new Map<string, RequestState>());
+}
+
+/** Maps a server routing snapshot's instance states onto the `host:instance` Map. */
+export function snapshotInstanceStates(snapshot: RoutingState | null): Map<string, InstanceStateData> {
+  if (!snapshot) return new Map();
+  return (snapshot.instance_states ?? []).reduce((acc, s) => {
+    acc.set(`${s.host_id}:${s.instance_id}`, s.data as unknown as InstanceStateData);
+    return acc;
+  }, new Map<string, InstanceStateData>());
 }
 
 /** Fraction of the instance's slots in use, for the cell's load bar. */
