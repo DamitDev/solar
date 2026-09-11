@@ -1,4 +1,4 @@
-"""Tests for the /api/routing management route (US-005).
+"""Tests for the /api/routing management route.
 
 The REST mirror returns the exact payload produced by the snapshot builder (so
 it is identical in shape to the ``routing_snapshot`` WS event) and enforces the

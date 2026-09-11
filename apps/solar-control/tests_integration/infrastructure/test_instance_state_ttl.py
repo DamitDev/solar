@@ -1,4 +1,4 @@
-"""infrastructure: US-001 — per-instance runtime state TTL expiry (marker: infrastructure).
+"""infrastructure: per-instance runtime state TTL expiry (marker: infrastructure).
 
 The store is exercised against the live session Redis (``stack.db_env``), not a
 mocked client, so TTL expiry is proven against a real store: a write with a

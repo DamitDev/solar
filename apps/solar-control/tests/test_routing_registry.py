@@ -1,4 +1,4 @@
-"""Tests for the per-request active registry on ``RoutingStore`` (US-002).
+"""Tests for the per-request active registry on ``RoutingStore``.
 
 The store runs against a dict-based fake Redis (the store itself is the real
 ``RoutingStore``). The fake records every ``expire`` issued so tests can assert

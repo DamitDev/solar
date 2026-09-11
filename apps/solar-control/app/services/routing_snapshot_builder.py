@@ -1,9 +1,9 @@
-"""Snapshot builder for the Routing view (US-003).
+"""Snapshot builder for the Routing view.
 
 Composes hosts (status + drain + health), instances per host, instance states,
 active requests with server-computed tallies, endpoints, and pending hosts into
 one authoritative :class:`RoutingSnapshot`. The same payload is emitted on
-WebUI connect (US-004) and mirrored over REST (US-005).
+WebUI connect and mirrored over REST.
 
 The aggregate arithmetic (inFlight per instance/host/model/endpoint and the
 queued/processing/errored totals) previously lived client-side in
