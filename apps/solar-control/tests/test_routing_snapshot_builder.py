@@ -1,8 +1,8 @@
-"""Tests for app.services.routing_snapshot_builder — the snapshot builder (US-003).
+"""Tests for :mod:`app.services.routing_snapshot_builder`.
 
 Patches the store/db namespaces the builder imports directly and verifies the
 composed payload shape, the server-computed tallies, and the field contract the
-WebUI consumers (US-006/007/009) code against.
+WebUI consumers code against.
 """
 
 from contextlib import ExitStack
