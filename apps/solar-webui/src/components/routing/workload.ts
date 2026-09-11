@@ -50,28 +50,16 @@ export function modelOf(instance: Instance): string {
   return config?.model || config?.model_id || '';
 }
 
-/** How many unfinished requests each instance is currently holding. */
-export function countInFlightByInstance(requests: Iterable<RequestState>): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const request of requests) {
-    if (!isActiveRequest(request) || !request.instance_id) continue;
-    const key = cellKey(request.host_id ?? '', request.instance_id);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return counts;
-}
-
 export function cellKey(hostId: string, instanceId: string): string {
   return `${hostId}:${instanceId}`;
 }
 
 interface BuildOptions {
   hosts: HostWithInstances[];
-  requests: Iterable<RequestState>;
   getInstanceState: (hostId: string, instanceId: string) => InstanceStateData | null | undefined;
-  /** Server-computed "host:instance" -> in-flight counts. When supplied, the
-   * cell load bars read these instead of the client request Map. */
-  aggregates?: RoutingStateAggregates | null;
+  /** Server-computed "host:instance" -> in-flight counts, authoritative for the
+   * cell load bars. */
+  aggregates: RoutingStateAggregates;
   /** Substring match over instance alias, model, and host name. */
   search?: string;
   /** Drop instances that are not running. */
@@ -87,16 +75,12 @@ export const collator = new Intl.Collator(undefined, { numeric: true, sensitivit
  */
 export function buildCells({
   hosts,
-  requests,
   getInstanceState,
   aggregates,
   search = '',
   runningOnly = false,
 }: BuildOptions): InstanceCell[] {
-  const inFlight =
-    aggregates?.by_instance != null
-      ? new Map(Object.entries(aggregates.by_instance))
-      : countInFlightByInstance(requests);
+  const inFlight = new Map(Object.entries(aggregates.by_instance));
   const terms = search.toLowerCase().split(/\s+/).filter(Boolean);
   const cells: InstanceCell[] = [];
 
@@ -144,27 +128,10 @@ export interface FlowTotals {
 /** The always-same-size header numbers, independent of fleet size. */
 export function summarizeFlow(
   hosts: HostWithInstances[],
-  requests: Iterable<RequestState>,
   endpointCount: number,
-  aggregates?: RoutingStateAggregates | null,
+  aggregates: RoutingStateAggregates,
 ): FlowTotals {
-  // When the server snapshot's aggregates are available they are authoritative
-  // for the request tallies; otherwise fall back to the client Map.
-  let pending = aggregates?.queued ?? 0;
-  let processing = aggregates?.processing ?? 0;
-  let errored = aggregates?.errored ?? 0;
-  if (!aggregates) {
-    pending = 0;
-    processing = 0;
-    errored = 0;
-    for (const request of requests) {
-      if (request.removing) continue;
-      if (request.status === 'pending') pending += 1;
-      else if (request.status === 'processing' || request.status === 'routed') processing += 1;
-      else if (request.status === 'error') errored += 1;
-    }
-  }
-
+  const { queued, processing, errored } = aggregates;
   let instancesRunning = 0;
   let instancesTotal = 0;
   for (const host of hosts) {
@@ -176,7 +143,7 @@ export function summarizeFlow(
 
   return {
     endpoints: endpointCount,
-    pending,
+    pending: queued,
     processing,
     errored,
     hostsOnline: hosts.filter((h) => h.status === 'online').length,

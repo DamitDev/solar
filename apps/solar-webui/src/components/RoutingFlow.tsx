@@ -15,7 +15,7 @@ import ReactFlow, {
 import 'reactflow/dist/style.css';
 import { Activity, Search, X } from 'lucide-react';
 import solarClient from '@/api/client';
-import { RoutingState } from '@/api/types';
+import { RoutingState, RoutingStateAggregates } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
 import { useRoutingEventsContext } from '@/context/RoutingEventsContext';
 import { useFallbackPolling } from '@/hooks/useFallbackPolling';
@@ -51,6 +51,19 @@ const nodeTypes = {
 
 const canvasWidth = (state: ReactFlowState) => state.width;
 const canvasHeight = (state: ReactFlowState) => state.height;
+
+/** Fresh empty aggregates so a render can never alias a shared, mutable one. */
+function emptyAggregates(): RoutingStateAggregates {
+  return {
+    by_instance: {},
+    by_host: {},
+    by_model: {},
+    by_endpoint: {},
+    queued: 0,
+    processing: 0,
+    errored: 0,
+  };
+}
 
 interface Trace {
   nodes: Set<string>;
@@ -142,11 +155,13 @@ function RoutingFlowCanvas() {
 
   // Server-computed aggregates are authoritative for the routing view's load
   // bars and totals: connected mode uses the ones the WS snapshot carried,
-  // disconnected mode the REST mirror's.
+  // disconnected mode the REST mirror's. Before the first snapshot lands there
+  // are none yet, so the view renders at zero load rather than guessing.
   const aggregates = useMemo(
     () => (isConnected ? wsAggregates : (fallback?.aggregates ?? null)),
     [isConnected, wsAggregates, fallback],
   );
+  const graphAggregates = useMemo(() => aggregates ?? emptyAggregates(), [aggregates]);
 
   const fallbackStates = useMemo(() => snapshotInstanceStates(fallback), [fallback]);
 
@@ -169,14 +184,14 @@ function RoutingFlowCanvas() {
         requests: requestList,
         endpoints,
         getInstanceState: getState,
-        aggregates,
+        aggregates: graphAggregates,
         search,
         runningOnly,
         expanded,
         expandAll: searching,
         showAllHosts,
       }),
-    [hosts, requestList, endpoints, getState, aggregates, search, runningOnly, expanded, searching, showAllHosts],
+    [hosts, requestList, endpoints, getState, graphAggregates, search, runningOnly, expanded, searching, showAllHosts],
   );
 
   const layout = useStableLayout(graph);
@@ -185,8 +200,8 @@ function RoutingFlowCanvas() {
 
   const ticker = useMemo(() => tickerRequests([...requestList, ...recentTerminal]), [requestList, recentTerminal]);
   const totals = useMemo(
-    () => summarizeFlow(hosts, requestList, endpoints.length, aggregates),
-    [hosts, requestList, endpoints.length, aggregates],
+    () => summarizeFlow(hosts, endpoints.length, graphAggregates),
+    [hosts, endpoints.length, graphAggregates],
   );
 
   // A trace frames its own path: fitting the whole fleet around it would zoom

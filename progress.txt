@@ -471,3 +471,65 @@ Tests (`apps/solar-webui/src/components/routing/__tests__`):
 Feedback loops: `tsc --noEmit` clean, `pnpm lint` (eslint 0 errors + prettier)
 green, full webui vitest suite green (520 passed). No new US-* references in
 code.
+
+## US-010 — Remove obsolete client-side routing aggregation (DONE)
+
+The routing view now derives every load bar and total from the authoritative
+server snapshot `aggregates`, and the dead client-side tallying against the
+transient request Map is gone. The aggregates are a required parameter on the
+build path, so the cells, the header totals and the graph can no longer drift
+from the server's numbers.
+
+- `apps/solar-webui/src/components/routing/workload.ts`:
+  - Removed `countInFlightByInstance` and the request-Map fallback in
+    `buildCells`. Cells read their `inFlight` directly from
+    `aggregates.by_instance`; the `requests` parameter is gone from
+    `BuildOptions`/`buildCells`.
+  - `summarizeFlow` now takes `(hosts, endpointCount, aggregates)` — the
+    `requests` tally is removed and `pending`/`processing`/`errored` come
+    straight from `aggregates.queued/processing/errored`. Instance/host fleet
+    counts still come from `hosts` (the aggregates carry no topology).
+  - Every client view helper kept: `buildCells`, `instanceAlias`, `modelOf`,
+    `loadFraction`, `phaseLabel`, `tickerRequests`, `terminalRequests`,
+    `snapshotRequests`, `snapshotInstanceStates`, search/runningOnly/filter
+    logic.
+- `apps/solar-webui/src/components/routing/graph.ts`:
+  - `BuildGraphOptions.aggregates` is now required. `buildFlowGraph` still
+    accepts the request Map because the view-only trace/search/expand logic and
+    the per-hop error tone depend on it.
+  - `tallyTraffic` no longer tallies in-flight/queued/processing from the
+    request Map. All hop loads (`by_endpoint`, `by_model`, and the model->host
+    `by_binding` loads derived from `by_instance`) and the gateway totals come
+    from the aggregates. The request Map is only read for per-hop `errors` (a
+    red edge), which the aggregates do not break down.
+  - Dropped the now-unused `isActiveRequest` import.
+- `apps/solar-webui/src/components/RoutingFlow.tsx`: since aggregates are
+  required, a module-scope `EMPTY_AGGREGATES` constant is used whenever the 
+  socket is connected but no snapshot has landed yet (US-004/009 guarantee that
+  window is short), so the view renders at zero load instead of guessing.
+- Unchanged (US-010 KEEP list): `EndpointsDashboard`/`GatewayDashboard`
+  `getEndpoints()` and the WS `endpoints_update`/`api_keys_update` events still
+  feed the endpoints dashboard; `GatewayLogger._inflight`
+  (`app/database/logs.py`) is untouched (per-pod, gateway-stats only). The
+  routing view's own `getEndpoints()` feed was already removed in US-007.
+
+Tests:
+- `workload.test.ts`: removed the `countInFlightByInstance` block and the
+  "falls back to the request Map when no aggregates are supplied" case and the
+  "ignores requests that are fading out" tally case (they tested the deleted
+  tally path). All `buildCells`/`summarizeFlow` cases now supply `aggregates`
+  via an `emptyAggregates` helper; the per-cell in-flight test is aggregate
+  driven.
+- `graph.test.ts`: added an `emptyAggregates` helper and made every
+  `buildFlowGraph` call supply aggregates. Request-driven load tests became
+  aggregate-driven ("keeps the node count flat…", "places a queued request…",
+  the fan-out "carries the traffic of hosts that did not fit…" and "keeps the
+  hosts that are failing or working…"). Per-hop error-tone tests keep using the
+  request Map and pass unchanged.
+- `layout.test.ts`: `graphFor` supplies `emptyAggregates()`.
+- `RoutingFlow.test.tsx`: the "keeps a busy host out of the rollup" case now
+  seeds `routingEvents.aggregates` (host load is the server's call, not the
+  client Map's); the mock and `beforeEach` reset `aggregates`.
+
+Feedback loops: `tsc --noEmit` clean, `pnpm lint` (eslint 0 errors + prettier)
+green, full webui vitest suite green (515 passed). No US-* references in code.

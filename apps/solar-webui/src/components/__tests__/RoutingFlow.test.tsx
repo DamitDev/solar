@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import solarClient from '@/api/client';
-import { ApiEndpoint, HostWithInstances, Instance, RoutingState } from '@/api/types';
+import { ApiEndpoint, HostWithInstances, Instance, RoutingState, RoutingStateAggregates } from '@/api/types';
 import { RequestState } from '@/hooks/eventStream/useEventStream';
 
 /**
@@ -57,6 +57,7 @@ const eventStream = {
 
 const routingEvents = {
   requests: new Map<string, RequestState>(),
+  aggregates: null as RoutingStateAggregates | null,
   removeRequest: vi.fn(),
   snapshotListener: null as ((snapshot: unknown) => void) | null,
   registerRoutingSnapshotHandler: (listener: (snapshot: unknown) => void) => {
@@ -135,6 +136,7 @@ beforeEach(() => {
   eventStream.endpoints = [endpoint('e1', 'prod'), endpoint('e2', 'dev')];
   eventStream.isConnected = true;
   routingEvents.requests = new Map();
+  routingEvents.aggregates = null;
   routingEvents.snapshotListener = null;
   instancesHook.hosts = [
     host('h1', 'alpha', [instance('i1', 'chat', 'qwen3.6:35b'), instance('i2', 'embed', 'iris:110m')]),
@@ -409,7 +411,17 @@ describe('RoutingFlow at fleet scale', () => {
 
   it('keeps a busy host out of the rollup', async () => {
     instancesHook.hosts = fleet();
-    // host49 sorts last, so it is only drawn because it is working.
+    // host49 sorts last, so it is only drawn because it is under load. In the
+    // snapshot architecture load is the server's call, not the client Map's.
+    routingEvents.aggregates = {
+      by_instance: { 'h49:h49-i0': 2 },
+      by_host: { h49: 2 },
+      by_model: { 'model-0': 2 },
+      by_endpoint: {},
+      queued: 0,
+      processing: 2,
+      errored: 0,
+    };
     routingEvents.requests = new Map([
       ['r1', liveRequest({ model: 'model-0', host_id: 'h49', instance_id: 'h49-i0' })],
     ]);
