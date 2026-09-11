@@ -65,8 +65,8 @@ async def webui_connect(
 
     # Authoritative snapshot first, before any request_*/instance_state deltas,
     # so a late-joining or reconnecting client resets to fleet state and then
-    # applies deltas on top (US-004). Connection-filtered emit keeps other
-    # clients unaffected.
+    # applies deltas on top. Connection-filtered emit keeps other clients
+    # unaffected.
     snapshot = await build_routing_snapshot()
     await sio.emit(
         "routing_snapshot",

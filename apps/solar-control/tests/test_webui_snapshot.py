@@ -1,4 +1,4 @@
-"""Tests for the WebUI connect snapshot emit (US-004).
+"""Tests for the WebUI connect snapshot emit.
 
 Verifies that a freshly connected WebUI client receives the authoritative
 ``routing_snapshot`` (produced by the routing snapshot builder) before any

@@ -56,7 +56,7 @@ function snapshotPayload(overrides: Partial<any> = {}) {
   };
 }
 
-describe('useEventStream snapshot consumer (US-006)', () => {
+describe('useEventStream snapshot consumer', () => {
   beforeEach(() => {
     socketHandlers = {};
     connectCallback = null;

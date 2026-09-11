@@ -1,4 +1,4 @@
-"""infrastructure: US-002 — per-request active registry real write + TTL expiry
+"""infrastructure: per-request active registry real write + TTL expiry
 (marker: infrastructure).
 
 The registry is exercised against the live session Redis (``stack.db_env``),
