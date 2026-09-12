@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import settings
-from app.models.routing_snapshot import RoutingSnapshot, SCHEMA_VERSION
+from app.models.routing_snapshot import SCHEMA_VERSION, RoutingSnapshot
 
 API_KEY = settings.management_api_key
 
