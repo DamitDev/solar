@@ -10,6 +10,11 @@ from fastapi import FastAPI
 from fastapi.responses import Response
 
 from app.config import settings
+from app.routes.artifacts import router as artifacts_router
+from app.routes.datasets import router as datasets_router
+from app.routes.health import router as health_router
+from app.routes.models import router as models_router
+from app.routes.resolve import router as resolve_router
 
 try:
     __version__ = _pkg_version("data-repository")
@@ -59,12 +64,6 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
-
-from app.routes.artifacts import router as artifacts_router
-from app.routes.datasets import router as datasets_router
-from app.routes.health import router as health_router
-from app.routes.models import router as models_router
-from app.routes.resolve import router as resolve_router
 
 app.include_router(health_router)
 app.include_router(artifacts_router)

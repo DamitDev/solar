@@ -20,7 +20,7 @@ from app.redis_state.instance_states import (
 
 
 class _FakePipeline:
-    def __init__(self, redis: "_FakeRedis") -> None:
+    def __init__(self, redis: _FakeRedis) -> None:
         self._redis = redis
         self._ops: list[tuple[Any, ...]] = []
 
