@@ -10,8 +10,8 @@ removes the entry regardless of which replica created it (cross-pod delete), and
 the TTL self-heals state for replicas that crash mid-request.
 """
 
-from typing import Any
 import json
+from typing import Any
 
 from .connection import redis_client
 

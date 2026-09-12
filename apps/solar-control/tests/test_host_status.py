@@ -262,7 +262,7 @@ async def test_webui_initial_status_includes_active_jobs(training_host, job_defi
         patch.object(
             webui_handlers,
             "build_routing_snapshot",
-            AsyncMock(return_value=SimpleNamespace(model_dump=lambda: {})),
+            AsyncMock(return_value=SimpleNamespace(model_dump=dict)),
         ),
         patch.object(
             job_db, "get_active_by_host", AsyncMock(return_value=[_job(job_definition)])

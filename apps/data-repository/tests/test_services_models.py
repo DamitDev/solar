@@ -35,7 +35,11 @@ from app.harbor import (
     HarborAuthError,
     HarborConnectionError,
 )
-from app.repositories.artifacts import ArtifactMetadataRecord, ArtifactVersionRecord
+from app.repositories.artifacts import (
+    ArtifactListRecord,
+    ArtifactMetadataRecord,
+    ArtifactVersionRecord,
+)
 from app.schemas.datasets import UpdateDatasetMetadataRequest
 from app.schemas.models import (
     LineageMetadata,
@@ -1078,8 +1082,6 @@ async def test_delete_dataset_commits_before_returning():
 # ---------------------------------------------------------------------------
 # list_models (ModelQueryService)
 # ---------------------------------------------------------------------------
-
-from app.repositories.artifacts import ArtifactListRecord
 
 
 def _make_list_record(
