@@ -36,11 +36,19 @@ class TestContractViolation:
 
         Unverified is NOT a violation — everywhere. Save-time validation only
         warns; routing serves the target and the webui flags it. Only a
-        CONTRADICTING size is a violation.
+        CONTRADICTING size is a violation. Capability checks still apply
+        even when the context size is unknown.
         """
         contract = VirtualModelContract(context_size=200_000)
         assert contract_violation(None, [], contract) is None
         assert contract_violation(None, None, contract) is None
+        # Unknown context must not short-circuit capability checking.
+        contract_caps = VirtualModelContract(
+            context_size=200_000, capabilities=["multimodal"]
+        )
+        assert contract_violation(None, ["completion"], contract_caps) == (
+            "missing capabilities: multimodal"
+        )
 
     def test_violation_when_capability_missing(self):
         contract = VirtualModelContract(capabilities=["multimodal"])

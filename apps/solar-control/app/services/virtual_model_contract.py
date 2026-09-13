@@ -21,11 +21,12 @@ def contract_violation(
     flags it as unverified. Only a *contradicting* reported size is a
     violation.
     """
-    if contract.context_size is not None:
-        if context_size is None:
-            return None
-        if context_size < contract.context_size:
-            return f"context {context_size} < declared {contract.context_size}"
+    if (
+        contract.context_size is not None
+        and context_size is not None
+        and context_size < contract.context_size
+    ):
+        return f"context {context_size} < declared {contract.context_size}"
     if contract.capabilities:
         have = set(capabilities or [])
         missing = [c for c in contract.capabilities if c not in have]
