@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from redis.exceptions import ResponseError
 
 from app.redis_state.instance_states import (
     ISTATE_PREFIX,
@@ -62,6 +63,8 @@ class _FakeRedis:
         self.store.pop(key, None)
 
     async def mget(self, *keys):
+        if not keys:
+            raise ResponseError("wrong number of arguments for 'mget' command")
         return [self.store.get(k) for k in keys]
 
     async def scan_iter(self, match=None):
@@ -155,3 +158,10 @@ async def test_get_all_returns_live_entries(fake_redis):
 
     all_entries = await store.get_all()
     assert {e["instance_id"] for e in all_entries} == {"inst-1", "inst-2"}
+
+
+@pytest.mark.anyio
+async def test_get_all_empty_registry_returns_empty_list(fake_redis):
+    """An empty registry is the steady state — no keys must not raise."""
+    store = InstanceStatesStore()
+    assert await store.get_all() == []

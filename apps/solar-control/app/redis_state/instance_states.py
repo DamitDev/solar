@@ -65,6 +65,10 @@ class InstanceStatesStore:
         """Return every non-expired instance state entry (used by snapshotting)."""
         r = redis_client()
         keys = [key async for key in r.scan_iter(match=f"{ISTATE_PREFIX}*")]
+        if not keys:
+            # mget() requires at least one key; an empty registry is the
+            # steady state, not an error.
+            return []
         values = await r.mget(*keys)
         entries: list[dict[str, Any]] = []
         for raw in values:
