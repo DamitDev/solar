@@ -13,6 +13,9 @@ import {
   GatewayGroupBy,
   ApiEndpoint,
   ApiKey,
+  VirtualModel,
+  VirtualModelCreateRequest,
+  VirtualModelUpdateRequest,
   ApiKeyCreateRequest,
   ApiKeyUpdateRequest,
   EndpointModelsResponse,
@@ -366,6 +369,27 @@ class SolarClient {
   async deleteIntent(id: string, orphan = false): Promise<IntentDeletedResponse> {
     const response = await this.client.delete(`/api/intents/${id}`, { params: { orphan } });
     return response.data as IntentDeletedResponse;
+  }
+
+  // Virtual models (S-060)
+  async listVirtualModels(): Promise<VirtualModel[]> {
+    const response = await this.client.get('/api/virtual-models');
+    return response.data as VirtualModel[];
+  }
+
+  async createVirtualModel(data: VirtualModelCreateRequest): Promise<VirtualModel> {
+    const response = await this.client.post('/api/virtual-models', data);
+    return response.data as VirtualModel;
+  }
+
+  async updateVirtualModel(name: string, data: VirtualModelUpdateRequest): Promise<VirtualModel> {
+    const response = await this.client.put(`/api/virtual-models/${encodeURIComponent(name)}`, data);
+    return response.data as VirtualModel;
+  }
+
+  async deleteVirtualModel(name: string): Promise<{ message: string }> {
+    const response = await this.client.delete(`/api/virtual-models/${encodeURIComponent(name)}`);
+    return response.data as { message: string };
   }
 
   // Resource utilization (U-004, S-035)

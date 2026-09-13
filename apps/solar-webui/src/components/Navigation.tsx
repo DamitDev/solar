@@ -1,6 +1,19 @@
 import { Link, useLocation } from 'react-router-dom';
 import { ReactNode, useEffect, useRef, useState } from 'react';
-import { Activity, Server, Target, Gauge, Key, Database, HardDrive, Upload, LogOut, Menu, X } from 'lucide-react';
+import {
+  Activity,
+  Server,
+  Target,
+  Gauge,
+  Key,
+  Database,
+  HardDrive,
+  Upload,
+  LogOut,
+  Menu,
+  X,
+  Boxes,
+} from 'lucide-react';
 import { useRoutingEventsContext } from '@/context/RoutingEventsContext';
 
 type NavItemDef = {
@@ -15,6 +28,12 @@ const NAV_ITEMS: NavItemDef[] = [
   { to: '/gateway', icon: <Activity size={18} />, label: 'Gateway', isActive: (p) => p === '/gateway' },
   { to: '/hosts', icon: <Server size={18} />, label: 'Hosts & Instances', isActive: (p) => p === '/hosts' },
   { to: '/intents', icon: <Target size={18} />, label: 'Intents', isActive: (p) => p.startsWith('/intents') },
+  {
+    to: '/virtual-models',
+    icon: <Boxes size={18} />,
+    label: 'Virtual Models',
+    isActive: (p) => p.startsWith('/virtual-models'),
+  },
   { to: '/resources', icon: <Gauge size={18} />, label: 'Resources', isActive: (p) => p === '/resources' },
   { to: '/endpoints', icon: <Key size={18} />, label: 'Endpoints', isActive: (p) => p === '/endpoints' },
   { to: '/catalog', icon: <Database size={18} />, label: 'Catalog', isActive: (p) => p === '/catalog' },

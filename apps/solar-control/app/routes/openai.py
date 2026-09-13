@@ -12,7 +12,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from app.gateway import gateway
+from app.gateway import VirtualModelUnavailableError, gateway
 from app.models import (
     ChatCompletionRequest,
     ClassifyRequest,
@@ -60,6 +60,20 @@ def _raise_model_not_found(model: str):
     )
 
 
+def _raise_virtual_unavailable(exc: VirtualModelUnavailableError):
+    """OpenAI-shaped 503 carrying the per-target failure reasons."""
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "message": str(exc),
+            "type": "service_unavailable",
+            "param": None,
+            "code": "virtual_model_unavailable",
+            "targets": exc.reasons,
+        },
+    )
+
+
 def _safe_stream(
     model: str,
     endpoint: str,
@@ -82,6 +96,17 @@ def _safe_stream(
         try:
             async for chunk in stream:
                 yield chunk
+        except VirtualModelUnavailableError as e:
+            # Structured payload so virtual-model exhaustion keeps its
+            # per-target reasons even though HTTP status is already 200.
+            payload = json.dumps(
+                {
+                    "error": str(e),
+                    "code": "virtual_model_unavailable",
+                    "targets": e.reasons,
+                }
+            )
+            yield f"data: {payload}\n\n".encode()
         except Exception as e:  # noqa: BLE001
             payload = json.dumps({"error": str(e)})
             yield f"data: {payload}\n\n".encode()
@@ -131,6 +156,8 @@ async def chat_completions(request: ChatCompletionRequest, client: Request):
                 model_patterns=model_patterns,
             )
             return response
+    except VirtualModelUnavailableError as exc:
+        _raise_virtual_unavailable(exc)
     except ValueError:
         _raise_model_not_found(request.model)
     except Exception as e:  # noqa: BLE001
@@ -164,6 +191,8 @@ async def completions(request: CompletionRequest, client: Request):
                 model_patterns=model_patterns,
             )
             return response
+    except VirtualModelUnavailableError as exc:
+        _raise_virtual_unavailable(exc)
     except ValueError:
         _raise_model_not_found(request.model)
     except Exception as e:  # noqa: BLE001
@@ -187,6 +216,8 @@ async def classify(request: ClassifyRequest, client: Request):
             model_patterns=model_patterns,
         )
         return response
+    except VirtualModelUnavailableError as exc:
+        _raise_virtual_unavailable(exc)
     except ValueError:
         _raise_model_not_found(request.model)
     except Exception as e:  # noqa: BLE001
@@ -210,6 +241,8 @@ async def embeddings(request: EmbeddingRequest, client: Request):
             model_patterns=model_patterns,
         )
         return response
+    except VirtualModelUnavailableError as exc:
+        _raise_virtual_unavailable(exc)
     except ValueError:
         _raise_model_not_found(request.model)
     except Exception as e:  # noqa: BLE001
@@ -233,6 +266,8 @@ async def rerank(request: RerankRequest, client: Request):
             model_patterns=model_patterns,
         )
         return response
+    except VirtualModelUnavailableError as exc:
+        _raise_virtual_unavailable(exc)
     except ValueError:
         _raise_model_not_found(request.model)
     except Exception as e:  # noqa: BLE001

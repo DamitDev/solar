@@ -5,6 +5,22 @@ from unittest.mock import patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _seed_empty_virtual_model_cache():
+    """Default the virtual-model cache to an empty list for every test.
+
+    Gateway tests exercise route_request / stream_request / models listing
+    without a database; on a cache miss the virtual pre-resolution would
+    otherwise hit VirtualModelDB and blow up with "Database not initialized".
+    Tests that need real virtual models patch or re-seed the cache explicitly.
+    """
+    from app.services.virtual_model_cache import virtual_model_cache
+
+    virtual_model_cache.set_all([])
+    yield
+    virtual_model_cache.invalidate()
+
+
 @pytest.fixture
 def repo_settings():
     """Patch ``app.model_resolvers.repo.settings`` with sensible defaults.

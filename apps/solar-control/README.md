@@ -21,6 +21,7 @@ A coordinator for multiple solar-host instances with OpenAI-compatible API gatew
 - **Model pull progress (S-051)** — `GET /api/pulls` exposes the latest pull progress per (host, source_uri); the reconciler's cold-start actions wait with progress-aware bounds instead of a raw timeout
 - **Drift-safe intents (S-049)** — backend comparison is JSON-structural with host-mirrored coercion; a churn circuit breaker turns an unsettled spec into a recorded `BackendDriftUnsettled` error
 - **Intent validation (S-052)** — accelerator vocabulary with aliases, per-backend field ownership, device contract, and fleet-aware advisory warnings that never block an edit
+- **Virtual models (S-060)** — stable public model names with an ordered failover target list and a guaranteed context/capability contract
 - Docker support with automatic database migrations
 
 ## Supported Backend Types
@@ -98,6 +99,29 @@ python -m alembic revision --autogenerate -m "description of change"
 ```
 
 Migration files are in `app/database/migrations/versions/` and follow a `NNNN_description.py` naming convention.
+
+## Virtuális modellek (S-060)
+
+A virtuális modellek egy fix, nyilvános modellnevet adnak a klienseknek, amely mögött
+rendezett céllista (igazi registry aliasok) áll. A gateway a célokat sorban próbálja:
+az első kiszolgálja, amelyik élő példánya igazolja a virtuális modell **kontraktját** —
+
+- `context_size` — minimális kontextusablak (token), amit minden példánynak teljesíteni kell
+- `capabilities` — kötelező képességek (pl. `multimodal`), a host által jelentett lista alapján
+
+Ha egy cél nincs elindítva vagy nem teljesíti a kontraktot, a kérés a következő célhoz
+megy; ha egyik sem jó, a válasz `503`, célonkénti okkal. A `/v1/models` lista minden
+virtuális modellt is behirdet (`owned_by: "solar-virtual"`) a deklarált kontextussal és
+képességekkel, így a kliens oldalon is ellenőrizhető a kontrakt.
+
+Kezelés a WebUI **Virtual Models** oldalán, vagy az API-n keresztül:
+
+- `GET /api/virtual-models` — lista, élő célállapotokkal (`satisfied` / `missing` / `violating: …`)
+- `POST /api/virtual-models` — létrehozás (név, rendezett `targets`, opcionális `contract`);
+  még nem futó cél csak figyelmeztetés, de a nevek ütközése (pontos vagy előtag-egyezőség
+  egy valós aliassal) `422`
+- `PUT /api/virtual-models/{name}` — módosítás (teljes csere a megadott mezőkön)
+- `DELETE /api/virtual-models/{name}` — törlés; a mögöttes modellekhez nem nyúl
 
 ## API Endpoints
 

@@ -278,7 +278,7 @@ export function SglangConfigFields({
 
       {numberField('hicache_ratio', 'Host Cache Ratio', <>Host-to-device cache size ratio (--hicache-ratio).</>, {
         min: 0,
-        step: 1,
+        step: 'any',
       })}
       {textField(
         'hicache_mem_layout',

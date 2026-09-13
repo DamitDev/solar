@@ -162,6 +162,22 @@ traffic to the caller's endpoint key. See
 
 ---
 
+### Milestone 0.10: Virtual Models
+
+Gives upstream clients a stable model name that survives model swaps: a virtual
+model is a fixed public name with an ordered failover list of real registry aliases
+and a declared contract (minimum context size, required capabilities). Routing
+always honors the contract — targets that cannot satisfy it are skipped — and
+`/v1/models` advertises the declared contract per virtual model. Managed from a
+dedicated webui page. See
+[issues/Phase 0/Milestone 0.10/S-060.md](issues/Phase%200/Milestone%200.10/S-060.md).
+
+| ID | Issue | Repo | Size | Depends on |
+|----|-------|------|------|------------|
+| S-060 | Virtual models: `virtual_models` table + management API, contract validation (save-time hard-fail on violating existing targets, warning on missing ones), gateway pre-resolution with ordered contract-aware failover, synthetic `/v1/models` entries, webui list/form page. | solar-control, solar-webui | M | - |
+
+---
+
 ## Phase 1: Data Repository
 
 > Centralized storage for models and training datasets. Can start in parallel with Phase 0.

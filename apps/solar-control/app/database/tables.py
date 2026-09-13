@@ -234,6 +234,29 @@ class JobRow(Base):
     )
 
 
+class VirtualModelRow(Base):
+    """A virtual model: stable public name over ordered fallback targets (S-060)."""
+
+    __tablename__ = "virtual_models"
+    __table_args__ = (Index("idx_virtual_models_name", "name", unique=True),)
+
+    id: Mapped[str] = mapped_column(
+        PG_UUID(as_uuid=False), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    targets: Mapped[list] = mapped_column(JSONB, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    contract: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class IntentRow(Base):
     """A declarative deployment intent (S-040)."""
 

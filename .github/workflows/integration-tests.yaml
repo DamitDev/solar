@@ -73,9 +73,18 @@ jobs:
       - name: Sync workspace (control + data-repository)
         run: uv sync --all-extras
 
-      - name: Sync solar-host (huggingface extra for the suite)
+      - name: Sync solar-host (CPU torch for the suite)
         working-directory: apps/solar-host
-        run: uv sync --extra huggingface
+        # The suite's hf_server runs the fixture BERT on device "cpu"; the
+        # CUDA build (~2.5 GB of nvidia wheels) is pure download cost. The
+        # torch-backend knob only exists on the pip interface, so build the
+        # host venv through it: pip install -e '.[huggingface]' resolves
+        # torch==+cpu with zero nvidia packages (venv 4.8 GB -> ~1 GB).
+        env:
+          UV_TORCH_BACKEND: cpu
+        run: |
+          uv venv --clear .venv
+          uv pip install -p .venv/bin/python -e '.[huggingface]'
 
       - name: Verify Docker access
         run: docker version
