@@ -320,11 +320,18 @@ class SglangRunner(BackendRunner):
         if not instance.port:
             return None
         base = f"http://127.0.0.1:{instance.port}"
+        # The spawned SGLang process runs with --api-key (the host's key);
+        # without the header both info endpoints answer 401.
+        headers = (
+            {"Authorization": f"Bearer {settings.api_key}"} if settings.api_key else {}
+        )
         async with aiohttp.ClientSession() as session:
             for path in ("/get_server_info", "/get_model_info"):
                 try:
                     async with session.get(
-                        f"{base}{path}", timeout=aiohttp.ClientTimeout(total=3)
+                        f"{base}{path}",
+                        timeout=aiohttp.ClientTimeout(total=3),
+                        headers=headers,
                     ) as resp:
                         if resp.status != 200:
                             continue
