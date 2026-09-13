@@ -16,6 +16,7 @@ from . import (
     resources,
     storage,
     uploads,
+    virtual_models,
 )
 
 router = APIRouter(prefix="/api", tags=["management"])
@@ -33,3 +34,4 @@ router.include_router(catalog.router)
 router.include_router(storage.router)
 router.include_router(uploads.router)
 router.include_router(pulls.router)
+router.include_router(virtual_models.router)
