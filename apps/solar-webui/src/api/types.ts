@@ -889,6 +889,45 @@ export interface IntentDeletedResponse {
   message: string;
 }
 
+// ─── Virtual models (S-060) ─────────────────────────────────────────
+
+export interface VirtualModelContract {
+  /** Minimum context window (tokens) every target must report. Unset = no constraint. */
+  context_size?: number | null;
+  /** Capability strings (e.g. "multimodal") every target must advertise. Unset = no constraint. */
+  capabilities?: string[] | null;
+}
+
+/** Live per-target status from GET /api/virtual-models. */
+export type TargetStatus = 'satisfied' | 'missing' | `violating: ${string}`;
+
+export interface VirtualModel {
+  id: string;
+  name: string;
+  targets: string[];
+  description?: string | null;
+  contract: VirtualModelContract;
+  created_at?: string | null;
+  updated_at?: string | null;
+  /** Save-time advisory warnings (create/update responses only). */
+  warnings?: string[];
+  /** target alias -> "satisfied" | "missing" | "violating: <reason>" (list responses only). */
+  target_status?: Record<string, string> | null;
+}
+
+export interface VirtualModelCreateRequest {
+  name: string;
+  targets: string[];
+  description?: string | null;
+  contract?: VirtualModelContract;
+}
+
+export interface VirtualModelUpdateRequest {
+  targets?: string[];
+  description?: string | null;
+  contract?: VirtualModelContract;
+}
+
 // ─── Resource utilization (U-004, GET /api/resources — S-035 + PR #62) ───
 
 export interface ActiveJobSummary {

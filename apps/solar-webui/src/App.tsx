@@ -5,6 +5,7 @@ import { GatewayDashboard } from './components/GatewayDashboard';
 import { EndpointsDashboard } from './components/endpoints/EndpointsDashboard';
 import { ModelCatalog } from './components/ModelCatalog';
 import { IntentsPage } from './components/IntentsPage';
+import { VirtualModelsPage } from './components/VirtualModelsPage';
 import { IntentDetail } from './components/IntentDetail';
 import { StoragePage } from './components/StoragePage';
 import { ArtifactUpload } from './components/ArtifactUpload';
@@ -33,6 +34,7 @@ const router = createBrowserRouter([
       { path: '/hosts', element: <Dashboard /> },
       { path: '/intents', element: <IntentsPage /> },
       { path: '/intents/:id', element: <IntentDetail /> },
+      { path: '/virtual-models', element: <VirtualModelsPage /> },
       { path: '/resources', element: <ResourcesPage /> },
       { path: '/endpoints', element: <EndpointsDashboard /> },
       { path: '/catalog', element: <ModelCatalog /> },
