@@ -68,7 +68,7 @@ Markers (applied automatically by folder):
 -m repo_path        # minimal repo path (registration, resolve, distribute, inference)
 -m intent_path      # declarative intents (API, reconcile, scaling, strategies)
 -m migration_path   # S-037 migration (explicit, reconciler, guards) + S-043 host drain
--m infrastructure   # WS seam, gateway registry, model cache, reconciler wake
+-m infrastructure   # WS seam, gateway registry, model cache, reconciler wake, routing view
 ```
 
 Run one file:
@@ -133,7 +133,7 @@ tests_integration/
 ├── repo_path/             # minimal repo path (9 tests)
 ├── intent_path/           # declarative path (21 tests)
 ├── migration_path/        # S-037 + S-043 drain (13 tests)
-└── infrastructure/        # WS seam, registry, cache, wake (6 tests)
+└── infrastructure/        # WS seam, registry, cache, wake, routing view (14 tests)
 ```
 
 ## Fixture regeneration
