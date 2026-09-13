@@ -1166,10 +1166,15 @@ class ProcessManager:
         probe = getattr(runner, "probe_context_size", None)
         if probe is None:
             return
-        # SGLang needs a beat after the ready line before its HTTP surface
-        # answers; the ready event already fired by the time we run.
-        await asyncio.sleep(1.0)
-        size = await probe(instance)
+        # The backend's HTTP surface can lag its ready line by a few seconds;
+        # retry briefly before giving up (leaving context_size as None).
+        size = None
+        for attempt in range(3):
+            if attempt:
+                await asyncio.sleep(2.0)
+            size = await probe(instance)
+            if size is not None:
+                break
         if size is not None and size != instance.context_size:
             instance.context_size = size
             config_manager.update_instance(instance_id, instance)
