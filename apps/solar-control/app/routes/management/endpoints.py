@@ -77,7 +77,20 @@ async def _list_keys_by_endpoint() -> dict[str, int]:
 
 async def _registry_aliases() -> list[str]:
     registry = await registry_store.get_registry()
-    return [alias for alias, instances in registry.items() if instances]
+    aliases = [alias for alias, instances in registry.items() if instances]
+    # Virtual models are first-class serveable names — include them so the
+    # endpoints form can scope against them (S-060). Degrades silently when
+    # no DB is configured (tests, degraded mode).
+    try:
+        from app.database.virtual_models import virtual_model_db
+
+        virtuals = await virtual_model_db.list_all()
+    except Exception:  # noqa: BLE001 - unavailable DB must not break scoping
+        return sorted(aliases)
+    for vm in virtuals:
+        if vm.name not in aliases:
+            aliases.append(vm.name)
+    return sorted(aliases)
 
 
 @router.get("")

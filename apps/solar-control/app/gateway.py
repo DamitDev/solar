@@ -1488,6 +1488,11 @@ class OpenAIGateway:
             )
             raise VirtualModelUnavailableError(model, virtual_reasons)
         if virtual_target:
+            # The virtual name is the scope boundary (checked in
+            # _resolve_virtual): the target lookup must bypass the endpoint's
+            # patterns, or a scoped endpoint holding only the virtual name
+            # could never reach the target it resolves to.
+            model_patterns = None
             model = virtual_target
 
         for attempt in range(max(1, int(settings.route_max_attempts))):
@@ -1690,6 +1695,9 @@ class OpenAIGateway:
         if virtual_target is None and virtual_reasons:
             raise VirtualModelUnavailableError(model, virtual_reasons)
         if virtual_target:
+            # Same scope-boundary rule as route_request: targets bypass the
+            # endpoint's patterns.
+            model_patterns = None
             model = virtual_target
 
         for attempt in range(max(1, int(settings.route_max_attempts))):
