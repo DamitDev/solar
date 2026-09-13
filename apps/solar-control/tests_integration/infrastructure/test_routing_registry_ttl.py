@@ -20,10 +20,13 @@ pytestmark = pytest.mark.infrastructure
 async def test_request_registry_real_write_ttl_and_cross_pod_delete(stack, clean_state):
     """A real Redis round-trips a request entry, expires after TTL, and a
     terminal delete removes it (cross-pod semantics)."""
-    from app.redis_state.routing import REQ_PREFIX, RoutingStore
+    from app.redis_state import close_redis, init_redis
+    from app.redis_state.routing import RoutingStore
 
-    r = await _redis(stack)
-    await r.flushall()
+    # See test_instance_state_ttl: init the shared client for this process
+    # only, and rely on clean_state's ``solar:active-req:*`` wipe instead of
+    # a flushall (which would break the session's WS connection state).
+    await init_redis(stack.db_env["redis"])
     store = RoutingStore()
 
     try:
@@ -76,11 +79,5 @@ async def test_request_registry_real_write_ttl_and_cross_pod_delete(stack, clean
         assert await store.get_request(rid_long) is not None
     finally:
         for rid in (rid_short, rid_long, rid_terminated):
-            await r.delete(f"{REQ_PREFIX}{rid}")
-        await r.aclose()
-
-
-async def _redis(stack):
-    import redis.asyncio as aioredis
-
-    return aioredis.from_url(stack.db_env["redis"], decode_responses=True)
+            await store.delete_request(rid)
+        await close_redis()
