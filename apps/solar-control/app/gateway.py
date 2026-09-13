@@ -949,6 +949,16 @@ class OpenAIGateway:
             return ["embedding"]
         return ["completion"]
 
+    async def _get_virtuals(self):
+        """Cached virtual model list, loading from the DB on a miss."""
+        virtuals = virtual_model_cache.get_all()
+        if virtuals is None:
+            from app.database.virtual_models import virtual_model_db
+
+            virtuals = await virtual_model_db.list_all()
+            virtual_model_cache.set_all(virtuals)
+        return virtuals
+
     async def _resolve_virtual(
         self, model: str, model_patterns: list[str] | None
     ) -> tuple[str | None, dict[str, str], VirtualModelContract | None]:
@@ -972,12 +982,7 @@ class OpenAIGateway:
         None when the name is not a virtual model (normal registry flow) or
         when every target failed (reasons then say why).
         """
-        virtuals = virtual_model_cache.get_all()
-        if virtuals is None:
-            from app.database.virtual_models import virtual_model_db
-
-            virtuals = await virtual_model_db.list_all()
-            virtual_model_cache.set_all(virtuals)
+        virtuals = await self._get_virtuals()
         vm = next((v for v in virtuals if v.name == model), None)
         if vm is None:
             return None, {}, None
@@ -1051,8 +1056,8 @@ class OpenAIGateway:
             ),
         }
 
-    @staticmethod
     async def _append_virtual_entries(
+        self,
         result: dict[str, list[dict[str, Any]]],
         model_patterns: list[str] | None,
     ) -> None:
@@ -1065,12 +1070,7 @@ class OpenAIGateway:
         upstream fetch above cannot see virtuals because virtual names are
         absent from the registry.
         """
-        virtuals = virtual_model_cache.get_all()
-        if virtuals is None:
-            from app.database.virtual_models import virtual_model_db
-
-            virtuals = await virtual_model_db.list_all()
-            virtual_model_cache.set_all(virtuals)
+        virtuals = await self._get_virtuals()
         if not virtuals:
             return
         if model_patterns is not None:
@@ -1449,6 +1449,7 @@ class OpenAIGateway:
     ) -> dict[str, Any]:
         request_id = str(uuid.uuid4())
         start_time = time.time()
+        original_model = model
 
         await self._broadcast_routing_event(
             {
@@ -1636,8 +1637,12 @@ class OpenAIGateway:
             endpoint_id,
             client_ip=client_ip,
         )
-        if attempted:
-            raise ValueError(error_msg)
+        if virtual_contract is not None and not attempted:
+            # A known virtual whose contract is momentarily unsatisfiable (or
+            # whose target vanished mid-TTL) must 503 with reasons, not 404.
+            raise VirtualModelUnavailableError(
+                original_model, {model: "no satisfying instance"}
+            )
         raise ValueError(error_msg)
 
     async def stream_request(
@@ -1894,6 +1899,8 @@ class OpenAIGateway:
             endpoint_id,
             client_ip=client_ip,
         )
+        if virtual_contract is not None and not attempted:
+            raise VirtualModelUnavailableError(model, {model: "no satisfying instance"})
         if attempted:
             raise ValueError(error_msg)
         raise ValueError(error_msg)

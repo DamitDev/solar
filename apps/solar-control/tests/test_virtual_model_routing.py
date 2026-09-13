@@ -204,43 +204,43 @@ class TestResolveVirtual:
 
 class TestVirtualModelsEntries:
     @pytest.mark.anyio
-    async def test_appended_to_both_arrays(self):
+    async def test_appended_to_both_arrays(self, gateway):
         result = {"models": [], "data": []}
         vm = _vm("team", ("a:8b",), VirtualModelContract(context_size=200_000))
         with patch(
             "app.services.virtual_model_cache.virtual_model_cache.get_all",
             return_value=[vm],
         ):
-            await OpenAIGateway._append_virtual_entries(result, None)
+            await gateway._append_virtual_entries(result, None)
         assert result["data"][0]["id"] == "team"
         assert result["data"][0]["max_model_len"] == 200_000
         assert result["data"][0]["owned_by"] == "solar-virtual"
         assert result["models"][0]["name"] == "team"
 
     @pytest.mark.anyio
-    async def test_undeclared_contract_fields_omitted(self):
+    async def test_undeclared_contract_fields_omitted(self, gateway):
         result = {"models": [], "data": []}
         with patch(
             "app.services.virtual_model_cache.virtual_model_cache.get_all",
             return_value=[_vm("plain", ("a:8b",))],
         ):
-            await OpenAIGateway._append_virtual_entries(result, None)
+            await gateway._append_virtual_entries(result, None)
         assert "max_model_len" not in result["data"][0]
         assert "capabilities" not in result["data"][0]
 
     @pytest.mark.anyio
-    async def test_pattern_filtering(self):
+    async def test_pattern_filtering(self, gateway):
         result = {"models": [], "data": []}
         vms = [_vm("team", ("a:8b",)), _vm("other", ("b:8b",))]
         with patch(
             "app.services.virtual_model_cache.virtual_model_cache.get_all",
             return_value=vms,
         ):
-            await OpenAIGateway._append_virtual_entries(result, ["team*"])
+            await gateway._append_virtual_entries(result, ["team*"])
         assert [m["id"] for m in result["data"]] == ["team"]
 
     @pytest.mark.anyio
-    async def test_cache_miss_loads_from_db(self):
+    async def test_cache_miss_loads_from_db(self, gateway):
         """Cache miss must populate from the DB, not silently skip (S-060 review)."""
         from app.services.virtual_model_cache import virtual_model_cache
 
@@ -255,7 +255,7 @@ class TestVirtualModelsEntries:
                 new=AsyncMock(return_value=[_vm("team", ("a:8b",))]),
             ),
         ):
-            await OpenAIGateway._append_virtual_entries(result, None)
+            await gateway._append_virtual_entries(result, None)
         assert [m["id"] for m in result["data"]] == ["team"]
         virtual_model_cache.invalidate()
 

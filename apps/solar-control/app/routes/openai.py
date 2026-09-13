@@ -96,6 +96,17 @@ def _safe_stream(
         try:
             async for chunk in stream:
                 yield chunk
+        except VirtualModelUnavailableError as e:
+            # Structured payload so virtual-model exhaustion keeps its
+            # per-target reasons even though HTTP status is already 200.
+            payload = json.dumps(
+                {
+                    "error": str(e),
+                    "code": "virtual_model_unavailable",
+                    "targets": e.reasons,
+                }
+            )
+            yield f"data: {payload}\n\n".encode()
         except Exception as e:  # noqa: BLE001
             payload = json.dumps({"error": str(e)})
             yield f"data: {payload}\n\n".encode()
