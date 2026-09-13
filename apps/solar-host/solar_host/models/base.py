@@ -200,6 +200,12 @@ class Instance(BaseModel):
     # request's model field to this. None means "same as the alias".
     served_model_name: str | None = Field(default=None)
 
+    # Max context length in tokens, reported by the backend when it can be
+    # determined (llama.cpp config, SGLang /get_model_info probe). None means
+    # the backend did not (yet) report one — solar-control treats contract
+    # verification as unverifiable rather than violated (S-060 follow-up).
+    context_size: int | None = Field(default=None)
+
     # Capabilities advertised for this instance (populated at create/start by
     # the host's detector). None means "unknown": solar-control leaves the
     # upstream's own advertisement untouched.

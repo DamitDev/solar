@@ -306,6 +306,39 @@ class SglangRunner(BackendRunner):
         """SGLang answers to the colon-free form of the alias."""
         return served_model_name(config.alias)
 
+    async def probe_context_size(self, instance: Any) -> int | None:
+        """Ask the running SGLang server for its max context length.
+
+        SGLang's OpenAI-compatible ``/v1/models`` carries no context field
+        (unlike llama.cpp), but ``GET /get_model_info`` reports
+        ``context_length``. Probed once around the RUNNING transition;
+        failures leave the instance's ``context_size`` as None, which
+        solar-control treats as "unverifiable", never as violated.
+        """
+        import aiohttp
+
+        if not instance.port:
+            return None
+        url = f"http://127.0.0.1:{instance.port}/get_model_info"
+        try:
+            async with (
+                aiohttp.ClientSession() as session,
+                session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp,
+            ):
+                if resp.status != 200:
+                    return None
+                data = await resp.json(content_type=None)
+        except Exception:
+            logger.warning(
+                "SGLang context probe failed for %s (port %s)",
+                instance.id,
+                instance.port,
+                exc_info=True,
+            )
+            return None
+        value = data.get("context_length")
+        return value if isinstance(value, int) and value > 0 else None
+
     def is_ready_line(self, line: str) -> bool:
         """True when the line proves SGLang finished warmup and is serving."""
         return _RE_READY.search(line) is not None

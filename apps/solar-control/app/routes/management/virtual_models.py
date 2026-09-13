@@ -56,7 +56,13 @@ def _enrich(
             is not None
         ]
         if len(reasons) == len(instances):
-            status[target] = f"violating: {reasons[0]}"
+            reason = reasons[0]
+            if "unknown context size" in reason:
+                # The contract cannot be verified against this target (host
+                # predates the context probe): serve-but-flag, never block.
+                status[target] = "unverified"
+            else:
+                status[target] = f"violating: {reason}"
         else:
             status[target] = "satisfied"
     return vm.model_copy(update={"target_status": status})

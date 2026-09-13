@@ -74,6 +74,18 @@ def validate_virtual_model(
                 "will be checked at routing time"
             )
             continue
+        instances_without_ctx = [
+            inst for inst in instances if getattr(inst, "context_size", None) is None
+        ]
+        if (
+            data.contract.context_size is not None
+            and instances_without_ctx
+            and len(instances_without_ctx) == len(instances)
+        ):
+            warnings.append(
+                f"target '{target}' does not report a context size — "
+                "the declared context contract cannot be verified"
+            )
         reasons = [
             reason
             for inst in instances
@@ -82,6 +94,7 @@ def validate_virtual_model(
                     getattr(inst, "context_size", None),
                     getattr(inst, "capabilities", None),
                     data.contract,
+                    unknown_is_violation=True,
                 )
             )
             is not None

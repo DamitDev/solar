@@ -114,6 +114,11 @@ megy; ha egyik sem jó, a válasz `503`, célonkénti okkal. A `/v1/models` list
 virtuális modellt is behirdet (`owned_by: "solar-virtual"`) a deklarált kontextussal és
 képességekkel, így a kliens oldalon is ellenőrizhető a kontrakt.
 
+Ha egy cél nem jelent kontextusméretet (pl. régebbi solar-host SGLang példány), a
+kontrakt nem *igazolható*: a cél `unverified` jelöléssel továbbra is kiszolgál
+(sárga chip a WebUI-n), a routing nem blokkol — ellenben egy * ellentmondó* mérettel,
+amely továbbra is kemény kihagyás.
+
 Kezelés a WebUI **Virtual Models** oldalán, vagy az API-n keresztül:
 
 - `GET /api/virtual-models` — lista, élő célállapotokkal (`satisfied` / `missing` / `violating: …`)
