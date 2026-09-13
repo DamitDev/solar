@@ -94,7 +94,6 @@ def validate_virtual_model(
                     getattr(inst, "context_size", None),
                     getattr(inst, "capabilities", None),
                     data.contract,
-                    unknown_is_violation=True,
                 )
             )
             is not None

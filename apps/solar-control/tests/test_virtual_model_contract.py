@@ -34,17 +34,13 @@ class TestContractViolation:
     def test_unverified_when_context_unknown(self):
         """A host that reports no context size makes the contract unverifiable.
 
-        Unverified is NOT a violation: SGLang instances pre-dating the host
-        probe would never route at all otherwise. Routing serves the target
-        and flags it; only a CONTRADICTING size is a violation.
+        Unverified is NOT a violation — everywhere. Save-time validation only
+        warns; routing serves the target and the webui flags it. Only a
+        CONTRADICTING size is a violation.
         """
         contract = VirtualModelContract(context_size=200_000)
         assert contract_violation(None, [], contract) is None
         assert contract_violation(None, None, contract) is None
-        assert (
-            contract_violation(None, [], contract, unknown_is_violation=True)
-            is not None
-        )
 
     def test_violation_when_capability_missing(self):
         contract = VirtualModelContract(capabilities=["multimodal"])

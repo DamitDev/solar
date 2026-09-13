@@ -13,22 +13,16 @@ def contract_violation(
     context_size: int | None,
     capabilities: list[str] | None,
     contract: VirtualModelContract,
-    *,
-    unknown_is_violation: bool = False,
 ) -> str | None:
     """Return a human-readable violation reason, or None if satisfied.
 
     An unknown context size (host did not report one) makes the contract
-    unverifiable: by default that is NOT a violation — routing serves the
-    target and the webui flags it as unverified (SGLang instances pre-dating
-    the host probe would be unroutable otherwise). Pass
-    ``unknown_is_violation=True`` where the caller wants fail-closed
-    behaviour (save-time hard validation).
+    unverifiable, not violated: routing serves the target and the webui
+    flags it as unverified. Only a *contradicting* reported size is a
+    violation.
     """
     if contract.context_size is not None:
         if context_size is None:
-            if unknown_is_violation:
-                return "unknown context size (host did not report one)"
             return None
         if context_size < contract.context_size:
             return f"context {context_size} < declared {contract.context_size}"
