@@ -18,10 +18,15 @@ pytestmark = pytest.mark.infrastructure
 
 async def test_instance_state_real_write_and_ttl_expiry(stack, clean_state):
     """A real Redis write round-trips through the store and expires after TTL."""
+    from app.redis_state import close_redis, init_redis
     from app.redis_state.instance_states import InstanceStatesStore
 
-    r = await _redis(stack)
-    await r.flushall()
+    # The store resolves the shared client lazily and the pytest process never
+    # runs the app lifespan, so init it against the session Redis and close it
+    # again when done. clean_state already wipes ``solar:istate:*`` around this
+    # test — no flushall here: that would also drop ``solar:hosts:*``
+    # connection state and break the WS seam for the rest of the session.
+    await init_redis(stack.db_env["redis"])
     store = InstanceStatesStore()
 
     try:
@@ -60,12 +65,6 @@ async def test_instance_state_real_write_and_ttl_expiry(stack, clean_state):
         assert await store.get("host-a", "inst-a") is None
         assert await store.get("host-a", "inst-b") == entry_b
     finally:
-        await r.delete("solar:istate:host-a:inst-a")
-        await r.delete("solar:istate:host-a:inst-b")
-        await r.aclose()
-
-
-async def _redis(stack):
-    import redis.asyncio as aioredis
-
-    return aioredis.from_url(stack.db_env["redis"], decode_responses=True)
+        await store.delete("host-a", "inst-a")
+        await store.delete("host-a", "inst-b")
+        await close_redis()
