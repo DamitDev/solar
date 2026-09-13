@@ -48,7 +48,9 @@ class TestContractViolation:
         contract = VirtualModelContract(
             context_size=200_000, capabilities=["multimodal", "completion"]
         )
-        assert contract_violation(262_144, ["completion", "multimodal"], contract) is None
+        assert (
+            contract_violation(262_144, ["completion", "multimodal"], contract) is None
+        )
 
     def test_reports_all_missing_capabilities(self):
         contract = VirtualModelContract(capabilities=["multimodal", "embedding"])

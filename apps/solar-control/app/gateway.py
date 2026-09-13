@@ -22,8 +22,25 @@ from app.database.hosts import host_db
 from app.models import HostStatus, RegistryEntry
 from app.redis_state import health_store, host_store, registry_store, routing_store
 from app.services.model_access import filter_aliases_for_patterns
+from app.services.virtual_model_cache import virtual_model_cache
+from app.services.virtual_model_contract import contract_violation
 
 logger = logging.getLogger(__name__)
+
+
+class VirtualModelUnavailableError(ValueError):
+    """A virtual model's targets cannot serve the request (all dead/violating).
+
+    Subclasses ValueError so existing ``except ValueError`` funnels (OpenAI
+    route handlers, streaming relay) keep working; the OpenAI routes catch it
+    explicitly to answer 503 with per-target reasons instead of a 404.
+    """
+
+    def __init__(self, name: str, reasons: dict[str, str]) -> None:
+        self.name = name
+        self.reasons = reasons
+        detail = "; ".join(f"{t}: {r}" for t, r in reasons.items()) or "no targets"
+        super().__init__(f"Virtual model '{name}' has no available target ({detail})")
 
 
 def _task_done_callback(task: asyncio.Task) -> None:
@@ -915,10 +932,12 @@ class OpenAIGateway:
                             ollama_dict[alias], context_size
                         )
 
-        return {
+        result = {
             "models": list(ollama_dict.values()),
             "data": list(data_dict.values()),
         }
+        self._append_virtual_entries(result, model_patterns)
+        return result
 
     @staticmethod
     def _fallback_capabilities(backend_type: str) -> list[str]:
@@ -928,6 +947,118 @@ class OpenAIGateway:
         if backend_type == "huggingface_embedding":
             return ["embedding"]
         return ["completion"]
+
+    async def _resolve_virtual(
+        self, model: str, model_patterns: list[str] | None
+    ) -> tuple[str | None, dict[str, str]]:
+        """Pre-resolution for virtual models (S-060).
+
+        If ``model`` names a virtual model, walk its targets in order and
+        return the first target that has a healthy, contract-satisfying
+        instance. Per-target reasons (``unavailable`` /
+        ``contract_violation: ...``) are collected for the failure path.
+
+        Virtuals honor endpoint model scoping: when patterns are set and the
+        virtual name does not match, it is treated as unknown so a scoped
+        endpoint cannot reach it by any spelling.
+
+        Returns ``(target_alias, reasons)``; ``target_alias`` is None when the
+        name is not a virtual model (normal registry flow) or when every
+        target failed (reasons then say why).
+        """
+        virtuals = virtual_model_cache.get_all()
+        if virtuals is None:
+            from app.database.virtual_models import virtual_model_db
+
+            virtuals = await virtual_model_db.list_all()
+            virtual_model_cache.set_all(virtuals)
+        vm = next((v for v in virtuals if v.name == model), None)
+        if vm is None:
+            return None, {}
+
+        if model_patterns is not None and not filter_aliases_for_patterns(
+            model_patterns, [model]
+        ):
+            return None, {}
+
+        registry = await registry_store.get_registry()
+        reasons: dict[str, str] = {}
+        for target in vm.targets:
+            instances = registry.get(target)
+            if not instances:
+                reasons[target] = "unavailable"
+                continue
+            satisfying = [
+                inst
+                for inst in instances
+                if contract_violation(inst.context_size, inst.capabilities, vm.contract)
+                is None
+            ]
+            if not satisfying:
+                sample = instances[0]
+                reason = contract_violation(
+                    sample.context_size, sample.capabilities, vm.contract
+                )
+                reasons[target] = f"contract_violation: {reason}"
+                continue
+            # Hand the real alias to the normal routing loop: it re-resolves
+            # health/load-balancing for us and translates served_model_name.
+            # Targets are resolved WITHOUT the endpoint's model_patterns: the
+            # virtual name is the scope boundary, so endpoints may bind to a
+            # virtual whose targets rotate outside their glob scope.
+            resolved = await self._resolve_model_name(target, None)
+            if resolved is None:
+                reasons[target] = "unavailable"
+                continue
+            return resolved, reasons
+        return None, reasons
+
+    @staticmethod
+    def _virtual_entry(vm) -> dict[str, Any]:
+        """Common synthetic /v1/models fields for a virtual model."""
+        ctx = vm.contract.context_size
+        return {
+            "created": 1_787_143_953,  # stable placeholder (see cursor aliases)
+            "owned_by": "solar-virtual",
+            "root": vm.targets[0] if vm.targets else None,
+            "parent": None,
+            **({"max_model_len": ctx} if ctx is not None else {}),
+            **(
+                {"capabilities": list(vm.contract.capabilities)}
+                if vm.contract.capabilities
+                else {}
+            ),
+        }
+
+    @staticmethod
+    def _append_virtual_entries(
+        result: dict[str, list[dict[str, Any]]],
+        model_patterns: list[str] | None,
+    ) -> None:
+        """Advertise virtual models in /v1/models (S-060).
+
+        Appends one synthetic entry per virtual model into both the Ollama-
+        style and OpenAI-style arrays, filtered by the endpoint's model
+        patterns like any real alias. Declared contract fields are exposed
+        (max_model_len, capabilities) so clients can validate locally; the
+        upstream fetch above cannot see virtuals because virtual names are
+        absent from the registry.
+        """
+        virtuals = virtual_model_cache.get_all()
+        if not virtuals:
+            return
+        if model_patterns is not None:
+            allowed = set(
+                filter_aliases_for_patterns(
+                    model_patterns, [vm.name for vm in virtuals]
+                )
+            )
+            virtuals = [vm for vm in virtuals if vm.name in allowed]
+        for vm in virtuals:
+            result["data"].append({"id": vm.name, **OpenAIGateway._virtual_entry(vm)})
+            result["models"].append(
+                {"name": vm.name, "model": vm.name, **OpenAIGateway._virtual_entry(vm)}
+            )
 
     async def _resolve_model_name(
         self, model: str, model_patterns: list[str] | None = None
@@ -1300,6 +1431,22 @@ class OpenAIGateway:
         retried_once = [False]
         filter_endpoint = required_endpoint or endpoint
 
+        virtual_target, virtual_reasons = await self._resolve_virtual(
+            model, model_patterns
+        )
+        if virtual_target is None and virtual_reasons:
+            await self._emit_error(
+                request_id,
+                model,
+                f"Virtual model '{model}' has no available target",
+                time.time() - start_time,
+                endpoint_id,
+                client_ip=client_ip,
+            )
+            raise VirtualModelUnavailableError(model, virtual_reasons)
+        if virtual_target:
+            model = virtual_target
+
         for attempt in range(max(1, int(settings.route_max_attempts))):
             instance = await self._find_instance_or_retry(
                 model,
@@ -1487,6 +1634,14 @@ class OpenAIGateway:
         attempted: set[str] = set()
         last_error: Exception | None = None
         retried_once = [False]
+
+        virtual_target, virtual_reasons = await self._resolve_virtual(
+            model, model_patterns
+        )
+        if virtual_target is None and virtual_reasons:
+            raise VirtualModelUnavailableError(model, virtual_reasons)
+        if virtual_target:
+            model = virtual_target
 
         for attempt in range(max(1, int(settings.route_max_attempts))):
             instance = await self._find_instance_or_retry(

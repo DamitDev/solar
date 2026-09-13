@@ -67,7 +67,7 @@ class VirtualModelDB:
             session.add(row)
             try:
                 await session.commit()
-            except Exception as exc:  # noqa: BLE001 - unique violation -> 409
+            except Exception as exc:
                 await session.rollback()
                 raise ValueError(f"virtual model '{data.name}' already exists") from exc
             await session.refresh(row)

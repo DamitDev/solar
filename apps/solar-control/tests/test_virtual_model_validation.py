@@ -86,7 +86,5 @@ class TestValidateVirtualModel:
         """One violating instance among several is fine — routing skips it."""
         registry = {"mixed:8b": [_inst(ctx=131_072), _inst(ctx=1_048_576)]}
         contract = VirtualModelContract(context_size=200_000)
-        errors, _ = validate_virtual_model(
-            _payload(contract=contract), registry
-        )
+        errors, _ = validate_virtual_model(_payload(contract=contract), registry)
         assert errors == []

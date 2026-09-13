@@ -8,7 +8,7 @@ DELETE /api/virtual-models/{name}   — delete a virtual model
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException
 
 from app.database.virtual_models import virtual_model_db
 from app.models.virtual_model import (
@@ -33,7 +33,9 @@ async def _live_registry() -> dict[str, list]:
     return await registry_store.get_registry()
 
 
-def _enrich(vm: VirtualModelResponse, registry: dict[str, list]) -> VirtualModelResponse:
+def _enrich(
+    vm: VirtualModelResponse, registry: dict[str, list]
+) -> VirtualModelResponse:
     """Fill in target_status for one virtual model against the live registry."""
     status: dict[str, str] = {}
     for target in vm.targets:
@@ -104,9 +106,7 @@ async def update_virtual_model(
         description=(
             body.description if body.description is not None else existing.description
         ),
-        contract=(
-            body.contract if body.contract is not None else existing.contract
-        ),
+        contract=(body.contract if body.contract is not None else existing.contract),
     )
     await _validated_create(merged)
 
