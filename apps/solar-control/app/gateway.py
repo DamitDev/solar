@@ -1638,11 +1638,11 @@ class OpenAIGateway:
             client_ip=client_ip,
         )
         if virtual_contract is not None and not attempted:
-            # A known virtual whose contract is momentarily unsatisfiable (or
-            # whose target vanished mid-TTL) must 503 with reasons, not 404.
             raise VirtualModelUnavailableError(
                 original_model, {model: "no satisfying instance"}
             )
+        if attempted:
+            raise ValueError(error_msg)
         raise ValueError(error_msg)
 
     async def stream_request(
@@ -1658,6 +1658,7 @@ class OpenAIGateway:
         request_id = str(uuid.uuid4())
         start_time = time.time()
         completed = False
+        original_model = model
 
         await self._broadcast_routing_event(
             {
@@ -1900,7 +1901,9 @@ class OpenAIGateway:
             client_ip=client_ip,
         )
         if virtual_contract is not None and not attempted:
-            raise VirtualModelUnavailableError(model, {model: "no satisfying instance"})
+            raise VirtualModelUnavailableError(
+                original_model, {model: "no satisfying instance"}
+            )
         if attempted:
             raise ValueError(error_msg)
         raise ValueError(error_msg)

@@ -375,3 +375,46 @@ class TestUnavailableError:
         assert isinstance(exc, ValueError)
         assert "team" in str(exc)
         assert exc.reasons == {"a:8b": "unavailable"}
+
+
+class TestSafestreamPayload:
+    """Exhausted virtuals keep their structured reasons in the SSE relay."""
+
+    @pytest.mark.anyio
+    async def test_stream_payload_carries_code_and_targets(self):
+        import json as jsonlib
+
+        from app.routes.openai import _safe_stream
+
+        captured = []
+
+        class _FakeStream:
+            def __init__(self):
+                self._done = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._done:
+                    raise StopAsyncIteration
+                self._done = True
+                raise VirtualModelUnavailableError(
+                    "team", {"a:8b": "unavailable", "b:8b": "contract_violation: x"}
+                )
+
+            async def aclose(self):
+                return None
+
+        with patch(
+            "app.routes.openai.gateway.stream_request",
+            return_value=_FakeStream(),
+        ):
+            gen = _safe_stream("team", "/v1/chat/completions", {}, "ip", None, None)
+            async for chunk in gen.body_iterator:
+                captured.append(chunk)
+
+        payload = jsonlib.loads(captured[0].decode().removeprefix("data: ").strip())
+        assert payload["code"] == "virtual_model_unavailable"
+        assert payload["targets"]["a:8b"] == "unavailable"
+        assert "team" in payload["error"]
