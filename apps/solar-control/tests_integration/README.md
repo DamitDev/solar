@@ -233,6 +233,15 @@ Add a manager.
   cross-reconcile — a second control resolves "host-a" to the other stack's
   host and races every intent). `test_failed_create_backoff` lives in its
   own module because it needs a live control.
+- **Never `flushall()` the session Redis.** In-process store tests
+  (`test_instance_state_ttl`, `test_routing_registry_ttl`) must
+  `init_redis(stack.db_env["redis"])` first — the pytest process never runs
+  the app lifespan, so `redis_client()` raises otherwise — and must clean
+  only their own key prefixes. A `flushall` wipes `solar:hosts:*`
+  (WS sid→host map, instances cache) and the `solar:disowned` tombstones;
+  hosts stay WS-connected but control drops every `pull_progress` /
+  `instances_update` event and re-seeds caches over HTTP, cascading into
+  timeouts and stale-state failures in every later module.
 - **Version-change artifacts:** `_register_v2` registers a second version
   with identical tensors but a different `model.safetensors` (re-saved with
   a `version: v2` header entry via `rewrite_safetensors_with_metadata` —
