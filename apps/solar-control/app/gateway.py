@@ -1487,7 +1487,18 @@ class OpenAIGateway:
                 client_ip=client_ip,
             )
             raise VirtualModelUnavailableError(model, virtual_reasons)
+
+        # Virtual failover: the chosen target may still lose its instances to
+        # a registry refresh mid-flight, and the attempt loop below only
+        # retries *within* one alias. Walk the virtual's target list instead,
+        # mirroring _resolve_virtual's ordering and contract semantics. A
+        # non-virtual model is a single-element list — same loop, no special
+        # casing.
+        virtual_targets: list[str] = []
         if virtual_target:
+            virtuals = await self._get_virtuals()
+            vm = next((v for v in virtuals if v.name == original_model), None)
+            virtual_targets = vm.targets if vm else []
             # The virtual name is the scope boundary (checked in
             # _resolve_virtual): the target lookup must bypass the endpoint's
             # patterns, or a scoped endpoint holding only the virtual name
@@ -1495,139 +1506,159 @@ class OpenAIGateway:
             model_patterns = None
             model = virtual_target
 
-        for attempt in range(max(1, int(settings.route_max_attempts))):
-            instance = await self._find_instance_or_retry(
-                model,
-                filter_endpoint,
-                attempted,
-                retried_once,
-                model_patterns,
-                contract_filter=virtual_contract,
-            )
-            if not instance:
-                break
+        # Build the target itinerary: for a virtual, ALL targets in declared
+        # order (the pre-resolved target was merely the first candidate — if
+        # its instances vanish before selection, the next target must get its
+        # chance); for a normal model, just the model itself.
+        if virtual_targets:
+            itinerary = virtual_targets
+        else:
+            itinerary = [model]
 
-            instance_key = f"{instance.host_id}-{instance.instance_id}"
-            attempted.add(instance_key)
-            weight = self._parse_model_size(instance.model_alias)
+        for target_alias in itinerary:
+            if target_alias != model:
+                # Advance to the next target: reset attempt bookkeeping so
+                # this target gets a fresh shot.
+                attempted.clear()
+                retried_once[0] = False
+                model = target_alias
+                virtual_target = target_alias
 
-            host = await host_db.get_host(instance.host_id)
-            host_name = host.name if host else "unknown"
+            for attempt in range(max(1, int(settings.route_max_attempts))):
+                instance = await self._find_instance_or_retry(
+                    model,
+                    filter_endpoint,
+                    attempted,
+                    retried_once,
+                    model_patterns,
+                    contract_filter=virtual_contract,
+                )
+                if not instance:
+                    break
 
-            async with self._routing_context(instance, weight):
-                try:
-                    await self._broadcast_routing_event(
-                        {
-                            "type": "request_routed",
-                            "data": {
-                                "request_id": request_id,
-                                "model": model,
-                                "resolved_model": instance.model_alias,
-                                "host_id": instance.host_id,
-                                "host_name": host_name,
-                                "instance_id": instance.instance_id,
-                                "instance_url": instance.url,
-                                "client_ip": client_ip,
-                                "timestamp": self._ts(),
-                                "attempt": attempt + 1,
+                instance_key = f"{instance.host_id}-{instance.instance_id}"
+                attempted.add(instance_key)
+                weight = self._parse_model_size(instance.model_alias)
+
+                host = await host_db.get_host(instance.host_id)
+                host_name = host.name if host else "unknown"
+
+                async with self._routing_context(instance, weight):
+                    try:
+                        await self._broadcast_routing_event(
+                            {
+                                "type": "request_routed",
+                                "data": {
+                                    "request_id": request_id,
+                                    "model": model,
+                                    "resolved_model": instance.model_alias,
+                                    "host_id": instance.host_id,
+                                    "host_name": host_name,
+                                    "instance_id": instance.instance_id,
+                                    "instance_url": instance.url,
+                                    "client_ip": client_ip,
+                                    "timestamp": self._ts(),
+                                    "attempt": attempt + 1,
+                                },
                             },
-                        },
-                        endpoint_id=endpoint_id,
-                    )
+                            endpoint_id=endpoint_id,
+                        )
 
-                    url = f"{instance.url}{endpoint}"
-                    headers = {
-                        "Authorization": f"Bearer {instance.api_key}",
-                        "Content-Type": "application/json",
-                    }
-                    timeout = self._make_route_timeout()
+                        url = f"{instance.url}{endpoint}"
+                        headers = {
+                            "Authorization": f"Bearer {instance.api_key}",
+                            "Content-Type": "application/json",
+                        }
+                        timeout = self._make_route_timeout()
 
-                    async with self.session.post(
-                        url,
-                        json=self._upstream_body(instance, data)[0],
-                        headers=headers,
-                        timeout=timeout,
-                    ) as response:
-                        if response.status == 200:
-                            await health_store.mark_healthy(
-                                instance.host_id,
-                                instance.instance_id,
-                                ttl_s=settings.health_ttl_s + 2,
-                            )
-                            result = await response.json()
-                            duration = time.time() - start_time
+                        async with self.session.post(
+                            url,
+                            json=self._upstream_body(instance, data)[0],
+                            headers=headers,
+                            timeout=timeout,
+                        ) as response:
+                            if response.status == 200:
+                                await health_store.mark_healthy(
+                                    instance.host_id,
+                                    instance.instance_id,
+                                    ttl_s=settings.health_ttl_s + 2,
+                                )
+                                result = await response.json()
+                                duration = time.time() - start_time
 
-                            usage_fields = self._extract_usage_from_result(result)
-                            usage_fields = await self._fill_usage_gaps(
-                                usage_fields, instance
-                            )
+                                usage_fields = self._extract_usage_from_result(result)
+                                usage_fields = await self._fill_usage_gaps(
+                                    usage_fields, instance
+                                )
 
-                            await self._emit_success(
-                                request_id,
-                                model,
-                                instance,
-                                duration,
-                                usage_fields,
-                                endpoint_id,
-                            )
-                            return result
-                        elif response.status in _RETRYABLE_STATUSES:
-                            error_text = await response.text()
-                            logger.warning(
-                                "Retryable %d from %s: %s",
-                                response.status,
-                                instance.url,
-                                error_text[:200],
-                            )
-                            await health_store.mark_failed(
-                                instance.host_id,
-                                instance.instance_id,
-                                cooldown_s=settings.health_cooldown_s,
-                            )
-                            last_error = Exception(f"Upstream {response.status}")
-                            await self._emit_reroute(
-                                request_id,
-                                model,
-                                instance,
-                                attempt + 1,
-                                endpoint_id,
-                            )
-                            continue
-                        else:
-                            error_text = await response.text()
-                            duration = time.time() - start_time
-                            msg = f"Request failed: {response.status} - {error_text}"
-                            await self._emit_error(
-                                request_id,
-                                model,
-                                msg,
-                                duration,
-                                endpoint_id,
-                                instance=instance,
-                            )
-                            raise ValueError(msg)
+                                await self._emit_success(
+                                    request_id,
+                                    model,
+                                    instance,
+                                    duration,
+                                    usage_fields,
+                                    endpoint_id,
+                                )
+                                return result
+                            elif response.status in _RETRYABLE_STATUSES:
+                                error_text = await response.text()
+                                logger.warning(
+                                    "Retryable %d from %s: %s",
+                                    response.status,
+                                    instance.url,
+                                    error_text[:200],
+                                )
+                                await health_store.mark_failed(
+                                    instance.host_id,
+                                    instance.instance_id,
+                                    cooldown_s=settings.health_cooldown_s,
+                                )
+                                last_error = Exception(f"Upstream {response.status}")
+                                await self._emit_reroute(
+                                    request_id,
+                                    model,
+                                    instance,
+                                    attempt + 1,
+                                    endpoint_id,
+                                )
+                                continue
+                            else:
+                                error_text = await response.text()
+                                duration = time.time() - start_time
+                                msg = (
+                                    f"Request failed: {response.status} - {error_text}"
+                                )
+                                await self._emit_error(
+                                    request_id,
+                                    model,
+                                    msg,
+                                    duration,
+                                    endpoint_id,
+                                    instance=instance,
+                                )
+                                raise ValueError(msg)
 
-                except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
-                    await health_store.mark_failed(
-                        instance.host_id,
-                        instance.instance_id,
-                        cooldown_s=settings.health_cooldown_s,
-                    )
-                    last_error = e
-                    await self._emit_reroute(
-                        request_id, model, instance, attempt + 1, endpoint_id
-                    )
-                except Exception as e:
-                    duration = time.time() - start_time
-                    await self._emit_error(
-                        request_id,
-                        model,
-                        str(e),
-                        duration,
-                        endpoint_id,
-                        instance=instance,
-                    )
-                    raise
+                    except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
+                        await health_store.mark_failed(
+                            instance.host_id,
+                            instance.instance_id,
+                            cooldown_s=settings.health_cooldown_s,
+                        )
+                        last_error = e
+                        await self._emit_reroute(
+                            request_id, model, instance, attempt + 1, endpoint_id
+                        )
+                    except Exception as e:
+                        duration = time.time() - start_time
+                        await self._emit_error(
+                            request_id,
+                            model,
+                            str(e),
+                            duration,
+                            endpoint_id,
+                            instance=instance,
+                        )
+                        raise
 
         error_msg = (
             f"Model '{model}' not found or no instances available"
