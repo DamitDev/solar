@@ -20,6 +20,7 @@ import aiohttp
 from app.config import settings
 from app.database.hosts import host_db
 from app.models import HostStatus, RegistryEntry
+from app.models.virtual_model import VirtualModelContract
 from app.redis_state import health_store, host_store, registry_store, routing_store
 from app.services.model_access import filter_aliases_for_patterns
 from app.services.virtual_model_cache import virtual_model_cache
@@ -936,7 +937,7 @@ class OpenAIGateway:
             "models": list(ollama_dict.values()),
             "data": list(data_dict.values()),
         }
-        self._append_virtual_entries(result, model_patterns)
+        await self._append_virtual_entries(result, model_patterns)
         return result
 
     @staticmethod
@@ -950,7 +951,7 @@ class OpenAIGateway:
 
     async def _resolve_virtual(
         self, model: str, model_patterns: list[str] | None
-    ) -> tuple[str | None, dict[str, str]]:
+    ) -> tuple[str | None, dict[str, str], VirtualModelContract | None]:
         """Pre-resolution for virtual models (S-060).
 
         If ``model`` names a virtual model, walk its targets in order and
@@ -958,13 +959,18 @@ class OpenAIGateway:
         instance. Per-target reasons (``unavailable`` /
         ``contract_violation: ...``) are collected for the failure path.
 
+        The returned contract is also threaded into instance selection
+        (``contract_filter``) so the load balancer can never hand the request
+        an instance that violates the guarantee — with a heterogeneous alias
+        (rolling upgrade), pre-resolution alone would be insufficient.
+
         Virtuals honor endpoint model scoping: when patterns are set and the
         virtual name does not match, it is treated as unknown so a scoped
         endpoint cannot reach it by any spelling.
 
-        Returns ``(target_alias, reasons)``; ``target_alias`` is None when the
-        name is not a virtual model (normal registry flow) or when every
-        target failed (reasons then say why).
+        Returns ``(target_alias, reasons, contract)``; ``target_alias`` is
+        None when the name is not a virtual model (normal registry flow) or
+        when every target failed (reasons then say why).
         """
         virtuals = virtual_model_cache.get_all()
         if virtuals is None:
@@ -974,12 +980,15 @@ class OpenAIGateway:
             virtual_model_cache.set_all(virtuals)
         vm = next((v for v in virtuals if v.name == model), None)
         if vm is None:
-            return None, {}
+            return None, {}, None
 
         if model_patterns is not None and not filter_aliases_for_patterns(
             model_patterns, [model]
         ):
-            return None, {}
+            return None, {}, None
+
+        if not vm.targets:
+            return None, {"<none>": "no targets configured"}, vm.contract
 
         registry = await registry_store.get_registry()
         reasons: dict[str, str] = {}
@@ -1005,23 +1014,35 @@ class OpenAIGateway:
             # health/load-balancing for us and translates served_model_name.
             # Targets are resolved WITHOUT the endpoint's model_patterns: the
             # virtual name is the scope boundary, so endpoints may bind to a
-            # virtual whose targets rotate outside their glob scope.
+            # virtual whose targets rotate outside their glob scope. The
+            # contract rides along as a per-instance candidate filter.
             resolved = await self._resolve_model_name(target, None)
             if resolved is None:
                 reasons[target] = "unavailable"
                 continue
-            return resolved, reasons
-        return None, reasons
+            return resolved, reasons, vm.contract
+        return None, reasons, vm.contract
 
     @staticmethod
     def _virtual_entry(vm) -> dict[str, Any]:
-        """Common synthetic /v1/models fields for a virtual model."""
+        """Common synthetic /v1/models fields for a virtual model.
+
+        ``created`` is the row's real creation timestamp when available
+        (the cursor-alias constant otherwise); ``root``/``parent`` are
+        deliberately omitted — after failover there is no single upstream
+        the name can be attributed to.
+        """
         ctx = vm.contract.context_size
+        if vm.created_at:
+            try:
+                created = int(datetime.fromisoformat(vm.created_at).timestamp())
+            except ValueError:
+                created = 1_787_143_953
+        else:
+            created = 1_787_143_953
         return {
-            "created": 1_787_143_953,  # stable placeholder (see cursor aliases)
+            "created": created,
             "owned_by": "solar-virtual",
-            "root": vm.targets[0] if vm.targets else None,
-            "parent": None,
             **({"max_model_len": ctx} if ctx is not None else {}),
             **(
                 {"capabilities": list(vm.contract.capabilities)}
@@ -1031,7 +1052,7 @@ class OpenAIGateway:
         }
 
     @staticmethod
-    def _append_virtual_entries(
+    async def _append_virtual_entries(
         result: dict[str, list[dict[str, Any]]],
         model_patterns: list[str] | None,
     ) -> None:
@@ -1045,6 +1066,11 @@ class OpenAIGateway:
         absent from the registry.
         """
         virtuals = virtual_model_cache.get_all()
+        if virtuals is None:
+            from app.database.virtual_models import virtual_model_db
+
+            virtuals = await virtual_model_db.list_all()
+            virtual_model_cache.set_all(virtuals)
         if not virtuals:
             return
         if model_patterns is not None:
@@ -1102,6 +1128,7 @@ class OpenAIGateway:
         exclude_keys: set[str] | None = None,
         required_endpoint: str | None = None,
         model_patterns: list[str] | None = None,
+        contract_filter: VirtualModelContract | None = None,
     ) -> RegistryEntry | None:
         """Select the best instance for a model using host-aware load balancing."""
         resolved_model = await self._resolve_model_name(model, model_patterns)
@@ -1112,6 +1139,18 @@ class OpenAIGateway:
         available = registry.get(resolved_model, [])
         if not available:
             return None
+
+        if contract_filter is not None:
+            available = [
+                inst
+                for inst in available
+                if contract_violation(
+                    inst.context_size, inst.capabilities, contract_filter
+                )
+                is None
+            ]
+            if not available:
+                return None
 
         if required_endpoint:
             available = [
@@ -1358,6 +1397,7 @@ class OpenAIGateway:
         attempted: set[str],
         retried_once_flag: list[bool],
         model_patterns: list[str] | None = None,
+        contract_filter: VirtualModelContract | None = None,
     ) -> RegistryEntry | None:
         """Try to find an instance, with one registry-refresh retry."""
         instance = await self._get_next_instance(
@@ -1365,6 +1405,7 @@ class OpenAIGateway:
             exclude_keys=attempted,
             required_endpoint=filter_endpoint,
             model_patterns=model_patterns,
+            contract_filter=contract_filter,
         )
         if instance:
             return instance
@@ -1384,6 +1425,7 @@ class OpenAIGateway:
                 exclude_keys=attempted,
                 required_endpoint=filter_endpoint,
                 model_patterns=model_patterns,
+                contract_filter=contract_filter,
             )
         return None
 
@@ -1431,7 +1473,7 @@ class OpenAIGateway:
         retried_once = [False]
         filter_endpoint = required_endpoint or endpoint
 
-        virtual_target, virtual_reasons = await self._resolve_virtual(
+        virtual_target, virtual_reasons, virtual_contract = await self._resolve_virtual(
             model, model_patterns
         )
         if virtual_target is None and virtual_reasons:
@@ -1454,6 +1496,7 @@ class OpenAIGateway:
                 attempted,
                 retried_once,
                 model_patterns,
+                contract_filter=virtual_contract,
             )
             if not instance:
                 break
@@ -1635,7 +1678,7 @@ class OpenAIGateway:
         last_error: Exception | None = None
         retried_once = [False]
 
-        virtual_target, virtual_reasons = await self._resolve_virtual(
+        virtual_target, virtual_reasons, virtual_contract = await self._resolve_virtual(
             model, model_patterns
         )
         if virtual_target is None and virtual_reasons:
@@ -1650,6 +1693,7 @@ class OpenAIGateway:
                 attempted,
                 retried_once,
                 model_patterns,
+                contract_filter=virtual_contract,
             )
             if not instance:
                 break

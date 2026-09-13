@@ -26,7 +26,7 @@ class VirtualModelCreate(BaseModel):
 
 
 class VirtualModelUpdate(BaseModel):
-    targets: list[str] | None = None
+    targets: list[str] | None = Field(default=None, min_length=1)
     description: str | None = None
     contract: VirtualModelContract | None = None
 

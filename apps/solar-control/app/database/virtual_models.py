@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.models.virtual_model import (
     VirtualModelContract,
@@ -67,7 +68,7 @@ class VirtualModelDB:
             session.add(row)
             try:
                 await session.commit()
-            except Exception as exc:
+            except IntegrityError as exc:  # unique violation -> 409
                 await session.rollback()
                 raise ValueError(f"virtual model '{data.name}' already exists") from exc
             await session.refresh(row)

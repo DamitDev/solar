@@ -40,9 +40,10 @@ class TestResolveVirtual:
             "app.services.virtual_model_cache.virtual_model_cache.get_all",
             return_value=[],
         ):
-            target, reasons = await gateway._resolve_virtual("a:8b", None)
+            target, reasons, contract = await gateway._resolve_virtual("a:8b", None)
         assert target is None
         assert reasons == {}
+        assert contract is None
 
     @pytest.mark.anyio
     async def test_first_target_selected_in_order(self, gateway):
@@ -60,9 +61,38 @@ class TestResolveVirtual:
                 new=AsyncMock(return_value=registry),
             ),
         ):
-            target, reasons = await gateway._resolve_virtual("team", None)
+            target, reasons, _ = await gateway._resolve_virtual("team", None)
         assert target == "first:8b"
         assert reasons == {}
+
+    @pytest.mark.anyio
+    async def test_returns_contract_for_instance_filtering(self, gateway):
+        contract = VirtualModelContract(context_size=200_000)
+        registry = {"big:8b": [_inst(ctx=1_048_576)]}
+        with (
+            patch(
+                "app.services.virtual_model_cache.virtual_model_cache.get_all",
+                return_value=[_vm("team", ("big:8b",), contract)],
+            ),
+            patch(
+                "app.redis_state.registry_store.get_registry",
+                new=AsyncMock(return_value=registry),
+            ),
+        ):
+            target, _, returned = await gateway._resolve_virtual("team", None)
+        assert target == "big:8b"
+        assert returned is contract
+
+    @pytest.mark.anyio
+    async def test_empty_targets_explicitly_reported(self, gateway):
+        with patch(
+            "app.services.virtual_model_cache.virtual_model_cache.get_all",
+            return_value=[_vm("hollow", ())],
+        ):
+            target, reasons, contract = await gateway._resolve_virtual("hollow", None)
+        assert target is None
+        assert reasons == {"<none>": "no targets configured"}
+        assert contract is not None
 
     @pytest.mark.anyio
     async def test_dead_target_skipped(self, gateway):
@@ -77,7 +107,7 @@ class TestResolveVirtual:
                 new=AsyncMock(return_value=registry),
             ),
         ):
-            target, reasons = await gateway._resolve_virtual("team", None)
+            target, reasons, _ = await gateway._resolve_virtual("team", None)
         assert target == "second:8b"
         assert reasons["dead:8b"] == "unavailable"
 
@@ -98,7 +128,7 @@ class TestResolveVirtual:
                 new=AsyncMock(return_value=registry),
             ),
         ):
-            target, reasons = await gateway._resolve_virtual("team", None)
+            target, reasons, _ = await gateway._resolve_virtual("team", None)
         assert target == "big:8b"
         assert reasons["small:8b"].startswith("contract_violation:")
 
@@ -116,7 +146,7 @@ class TestResolveVirtual:
                 new=AsyncMock(return_value=registry),
             ),
         ):
-            target, reasons = await gateway._resolve_virtual("vision", None)
+            target, reasons, _ = await gateway._resolve_virtual("vision", None)
         assert target is None
         assert reasons["quiet:8b"].startswith("contract_violation:")
 
@@ -132,7 +162,7 @@ class TestResolveVirtual:
                 new=AsyncMock(return_value={}),
             ),
         ):
-            target, reasons = await gateway._resolve_virtual("team", None)
+            target, reasons, _ = await gateway._resolve_virtual("team", None)
         assert target is None
         assert reasons == {"dead:8b": "unavailable", "gone:8b": "unavailable"}
 
@@ -150,7 +180,7 @@ class TestResolveVirtual:
                 new=AsyncMock(return_value=registry),
             ),
         ):
-            target, reasons = await gateway._resolve_virtual("team", ["other:*"])
+            target, reasons, _ = await gateway._resolve_virtual("team", ["other:*"])
         assert target is None
         assert reasons == {}
 
@@ -168,43 +198,175 @@ class TestResolveVirtual:
                 new=AsyncMock(return_value=registry),
             ),
         ):
-            target, _ = await gateway._resolve_virtual("team", ["team*"])
+            target, _, _ = await gateway._resolve_virtual("team", ["team*"])
         assert target == "hidden-internal:8b"
 
 
 class TestVirtualModelsEntries:
-    def test_appended_to_both_arrays(self):
+    @pytest.mark.anyio
+    async def test_appended_to_both_arrays(self):
         result = {"models": [], "data": []}
         vm = _vm("team", ("a:8b",), VirtualModelContract(context_size=200_000))
         with patch(
             "app.services.virtual_model_cache.virtual_model_cache.get_all",
             return_value=[vm],
         ):
-            OpenAIGateway._append_virtual_entries(result, None)
+            await OpenAIGateway._append_virtual_entries(result, None)
         assert result["data"][0]["id"] == "team"
         assert result["data"][0]["max_model_len"] == 200_000
         assert result["data"][0]["owned_by"] == "solar-virtual"
         assert result["models"][0]["name"] == "team"
 
-    def test_undeclared_contract_fields_omitted(self):
+    @pytest.mark.anyio
+    async def test_undeclared_contract_fields_omitted(self):
         result = {"models": [], "data": []}
         with patch(
             "app.services.virtual_model_cache.virtual_model_cache.get_all",
             return_value=[_vm("plain", ("a:8b",))],
         ):
-            OpenAIGateway._append_virtual_entries(result, None)
+            await OpenAIGateway._append_virtual_entries(result, None)
         assert "max_model_len" not in result["data"][0]
         assert "capabilities" not in result["data"][0]
 
-    def test_pattern_filtering(self):
+    @pytest.mark.anyio
+    async def test_pattern_filtering(self):
         result = {"models": [], "data": []}
         vms = [_vm("team", ("a:8b",)), _vm("other", ("b:8b",))]
         with patch(
             "app.services.virtual_model_cache.virtual_model_cache.get_all",
             return_value=vms,
         ):
-            OpenAIGateway._append_virtual_entries(result, ["team*"])
+            await OpenAIGateway._append_virtual_entries(result, ["team*"])
         assert [m["id"] for m in result["data"]] == ["team"]
+
+    @pytest.mark.anyio
+    async def test_cache_miss_loads_from_db(self):
+        """Cache miss must populate from the DB, not silently skip (S-060 review)."""
+        from app.services.virtual_model_cache import virtual_model_cache
+
+        result = {"models": [], "data": []}
+        with (
+            patch(
+                "app.services.virtual_model_cache.virtual_model_cache.get_all",
+                return_value=None,
+            ),
+            patch(
+                "app.database.virtual_models.virtual_model_db.list_all",
+                new=AsyncMock(return_value=[_vm("team", ("a:8b",))]),
+            ),
+        ):
+            await OpenAIGateway._append_virtual_entries(result, None)
+        assert [m["id"] for m in result["data"]] == ["team"]
+        virtual_model_cache.invalidate()
+
+
+class TestContractFilter:
+    """The load balancer itself must honor the contract (S-060 review, major #1)."""
+
+    @staticmethod
+    def _routable(ctx, caps=None):
+
+        return SimpleNamespace(
+            context_size=ctx,
+            capabilities=caps,
+            host_id="h1",
+            instance_id=f"i-{ctx}",
+            model_alias="mixed:8b",
+            supported_endpoints=["/v1/chat/completions"],
+        )
+
+    @pytest.mark.anyio
+    async def test_get_next_instance_skips_violating_instance(self, gateway):
+        registry = {
+            "mixed:8b": [
+                self._routable(ctx=131_072),  # violates the 200K contract
+                self._routable(ctx=1_048_576),  # satisfies it
+            ]
+        }
+        contract = VirtualModelContract(context_size=200_000)
+        with (
+            patch(
+                "app.redis_state.registry_store.get_registry",
+                new=AsyncMock(return_value=registry),
+            ),
+            patch(
+                "app.gateway.OpenAIGateway._resolve_model_name",
+                return_value="mixed:8b",
+            ),
+            patch(
+                "app.redis_state.health_store.is_healthy",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "app.redis_state.routing_store.get_host_active",
+                new=AsyncMock(return_value=0),
+            ),
+            patch(
+                "app.redis_state.routing_store.get_weight",
+                new=AsyncMock(return_value=0.0),
+            ),
+            patch(
+                "app.gateway.OpenAIGateway._get_host_name",
+                new=AsyncMock(return_value="h1"),
+            ),
+        ):
+            instance = await gateway._get_next_instance(
+                "mixed:8b", contract_filter=contract
+            )
+        assert instance is not None
+        assert instance.context_size == 1_048_576
+
+    @pytest.mark.anyio
+    async def test_get_next_instance_none_when_all_violate(self, gateway):
+        registry = {"small:8b": [self._routable(ctx=131_072)]}
+        contract = VirtualModelContract(context_size=200_000)
+        with (
+            patch(
+                "app.redis_state.registry_store.get_registry",
+                new=AsyncMock(return_value=registry),
+            ),
+            patch(
+                "app.gateway.OpenAIGateway._resolve_model_name",
+                return_value="small:8b",
+            ),
+        ):
+            instance = await gateway._get_next_instance(
+                "small:8b", contract_filter=contract
+            )
+        assert instance is None
+
+    @pytest.mark.anyio
+    async def test_get_next_instance_unfiltered_without_contract(self, gateway):
+        """Plain (non-virtual) routing is untouched by the filter."""
+        registry = {"any:8b": [self._routable(ctx=131_072)]}
+        with (
+            patch(
+                "app.redis_state.registry_store.get_registry",
+                new=AsyncMock(return_value=registry),
+            ),
+            patch(
+                "app.gateway.OpenAIGateway._resolve_model_name",
+                return_value="any:8b",
+            ),
+            patch(
+                "app.redis_state.health_store.is_healthy",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "app.redis_state.routing_store.get_host_active",
+                new=AsyncMock(return_value=0),
+            ),
+            patch(
+                "app.redis_state.routing_store.get_weight",
+                new=AsyncMock(return_value=0.0),
+            ),
+            patch(
+                "app.gateway.OpenAIGateway._get_host_name",
+                new=AsyncMock(return_value="h1"),
+            ),
+        ):
+            instance = await gateway._get_next_instance("any:8b")
+        assert instance is not None
 
 
 class TestUnavailableError:

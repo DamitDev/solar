@@ -152,6 +152,55 @@ class TestVirtualModelRoutes:
         assert by_name["violating"]["target_status"]["a:8b"].startswith("violating:")
 
     @pytest.mark.anyio
+    async def test_update_success_merges_fields(self, no_cache):
+        existing = _vm(targets=("a:8b",))
+        updated = _vm(targets=("a:8b", "b:8b"))
+        with (
+            patch(
+                "app.routes.management.virtual_models.virtual_model_db.get_by_name",
+                new=AsyncMock(return_value=existing),
+            ),
+            patch(
+                "app.routes.management.virtual_models._live_registry",
+                new=AsyncMock(return_value={"a:8b": [], "b:8b": []}),
+            ),
+            patch(
+                "app.routes.management.virtual_models.virtual_model_db.update",
+                new=AsyncMock(return_value=updated),
+            ),
+        ):
+            response = _client().put(
+                "/api/virtual-models/team-chat",
+                json={"targets": ["a:8b", "b:8b"]},
+                headers=MANAGEMENT_KEY,
+            )
+        assert response.status_code == 200
+        assert response.json()["targets"] == ["a:8b", "b:8b"]
+
+    @pytest.mark.anyio
+    async def test_update_missing_404(self, no_cache):
+        with patch(
+            "app.routes.management.virtual_models.virtual_model_db.get_by_name",
+            new=AsyncMock(return_value=None),
+        ):
+            response = _client().put(
+                "/api/virtual-models/nope",
+                json={"targets": ["a:8b"]},
+                headers=MANAGEMENT_KEY,
+            )
+        assert response.status_code == 404
+
+    @pytest.mark.anyio
+    async def test_update_empty_targets_rejected(self, no_cache):
+        """PUT with an empty targets list must be a validation error (review major #2)."""
+        response = _client().put(
+            "/api/virtual-models/team-chat",
+            json={"targets": []},
+            headers=MANAGEMENT_KEY,
+        )
+        assert response.status_code == 422
+
+    @pytest.mark.anyio
     async def test_delete_missing_404(self, no_cache):
         with patch(
             "app.routes.management.virtual_models.virtual_model_db.delete",

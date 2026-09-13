@@ -60,6 +60,20 @@ def _raise_model_not_found(model: str):
     )
 
 
+def _raise_virtual_unavailable(exc: VirtualModelUnavailableError):
+    """OpenAI-shaped 503 carrying the per-target failure reasons."""
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "message": str(exc),
+            "type": "service_unavailable",
+            "param": None,
+            "code": "virtual_model_unavailable",
+            "targets": exc.reasons,
+        },
+    )
+
+
 def _safe_stream(
     model: str,
     endpoint: str,
@@ -132,16 +146,7 @@ async def chat_completions(request: ChatCompletionRequest, client: Request):
             )
             return response
     except VirtualModelUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "message": str(exc),
-                "type": "service_unavailable",
-                "param": None,
-                "code": "virtual_model_unavailable",
-                "targets": exc.reasons,
-            },
-        )
+        _raise_virtual_unavailable(exc)
     except ValueError:
         _raise_model_not_found(request.model)
     except Exception as e:  # noqa: BLE001
@@ -176,16 +181,7 @@ async def completions(request: CompletionRequest, client: Request):
             )
             return response
     except VirtualModelUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "message": str(exc),
-                "type": "service_unavailable",
-                "param": None,
-                "code": "virtual_model_unavailable",
-                "targets": exc.reasons,
-            },
-        )
+        _raise_virtual_unavailable(exc)
     except ValueError:
         _raise_model_not_found(request.model)
     except Exception as e:  # noqa: BLE001
@@ -210,16 +206,7 @@ async def classify(request: ClassifyRequest, client: Request):
         )
         return response
     except VirtualModelUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "message": str(exc),
-                "type": "service_unavailable",
-                "param": None,
-                "code": "virtual_model_unavailable",
-                "targets": exc.reasons,
-            },
-        )
+        _raise_virtual_unavailable(exc)
     except ValueError:
         _raise_model_not_found(request.model)
     except Exception as e:  # noqa: BLE001
@@ -244,16 +231,7 @@ async def embeddings(request: EmbeddingRequest, client: Request):
         )
         return response
     except VirtualModelUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "message": str(exc),
-                "type": "service_unavailable",
-                "param": None,
-                "code": "virtual_model_unavailable",
-                "targets": exc.reasons,
-            },
-        )
+        _raise_virtual_unavailable(exc)
     except ValueError:
         _raise_model_not_found(request.model)
     except Exception as e:  # noqa: BLE001
@@ -278,16 +256,7 @@ async def rerank(request: RerankRequest, client: Request):
         )
         return response
     except VirtualModelUnavailableError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "message": str(exc),
-                "type": "service_unavailable",
-                "param": None,
-                "code": "virtual_model_unavailable",
-                "targets": exc.reasons,
-            },
-        )
+        _raise_virtual_unavailable(exc)
     except ValueError:
         _raise_model_not_found(request.model)
     except Exception as e:  # noqa: BLE001
