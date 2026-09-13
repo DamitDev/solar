@@ -194,6 +194,27 @@ async def test_cross_pod_delete_semantics(fake_redis):
 
 
 @pytest.mark.anyio
+async def test_create_request_stores_request_id_in_payload(fake_redis):
+    """The payload must repeat request_id: list_requests() returns only
+    values, and the snapshot projection needs the id on each entry."""
+    store = RoutingStore()
+    await store.create_request(
+        "req-1", model="model-x", endpoint="/v1", client_ip="1.2.3.4", timestamp="ts"
+    )
+
+    entries = await store.list_requests()
+    assert len(entries) == 1
+    assert entries[0]["request_id"] == "req-1"
+
+
+@pytest.mark.anyio
+async def test_list_requests_empty_registry_returns_empty_list(fake_redis):
+    """An empty registry is the steady state — no keys must not raise."""
+    store = RoutingStore()
+    assert await store.list_requests() == []
+
+
+@pytest.mark.anyio
 async def test_list_requests_returns_live_entries_excluding_expired(fake_redis):
     store = RoutingStore()
     await store.create_request(

@@ -134,7 +134,12 @@ class RoutingStore:
         r = redis_client()
         key = RoutingStore._req_key(request_id)
         pipe = r.pipeline()
-        pipe.set(key, json.dumps(data))
+        # The key carries the id, but the payload must repeat it:
+        # list_requests() returns only values, and the snapshot projection
+        # needs request_id on each entry for WebUI reconciliation.
+        payload = dict(data)
+        payload["request_id"] = request_id
+        pipe.set(key, json.dumps(payload))
         pipe.expire(key, ttl or ACTIVE_TTL_S)
         await pipe.execute()
 
@@ -219,6 +224,10 @@ class RoutingStore:
         """Return every live in-flight request entry (used by snapshotting)."""
         r = redis_client()
         keys = [key async for key in r.scan_iter(match=f"{REQ_PREFIX}*")]
+        if not keys:
+            # mget() requires at least one key; an empty registry is the
+            # steady state, not an error.
+            return []
         values = await r.mget(*keys)
         entries: list[dict[str, Any]] = []
         for raw in values:
