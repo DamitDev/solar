@@ -128,6 +128,8 @@ class ProcessManager:
         # that the log thread sets when the backend logs its ready line.
         self.ready_events: dict[str, asyncio.Event] = {}
         self._ready_loop: asyncio.AbstractEventLoop | None = None
+        # Strong refs to in-flight context probes (see _schedule_context_probe).
+        self._context_probe_tasks: dict[str, asyncio.Task] = {}
 
     def _is_port_available(self, port: int) -> bool:
         """Check if a port is available (not bound by any process)."""
@@ -1150,13 +1152,30 @@ class ProcessManager:
         """
         try:
             loop = self._ready_loop or asyncio.get_event_loop()
-            loop.call_soon_threadsafe(
-                lambda: asyncio.ensure_future(self._probe_context(instance_id))
-            )
         except RuntimeError:
             logger.debug(
                 "No loop available for context probe of %s", instance_id, exc_info=True
             )
+            return
+
+        def _run_probe() -> None:
+            task = asyncio.ensure_future(self._probe_context(instance_id))
+            # The loop only weakly references tasks: hold a strong ref so a
+            # probe cannot be GC'd mid-flight, and surface failures.
+            self._context_probe_tasks[instance_id] = task
+            task.add_done_callback(
+                lambda t: (
+                    self._context_probe_tasks.pop(instance_id, None),
+                    t.exception()
+                    and logger.warning(
+                        "Context probe for %s failed",
+                        instance_id,
+                        exc_info=t.exception(),
+                    ),
+                )
+            )
+
+        loop.call_soon_threadsafe(_run_probe)
 
     async def _probe_context(self, instance_id: str) -> None:
         instance = config_manager.get_instance(instance_id)
