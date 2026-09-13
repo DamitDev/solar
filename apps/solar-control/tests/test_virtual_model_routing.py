@@ -1,8 +1,9 @@
 """Tests for virtual model routing in the gateway (S-060)."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 
 from app.gateway import OpenAIGateway, VirtualModelUnavailableError
@@ -219,6 +220,82 @@ class TestResolveVirtual:
         ):
             target, _, _ = await gateway._resolve_virtual("team", ["team*"])
         assert target == "hidden-internal:8b"
+
+    @pytest.mark.anyio
+    async def test_route_request_clears_patterns_for_virtual_target(self, gateway):
+        """A scoped endpoint holding only the virtual name must still reach
+        the resolved target — patterns are cleared once resolution picked
+        one (Commander's report: endpoint with team-chat but not the target)."""
+        registry = {"hidden-internal:8b": [_inst()]}
+        captured = {"patterns": "sentinel"}
+        null_cm = AsyncMock()
+        null_cm.__aenter__ = AsyncMock(return_value=None)
+        null_cm.__aexit__ = AsyncMock(return_value=False)
+
+        def fake_post(_url, **_kwargs):
+            # The test's assertion is which patterns _find_instance_or_retry
+            # received; the POST itself is out of scope, so fail it with the
+            # exact exception type the routing loop treats as retryable.
+            raise aiohttp.ClientConnectionError("no upstream in this test")
+
+        gateway.session = MagicMock()
+        gateway.session.post = fake_post
+
+        async def fake_find(
+            model, fe, attempted, retry, patterns, contract_filter=None
+        ):
+            captured["patterns"] = patterns
+            return SimpleNamespace(
+                host_id="h1",
+                instance_id="i-1",
+                model_alias="hidden-internal:8b",
+                context_size=4096,
+                capabilities=None,
+                url="http://127.0.0.1:9999",
+                api_key="k",
+                served_model_name=None,
+                supported_endpoints=["/v1/chat/completions"],
+            )
+
+        with (
+            patch.object(gateway, "_ensure_session", AsyncMock()),
+            patch.object(gateway, "session", MagicMock(post=fake_post), create=True),
+            patch(
+                "app.services.virtual_model_cache.virtual_model_cache.get_all",
+                return_value=[_vm("team", ("hidden-internal:8b",))],
+            ),
+            patch(
+                "app.redis_state.registry_store.get_registry",
+                new=AsyncMock(return_value=registry),
+            ),
+            patch(
+                "app.gateway.OpenAIGateway._find_instance_or_retry",
+                side_effect=fake_find,
+            ),
+            patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+            patch.object(gateway, "_emit_success", AsyncMock()),
+            patch("app.gateway.host_db.get_host", AsyncMock(return_value=None)),
+            patch.object(gateway, "_routing_context", return_value=null_cm),
+            patch(
+                "app.gateway.health_store.mark_healthy", AsyncMock(return_value=True)
+            ),
+            patch("app.gateway.health_store.mark_failed", AsyncMock(return_value=None)),
+            patch(
+                "app.gateway.routing_store.get_host_active", AsyncMock(return_value=0)
+            ),
+            patch("app.gateway.routing_store.get_weight", AsyncMock(return_value=0.0)),
+            patch("app.gateway.settings.route_max_attempts", 1),
+        ):
+            try:
+                await gateway.route_request(
+                    "team",
+                    "/v1/chat/completions",
+                    {"model": "team"},
+                    model_patterns=["team*"],
+                )
+            except ValueError:
+                pass  # the stubbed POST raises; routing is expected to fail
+        assert captured["patterns"] is None
 
 
 class TestVirtualModelsEntries:

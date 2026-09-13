@@ -148,10 +148,10 @@ async def test_preview_models_filters_and_reports_available(registry):
     result = await preview_models(
         EndpointModelPreview(serve_all_models=False, model_patterns=["iris-osl:*"])
     )
-    assert result["aliases"] == ["iris-osl:8b", "iris-osl:70b"]
+    assert result["aliases"] == ["iris-osl:70b", "iris-osl:8b"]
     assert result["count"] == 2
     # Aliases without a live instance are not offered.
-    assert result["available"] == ["iris-osl:8b", "iris-osl:70b", "qwen-v4-flash:284b"]
+    assert result["available"] == ["iris-osl:70b", "iris-osl:8b", "qwen-v4-flash:284b"]
 
 
 async def test_preview_models_serve_all_returns_every_alias(registry):
