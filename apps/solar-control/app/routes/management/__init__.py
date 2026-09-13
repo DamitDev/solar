@@ -14,6 +14,7 @@ from . import (
     pulls,
     reservations,
     resources,
+    routing,
     storage,
     uploads,
     virtual_models,
@@ -35,3 +36,4 @@ router.include_router(storage.router)
 router.include_router(uploads.router)
 router.include_router(pulls.router)
 router.include_router(virtual_models.router)
+router.include_router(routing.router)

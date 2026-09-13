@@ -12,6 +12,7 @@ import {
   InstanceStateData,
   InstanceSummary,
   RequestState,
+  RoutingState,
   WSMessageType,
   RoutingEventData,
   LogEventData,
@@ -19,7 +20,7 @@ import {
   GatewayRequestSummary,
   GatewayFilter,
   PullProgressEvent,
-} from '@/hooks/useEventStream';
+} from '@/hooks/eventStream/useEventStream';
 import { LogMessage, PendingHost, Intent, ApiEndpoint, ApiKey } from '@/api/types';
 
 interface EventStreamContextValue {
@@ -39,6 +40,10 @@ interface EventStreamContextValue {
   endpoints: ApiEndpoint[];
   // API key records, event-driven (api_keys_update).
   apiKeys: ApiKey[];
+  // Server-computed routing aggregates from the authoritative snapshot; the
+  // routing view's load bars and totals read these instead of re-deriving them
+  // from the client request Map.
+  aggregates: ReturnType<typeof useEventStream>['aggregates'];
   getInstanceLogs: (hostId: string, instanceId: string) => LogMessage[];
   getInstanceState: (hostId: string, instanceId: string) => InstanceStateData | undefined;
   getPullProgress: (hostId: string | null | undefined, sourceUri: string) => PullProgressEvent | undefined;
@@ -46,6 +51,9 @@ interface EventStreamContextValue {
   removeRequest: (requestId: string) => void;
   setFilter: (filter: Partial<GatewayFilter>) => void;
   clearGatewayRequests: () => void;
+  // Subscribe to freshly-applied authoritative routing snapshots; returns an
+  // unsubscribe. Consumers use this to react (e.g. backfill the ticker).
+  registerRoutingSnapshotHandler: (listener: (snapshot: RoutingState) => void) => () => void;
 }
 
 const EventStreamContext = createContext<EventStreamContextValue | null>(null);

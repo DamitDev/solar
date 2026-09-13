@@ -8,7 +8,7 @@
 
 import { createContext, useCallback, useContext, useMemo, useState, ReactNode } from 'react';
 import { EventStreamProvider, useEventStreamContext, HostStatusData, RequestState } from './EventStreamContext';
-import { InstanceSummary } from '@/hooks/useEventStream';
+import { InstanceSummary, RoutingState, RoutingStateAggregates } from '@/hooks/eventStream/useEventStream';
 import { PendingHost } from '@/api/types';
 
 export interface RoutingEvent {
@@ -43,6 +43,8 @@ interface RoutingEventsContextValue {
   hostStatuses: Map<string, HostStatusData>;
   pendingHosts: Map<string, PendingHost>;
   hostInstances: Map<string, InstanceSummary[]>;
+  registerRoutingSnapshotHandler: (listener: (snapshot: RoutingState) => void) => () => void;
+  aggregates: RoutingStateAggregates | null;
 }
 
 const RoutingEventsContext = createContext<RoutingEventsContextValue | undefined>(undefined);
@@ -84,6 +86,8 @@ function RoutingEventsInner({ children }: { children: ReactNode }) {
       hostStatuses: eventStream.hosts,
       pendingHosts: eventStream.pendingHosts,
       hostInstances: eventStream.hostInstances,
+      registerRoutingSnapshotHandler: eventStream.registerRoutingSnapshotHandler,
+      aggregates: eventStream.aggregates,
     }),
     [
       eventStream.requests,
@@ -92,6 +96,8 @@ function RoutingEventsInner({ children }: { children: ReactNode }) {
       eventStream.hosts,
       eventStream.pendingHosts,
       eventStream.hostInstances,
+      eventStream.registerRoutingSnapshotHandler,
+      eventStream.aggregates,
       events,
       addRecentEvents,
     ],

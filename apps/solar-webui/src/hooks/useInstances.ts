@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import solarClient from '@/api/client';
 import { Host, Instance, InstanceStatus } from '@/api/types';
 import { useRoutingEventsContext } from '@/context/RoutingEventsContext';
-import { InstanceSummary } from '@/hooks/useEventStream';
+import { InstanceSummary } from '@/hooks/eventStream/useEventStream';
 
 interface HostWithInstances extends Host {
   instances: Instance[];

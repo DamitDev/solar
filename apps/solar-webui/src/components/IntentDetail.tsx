@@ -15,7 +15,7 @@ import {
   PULL_PHASE_LABELS,
   PULL_PROGRESS_TERMINAL_GRACE_MS,
   type PullProgressEvent,
-} from '@/hooks/useEventStream';
+} from '@/hooks/eventStream/useEventStream';
 import { useFallbackPolling } from '@/hooks/useFallbackPolling';
 import { cn, formatDateTime, formatRelativeTime } from '@/lib/utils';
 import { IntentPhaseBadge } from './IntentBadges';

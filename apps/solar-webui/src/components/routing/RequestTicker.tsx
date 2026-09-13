@@ -1,5 +1,5 @@
 import { AlertCircle, Loader2, X } from 'lucide-react';
-import { RequestState } from '@/hooks/useEventStream';
+import { RequestState } from '@/hooks/eventStream/useEventStream';
 import { parseGatewayEvent } from '@/lib/gatewayErrors';
 import { cn } from '@/lib/utils';
 
