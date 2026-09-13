@@ -238,8 +238,24 @@ class TestResolveVirtual:
             # exact exception type the routing loop treats as retryable.
             raise aiohttp.ClientConnectionError("no upstream in this test")
 
-        gateway.session = MagicMock()
-        gateway.session.post = fake_post
+        ok_resp = MagicMock()
+        ok_resp.status = 200
+        ok_resp.json = AsyncMock(return_value={"ok": True})
+
+        class _Ctx:
+            def __init__(self, resp):
+                self._resp = resp
+
+            async def __aenter__(self):
+                return self._resp
+
+            async def __aexit__(self, *exc):
+                return False
+
+        def ok_post(_url, **_kwargs):
+            return _Ctx(ok_resp)
+
+        gateway.session = MagicMock(post=ok_post)
 
         async def fake_find(
             model, fe, attempted, retry, patterns, contract_filter=None
@@ -255,11 +271,12 @@ class TestResolveVirtual:
                 api_key="k",
                 served_model_name=None,
                 supported_endpoints=["/v1/chat/completions"],
+                backend_type="sglang",
             )
 
         with (
             patch.object(gateway, "_ensure_session", AsyncMock()),
-            patch.object(gateway, "session", MagicMock(post=fake_post), create=True),
+            patch.object(gateway, "session", MagicMock(post=ok_post), create=True),
             patch(
                 "app.services.virtual_model_cache.virtual_model_cache.get_all",
                 return_value=[_vm("team", ("hidden-internal:8b",))],
@@ -296,6 +313,133 @@ class TestResolveVirtual:
             except ValueError:
                 pass  # the stubbed POST raises; routing is expected to fail
         assert captured["patterns"] is None
+
+    @pytest.mark.anyio
+    async def test_target_vanished_midflight_falls_to_next(self, gateway):
+        """Target 1 resolves pre-flight but has no instance at selection time
+        (registry refresh, host restart): the request must fail over to the
+        next target, not 404 (Commander's failover question)."""
+        registry = {
+            "a-first:8b": [],
+            "b-second:8b": [_inst()],
+        }
+        tried = []
+        ok_resp = MagicMock()
+        ok_resp.status = 200
+        ok_resp.json = AsyncMock(return_value={"ok": True})
+
+        class _Ctx:
+            def __init__(self, resp):
+                self._resp = resp
+
+            async def __aenter__(self):
+                return self._resp
+
+            async def __aexit__(self, *exc):
+                return False
+
+        def ok_post(_url, **_kwargs):
+            return _Ctx(ok_resp)
+
+        async def fake_find(
+            model, fe, attempted, retry, patterns, contract_filter=None
+        ):
+            tried.append(model)
+            if model == "a-first:8b":
+                return None  # target vanished mid-flight
+            inst = registry["b-second:8b"][0]
+            return SimpleNamespace(
+                host_id="h1",
+                instance_id="i-1",
+                model_alias="b-second:8b",
+                context_size=4096,
+                capabilities=None,
+                url="http://127.0.0.1:9999",
+                api_key="k",
+                served_model_name=None,
+                supported_endpoints=["/v1/chat/completions"],
+                backend_type="sglang",
+            )
+
+        null_cm = AsyncMock()
+        null_cm.__aenter__ = AsyncMock(return_value=None)
+        null_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch.object(gateway, "_ensure_session", AsyncMock()),
+            patch.object(gateway, "session", MagicMock(post=ok_post)),
+            patch(
+                "app.services.virtual_model_cache.virtual_model_cache.get_all",
+                return_value=[_vm("team", ("a-first:8b", "b-second:8b"))],
+            ),
+            patch(
+                "app.redis_state.registry_store.get_registry",
+                new=AsyncMock(return_value=registry),
+            ),
+            patch(
+                "app.gateway.OpenAIGateway._find_instance_or_retry",
+                side_effect=fake_find,
+            ),
+            patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+            patch.object(
+                gateway, "_emit_success", AsyncMock(return_value={"ok": True})
+            ),
+            patch("app.gateway.host_db.get_host", AsyncMock(return_value=None)),
+            patch.object(gateway, "_routing_context", return_value=null_cm),
+            patch(
+                "app.gateway.health_store.mark_healthy", AsyncMock(return_value=True)
+            ),
+            patch("app.gateway.health_store.mark_failed", AsyncMock(return_value=None)),
+            patch(
+                "app.gateway.routing_store.get_host_active", AsyncMock(return_value=0)
+            ),
+            patch("app.gateway.routing_store.get_weight", AsyncMock(return_value=0.0)),
+        ):
+            result = await gateway.route_request(
+                "team",
+                "/v1/chat/completions",
+                {"model": "team"},
+            )
+
+        assert tried == ["a-first:8b", "b-second:8b"]
+        assert result == {"ok": True}
+
+    @pytest.mark.anyio
+    async def test_all_targets_vanished_midflight_raises_unavailable(self, gateway):
+        """Every target gone by selection time: 503 with per-target reasons,
+        not a 404 model_not_found."""
+
+        async def fake_find(
+            model, fe, attempted, retry, patterns, contract_filter=None
+        ):
+            return None
+
+        with (
+            patch.object(gateway, "_ensure_session", AsyncMock()),
+            patch.object(gateway, "session", MagicMock()),
+            patch(
+                "app.services.virtual_model_cache.virtual_model_cache.get_all",
+                return_value=[_vm("team", ("dead:8b", "gone:8b"))],
+            ),
+            patch(
+                "app.redis_state.registry_store.get_registry",
+                new=AsyncMock(return_value={}),
+            ),
+            patch(
+                "app.gateway.OpenAIGateway._find_instance_or_retry",
+                side_effect=fake_find,
+            ),
+            patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+            patch.object(gateway, "_emit_error", AsyncMock()),
+            pytest.raises(VirtualModelUnavailableError) as excinfo,
+        ):
+            await gateway.route_request(
+                "team",
+                "/v1/chat/completions",
+                {"model": "team"},
+            )
+
+        assert set(excinfo.value.reasons) == {"dead:8b", "gone:8b"}
 
 
 class TestVirtualModelsEntries:
