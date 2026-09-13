@@ -6,7 +6,8 @@
 #   - data-repository/.venv      (requirements.txt)
 #   - solar-control/.venv        (requirements.txt)
 #   - solar-host/.venv           (requirements-dev.txt — includes the
-#                                 huggingface extra: torch + transformers)
+#                                 huggingface extra: CPU torch via
+#                                 UV_TORCH_BACKEND=cpu, no nvidia wheels)
 #
 # Install:
 #   env -u PYTHONPATH .venv/bin/pip install -r tests_integration/requirements.txt
