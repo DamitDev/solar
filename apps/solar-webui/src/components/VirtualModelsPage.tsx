@@ -19,6 +19,7 @@ function targetChipClass(status: string | undefined): string {
   if (!status) return 'bg-nord-2 text-nord-6';
   if (status === 'satisfied') return 'bg-nord-14 bg-opacity-30 text-nord-14 border border-nord-14';
   if (status === 'missing') return 'bg-nord-2 text-nord-4 border border-nord-3';
+  if (status === 'unverified') return 'bg-nord-13 bg-opacity-20 text-nord-13 border border-nord-13';
   // violating: <reason>
   return 'bg-nord-11 bg-opacity-20 text-nord-11 border border-nord-11';
 }

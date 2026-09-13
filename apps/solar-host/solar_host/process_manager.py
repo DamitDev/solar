@@ -405,6 +405,7 @@ class ProcessManager:
                         )
 
                     self._push_instances_update()
+                    self._schedule_context_probe(instance_id)
 
         self._signal_ready(instance_id)
 
@@ -1096,6 +1097,7 @@ class ProcessManager:
             supported_endpoints=supported_endpoints,
             served_model_name=runner.get_served_model_name(config),
             capabilities=capabilities_for_config(config),
+            context_size=getattr(config, "ctx_size", None),
             priority=(
                 InstancePriority(priority) if priority else InstancePriority.PRODUCTION
             ),
@@ -1137,6 +1139,47 @@ class ProcessManager:
     def get_state_next_sequence(self, instance_id: str) -> int:
         """Get next state sequence number for an instance."""
         return self.state_sequences.get(instance_id, 0)
+
+    def _schedule_context_probe(self, instance_id: str) -> None:
+        """Fire-and-forget the backend context probe for a just-started instance.
+
+        The RUNNING transition happens on a thread with no running loop, so
+        the async probe rides the host's main loop. Results are written back
+        onto the instance and pushed to control; a failure leaves
+        ``context_size`` as None (unverifiable, never violated).
+        """
+        try:
+            loop = self._ready_loop or asyncio.get_event_loop()
+            loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(self._probe_context(instance_id))
+            )
+        except RuntimeError:
+            logger.debug(
+                "No loop available for context probe of %s", instance_id, exc_info=True
+            )
+
+    async def _probe_context(self, instance_id: str) -> None:
+        instance = config_manager.get_instance(instance_id)
+        runner = self.instance_runners.get(instance_id)
+        if instance is None or runner is None:
+            return
+        probe = getattr(runner, "probe_context_size", None)
+        if probe is None:
+            return
+        # SGLang needs a beat after the ready line before its HTTP surface
+        # answers; the ready event already fired by the time we run.
+        await asyncio.sleep(1.0)
+        size = await probe(instance)
+        if size is not None and size != instance.context_size:
+            instance.context_size = size
+            config_manager.update_instance(instance_id, instance)
+            self._push_instances_update()
+            logger.info(
+                "Instance %s reports context_size=%d (%s)",
+                instance_id,
+                size,
+                getattr(runner, "get_backend_type", lambda: "?")(),
+            )
 
     def _push_instances_update(self):
         """Push instance list update to all connected solar-controls (thread-safe)."""

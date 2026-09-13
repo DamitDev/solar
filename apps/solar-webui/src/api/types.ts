@@ -899,7 +899,7 @@ export interface VirtualModelContract {
 }
 
 /** Live per-target status from GET /api/virtual-models. */
-export type TargetStatus = 'satisfied' | 'missing' | `violating: ${string}`;
+export type TargetStatus = "satisfied" | "missing" | "unverified" | `violating: ${string}`;
 
 export interface VirtualModel {
   id: string;

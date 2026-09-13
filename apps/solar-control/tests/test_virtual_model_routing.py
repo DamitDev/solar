@@ -151,6 +151,25 @@ class TestResolveVirtual:
         assert reasons["quiet:8b"].startswith("contract_violation:")
 
     @pytest.mark.anyio
+    async def test_unknown_context_size_serves_but_flags(self, gateway):
+        """No reported context size: serve, don't skip (S-060 follow-up)."""
+        registry = {"muted:8b": [_inst(ctx=None)]}
+        contract = VirtualModelContract(context_size=200_000)
+        with (
+            patch(
+                "app.services.virtual_model_cache.virtual_model_cache.get_all",
+                return_value=[_vm("team", ("muted:8b",), contract)],
+            ),
+            patch(
+                "app.redis_state.registry_store.get_registry",
+                new=AsyncMock(return_value=registry),
+            ),
+        ):
+            target, reasons, _ = await gateway._resolve_virtual("team", None)
+        assert target == "muted:8b"
+        assert reasons == {}
+
+    @pytest.mark.anyio
     async def test_all_targets_dead_yields_reasons(self, gateway):
         with (
             patch(
