@@ -88,3 +88,13 @@ class TestValidateVirtualModel:
         contract = VirtualModelContract(context_size=200_000)
         errors, _ = validate_virtual_model(_payload(contract=contract), registry)
         assert errors == []
+
+    def test_unverifiable_context_warns_instead_of_erroring(self):
+        """Unknown context size: warning only, never a 422 (review finding #2)."""
+        registry = {"muted:8b": [_inst(ctx=None)]}
+        contract = VirtualModelContract(context_size=200_000)
+        errors, warnings = validate_virtual_model(
+            _payload(targets=("muted:8b",), contract=contract), registry
+        )
+        assert errors == []
+        assert any("cannot be verified" in w for w in warnings)
