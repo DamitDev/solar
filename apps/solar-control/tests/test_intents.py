@@ -3,6 +3,8 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
+
 from app.models.intent import (
     IntentCreate,
     IntentPhase,
@@ -20,7 +22,6 @@ from app.validation import (
     validate_intent_update,
     validate_intent_warnings,
 )
-from fastapi import HTTPException
 
 # ── Validation unit tests ──────────────────────────────────────
 
@@ -583,8 +584,9 @@ async def test_create_intent_response_carries_resolved_gpu_count():
     the sglang ``tp_size`` and the response (and the stored resources)
     carry the resolved value — consumers never see a None count.
     """
-    from app.main import app
     from fastapi.testclient import TestClient
+
+    from app.main import app
 
     payload = {
         "alias": "tp-model",
@@ -647,8 +649,9 @@ async def test_create_intent_alias_conflict(valid_intent_create):
         "app.routes.management.intents.intent_db.check_alias_conflict",
         new=AsyncMock(return_value=True),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.post(
@@ -667,8 +670,9 @@ async def test_create_intent_validation_error():
         "app.routes.management.intents.intent_db.check_alias_conflict",
         new=AsyncMock(return_value=False),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.post(
@@ -691,8 +695,9 @@ async def test_create_intent_validation_error():
 @pytest.mark.anyio
 async def test_create_intent_unauthorized(valid_intent_create):
     """POST without API key returns 401."""
-    from app.main import app
     from fastapi.testclient import TestClient
+
+    from app.main import app
 
     client = TestClient(app)
     response = client.post(
@@ -710,8 +715,9 @@ async def test_list_intents(mock_intent_response):
         "app.routes.management.intents.intent_db.list_intents",
         new=AsyncMock(return_value=[mock_intent_response]),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.get(
@@ -733,8 +739,9 @@ async def test_get_intent_found(mock_intent_response):
         "app.routes.management.intents.intent_db.get_intent",
         new=AsyncMock(return_value=mock_intent_response),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.get(
@@ -753,8 +760,9 @@ async def test_get_intent_not_found():
         "app.routes.management.intents.intent_db.get_intent",
         new=AsyncMock(return_value=None),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.get(
@@ -773,8 +781,9 @@ async def test_delete_intent_success(mock_intent_response):
         "app.routes.management.intents.intent_db.soft_delete_intent",
         new=AsyncMock(return_value=mock_intent_response),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.delete(
@@ -794,8 +803,9 @@ async def test_delete_intent_not_found():
         "app.routes.management.intents.intent_db.soft_delete_intent",
         new=AsyncMock(return_value=None),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.delete(
@@ -814,8 +824,9 @@ async def test_delete_intent_with_orphan(mock_intent_response):
         "app.routes.management.intents.intent_db.soft_delete_intent",
         new=AsyncMock(return_value=mock_intent_response),
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.delete(
@@ -836,8 +847,9 @@ async def test_list_intents_with_filters(mock_intent_response):
         "app.routes.management.intents.intent_db.list_intents",
         new=mock_list,
     ):
-        from app.main import app
         from fastapi.testclient import TestClient
+
+        from app.main import app
 
         client = TestClient(app)
         response = client.get(
@@ -964,8 +976,9 @@ def mock_updated_intent(mock_intent_response) -> IntentResponse:
 
 
 def _put_intent(payload: dict, intent_id: str = "550e8400-e29b-41d4-a716-446655440000"):
-    from app.main import app
     from fastapi.testclient import TestClient
+
+    from app.main import app
 
     return TestClient(app).put(
         f"/api/intents/{intent_id}",
@@ -1047,8 +1060,9 @@ async def test_update_intent_rejects_deleting_intent(mock_intent_response):
 
 @pytest.mark.anyio
 async def test_update_intent_requires_api_key():
-    from app.main import app
     from fastapi.testclient import TestClient
+
+    from app.main import app
 
     response = TestClient(app).put(
         "/api/intents/550e8400-e29b-41d4-a716-446655440000",
@@ -1393,9 +1407,10 @@ async def test_every_status_json_key_is_hydrated_on_read():
     an explicit keyword list — so nothing but this test stops a new status
     field from being persisted and then silently defaulted on every load.
     """
+    from test_reconciliation import _make_intent, _make_observed
+
     from app.database.intents import IntentDB
     from app.services.reconciliation import Reconciler
-    from test_reconciliation import _make_intent, _make_observed
 
     intent = _make_intent()
     with patch("app.database.intents.intent_db") as mock_db:

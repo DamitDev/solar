@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
+
 from app.auth import ENDPOINT_CACHE_PREFIX, _resolve_endpoint
 from app.database.api_keys import ApiKey
 from app.database.endpoints import ApiEndpoint

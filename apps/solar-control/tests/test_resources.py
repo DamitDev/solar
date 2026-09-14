@@ -4,6 +4,7 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
 from app.database.jobs import job_db
 from app.models import (
     AggregatedResourceResponse,
@@ -468,8 +469,9 @@ async def test_get_resources_filter_by_role(mock_host_online):
 @pytest.mark.anyio
 async def test_get_resources_filter_by_host_id(mock_host_online):
     """host_id filter returns single host or 404."""
-    from app.routes.management.resources import get_resources
     from fastapi import HTTPException
+
+    from app.routes.management.resources import get_resources
 
     with (
         patch("app.database.hosts.host_db.get_host", return_value=mock_host_online),

@@ -11,6 +11,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
 from app.cursor_proxy.config import ProxyConfig
 from app.cursor_proxy.service import (
     CursorProxyUpstreamError,

@@ -10,6 +10,9 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
+from fastapi.testclient import TestClient
+
 from app.config import settings
 from app.models.uploads import (
     CompleteUploadResponse,
@@ -18,8 +21,6 @@ from app.models.uploads import (
     UploadFileStatus,
     UploadStatusResponse,
 )
-from fastapi import HTTPException
-from fastapi.testclient import TestClient
 
 # Read from settings: a local .env may override the packaged default.
 API_KEY = settings.management_api_key

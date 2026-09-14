@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
 from app.database.jobs import job_db
 from app.jobs.router import _translate_payload
 from app.models import Host, HostStatus

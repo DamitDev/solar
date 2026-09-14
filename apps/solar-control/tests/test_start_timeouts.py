@@ -9,6 +9,7 @@ the call chain must fit inside ``settings.host_start_timeout_s``.
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
 from app.config import settings
 from app.models import Host, HostStatus
 
@@ -221,15 +222,16 @@ async def test_last_error_carries_structured_fields():
     """The reconciler's last_error mapping populates instance_id + log_tail."""
     from unittest.mock import patch as _patch
 
-    from app.services.reconciliation import (
-        InstanceStartFailed,
-        Reconciler,
-    )
     from test_reconciliation import (
         _HostStub,
         _make_intent,
         _make_observed,
         _SnapshotStub,
+    )
+
+    from app.services.reconciliation import (
+        InstanceStartFailed,
+        Reconciler,
     )
 
     reconciler = Reconciler()

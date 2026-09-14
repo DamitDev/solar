@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from fastapi import HTTPException
+
 from app.models import Host, HostStatus
 from app.models.migration import MigrationResult
 from app.services.migration import (
@@ -13,7 +15,6 @@ from app.services.migration import (
     execute_evacuation,
     start_instance_on_host,
 )
-from fastapi import HTTPException
 
 
 @pytest.fixture

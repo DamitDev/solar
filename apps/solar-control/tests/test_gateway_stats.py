@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+
 from app.database.logs import GatewayLogger
 
 START = datetime(2026, 8, 17, tzinfo=timezone.utc)

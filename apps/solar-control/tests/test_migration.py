@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
+
 from app.models import Host, HostStatus
 from app.models.migration import MigrationResult
 from app.services.migration import (
@@ -18,7 +20,6 @@ from app.services.migration import (
     stop_source_instance,
     validate_target_fitness,
 )
-from fastapi import HTTPException
 
 # ── Helpers ──────────────────────────────────────────────────────
 

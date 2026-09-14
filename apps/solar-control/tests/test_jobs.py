@@ -10,13 +10,14 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy.dialects import postgresql
+
 from app.database.jobs import _ACTIVE_JOB_LIMIT, JobDB
 from app.jobs.client import JobHostClient, JobHostClientError
 from app.jobs.host_selector import select_host
 from app.jobs.router import _resolve_train_input, _translate_payload
 from app.models import Host, HostStatus
 from app.models.job import Job, JobStatus
-from sqlalchemy.dialects import postgresql
 
 # ── Fixtures ──────────────────────────────────────────────────
 

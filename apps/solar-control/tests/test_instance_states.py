@@ -11,12 +11,13 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from redis.exceptions import ResponseError
+
 from app.redis_state.instance_states import (
     ISTATE_PREFIX,
     ISTATE_TTL_S,
     InstanceStatesStore,
 )
-from redis.exceptions import ResponseError
 
 
 class _FakePipeline:

@@ -14,6 +14,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
+
 from app.models.intent import (
     IntentPhase,
     IntentResponse,
@@ -28,7 +30,6 @@ from app.services.reconciliation import (
     Reconciler,
     _action_timeout_s,
 )
-from fastapi import HTTPException
 
 
 def _make_intent(**overrides) -> IntentResponse:
