@@ -6,12 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from test_reconciliation import (
-    _make_intent,
-    _make_managed_instance,
-    _make_observed,
-)
-
 from app.database.intents import IntentDB
 from app.models.intent import (
     IntentPhase,
@@ -20,6 +14,11 @@ from app.models.intent import (
     ReconcileState,
 )
 from app.services.reconciliation import ActionType, Reconciler
+from test_reconciliation import (
+    _make_intent,
+    _make_managed_instance,
+    _make_observed,
+)
 
 
 def _drifted_intent(

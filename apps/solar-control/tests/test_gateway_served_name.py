@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from app.database.logs import GatewayLogger
 from app.gateway import (
     _CACHED_FILL_WINDOW_S,

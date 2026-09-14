@@ -8,8 +8,6 @@ column untouched while an explicit value (including ``null``) must be written.
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import HTTPException
-
 from app.database.endpoints import ApiEndpoint
 from app.routes.management.endpoints import (
     EndpointCreate,
@@ -20,6 +18,7 @@ from app.routes.management.endpoints import (
     preview_models,
     update_endpoint,
 )
+from fastapi import HTTPException
 
 pytestmark = pytest.mark.anyio
 

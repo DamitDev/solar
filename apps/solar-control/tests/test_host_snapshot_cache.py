@@ -11,7 +11,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
-
 from app.config import settings
 from app.models import Host, HostResourceSnapshot, HostStatus
 from app.routes.management.resources import (

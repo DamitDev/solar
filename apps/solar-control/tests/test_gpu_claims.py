@@ -12,7 +12,6 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
-
 from app.models import GpuInfo, HostReservationSummary, HostResourceSnapshot, HostStatus
 from app.services.placement import find_gpu_assignment
 from app.services.reservation import (

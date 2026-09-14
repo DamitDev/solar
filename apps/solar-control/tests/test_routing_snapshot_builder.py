@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from app.database.endpoints import ApiEndpoint
 from app.models import Host, HostStatus
 from app.models.routing_snapshot import SCHEMA_VERSION

@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
-
 from app.models import Host, HostStatus
 from app.routes.management.storage import (
     DeleteItem,

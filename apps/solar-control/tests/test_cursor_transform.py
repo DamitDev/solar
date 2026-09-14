@@ -9,7 +9,6 @@ import json
 from unittest.mock import patch
 
 import pytest
-
 from app.cursor_proxy.config import ProxyConfig
 from app.cursor_proxy.reasoning_store import (
     ReasoningStore,

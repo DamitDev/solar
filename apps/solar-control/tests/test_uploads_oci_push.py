@@ -18,7 +18,6 @@ import hashlib
 
 import httpx
 import pytest
-
 from app.harbor.oci_push import (
     OciPushClient,
     OciPushError,
