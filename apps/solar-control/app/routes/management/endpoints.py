@@ -54,7 +54,9 @@ async def _emit_endpoints_update() -> None:
         endpoints = await endpoint_db.get_all_endpoints()
         await sio.emit(
             "endpoints_update",
-            {"endpoints": [ep.model_dump() for ep in endpoints]},
+            # JSON mode: ApiEndpoint carries datetime fields and Socket.IO's
+            # encoder is plain json.dumps.
+            {"endpoints": [ep.model_dump(mode="json") for ep in endpoints]},
             namespace="/webui",
         )
     except Exception:

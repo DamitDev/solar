@@ -5,12 +5,14 @@ composed payload shape, the server-computed tallies, and the field contract the
 WebUI consumers code against.
 """
 
+import json
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.database.endpoints import ApiEndpoint
 from app.models import Host, HostStatus
 from app.models.routing_snapshot import SCHEMA_VERSION
 from app.services.routing_snapshot_builder import build_routing_snapshot
@@ -290,5 +292,45 @@ class _ApiEndpoint:
     def __init__(self, data: dict):
         self._data = data
 
-    def model_dump(self) -> dict:
+    def model_dump(self, *, mode: str = "python") -> dict:
         return self._data
+
+
+@_cm
+async def test_snapshot_dump_is_json_serializable():
+    """Regression: ApiEndpoint datetime fields must not leak into the payload.
+
+    The snapshot is emitted over Socket.IO, whose encoder is plain
+    ``json.dumps``; ``ApiEndpoint`` carries ``datetime`` fields, so any
+    non-JSON-mode dump crashes the ``routing_snapshot`` emit on WebUI
+    connect (and with it the connect handler).
+    """
+    endpoint = ApiEndpoint(
+        id="ep-1",
+        name="Endpoint One",
+        created_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        updated_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
+    )
+    with _patched(
+        **{
+            "app.services.routing_snapshot_builder.endpoint_db.get_all_endpoints": AsyncMock(
+                return_value=[endpoint]
+            )
+        }
+    ):
+        snap = await build_routing_snapshot()
+
+    dumped = snap.model_dump()  # same call the Socket.IO emit path makes
+    encoded = json.dumps(dumped)  # must not raise TypeError
+    payload = json.loads(encoded)
+    assert payload["endpoints"] == [
+        {
+            "id": "ep-1",
+            "name": "Endpoint One",
+            "description": None,
+            "serve_all_models": True,
+            "model_patterns": [],
+            "created_at": "2026-09-01T00:00:00Z",
+            "updated_at": "2026-09-02T00:00:00Z",
+        }
+    ]
