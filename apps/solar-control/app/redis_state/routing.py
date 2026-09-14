@@ -228,7 +228,7 @@ class RoutingStore:
             # mget() requires at least one key; an empty registry is the
             # steady state, not an error.
             return []
-        values = await r.mget(*keys)
+        values = await r.mget(keys)
         entries: list[dict[str, Any]] = []
         for raw in values:
             if raw is None:

@@ -62,10 +62,11 @@ class _FakeRedis:
     async def delete(self, key):
         self.store.pop(key, None)
 
-    async def mget(self, *keys):
-        if not keys:
+    async def mget(self, keys, *args):
+        all_keys = [*(keys if isinstance(keys, list) else [keys]), *args]
+        if not all_keys:
             raise ResponseError("wrong number of arguments for 'mget' command")
-        return [self.store.get(k) for k in keys]
+        return [self.store.get(k) for k in all_keys]
 
     async def scan_iter(self, match=None):
         import fnmatch
