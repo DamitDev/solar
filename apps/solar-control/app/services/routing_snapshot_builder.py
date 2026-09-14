@@ -176,7 +176,9 @@ async def _build_endpoints() -> list[dict[str, Any]]:
     """Compose endpoint records in the ``endpoints_update`` shape."""
     try:
         endpoints = await endpoint_db.get_all_endpoints()
-        return [ep.model_dump() for ep in endpoints]
+        # JSON mode: ApiEndpoint carries datetime fields and the snapshot is
+        # emitted over Socket.IO, whose encoder is plain json.dumps.
+        return [ep.model_dump(mode="json") for ep in endpoints]
     except Exception:
         logger.warning("Failed to load endpoints for snapshot", exc_info=True)
         return []

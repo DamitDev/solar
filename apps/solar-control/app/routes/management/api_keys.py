@@ -41,7 +41,9 @@ async def _emit_api_keys_update() -> None:
         keys = await api_key_db.list_all()
         await sio.emit(
             "api_keys_update",
-            {"api_keys": [key.model_dump() for key in keys]},
+            # JSON mode: ApiKey carries datetime fields and Socket.IO's
+            # encoder is plain json.dumps.
+            {"api_keys": [key.model_dump(mode="json") for key in keys]},
             namespace="/webui",
         )
     except Exception:
