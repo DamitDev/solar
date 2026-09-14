@@ -8,9 +8,10 @@ same management auth as the other management routes.
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
+
 from app.config import settings
 from app.models.routing_snapshot import SCHEMA_VERSION, RoutingSnapshot
-from fastapi.testclient import TestClient
 
 API_KEY = settings.management_api_key
 

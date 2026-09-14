@@ -9,6 +9,7 @@ Specification: training-platform-project/docs/specs/host-draining.md
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
 from app.models import DrainState, Host, HostStatus
 from app.services import drain
 
@@ -311,8 +312,9 @@ async def test_sweep_skips_when_another_replica_holds_the_lock(draining_host):
 
 
 def _client():
-    from app.main import app
     from fastapi.testclient import TestClient
+
+    from app.main import app
 
     return TestClient(app)
 

@@ -3,11 +3,12 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.testclient import TestClient
+
 from app.models.virtual_model import (
     VirtualModelContract,
     VirtualModelResponse,
 )
-from fastapi.testclient import TestClient
 
 MANAGEMENT_KEY = {"X-API-Key": "change-me-management"}
 

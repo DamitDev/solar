@@ -1,9 +1,10 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
+
 from app.model_resolvers.dispatcher import resolve
 from app.model_resolvers.parser import HuggingFaceURI, LocalURI, RepoURI, parse
-from fastapi import HTTPException
 
 
 def _repo_resolve_payload(**overrides):

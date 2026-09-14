@@ -11,6 +11,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, call, patch
 
 import pytest
+from fastapi import HTTPException
+
 from app.harbor.oci_push import OciPushError
 from app.services.catalog_delete import (
     CatalogDeleteService,
@@ -18,7 +20,6 @@ from app.services.catalog_delete import (
     _blocking_instances,
     _instance_serves_version,
 )
-from fastapi import HTTPException
 
 pytestmark = pytest.mark.anyio
 

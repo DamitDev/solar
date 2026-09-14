@@ -9,9 +9,10 @@ even through a prefix abbreviation ("sec" for "secret-7b").
 import json
 
 import pytest
+from fastapi import HTTPException
+
 from app.database.endpoints import ApiEndpoint
 from app.routes.openai import _model_patterns, _raise_model_not_found
-from fastapi import HTTPException
 
 
 class FakeState:

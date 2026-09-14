@@ -12,13 +12,14 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
+from pydantic import ValidationError
+
 from app.config import settings
 from app.harbor.oci_push import OciPushError
 from app.models.uploads import CreateUploadRequest, UploadFileDeclaration
 from app.redis_state.uploads import UploadSessionStore
 from app.services.uploads import DataRepoClient, UploadService
-from fastapi import HTTPException
-from pydantic import ValidationError
 
 # ---------------------------------------------------------------------------
 # Fake Redis (dict-backed, async interface used by UploadSessionStore)

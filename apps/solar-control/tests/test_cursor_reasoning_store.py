@@ -10,6 +10,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+
 from app.cursor_proxy.reasoning_store import (
     INDEX_KEY,
     KEY_PREFIX,
