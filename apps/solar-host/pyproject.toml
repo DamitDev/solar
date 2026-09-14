@@ -27,10 +27,10 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "python-multipart>=0.0.32",
     "python-socketio[asyncio_client]",
-    "Pebble>=5.2.1",
+    "Pebble>=5.2.2",
     "psutil>=7.2.2",
     "harbor-oci-client>=0.1.0",
-    "huggingface-hub>=1.30.0",
+    "huggingface-hub>=1.31.0",
     "docker>=7.2.0",
 ]
 
@@ -38,8 +38,8 @@ dependencies = [
 nvidia = ["nvidia-ml-py>=13.610.43"]
 huggingface = [
     "torch>=2.14.0",
-    "transformers>=5.16.1",
-    "accelerate>=1.14.0",
+    "transformers>=5.17.0",
+    "accelerate>=1.15.0",
 ]
 all = ["solar-host[nvidia,huggingface]"]
 dev = ["pytest>=9.1.1"]
@@ -53,7 +53,7 @@ Repository = "https://github.com/DamitDev/solar"
 Issues = "https://github.com/DamitDev/solar/issues"
 
 [dependency-groups]
-dev = ["pytest>=9.1.1", "black>=26.5.1", "ruff>=0.16.6"]
+dev = ["pytest>=9.1.1", "black>=26.5.1", "ruff>=0.16.7"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["solar_host"]
