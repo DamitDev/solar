@@ -15,9 +15,9 @@ dependencies = [
     "httpx==0.28.1",
     "python-multipart==0.0.32",
     "asyncpg==0.31.0",
-    "psycopg2-binary==2.9.12",
+    "psycopg2-binary==2.9.13",
     "sqlalchemy[asyncio]==2.0.52",
-    "alembic==1.19.1",
+    "alembic==1.19.2",
     "python-socketio[asyncio_server]==5.16.4",
     "redis[hiredis]==8.1.0",
 ]
@@ -36,7 +36,7 @@ dev = [
     "black>=26.5.1",
     # Pinned: ruff 0.16 changed the default rule set and flags the codebase's
     # existing style (248 errors). Bumping this is a deliberate lint cleanup PR.
-    "ruff==0.16.6",
+    "ruff==0.16.7",
 ]
 
 [tool.setuptools.packages.find]
