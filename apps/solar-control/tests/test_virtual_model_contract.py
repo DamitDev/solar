@@ -1,10 +1,9 @@
 """Unit tests for the virtual model contract check (S-060)."""
 
 import pytest
-from pydantic import ValidationError
-
 from app.models.virtual_model import VirtualModelContract
 from app.services.virtual_model_contract import contract_violation
+from pydantic import ValidationError
 
 
 class TestContractViolation:

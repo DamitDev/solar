@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
-
 from app.gateway import OpenAIGateway, VirtualModelUnavailableError
 from app.models.virtual_model import (
     VirtualModelContract,

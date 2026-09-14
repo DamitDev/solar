@@ -8,7 +8,6 @@ and warnings must never block an edit.
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from app.models import Host, HostStatus
 
 
@@ -89,9 +88,8 @@ class TestReconcilerDefensiveValidation:
         whenever a host is stale or disconnected, which is exactly the cost C5
         set out to remove from the reconcile path.
         """
-        from test_reconciliation import _HostStub, _make_intent, _make_observed
-
         from app.services.reconciliation import Reconciler
+        from test_reconciliation import _HostStub, _make_intent, _make_observed
 
         reconciler = Reconciler()
         intent = _make_intent(replicas=0)
@@ -114,9 +112,8 @@ class TestReconcilerDefensiveValidation:
     @pytest.mark.anyio
     async def test_violations_are_logged_once_per_spec_version(self):
         """An unfixable legacy spec must not log once per tick forever."""
-        from test_reconciliation import _HostStub, _make_intent, _make_observed
-
         from app.services.reconciliation import Reconciler
+        from test_reconciliation import _HostStub, _make_intent, _make_observed
 
         reconciler = Reconciler()
         # host_allow names a host that is not in the roster: a hard violation.

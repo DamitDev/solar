@@ -5,7 +5,6 @@ from itertools import pairwise
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from app.database.logs import (
     TIMESERIES_BUCKETS,
     TIMESERIES_MAX_POINTS,

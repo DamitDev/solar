@@ -4,8 +4,6 @@ from unittest.mock import AsyncMock, patch
 
 import aiohttp
 import pytest
-from fastapi import HTTPException
-
 from app.models import Host, HostStatus
 from app.routes.management.catalog import (
     _collect_availability,
@@ -14,6 +12,7 @@ from app.routes.management.catalog import (
     _model_name_from_source,
     get_catalog_models,
 )
+from fastapi import HTTPException
 
 REPO_MODELS = [
     {

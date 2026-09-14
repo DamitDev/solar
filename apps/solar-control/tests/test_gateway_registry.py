@@ -1,7 +1,6 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from app.gateway import OpenAIGateway
 from app.models import Host, HostStatus, RegistryEntry
 

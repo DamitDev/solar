@@ -8,10 +8,9 @@ working on /v1 for operator tooling.
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from app.auth import auth_middleware
 from fastapi.responses import JSONResponse, Response
 from starlette.requests import Request
-
-from app.auth import auth_middleware
 
 pytestmark = pytest.mark.anyio
 

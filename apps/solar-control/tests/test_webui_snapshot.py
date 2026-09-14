@@ -11,7 +11,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from app.models.routing_snapshot import SCHEMA_VERSION, RoutingSnapshot
 
 _cm = pytest.mark.anyio

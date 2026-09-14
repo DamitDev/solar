@@ -11,7 +11,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 from app.redis_state.routing import (
     ACTIVE_TTL_S,
     REQ_PREFIX,

@@ -3,8 +3,6 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import HTTPException
-
 from app.database.api_keys import ApiKey
 from app.routes.management.api_keys import (
     ApiKeyCreate,
@@ -15,6 +13,7 @@ from app.routes.management.api_keys import (
     rotate_api_key,
     update_api_key,
 )
+from fastapi import HTTPException
 
 pytestmark = pytest.mark.anyio
 

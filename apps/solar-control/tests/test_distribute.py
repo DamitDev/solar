@@ -1,8 +1,6 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import HTTPException
-
 from app.model_resolvers.parser import RepoURI, parse
 from app.models import Host, HostStatus
 from app.routes.management.models import (
@@ -12,6 +10,7 @@ from app.routes.management.models import (
     _StructuredPullError,
     distribute_model,
 )
+from fastapi import HTTPException
 
 
 @pytest.fixture

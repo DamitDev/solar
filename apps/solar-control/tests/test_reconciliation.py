@@ -6,8 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import HTTPException
-
 from app.models.intent import (
     IntentPhase,
     IntentResponse,
@@ -26,6 +24,7 @@ from app.services.reconciliation import (
     _intent_phase,
     _spec_settled,
 )
+from fastapi import HTTPException
 
 # ── Simple host stub ────────────────────────────────────────────
 

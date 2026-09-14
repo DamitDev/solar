@@ -10,10 +10,9 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from app.routes.management.catalog import router
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-
-from app.routes.management.catalog import router
 
 REPO_VERSIONS = {
     "versions": [

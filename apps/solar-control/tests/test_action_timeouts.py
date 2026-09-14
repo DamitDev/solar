@@ -16,19 +16,18 @@ import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from test_reconciliation import (
-    _HostStub,
-    _make_intent,
-    _make_observed,
-    _SnapshotStub,
-)
-
 from app.services.reconciliation import (
     Action,
     ActionType,
     Reconciler,
     _await_action_with_progress,
     _PullState,
+)
+from test_reconciliation import (
+    _HostStub,
+    _make_intent,
+    _make_observed,
+    _SnapshotStub,
 )
 
 
