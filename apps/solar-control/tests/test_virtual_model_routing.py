@@ -347,7 +347,6 @@ class TestResolveVirtual:
             tried.append(model)
             if model == "a-first:8b":
                 return None  # target vanished mid-flight
-            inst = registry["b-second:8b"][0]
             return SimpleNamespace(
                 host_id="h1",
                 instance_id="i-1",
