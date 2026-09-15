@@ -7,6 +7,8 @@ import { formatTokenCount } from '@/lib/utils';
 export interface BreakdownRow {
   id: string;
   label: string;
+  /** Optional: the endpoint the credential belongs to (By User only). */
+  endpoint_label?: string;
   completed: number;
   token_in: number;
   token_cached: number;
@@ -19,28 +21,49 @@ interface Props {
   /** Heading for the label column, e.g. "Model" or "Host". */
   labelHeading: string;
   rows: BreakdownRow[];
-  /** Tighter paddings + narrower label column, for grids that fit 3+ tables side by side. */
+  /** Tighter paddings and narrower labels, for tables in dense multi-column grids. */
   compact?: boolean;
+  /** Prepend an Endpoint column (By User: the key's owning endpoint). */
+  showEndpoint?: boolean;
+  /** Append a Tokens column: input + output combined. */
+  showTokens?: boolean;
+  /** Override the default label-ascending initial sort. */
+  defaultSort?: { key: string; direction: 'asc' | 'desc' };
 }
 
-export function BreakdownTable({ title, labelHeading, rows, compact = false }: Props) {
+export function BreakdownTable({
+  title,
+  labelHeading,
+  rows,
+  compact = false,
+  showEndpoint = false,
+  showTokens = false,
+  defaultSort,
+}: Props) {
   const pad = compact ? 'px-1.5 py-2' : 'px-2 py-2';
   const labelMax = compact ? 'max-w-[90px]' : 'max-w-[180px]';
   const columns = useMemo<SortColumn<BreakdownRow>[]>(
     () => [
+      ...(showEndpoint ? [{ key: 'endpoint', value: (r: BreakdownRow) => r.endpoint_label ?? '' }] : []),
       { key: 'label', value: (r) => r.label },
       { key: 'completed', value: (r) => r.completed, numeric: true },
       { key: 'token_miss', value: (r) => r.token_in - r.token_cached, numeric: true },
       { key: 'token_cached', value: (r) => r.token_cached, numeric: true },
       { key: 'token_out', value: (r) => r.token_out, numeric: true },
+      ...(showTokens ? [{ key: 'tokens', value: (r: BreakdownRow) => r.token_in + r.token_out, numeric: true }] : []),
       { key: 'avg_duration_s', value: (r) => r.avg_duration_s, numeric: true },
     ],
-    [],
+    [showEndpoint, showTokens],
   );
 
   // Alphabetical by default: the list is a reference you scan for a known name,
-  // not a leaderboard.
-  const { rows: sorted, sortKey, direction, toggle } = useTableSort(rows, columns, 'label');
+  // not a leaderboard. Tables can override (By User opens on Tokens desc).
+  const {
+    rows: sorted,
+    sortKey,
+    direction,
+    toggle,
+  } = useTableSort(rows, columns, defaultSort?.key ?? 'label', defaultSort?.direction ?? 'asc');
 
   const totals = useMemo(
     () =>
@@ -70,6 +93,16 @@ export function BreakdownTable({ title, labelHeading, rows, compact = false }: P
         <table className="min-w-full text-sm">
           <thead className="bg-nord-2 text-nord-4">
             <tr>
+              {showEndpoint && (
+                <SortHeader
+                  label="Endpoint"
+                  sortKey="endpoint"
+                  activeKey={sortKey}
+                  direction={direction}
+                  onSort={toggle}
+                  compact={compact}
+                />
+              )}
               <SortHeader
                 label={labelHeading}
                 sortKey="label"
@@ -114,6 +147,17 @@ export function BreakdownTable({ title, labelHeading, rows, compact = false }: P
                 align="right"
                 compact={compact}
               />
+              {showTokens && (
+                <SortHeader
+                  label="Tokens"
+                  sortKey="tokens"
+                  activeKey={sortKey}
+                  direction={direction}
+                  onSort={toggle}
+                  align="right"
+                  compact={compact}
+                />
+              )}
               <SortHeader
                 label="Latency"
                 sortKey="avg_duration_s"
@@ -129,6 +173,11 @@ export function BreakdownTable({ title, labelHeading, rows, compact = false }: P
             {sorted.length ? (
               sorted.map((row) => (
                 <tr key={row.id} className="border-t border-nord-3 hover:bg-nord-2/40">
+                  {showEndpoint && (
+                    <td className={`${pad} max-w-[140px] truncate`} title={row.endpoint_label}>
+                      {row.endpoint_label || '—'}
+                    </td>
+                  )}
                   <td className={`${pad} ${labelMax} truncate`} title={row.label}>
                     {row.label}
                   </td>
@@ -138,12 +187,20 @@ export function BreakdownTable({ title, labelHeading, rows, compact = false }: P
                   </td>
                   <td className={`${pad} text-right tabular-nums`}>{formatTokenCount(row.token_cached)}</td>
                   <td className={`${pad} text-right tabular-nums`}>{formatTokenCount(row.token_out)}</td>
+                  {showTokens && (
+                    <td className={`${pad} text-right tabular-nums`}>
+                      {formatTokenCount(row.token_in + row.token_out)}
+                    </td>
+                  )}
                   <td className={`${pad} text-right tabular-nums`}>{row.avg_duration_s.toFixed(2)}s</td>
                 </tr>
               ))
             ) : (
               <tr>
-                <td colSpan={6} className="px-3 py-4 text-center text-nord-4">
+                <td
+                  colSpan={6 + (showEndpoint ? 1 : 0) + (showTokens ? 1 : 0)}
+                  className="px-3 py-4 text-center text-nord-4"
+                >
                   No data
                 </td>
               </tr>

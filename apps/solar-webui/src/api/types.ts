@@ -484,6 +484,8 @@ export interface GatewayStats {
   users?: Array<{
     api_key_id: string;
     api_key_name: string;
+    /** Name of the endpoint the key belongs to (keys are endpoint-scoped). */
+    endpoint_name?: string | null;
     completed: number;
     token_in: number;
     token_cached: number;
