@@ -19,9 +19,13 @@ interface Props {
   /** Heading for the label column, e.g. "Model" or "Host". */
   labelHeading: string;
   rows: BreakdownRow[];
+  /** Tighter paddings + narrower label column, for grids that fit 3+ tables side by side. */
+  compact?: boolean;
 }
 
-export function BreakdownTable({ title, labelHeading, rows }: Props) {
+export function BreakdownTable({ title, labelHeading, rows, compact = false }: Props) {
+  const pad = compact ? 'px-1.5 py-2' : 'px-2 py-2';
+  const labelMax = compact ? 'max-w-[90px]' : 'max-w-[180px]';
   const columns = useMemo<SortColumn<BreakdownRow>[]>(
     () => [
       { key: 'label', value: (r) => r.label },
@@ -72,6 +76,7 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
                 activeKey={sortKey}
                 direction={direction}
                 onSort={toggle}
+                compact={compact}
               />
               <SortHeader
                 label="Completed"
@@ -80,6 +85,7 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
                 direction={direction}
                 onSort={toggle}
                 align="right"
+                compact={compact}
               />
               <SortHeader
                 label="Miss"
@@ -88,6 +94,7 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
                 direction={direction}
                 onSort={toggle}
                 align="right"
+                compact={compact}
               />
               <SortHeader
                 label="Hit"
@@ -96,6 +103,7 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
                 direction={direction}
                 onSort={toggle}
                 align="right"
+                compact={compact}
               />
               <SortHeader
                 label="Output"
@@ -104,6 +112,7 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
                 direction={direction}
                 onSort={toggle}
                 align="right"
+                compact={compact}
               />
               <SortHeader
                 label="Latency"
@@ -112,6 +121,7 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
                 direction={direction}
                 onSort={toggle}
                 align="right"
+                compact={compact}
               />
             </tr>
           </thead>
@@ -119,16 +129,16 @@ export function BreakdownTable({ title, labelHeading, rows }: Props) {
             {sorted.length ? (
               sorted.map((row) => (
                 <tr key={row.id} className="border-t border-nord-3 hover:bg-nord-2/40">
-                  <td className="px-2 py-2 max-w-[180px] truncate" title={row.label}>
+                  <td className={`${pad} ${labelMax} truncate`} title={row.label}>
                     {row.label}
                   </td>
-                  <td className="px-2 py-2 text-right tabular-nums">{row.completed}</td>
-                  <td className="px-2 py-2 text-right tabular-nums">
+                  <td className={`${pad} text-right tabular-nums`}>{row.completed}</td>
+                  <td className={`${pad} text-right tabular-nums`}>
                     {formatTokenCount(row.token_in - row.token_cached)}
                   </td>
-                  <td className="px-2 py-2 text-right tabular-nums">{formatTokenCount(row.token_cached)}</td>
-                  <td className="px-2 py-2 text-right tabular-nums">{formatTokenCount(row.token_out)}</td>
-                  <td className="px-2 py-2 text-right tabular-nums">{row.avg_duration_s.toFixed(2)}s</td>
+                  <td className={`${pad} text-right tabular-nums`}>{formatTokenCount(row.token_cached)}</td>
+                  <td className={`${pad} text-right tabular-nums`}>{formatTokenCount(row.token_out)}</td>
+                  <td className={`${pad} text-right tabular-nums`}>{row.avg_duration_s.toFixed(2)}s</td>
                 </tr>
               ))
             ) : (

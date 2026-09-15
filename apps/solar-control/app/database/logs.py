@@ -127,6 +127,8 @@ class RequestInProgress:
     resolved_model: str | None = None
     endpoint: str | None = None
     endpoint_id: str | None = None
+    api_key_id: str | None = None
+    api_key_name: str | None = None
     client_ip: str | None = None
     stream: bool | None = None
     start_timestamp: str | None = None
@@ -147,6 +149,8 @@ class RequestSummary:
     resolved_model: str | None
     endpoint: str | None
     endpoint_id: str | None
+    api_key_id: str | None
+    api_key_name: str | None
     client_ip: str | None
     stream: bool | None
     attempts: int
@@ -263,6 +267,8 @@ class GatewayLogger:
                                 resolved_model=r.get("resolved_model"),
                                 endpoint=r.get("endpoint"),
                                 endpoint_id=r.get("endpoint_id"),
+                                api_key_id=r.get("api_key_id"),
+                                api_key_name=r.get("api_key_name"),
                                 client_ip=r.get("client_ip"),
                                 stream=r.get("stream"),
                                 attempts=r.get("attempts", 1),
@@ -317,7 +323,12 @@ class GatewayLogger:
             self._request_buffer.append(summary_dict)
 
     async def log_event(
-        self, event: dict[str, Any], *, endpoint_id: str | None = None
+        self,
+        event: dict[str, Any],
+        *,
+        endpoint_id: str | None = None,
+        api_key_id: str | None = None,
+        api_key_name: str | None = None,
     ) -> RequestSummary | None:
         """Log a gateway event.
 
@@ -349,6 +360,8 @@ class GatewayLogger:
                     model=data.get("model"),
                     endpoint=ep,
                     endpoint_id=endpoint_id,
+                    api_key_id=api_key_id,
+                    api_key_name=api_key_name,
                     client_ip=data.get("client_ip"),
                     stream=(
                         bool(data.get("stream"))
@@ -369,6 +382,8 @@ class GatewayLogger:
                         model=data.get("model"),
                         endpoint=ep,
                         endpoint_id=endpoint_id,
+                        api_key_id=api_key_id,
+                        api_key_name=api_key_name,
                         start_timestamp=timestamp,
                         created_at=time.monotonic(),
                     )
@@ -392,6 +407,8 @@ class GatewayLogger:
                         model=data.get("model"),
                         endpoint=ep,
                         endpoint_id=endpoint_id,
+                        api_key_id=api_key_id,
+                        api_key_name=api_key_name,
                         start_timestamp=timestamp,
                     )
 
@@ -445,6 +462,8 @@ class GatewayLogger:
                     resolved_model=rip.resolved_model,
                     endpoint=rip.endpoint,
                     endpoint_id=rip.endpoint_id or endpoint_id,
+                    api_key_id=rip.api_key_id or api_key_id,
+                    api_key_name=rip.api_key_name or api_key_name,
                     client_ip=rip.client_ip,
                     stream=rip.stream,
                     attempts=max(1, rip.attempts),
@@ -526,6 +545,8 @@ class GatewayLogger:
             "resolved_model": row.resolved_model,
             "endpoint": row.endpoint,
             "endpoint_id": str(row.endpoint_id) if row.endpoint_id else None,
+            "api_key_id": str(row.api_key_id) if row.api_key_id else None,
+            "api_key_name": row.api_key_name,
             "client_ip": row.client_ip,
             "stream": row.stream,
             "attempts": row.attempts,
@@ -627,6 +648,7 @@ class GatewayLogger:
                 "avg_tokens_out": 0,
                 "models": [],
                 "hosts": [],
+                "users": [],
             }
 
         R = GatewayRequestRow
@@ -715,6 +737,38 @@ class GatewayLogger:
             )
             host_rows = (await session.execute(host_stmt)).all()
 
+            # Same denormalized label pattern as hosts: api_key_name is the
+            # snapshot taken at log time, so deleted/renamed keys still group
+            # and label correctly. Rows without attribution (pre-migration,
+            # management key) stay out of the breakdown.
+            user_key = R.api_key_id
+            user_stmt = (
+                select(
+                    R.api_key_id,
+                    sa_func.max(R.api_key_name).label("api_key_name"),
+                    sa_func.count().label("completed"),
+                    sa_func.coalesce(sa_func.sum(R.prompt_tokens), 0).label("token_in"),
+                    sa_func.coalesce(sa_func.sum(R.cached_tokens), 0).label(
+                        "token_cached"
+                    ),
+                    sa_func.coalesce(sa_func.sum(R.completion_tokens), 0).label(
+                        "token_out"
+                    ),
+                    sa_func.coalesce(sa_func.avg(R.duration_s), 0).label(
+                        "avg_duration_s"
+                    ),
+                )
+                .where(
+                    and_(
+                        *conditions,
+                        R.status == "success",
+                        R.api_key_id.isnot(None),
+                    )
+                )
+                .group_by(user_key)
+            )
+            user_rows = (await session.execute(user_stmt)).all()
+
             E = GatewayEventRow
             ev_conditions = [
                 E.timestamp >= start,
@@ -767,6 +821,18 @@ class GatewayLogger:
                     "avg_duration_s": float(r.avg_duration_s),
                 }
                 for r in host_rows
+            ],
+            "users": [
+                {
+                    "api_key_id": str(r.api_key_id),
+                    "api_key_name": r.api_key_name or str(r.api_key_id),
+                    "completed": r.completed,
+                    "token_in": int(r.token_in),
+                    "token_cached": int(r.token_cached),
+                    "token_out": int(r.token_out),
+                    "avg_duration_s": float(r.avg_duration_s),
+                }
+                for r in user_rows
             ],
         }
 

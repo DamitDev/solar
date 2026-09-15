@@ -481,6 +481,15 @@ export interface GatewayStats {
     token_out: number;
     avg_duration_s: number;
   }>;
+  users?: Array<{
+    api_key_id: string;
+    api_key_name: string;
+    completed: number;
+    token_in: number;
+    token_cached: number;
+    token_out: number;
+    avg_duration_s: number;
+  }>;
 }
 
 /** One bucket of the gateway time series. Empty buckets are zero-filled by
@@ -530,6 +539,9 @@ export interface GatewayRequestSummary {
   resolved_model?: string;
   endpoint?: string;
   endpoint_id?: string;
+  /** Named /v1 credential that authenticated the request (NULL = management key or pre-attribution row). */
+  api_key_id?: string;
+  api_key_name?: string;
   client_ip?: string;
   stream?: boolean;
   attempts: number;

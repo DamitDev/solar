@@ -78,12 +78,17 @@ async def invalidate_endpoint_cache() -> None:
         logger.warning("Failed to invalidate endpoint cache: %s", e)
 
 
-async def _resolve_endpoint(api_key: str) -> tuple[Any, str] | None:
-    """Resolve a raw key to an (endpoint, api_key_id) pair via Redis cache.
+async def _resolve_endpoint(
+    api_key: str,
+) -> tuple[Any, str, str | None] | None:
+    """Resolve a raw key to an (endpoint, api_key_id, api_key_name) triple.
 
-    The cache entry is ``{"endpoint": {...}, "api_key_id": "..."}`` keyed by
-    the same ``solar:endpoint_cache:{api_key}`` as before the endpoint/key
-    split, so a rolling deploy keeps a single cache namespace.
+    The cache entry is ``{"endpoint": {...}, "api_key_id": "...",
+    "api_key_name": "..."}`` keyed by the same
+    ``solar:endpoint_cache:{api_key}`` as before the endpoint/key split, so
+    a rolling deploy keeps a single cache namespace. ``api_key_name`` reads
+    with a tolerant ``.get()`` because entries written by pre-attribution
+    replicas lack it.
     """
     try:
         from app.redis_state.connection import redis_client
@@ -94,7 +99,11 @@ async def _resolve_endpoint(api_key: str) -> tuple[Any, str] | None:
             data = json.loads(cached)
             from app.database.endpoints import ApiEndpoint
 
-            return ApiEndpoint(**data["endpoint"]), data["api_key_id"]
+            return (
+                ApiEndpoint(**data["endpoint"]),
+                data["api_key_id"],
+                data.get("api_key_name"),
+            )
     except Exception:  # noqa: BLE001, S110
         pass
 
@@ -111,13 +120,14 @@ async def _resolve_endpoint(api_key: str) -> tuple[Any, str] | None:
                     {
                         "endpoint": endpoint.model_dump(mode="json"),
                         "api_key_id": api_key_row.id,
+                        "api_key_name": api_key_row.name,
                     }
                 ),
                 ex=ENDPOINT_CACHE_TTL,
             )
         except Exception:  # noqa: BLE001, S110
             pass
-        return endpoint, api_key_row.id
+        return endpoint, api_key_row.id, api_key_row.name
     return None
 
 
@@ -164,9 +174,10 @@ async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyp
     if path.startswith(("/v1/", "/cursor/v1/")):
         resolved = await _resolve_endpoint(api_key)
         if resolved:
-            endpoint, api_key_id = resolved
+            endpoint, api_key_id, api_key_name = resolved
             request.state.endpoint = endpoint
             request.state.api_key_id = api_key_id
+            request.state.api_key_name = api_key_name
             request.state.endpoint_id = endpoint.id
             request.state.endpoint_name = endpoint.name
             task = asyncio.create_task(_touch_last_used(api_key_id))
@@ -179,6 +190,7 @@ async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyp
         if api_key == settings.management_api_key and path.startswith("/v1/"):
             request.state.endpoint = None
             request.state.api_key_id = None
+            request.state.api_key_name = None
             request.state.endpoint_id = None
             request.state.endpoint_name = None
             return await call_next(request)

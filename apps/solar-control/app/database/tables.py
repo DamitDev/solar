@@ -149,6 +149,7 @@ class GatewayRequestRow(Base):
         Index("idx_requests_host", "host_id"),
         Index("idx_requests_type", "request_type"),
         Index("idx_requests_endpoint", "endpoint_id"),
+        Index("idx_requests_api_key", "api_key_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -163,6 +164,15 @@ class GatewayRequestRow(Base):
         ForeignKey("api_endpoints.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Named /v1 credential that authenticated the request. The FK nulls out
+    # when the key is deleted; api_key_name is the snapshot taken at log
+    # time, so history keeps a readable label after deletion or rename.
+    api_key_id: Mapped[str | None] = mapped_column(
+        PG_UUID(as_uuid=False),
+        ForeignKey("api_keys.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    api_key_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     client_ip: Mapped[str | None] = mapped_column(Text, nullable=True)
     stream: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, default=1)

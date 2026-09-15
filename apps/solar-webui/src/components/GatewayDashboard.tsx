@@ -165,6 +165,20 @@ export function GatewayDashboard() {
     [stats],
   );
 
+  const userRows = useMemo<BreakdownRow[]>(
+    () =>
+      (stats?.users ?? []).map((u) => ({
+        id: u.api_key_id,
+        label: u.api_key_name,
+        completed: u.completed,
+        token_in: u.token_in,
+        token_cached: u.token_cached,
+        token_out: u.token_out,
+        avg_duration_s: u.avg_duration_s,
+      })),
+    [stats],
+  );
+
   const allEndpointsSparkline = useMemo(
     () => (endpointTrends?.points ?? []).map((p) => p.success + p.error + p.missed),
     [endpointTrends],
@@ -631,6 +645,7 @@ export function GatewayDashboard() {
               <tr>
                 <th className="text-left px-3 py-2">Time</th>
                 <th className="text-left px-3 py-2">Endpoint</th>
+                <th className="text-left px-3 py-2">User</th>
                 <th className="text-left px-3 py-2">Type</th>
                 <th className="text-left px-3 py-2">Model</th>
                 <th className="text-left px-3 py-2">Status</th>
@@ -653,6 +668,7 @@ export function GatewayDashboard() {
                         {r.endpoint_id ? (endpointNameById.get(r.endpoint_id) ?? r.endpoint_id) : '—'}
                       </span>
                     </td>
+                    <td className="px-3 py-2 whitespace-nowrap text-nord-4">{r.api_key_name || '—'}</td>
                     <td className="px-3 py-2">
                       <span className="text-xs px-2 py-0.5 rounded bg-nord-2 text-nord-4">
                         {r.request_type || 'unknown'}
@@ -685,7 +701,7 @@ export function GatewayDashboard() {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={12} className="px-3 py-6 text-center text-nord-4">
+                  <td colSpan={13} className="px-3 py-6 text-center text-nord-4">
                     No data
                   </td>
                 </tr>
@@ -730,9 +746,10 @@ export function GatewayDashboard() {
       </div>
 
       {/* Breakdown tables */}
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        <BreakdownTable title="By Model" labelHeading="Model" rows={modelRows} />
-        <BreakdownTable title="By Host" labelHeading="Host" rows={hostRows} />
+      <div className="grid grid-cols-1 xl:grid-cols-2 2xl:grid-cols-3 gap-4">
+        <BreakdownTable title="By Model" labelHeading="Model" rows={modelRows} compact />
+        <BreakdownTable title="By Host" labelHeading="Host" rows={hostRows} compact />
+        <BreakdownTable title="By User" labelHeading="User" rows={userRows} compact />
       </div>
     </div>
   );
