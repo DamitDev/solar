@@ -95,11 +95,18 @@ def _host_row(host_id, completed=1, token_in=0, token_cached=0, token_out=0):
 
 
 def _user_row(
-    api_key_id, api_key_name, completed=1, token_in=0, token_cached=0, token_out=0
+    api_key_id,
+    api_key_name,
+    completed=1,
+    token_in=0,
+    token_cached=0,
+    token_out=0,
+    endpoint_name=None,
 ):
     return SimpleNamespace(
         api_key_id=api_key_id,
         api_key_name=api_key_name,
+        endpoint_name=endpoint_name,
         completed=completed,
         token_in=token_in,
         token_cached=token_cached,
@@ -125,6 +132,7 @@ async def test_users_breakdown_groups_by_api_key():
                 completed=9,
                 token_in=10665,
                 token_out=2295,
+                endpoint_name="UI Test Endpoint",
             ),
             _user_row(
                 "22222222-2222-2222-2222-222222222222",
@@ -143,6 +151,8 @@ async def test_users_breakdown_groups_by_api_key():
     by_name = {u["api_key_name"]: u for u in stats["users"]}
     assert by_name["alice"]["completed"] == 9
     assert by_name["alice"]["token_in"] == 10665
+    # The owning endpoint name rides along for the By User table.
+    assert by_name["alice"]["endpoint_name"] == "UI Test Endpoint"
     # NULL name snapshot falls back to the key id for the label
     assert stats["users"][1]["api_key_name"] == "22222222-2222-2222-2222-222222222222"
 

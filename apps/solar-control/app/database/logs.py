@@ -19,7 +19,7 @@ from sqlalchemy import func as sa_func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from .connection import get_session_factory
-from .tables import GatewayEventRow, GatewayRequestRow
+from .tables import ApiEndpointRow, GatewayEventRow, GatewayRequestRow
 
 logger = logging.getLogger(__name__)
 
@@ -746,6 +746,9 @@ class GatewayLogger:
                 select(
                     R.api_key_id,
                     sa_func.max(R.api_key_name).label("api_key_name"),
+                    # An api_key belongs to exactly one endpoint, so the join
+                    # is 1:1 per group; max() just keeps it aggregate-safe.
+                    sa_func.max(ApiEndpointRow.name).label("endpoint_name"),
                     sa_func.count().label("completed"),
                     sa_func.coalesce(sa_func.sum(R.prompt_tokens), 0).label("token_in"),
                     sa_func.coalesce(sa_func.sum(R.cached_tokens), 0).label(
@@ -758,6 +761,7 @@ class GatewayLogger:
                         "avg_duration_s"
                     ),
                 )
+                .outerjoin(ApiEndpointRow, ApiEndpointRow.id == R.endpoint_id)
                 .where(
                     and_(
                         *conditions,
@@ -826,6 +830,7 @@ class GatewayLogger:
                 {
                     "api_key_id": str(r.api_key_id),
                     "api_key_name": r.api_key_name or str(r.api_key_id),
+                    "endpoint_name": r.endpoint_name,
                     "completed": r.completed,
                     "token_in": int(r.token_in),
                     "token_cached": int(r.token_cached),

@@ -170,6 +170,7 @@ export function GatewayDashboard() {
       (stats?.users ?? []).map((u) => ({
         id: u.api_key_id,
         label: u.api_key_name,
+        endpoint_label: u.endpoint_name ?? undefined,
         completed: u.completed,
         token_in: u.token_in,
         token_cached: u.token_cached,
@@ -664,11 +665,21 @@ export function GatewayDashboard() {
                   <tr key={r.request_id} className="border-t border-nord-3">
                     <td className="px-3 py-2 whitespace-nowrap">{formatDateTime(r.end_timestamp)}</td>
                     <td className="px-3 py-2">
-                      <span className="text-xs px-2 py-0.5 rounded bg-nord-2 text-nord-4">
+                      <span
+                        className="text-xs px-2 py-0.5 rounded bg-nord-2 text-nord-4 inline-block max-w-[160px] overflow-hidden text-ellipsis whitespace-nowrap align-middle"
+                        title={r.endpoint_id ? (endpointNameById.get(r.endpoint_id) ?? r.endpoint_id) : undefined}
+                      >
                         {r.endpoint_id ? (endpointNameById.get(r.endpoint_id) ?? r.endpoint_id) : '—'}
                       </span>
                     </td>
-                    <td className="px-3 py-2 whitespace-nowrap text-nord-4">{r.api_key_name || '—'}</td>
+                    <td className="px-3 py-2">
+                      <span
+                        className="inline-block max-w-[120px] overflow-hidden text-ellipsis whitespace-nowrap align-middle text-nord-4"
+                        title={r.api_key_name ?? undefined}
+                      >
+                        {r.api_key_name || '—'}
+                      </span>
+                    </td>
                     <td className="px-3 py-2">
                       <span className="text-xs px-2 py-0.5 rounded bg-nord-2 text-nord-4">
                         {r.request_type || 'unknown'}
@@ -745,12 +756,20 @@ export function GatewayDashboard() {
         </div>
       </div>
 
-      {/* Breakdown tables */}
-      <div className="grid grid-cols-1 xl:grid-cols-2 2xl:grid-cols-3 gap-4">
+      {/* Breakdown tables: By User is wider (Endpoint + Tokens columns), so it
+          sits full-width below the two compact summaries. */}
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <BreakdownTable title="By Model" labelHeading="Model" rows={modelRows} compact />
         <BreakdownTable title="By Host" labelHeading="Host" rows={hostRows} compact />
-        <BreakdownTable title="By User" labelHeading="User" rows={userRows} compact />
       </div>
+      <BreakdownTable
+        title="By User"
+        labelHeading="User"
+        rows={userRows}
+        showEndpoint
+        showTokens
+        defaultSort={{ key: 'tokens', direction: 'desc' }}
+      />
     </div>
   );
 }
