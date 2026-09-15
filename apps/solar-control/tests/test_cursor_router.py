@@ -27,6 +27,7 @@ VALID_REQUEST_STATE = patch(
                 },
             )(),
             "key-1",
+            "default",
         )
     ),
 )

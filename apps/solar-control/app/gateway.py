@@ -1246,7 +1246,12 @@ class OpenAIGateway:
     # ── Routing infrastructure ────────────────────────────────
 
     async def _broadcast_routing_event(
-        self, event_data: dict[str, Any], *, endpoint_id: str | None = None
+        self,
+        event_data: dict[str, Any],
+        *,
+        endpoint_id: str | None = None,
+        api_key_id: str | None = None,
+        api_key_name: str | None = None,
     ) -> None:
         """Broadcast a routing event to WebUI via Socket.IO and log to database."""
         from dataclasses import asdict
@@ -1259,7 +1264,10 @@ class OpenAIGateway:
 
         try:
             summary = await gateway_logger.log_event(
-                event_data, endpoint_id=endpoint_id
+                event_data,
+                endpoint_id=endpoint_id,
+                api_key_id=api_key_id,
+                api_key_name=api_key_name,
             )
             if summary:
                 await broadcast_gateway_request(asdict(summary))
@@ -1286,6 +1294,8 @@ class OpenAIGateway:
         duration: float,
         usage_fields: dict[str, Any],
         endpoint_id: str | None,
+        api_key_id: str | None = None,
+        api_key_name: str | None = None,
     ) -> None:
         base_data: dict[str, Any] = {
             "request_id": request_id,
@@ -1299,6 +1309,8 @@ class OpenAIGateway:
         await self._broadcast_routing_event(
             {"type": "request_success", "data": base_data},
             endpoint_id=endpoint_id,
+            api_key_id=api_key_id,
+            api_key_name=api_key_name,
         )
 
     async def _emit_error(
@@ -1310,6 +1322,8 @@ class OpenAIGateway:
         endpoint_id: str | None,
         instance: RegistryEntry | None = None,
         client_ip: str | None = None,
+        api_key_id: str | None = None,
+        api_key_name: str | None = None,
     ) -> None:
         data: dict[str, Any] = {
             "request_id": request_id,
@@ -1326,6 +1340,8 @@ class OpenAIGateway:
         await self._broadcast_routing_event(
             {"type": "request_error", "data": data},
             endpoint_id=endpoint_id,
+            api_key_id=api_key_id,
+            api_key_name=api_key_name,
         )
 
     async def _emit_reroute(
@@ -1446,6 +1462,8 @@ class OpenAIGateway:
         required_endpoint: str | None = None,
         endpoint_id: str | None = None,
         model_patterns: list[str] | None = None,
+        api_key_id: str | None = None,
+        api_key_name: str | None = None,
     ) -> dict[str, Any]:
         request_id = str(uuid.uuid4())
         start_time = time.time()
@@ -1463,6 +1481,8 @@ class OpenAIGateway:
                 },
             },
             endpoint_id=endpoint_id,
+            api_key_id=api_key_id,
+            api_key_name=api_key_name,
         )
 
         await self._ensure_session()
@@ -1485,6 +1505,8 @@ class OpenAIGateway:
                 time.time() - start_time,
                 endpoint_id,
                 client_ip=client_ip,
+                api_key_id=api_key_id,
+                api_key_name=api_key_name,
             )
             raise VirtualModelUnavailableError(model, virtual_reasons)
 
@@ -1598,6 +1620,8 @@ class OpenAIGateway:
                                     duration,
                                     usage_fields,
                                     endpoint_id,
+                                    api_key_id=api_key_id,
+                                    api_key_name=api_key_name,
                                 )
                                 return result
                             elif response.status in _RETRYABLE_STATUSES:
@@ -1635,6 +1659,8 @@ class OpenAIGateway:
                                     duration,
                                     endpoint_id,
                                     instance=instance,
+                                    api_key_id=api_key_id,
+                                    api_key_name=api_key_name,
                                 )
                                 raise ValueError(msg)
 
@@ -1657,6 +1683,8 @@ class OpenAIGateway:
                             duration,
                             endpoint_id,
                             instance=instance,
+                            api_key_id=api_key_id,
+                            api_key_name=api_key_name,
                         )
                         raise
 
@@ -1672,6 +1700,8 @@ class OpenAIGateway:
             time.time() - start_time,
             endpoint_id,
             client_ip=client_ip,
+            api_key_id=api_key_id,
+            api_key_name=api_key_name,
         )
         if virtual_contract is not None and not attempted:
             raise VirtualModelUnavailableError(
@@ -1690,6 +1720,8 @@ class OpenAIGateway:
         required_endpoint: str | None = None,
         endpoint_id: str | None = None,
         model_patterns: list[str] | None = None,
+        api_key_id: str | None = None,
+        api_key_name: str | None = None,
     ):
         request_id = str(uuid.uuid4())
         start_time = time.time()
@@ -1709,6 +1741,8 @@ class OpenAIGateway:
                 },
             },
             endpoint_id=endpoint_id,
+            api_key_id=api_key_id,
+            api_key_name=api_key_name,
         )
 
         await self._ensure_session()
@@ -1851,6 +1885,8 @@ class OpenAIGateway:
                                 duration,
                                 usage_fields,
                                 endpoint_id,
+                                api_key_id=api_key_id,
+                                api_key_name=api_key_name,
                             )
                             return
                         elif response.status in _RETRYABLE_STATUSES:
@@ -1886,6 +1922,8 @@ class OpenAIGateway:
                                 duration,
                                 endpoint_id,
                                 instance=instance,
+                                api_key_id=api_key_id,
+                                api_key_name=api_key_name,
                             )
                             raise ValueError(msg)
 
@@ -1910,6 +1948,8 @@ class OpenAIGateway:
                                 endpoint_id,
                                 instance=instance,
                                 client_ip=client_ip,
+                                api_key_id=api_key_id,
+                                api_key_name=api_key_name,
                             )
                         except Exception:  # noqa: BLE001, S110
                             pass
@@ -1923,6 +1963,8 @@ class OpenAIGateway:
                         duration,
                         endpoint_id,
                         instance=instance,
+                        api_key_id=api_key_id,
+                        api_key_name=api_key_name,
                     )
                     raise
 
@@ -1938,6 +1980,8 @@ class OpenAIGateway:
             time.time() - start_time,
             endpoint_id,
             client_ip=client_ip,
+            api_key_id=api_key_id,
+            api_key_name=api_key_name,
         )
         if virtual_contract is not None and not attempted:
             raise VirtualModelUnavailableError(

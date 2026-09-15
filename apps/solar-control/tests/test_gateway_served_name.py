@@ -199,7 +199,7 @@ class TestStreamingUsage:
         emitted = {}
 
         async def _success(
-            request_id, model, instance, duration, usage_fields, endpoint_id
+            request_id, model, instance, duration, usage_fields, endpoint_id, **kwargs
         ):
             emitted["usage"] = usage_fields
 
@@ -441,7 +441,7 @@ class TestStreamingUsage:
         emitted = {}
 
         async def _success(
-            request_id, model, instance, duration, usage_fields, endpoint_id
+            request_id, model, instance, duration, usage_fields, endpoint_id, **kwargs
         ):
             emitted["usage"] = usage_fields
 
@@ -695,7 +695,7 @@ class TestCachedTokensFlow:
         emitted = {}
 
         async def _success(
-            request_id, model, instance, duration, usage_fields, endpoint_id
+            request_id, model, instance, duration, usage_fields, endpoint_id, **kwargs
         ):
             emitted["usage"] = usage_fields
 
@@ -763,7 +763,7 @@ class TestCachedTokensFlow:
         emitted = {}
 
         async def _success(
-            request_id, model, instance, duration, usage_fields, endpoint_id
+            request_id, model, instance, duration, usage_fields, endpoint_id, **kwargs
         ):
             emitted["usage"] = usage_fields
 
@@ -820,7 +820,7 @@ class TestCachedTokensFlow:
         emitted = {}
 
         async def _success(
-            request_id, model, instance, duration, usage_fields, endpoint_id
+            request_id, model, instance, duration, usage_fields, endpoint_id, **kwargs
         ):
             emitted["usage"] = usage_fields
 
@@ -876,7 +876,7 @@ class TestCachedTokensFlow:
             }
 
         async def _success(
-            request_id, model, instance, duration, usage_fields, endpoint_id
+            request_id, model, instance, duration, usage_fields, endpoint_id, **kwargs
         ):
             emitted.append(usage_fields)
 
@@ -938,7 +938,7 @@ class TestCachedTokensFlow:
             }
 
         async def _success(
-            request_id, model, instance, duration, usage_fields, endpoint_id
+            request_id, model, instance, duration, usage_fields, endpoint_id, **kwargs
         ):
             emitted.append(usage_fields)
 
@@ -993,7 +993,7 @@ class TestCachedTokensFlow:
             return None  # host unreachable / generation out of window
 
         async def _success(
-            request_id, model, instance, duration, usage_fields, endpoint_id
+            request_id, model, instance, duration, usage_fields, endpoint_id, **kwargs
         ):
             emitted.append(usage_fields)
 
@@ -1058,7 +1058,14 @@ class TestCachedTokensFlow:
             host = self._host()
             emitted = {}
 
-            async def _broadcast(event_data, *, endpoint_id=None, _target=emitted):
+            async def _broadcast(
+                event_data,
+                *,
+                endpoint_id=None,
+                api_key_id=None,
+                api_key_name=None,
+                _target=emitted,
+            ):
                 _target["data"] = event_data["data"]
 
             with (

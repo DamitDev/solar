@@ -59,7 +59,7 @@ def _resolve_ok(*args, **kwargs):
         (),
         {"id": "ep-1", "name": "ep", "serve_all_models": True, "model_patterns": []},
     )()
-    return AsyncMock(return_value=(endpoint, "key-1"))(*args, **kwargs)
+    return AsyncMock(return_value=(endpoint, "key-1", "default"))(*args, **kwargs)
 
 
 async def test_cursor_requires_a_key():

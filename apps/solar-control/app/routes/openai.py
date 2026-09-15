@@ -29,6 +29,17 @@ def _get_endpoint_id(request: Request) -> str | None:
     return getattr(request.state, "endpoint_id", None)  # set by auth_middleware
 
 
+def _get_api_key_attribution(request: Request) -> tuple[str | None, str | None]:
+    """(api_key_id, api_key_name) stamped by auth_middleware.
+
+    Management-key traffic gets (None, None) - it has no named credential.
+    """
+    return (
+        getattr(request.state, "api_key_id", None),
+        getattr(request.state, "api_key_name", None),
+    )
+
+
 def _model_patterns(request: Request) -> list[str] | None:
     """Registry restriction for the authenticated endpoint, or None.
 
@@ -81,6 +92,8 @@ def _safe_stream(
     client_ip: str,
     endpoint_id,
     model_patterns: list[str] | None,
+    api_key_id: str | None = None,
+    api_key_name: str | None = None,
 ):
     """Wrap gateway.stream_request so client disconnects emit a proper error event."""
 
@@ -92,6 +105,8 @@ def _safe_stream(
             client_ip,
             endpoint_id=endpoint_id,
             model_patterns=model_patterns,
+            api_key_id=api_key_id,
+            api_key_name=api_key_name,
         )
         try:
             async for chunk in stream:
@@ -134,6 +149,7 @@ async def chat_completions(request: ChatCompletionRequest, client: Request):
     try:
         client_ip = client.client.host if client.client else "unknown"
         endpoint_id = _get_endpoint_id(client)
+        api_key_id, api_key_name = _get_api_key_attribution(client)
         model_patterns = _model_patterns(client)
         request_data = request.model_dump(exclude_none=True)
 
@@ -145,6 +161,8 @@ async def chat_completions(request: ChatCompletionRequest, client: Request):
                 client_ip,
                 endpoint_id,
                 model_patterns,
+                api_key_id,
+                api_key_name,
             )
         else:
             response = await gateway.route_request(
@@ -154,6 +172,8 @@ async def chat_completions(request: ChatCompletionRequest, client: Request):
                 client_ip,
                 endpoint_id=endpoint_id,
                 model_patterns=model_patterns,
+                api_key_id=api_key_id,
+                api_key_name=api_key_name,
             )
             return response
     except VirtualModelUnavailableError as exc:
@@ -169,6 +189,7 @@ async def completions(request: CompletionRequest, client: Request):
     try:
         client_ip = client.client.host if client.client else "unknown"
         endpoint_id = _get_endpoint_id(client)
+        api_key_id, api_key_name = _get_api_key_attribution(client)
         model_patterns = _model_patterns(client)
         request_data = request.model_dump(exclude_none=True)
 
@@ -180,6 +201,8 @@ async def completions(request: CompletionRequest, client: Request):
                 client_ip,
                 endpoint_id,
                 model_patterns,
+                api_key_id,
+                api_key_name,
             )
         else:
             response = await gateway.route_request(
@@ -189,6 +212,8 @@ async def completions(request: CompletionRequest, client: Request):
                 client_ip,
                 endpoint_id=endpoint_id,
                 model_patterns=model_patterns,
+                api_key_id=api_key_id,
+                api_key_name=api_key_name,
             )
             return response
     except VirtualModelUnavailableError as exc:
@@ -204,6 +229,7 @@ async def classify(request: ClassifyRequest, client: Request):
     try:
         client_ip = client.client.host if client.client else "unknown"
         endpoint_id = _get_endpoint_id(client)
+        api_key_id, api_key_name = _get_api_key_attribution(client)
         model_patterns = _model_patterns(client)
         request_data = request.model_dump(exclude_none=True)
         response = await gateway.route_request(
@@ -214,6 +240,8 @@ async def classify(request: ClassifyRequest, client: Request):
             required_endpoint="/v1/classify",
             endpoint_id=endpoint_id,
             model_patterns=model_patterns,
+            api_key_id=api_key_id,
+            api_key_name=api_key_name,
         )
         return response
     except VirtualModelUnavailableError as exc:
@@ -229,6 +257,7 @@ async def embeddings(request: EmbeddingRequest, client: Request):
     try:
         client_ip = client.client.host if client.client else "unknown"
         endpoint_id = _get_endpoint_id(client)
+        api_key_id, api_key_name = _get_api_key_attribution(client)
         model_patterns = _model_patterns(client)
         request_data = request.model_dump(exclude_none=True)
         response = await gateway.route_request(
@@ -239,6 +268,8 @@ async def embeddings(request: EmbeddingRequest, client: Request):
             required_endpoint="/v1/embeddings",
             endpoint_id=endpoint_id,
             model_patterns=model_patterns,
+            api_key_id=api_key_id,
+            api_key_name=api_key_name,
         )
         return response
     except VirtualModelUnavailableError as exc:
@@ -254,6 +285,7 @@ async def rerank(request: RerankRequest, client: Request):
     try:
         client_ip = client.client.host if client.client else "unknown"
         endpoint_id = _get_endpoint_id(client)
+        api_key_id, api_key_name = _get_api_key_attribution(client)
         model_patterns = _model_patterns(client)
         request_data = request.model_dump(exclude_none=True)
         response = await gateway.route_request(
@@ -264,6 +296,8 @@ async def rerank(request: RerankRequest, client: Request):
             required_endpoint="/v1/rerank",
             endpoint_id=endpoint_id,
             model_patterns=model_patterns,
+            api_key_id=api_key_id,
+            api_key_name=api_key_name,
         )
         return response
     except VirtualModelUnavailableError as exc:

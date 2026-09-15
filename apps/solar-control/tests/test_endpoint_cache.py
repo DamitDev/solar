@@ -100,7 +100,11 @@ async def test_cache_read_roundtrips_through_endpoint_model():
     )
     # Pre-populate the cache the same way _resolve_endpoint writes it.
     fake.stored[f"{ENDPOINT_CACHE_PREFIX}sk-hit"] = json.dumps(
-        {"endpoint": ep.model_dump(mode="json"), "api_key_id": row.id}
+        {
+            "endpoint": ep.model_dump(mode="json"),
+            "api_key_id": row.id,
+            "api_key_name": row.name,
+        }
     )
 
     # resolve_by_api_key must NOT be hit if the cache returns a value.
@@ -108,7 +112,28 @@ async def test_cache_read_roundtrips_through_endpoint_model():
         resolved = await _resolve_endpoint("sk-hit")
 
     assert resolved is not None
-    endpoint, got_id = resolved
+    endpoint, got_id, got_name = resolved
     assert got_id == row.id
+    assert got_name == row.name
     assert endpoint.name == "cache-probe"
     assert endpoint.id == ep.id
+
+
+@pytest.mark.anyio
+async def test_cache_read_tolerates_pre_attribution_entries():
+    """Entries written before the api_key_name field (rolling deploy) resolve
+    with a None name instead of crashing."""
+    fake = _FakeRedis()
+    ep = _endpoint()
+    fake.stored[f"{ENDPOINT_CACHE_PREFIX}sk-old"] = json.dumps(
+        {"endpoint": ep.model_dump(mode="json"), "api_key_id": "id-old"}
+    )
+
+    with patch("app.redis_state.connection.redis_client", return_value=fake):
+        resolved = await _resolve_endpoint("sk-old")
+
+    assert resolved is not None
+    endpoint, got_id, got_name = resolved
+    assert got_id == "id-old"
+    assert got_name is None
+    assert endpoint.name == "cache-probe"

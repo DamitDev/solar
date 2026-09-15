@@ -9,16 +9,22 @@ interface Props {
   direction: SortDirection;
   onSort: (key: string) => void;
   align?: 'left' | 'right';
+  /** Tighter padding, for tables in multi-column grids. */
+  compact?: boolean;
 }
 
 /** Table heading that doubles as the sort control for its column. */
-export function SortHeader({ label, sortKey, activeKey, direction, onSort, align = 'left' }: Props) {
+export function SortHeader({ label, sortKey, activeKey, direction, onSort, align = 'left', compact = false }: Props) {
   const active = sortKey === activeKey;
   const Icon = !active ? ChevronsUpDown : direction === 'asc' ? ChevronUp : ChevronDown;
 
   return (
     <th
-      className={cn('px-3 py-2 font-medium whitespace-nowrap', align === 'right' ? 'text-right' : 'text-left')}
+      className={cn(
+        compact ? 'px-1.5 py-2' : 'px-3 py-2',
+        'font-medium whitespace-nowrap',
+        align === 'right' ? 'text-right' : 'text-left',
+      )}
       aria-sort={active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'}
     >
       <button

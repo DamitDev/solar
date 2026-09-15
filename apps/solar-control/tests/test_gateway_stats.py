@@ -94,6 +94,95 @@ def _host_row(host_id, completed=1, token_in=0, token_cached=0, token_out=0):
     )
 
 
+def _user_row(
+    api_key_id, api_key_name, completed=1, token_in=0, token_cached=0, token_out=0
+):
+    return SimpleNamespace(
+        api_key_id=api_key_id,
+        api_key_name=api_key_name,
+        completed=completed,
+        token_in=token_in,
+        token_cached=token_cached,
+        token_out=token_out,
+        avg_duration_s=1.0,
+    )
+
+
+@pytest.mark.anyio
+async def test_users_breakdown_groups_by_api_key():
+    """The users[] aggregation mirrors models/hosts: per-key rows with the
+    name snapshot as label, falling back to the id when a row somehow lost
+    its name."""
+    logger = GatewayLogger()
+    results = [
+        _agg_row(completed=18, token_in_total=21330, p_count=18, c_count=18),
+        [_model_row("test-model", completed=18)],
+        [_host_row("h1", completed=18)],
+        [
+            _user_row(
+                "11111111-1111-1111-1111-111111111111",
+                "alice",
+                completed=9,
+                token_in=10665,
+                token_out=2295,
+            ),
+            _user_row(
+                "22222222-2222-2222-2222-222222222222",
+                None,
+                completed=9,
+                token_in=10665,
+                token_out=2295,
+            ),
+        ],
+        0,
+    ]
+
+    with _patch_session(results):
+        stats = await logger.read_stats(START, END)
+
+    by_name = {u["api_key_name"]: u for u in stats["users"]}
+    assert by_name["alice"]["completed"] == 9
+    assert by_name["alice"]["token_in"] == 10665
+    # NULL name snapshot falls back to the key id for the label
+    assert stats["users"][1]["api_key_name"] == "22222222-2222-2222-2222-222222222222"
+
+
+@pytest.mark.anyio
+async def test_log_event_carries_api_key_attribution():
+    """request_start + request_success with attribution kwargs produce a
+    summary (and therefore a stored row) carrying id + name snapshot."""
+    logger = GatewayLogger()
+    start = {
+        "type": "request_start",
+        "data": {
+            "request_id": "r1",
+            "model": "m",
+            "endpoint": "/v1/chat/completions",
+            "timestamp": START.isoformat(),
+        },
+    }
+    success = {
+        "type": "request_success",
+        "data": {
+            "request_id": "r1",
+            "model": "m",
+            "duration": 1.0,
+            "timestamp": END.isoformat(),
+        },
+    }
+    kw = {"api_key_id": "abc", "api_key_name": "alice"}
+
+    await logger.log_event(start, **kw)
+    summary = await logger.log_event(success, **kw)
+
+    assert summary is not None
+    assert summary.api_key_id == "abc"
+    assert summary.api_key_name == "alice"
+    # The queued row that _flush_all inserts carries the same fields.
+    assert logger._request_buffer[0]["api_key_id"] == "abc"
+    assert logger._request_buffer[0]["api_key_name"] == "alice"
+
+
 @pytest.mark.anyio
 async def test_cache_hit_rate_counts_only_cache_aware_rows():
     """A NULL-cached_tokens request still adds its prompt tokens to the input
@@ -117,6 +206,7 @@ async def test_cache_hit_rate_counts_only_cache_aware_rows():
             _model_row("m2", token_in=200, token_cached=0, token_out=100),
         ],
         [_host_row("h1", token_in=700, token_cached=300, token_out=300)],
+        [],  # users
         0,  # rerouted requests
     ]
 
@@ -154,6 +244,7 @@ async def test_cache_hit_rate_is_zero_when_nothing_was_measured():
         ),
         [_model_row("hf-model", token_in=100, token_cached=0, token_out=50)],
         [_host_row("h1", token_in=100, token_cached=0, token_out=50)],
+        [],
         0,
     ]
 
@@ -183,6 +274,7 @@ async def test_everything_cached_reports_a_full_rate():
             _model_row("m2", completed=1, token_in=600, token_cached=600, token_out=50),
         ],
         [_host_row("h1", completed=2, token_in=1000, token_cached=1000, token_out=100)],
+        [],
         1,
     ]
 
