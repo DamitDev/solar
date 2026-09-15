@@ -685,7 +685,14 @@ export function GatewayDashboard() {
                         {r.request_type || 'unknown'}
                       </span>
                     </td>
-                    <td className="px-3 py-2">{r.resolved_model || r.model}</td>
+                    <td className="px-3 py-2">
+                      <span
+                        className="inline-block max-w-[180px] overflow-hidden text-ellipsis whitespace-nowrap align-middle"
+                        title={r.resolved_model || r.model}
+                      >
+                        {r.resolved_model || r.model}
+                      </span>
+                    </td>
                     <td className="px-3 py-2">
                       {r.status === 'success' ? (
                         <span className="text-nord-14 flex items-center gap-1">
@@ -697,7 +704,14 @@ export function GatewayDashboard() {
                         <span className="text-nord-12">error</span>
                       )}
                     </td>
-                    <td className="px-3 py-2">{r.host_name || r.host_id || '—'}</td>
+                    <td className="px-3 py-2">
+                      <span
+                        className="inline-block max-w-[120px] overflow-hidden text-ellipsis whitespace-nowrap align-middle text-nord-4"
+                        title={r.host_name || r.host_id}
+                      >
+                        {r.host_name || r.host_id || '—'}
+                      </span>
+                    </td>
                     <td className="px-3 py-2">{formatTokenCount(r.prompt_tokens)}</td>
                     <td className="px-3 py-2">
                       {r.cached_tokens != null && r.prompt_tokens != null
