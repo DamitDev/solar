@@ -1711,6 +1711,28 @@ class TestFieldOwnership:
             "extra_args",
             "extra_env",
         }
+        assert BACKEND_FIELD_OWNERS["vllm"] == {
+            # Shared with huggingface — ownership is many-to-many.
+            "dtype",
+            "trust_remote_code",
+            "tensor_parallel_size",
+            "pipeline_parallel_size",
+            "max_model_len",
+            "gpu_memory_utilization",
+            "max_num_seqs",
+            "max_num_batched_tokens",
+            "quantization",
+            "kv_cache_dtype",
+            "moe_backend",
+            "enforce_eager",
+            "enable_prefix_caching",
+            "speculative_config",
+            "tool_call_parser",
+            "reasoning_parser",
+            "enable_auto_tool_choice",
+            "extra_args",
+            "extra_env",
+        }
         # Shared fields belong to no single owner.
         for owner in BACKEND_FIELD_OWNERS.values():
             assert "file_filters" not in owner
@@ -1813,6 +1835,141 @@ class TestSglangContract:
         )
 
 
+class TestVllmContract:
+    """The vLLM backend's own rules (NVIDIA-only, escape hatches)."""
+
+    @staticmethod
+    def _intent(**backend_overrides):
+        return {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": {"backend_type": "vllm", **backend_overrides},
+        }
+
+    def test_a_minimal_vllm_intent_is_accepted(self):
+        assert validate_intent_create(self._intent(tensor_parallel_size=4)) == []
+
+    def test_gpu_type_is_pinned_to_nvidia_when_left_open(self):
+        data = self._intent()
+
+        assert validate_intent_create(data) == []
+        assert data["placement"]["gpu_type"] == "nvidia_cuda"
+
+    def test_a_contradicting_gpu_type_is_rejected(self):
+        data = self._intent()
+        data["placement"] = {"gpu_type": "apple_mps"}
+
+        errors = validate_intent_create(data)
+
+        assert any(
+            e["field"] == "placement.gpu_type"
+            and "nvidia_cuda" in e["message"]
+            and "apple_mps" in e["message"]
+            for e in errors
+        )
+
+    def test_model_path_inside_backend_is_rejected(self):
+        """It is resolved from model_source, per host."""
+        errors = validate_intent_create(self._intent(model_path="/models/x"))
+
+        assert any(
+            e["field"] == "backend.model_path" and "server-derived" in e["message"]
+            for e in errors
+        )
+
+    def test_a_vllm_field_on_a_llamacpp_intent_is_rejected(self):
+        data = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": _llamacpp_backend(model_file="m.gguf", tensor_parallel_size=4),
+        }
+
+        errors = validate_intent_create(data)
+
+        assert any(
+            e["field"] == "backend.tensor_parallel_size" and "vllm" in e["message"]
+            for e in errors
+        )
+
+    def test_extra_args_reject_host_managed_flags(self):
+        for arg in (
+            "--port",
+            "--api-key=leaked",
+            "--served-model-name",
+            "--model",
+            "--enable-prompt-tokens-details",
+            "--no-enable-prompt-tokens-details",
+            "--disable-log-stats",
+        ):
+            errors = validate_intent_create(self._intent(extra_args=[arg]))
+            assert any(
+                e["field"] == "backend.extra_args"
+                and "managed by solar-host" in e["message"]
+                for e in errors
+            ), arg
+
+    def test_extra_args_pass_through_when_they_are_not_reserved(self):
+        assert (
+            validate_intent_create(
+                self._intent(extra_args=["--max-num-partial-prefills", "4"])
+            )
+            == []
+        )
+
+    def test_extra_env_must_be_a_flat_string_map(self):
+        errors = validate_intent_create(self._intent(extra_env=["A=1"]))
+
+        assert any(e["field"] == "backend.extra_env" for e in errors)
+
+    def test_fields_shared_with_sglang_are_not_flagged_on_either_engine(self):
+        """Ownership is many-to-many: ``quantization``, ``kv_cache_dtype``,
+        ``extra_args`` and ``extra_env`` belong to both CUDA engines, so
+        neither may reject them on the sibling."""
+        shared = {
+            "quantization": "fp8",
+            "kv_cache_dtype": "fp8",
+            "extra_args": ["--max-num-partial-prefills", "4"],
+            "extra_env": {"VLLM_USE_FLASHINFER_MOE_FP4": "1"},
+        }
+        assert validate_intent_create(self._intent(**shared)) == []
+
+        sglang = {
+            "alias": "t",
+            "model_source": "repo://x:v1",
+            "backend": {"backend_type": "sglang", **shared},
+        }
+        assert validate_intent_create(sglang) == []
+
+    def test_speculative_config_is_canonicalized_for_drift_detection(self):
+        backend = {
+            "backend_type": "vllm",
+            "speculative_config": '{ "method": "mtp", "num_speculative_tokens": 5 }',
+        }
+
+        canonicalize_intent_backend(backend)
+
+        assert (
+            backend["speculative_config"]
+            == '{"method":"mtp","num_speculative_tokens":5}'
+        )
+
+    def test_blank_json_object_fields_are_dropped_like_the_host_drops_them(self):
+        """A blank form value configures nothing: the host turns it into None,
+        so keeping "" on the stored spec would read as permanent backend
+        drift once the reconciler compares the two."""
+        backend = {"backend_type": "vllm", "speculative_config": "  "}
+
+        canonicalize_intent_backend(backend)
+
+        assert "speculative_config" not in backend
+
+        llamacpp = {"backend_type": "llamacpp", "chat_template_kwargs": "  "}
+
+        canonicalize_intent_backend(llamacpp)
+
+        assert "chat_template_kwargs" not in llamacpp
+
+
 class TestManualInstanceBackendSupport:
     """Manual creation names its host, so placement never vets the fit."""
 
@@ -1823,6 +1980,25 @@ class TestManualInstanceBackendSupport:
         return SimpleNamespace(
             name="h1", gpu_type=gpu_type, supported_backends=supported_backends
         )
+
+    def test_vllm_on_an_nvidia_host_that_advertises_it_is_allowed(self):
+        from app.validation import validate_host_supports_backend
+
+        validate_host_supports_backend(
+            self._host(supported_backends=["llamacpp", "vllm"]), "vllm"
+        )
+
+    def test_vllm_on_a_non_nvidia_host_is_rejected(self):
+        from app.validation import validate_host_supports_backend
+
+        with pytest.raises(HTTPException) as exc:
+            validate_host_supports_backend(
+                self._host(gpu_type="apple_mps", supported_backends=["vllm"]),
+                "vllm",
+            )
+
+        assert exc.value.status_code == 422
+        assert "NVIDIA" in exc.value.detail
 
     def test_sglang_on_an_nvidia_host_that_advertises_it_is_allowed(self):
         from app.validation import validate_host_supports_backend
@@ -2058,6 +2234,74 @@ class TestGpuCountValidation:
         assert validate_intent_create(data) == []
         # Resolved and persisted — consumers always see a concrete int.
         assert data["resources"]["gpu_count"] == 2
+
+    def test_vllm_parallelism_multiplies_into_the_count(self):
+        data = self._data(
+            {
+                "backend_type": "vllm",
+                "tensor_parallel_size": 4,
+                "pipeline_parallel_size": 2,
+            },
+            resources={"vram_gb": 30.0},
+        )
+        assert validate_intent_create(data) == []
+        assert data["resources"]["gpu_count"] == 8
+
+    def test_vllm_a_lone_dimension_is_the_count(self):
+        data = self._data(
+            {"backend_type": "vllm", "tensor_parallel_size": 4},
+            resources={"vram_gb": 30.0},
+        )
+        assert validate_intent_create(data) == []
+        assert data["resources"]["gpu_count"] == 4
+
+    def test_vllm_without_parallelism_resolves_to_one(self):
+        data = self._data(
+            {"backend_type": "vllm"},
+            resources={"vram_gb": 30.0},
+        )
+        assert validate_intent_create(data) == []
+        assert data["resources"]["gpu_count"] == 1
+
+    def test_vllm_disagreement_names_both_dimensions(self):
+        data = self._data(
+            {
+                "backend_type": "vllm",
+                "tensor_parallel_size": 4,
+                "pipeline_parallel_size": 2,
+            },
+            resources={"vram_gb": 30.0, "gpu_count": 4},
+        )
+        errors = validate_intent_create(data)
+        assert any(
+            e["field"] == "resources.gpu_count"
+            and "tensor_parallel_size × backend.pipeline_parallel_size implies 8"
+            in e["message"]
+            for e in errors
+        )
+
+    def test_vllm_an_invalid_dimension_is_no_signal(self):
+        """A non-integer or out-of-range dimension cannot be multiplied, so
+        the explicit count stands alone and the resolver keeps it."""
+        for bad in (0, -1, "four"):
+            data = self._data(
+                {"backend_type": "vllm", "tensor_parallel_size": bad},
+                resources={"vram_gb": 30.0, "gpu_count": 2},
+            )
+            assert validate_intent_create(data) == [], bad
+            assert data["resources"]["gpu_count"] == 2
+
+    def test_vllm_multi_gpu_without_footprint_warns_per_gpu(self):
+        data = self._data(
+            {"backend_type": "vllm", "tensor_parallel_size": 4},
+            resources={},
+        )
+        validate_intent_create(data)
+        warnings = validate_intent_warnings(data)
+        assert any(
+            w["field"] == "resources.vram_gb" and "per-GPU" in w["message"]
+            for w in warnings
+        )
 
     def test_llamacpp_devices_derive_the_count(self):
         data = self._data(

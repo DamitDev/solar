@@ -341,6 +341,16 @@ def test_supports_backend_reads_an_empty_list_as_no_opinion(host_a100):
     assert supports_backend(host_a100, "llamacpp") is True
 
 
+def test_supports_backend_gates_vllm_the_same_way(host_a100):
+    from app.services.placement import supports_backend
+
+    host_a100.supported_backends = ["llamacpp", "sglang"]
+    assert supports_backend(host_a100, "vllm") is False
+
+    host_a100.supported_backends = ["llamacpp", "sglang", "vllm"]
+    assert supports_backend(host_a100, "vllm") is True
+
+
 @pytest.mark.anyio
 async def test_find_candidates_insufficient_vram(host_a100, host_mps):
     hosts = [host_a100, host_mps]

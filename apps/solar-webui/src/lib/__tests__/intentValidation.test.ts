@@ -272,6 +272,89 @@ describe('validateIntentRequest', () => {
       });
     });
 
+    // Mirrors _validate_vllm in app/validation.py — vLLM is CUDA-only too and
+    // owns its own set of flags.
+    describe('vllm', () => {
+      const vllm = (extra: Record<string, unknown> = {}) => ({ backend_type: 'vllm', ...extra });
+
+      it('accepts a vllm backend with its own flags', () => {
+        expect(errorsFor({ backend: vllm({ tensor_parallel_size: 4, kv_cache_dtype: 'fp8' }) })).toEqual([]);
+      });
+
+      it('rejects a vllm flag on another backend', () => {
+        const fields = fieldNames({
+          backend: { backend_type: 'llamacpp', tensor_parallel_size: 4, speculative_config: '{}' },
+        });
+        expect(fields).toContain('backend.tensor_parallel_size');
+        expect(fields).toContain('backend.speculative_config');
+      });
+
+      it('requires an NVIDIA accelerator', () => {
+        expect(fieldNames({ backend: vllm(), placement: { gpu_type: 'apple_mps' } })).toContain('placement.gpu_type');
+        expect(fieldNames({ backend: vllm(), placement: { gpu_type: 'cuda' } })).not.toContain('placement.gpu_type');
+        // Unset is fine: the server pins it to nvidia_cuda.
+        expect(fieldNames({ backend: vllm() })).not.toContain('placement.gpu_type');
+      });
+
+      it('rejects an extra arg that would override a host-managed flag', () => {
+        for (const arg of [
+          '--port',
+          '--api-key=leaked',
+          '--served-model-name',
+          '--model',
+          '--enable-prompt-tokens-details',
+          '--no-enable-prompt-tokens-details',
+          '--disable-log-stats',
+        ]) {
+          const errors = errorsFor({ backend: vllm({ extra_args: [arg, 'x'] }) });
+          const err = errors.find((e) => e.field === 'backend.extra_args');
+          expect(err, arg).toBeDefined();
+          expect(err!.message).toContain('solar-host');
+        }
+      });
+
+      it('accepts an extra arg vLLM has no typed field for', () => {
+        expect(fieldNames({ backend: vllm({ extra_args: ['--max-num-partial-prefills', '4'] }) })).not.toContain(
+          'backend.extra_args',
+        );
+      });
+
+      it('accepts the fields both CUDA engines own', () => {
+        // quantization / kv_cache_dtype / extra_env belong to sglang and vllm
+        // alike; neither engine may flag them on the sibling.
+        expect(
+          fieldNames({
+            backend: vllm({ quantization: 'fp8', kv_cache_dtype: 'fp8', extra_env: { A: '1' } }),
+          }),
+        ).toEqual([]);
+        expect(
+          fieldNames({
+            backend: {
+              backend_type: 'sglang',
+              quantization: 'fp8',
+              kv_cache_dtype: 'fp8_e4m3',
+              extra_env: { A: '1' },
+            },
+          }),
+        ).toEqual([]);
+      });
+
+      it('treats an invalid parallelism dimension as no signal', () => {
+        // No derivable count from 0 → the explicit value stands alone.
+        expect(
+          errorsFor({
+            backend: { backend_type: 'vllm', tensor_parallel_size: 0 },
+            resources: { vram_gb: 10, gpu_count: 2 },
+          }),
+        ).toEqual([]);
+      });
+
+      it('rejects an extra env that is not a flat string map', () => {
+        expect(fieldNames({ backend: vllm({ extra_env: ['A=1'] }) })).toContain('backend.extra_env');
+        expect(fieldNames({ backend: vllm({ extra_env: { A: '1' } }) })).not.toContain('backend.extra_env');
+      });
+    });
+
     // Mirrors _validate_backend_field_ownership plus the host's tensor_split
     // validator — llama.cpp reads an unparseable proportion as 0.0 and loads
     // the whole model onto one GPU instead of failing.
@@ -431,6 +514,7 @@ describe('sanitizeIntentBackend', () => {
 describe('resources.gpu_count (S-058 mirror of app/validation.py)', () => {
   const sglang = { backend_type: 'sglang', tp_size: 2 };
   const llamacpp = { backend_type: 'llamacpp', devices: '0,1' };
+  const vllm = { backend_type: 'vllm', tensor_parallel_size: 4 };
 
   it('never errors on a missing explicit count; the server derives it', () => {
     const payload: any = {
@@ -462,6 +546,25 @@ describe('resources.gpu_count (S-058 mirror of app/validation.py)', () => {
     expect(err).toBeDefined();
     expect(err!.message).toContain('devices');
     expect(err!.message).toContain('2');
+  });
+
+  it('derives from a lone vllm parallelism dimension', () => {
+    expect(errorsFor({ backend: vllm })).toEqual([]);
+    const errors = errorsFor({ backend: vllm, resources: { vram_gb: 30, gpu_count: 2 } });
+    const err = errors.find((e) => e.field === 'resources.gpu_count');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('tensor_parallel_size');
+    expect(err!.message).toContain('4');
+  });
+
+  it('multiplies vllm tensor and pipeline parallelism', () => {
+    const both = { backend_type: 'vllm', tensor_parallel_size: 4, pipeline_parallel_size: 2 };
+    expect(errorsFor({ backend: both, resources: { vram_gb: 30, gpu_count: 8 } })).toEqual([]);
+    const errors = errorsFor({ backend: both, resources: { vram_gb: 30, gpu_count: 4 } });
+    const err = errors.find((e) => e.field === 'resources.gpu_count');
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('tensor_parallel_size × backend.pipeline_parallel_size');
+    expect(err!.message).toContain('8');
   });
 
   it('keeps huggingface single-GPU by default and rejects multi-GPU', () => {

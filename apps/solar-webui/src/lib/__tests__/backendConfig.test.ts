@@ -33,6 +33,11 @@ describe('getBackendTypeFromSelection', () => {
     expect(getBackendTypeFromSelection('sglang', '')).toBe('sglang');
     expect(getBackendTypeFromSelection('sglang', 'causal')).toBe('sglang');
   });
+
+  it('maps vllm to vllm, which has no modes either', () => {
+    expect(getBackendTypeFromSelection('vllm', '')).toBe('vllm');
+    expect(getBackendTypeFromSelection('vllm', 'causal')).toBe('vllm');
+  });
 });
 
 describe('getDefaultConfig', () => {
@@ -82,6 +87,25 @@ describe('getDefaultConfig', () => {
     expect(cfg.mem_fraction_static).toBe(0.9);
     expect(cfg.context_length).toBeUndefined();
     expect(cfg.quantization).toBe('');
+    expect(cfg.extra_args).toEqual([]);
+    expect(cfg.extra_env).toEqual({});
+  });
+
+  it('asks a vllm instance for a model path, and an intent for none', () => {
+    expect(getDefaultConfig('vllm', '').model_path).toBe('');
+    expect(getDefaultConfig('vllm', '', true).model_path).toBeUndefined();
+    expect(getDefaultConfig('vllm', '', true).backend_type).toBe('vllm');
+  });
+
+  it('leaves the vllm flags it does not seed empty so vLLM keeps its defaults', () => {
+    const cfg = getDefaultConfig('vllm', '', true);
+    expect(cfg.tensor_parallel_size).toBe(1);
+    expect(cfg.gpu_memory_utilization).toBe(0.9);
+    expect(cfg.pipeline_parallel_size).toBeUndefined();
+    expect(cfg.max_model_len).toBeUndefined();
+    expect(cfg.quantization).toBe('');
+    // Tri-state: the form starts without an opinion on prefix caching.
+    expect(cfg.enable_prefix_caching).toBeUndefined();
     expect(cfg.extra_args).toEqual([]);
     expect(cfg.extra_env).toEqual({});
   });
@@ -168,6 +192,32 @@ describe('stripEmptyOptionalFields', () => {
         hicache_storage_backend: 'file',
       }),
     ).toEqual({ backend_type: 'sglang', kv_cache_dtype: 'fp8_e4m3', hicache_storage_backend: 'file' });
+  });
+
+  it('drops the blank vllm flags and keeps the filled ones', () => {
+    expect(
+      stripEmptyOptionalFields({
+        backend_type: 'vllm',
+        quantization: '',
+        kv_cache_dtype: 'fp8',
+        moe_backend: '',
+        speculative_config: '',
+        tool_call_parser: 'hermes',
+        reasoning_parser: '',
+      }),
+    ).toEqual({ backend_type: 'vllm', kv_cache_dtype: 'fp8', tool_call_parser: 'hermes' });
+  });
+
+  it('keeps an explicit vllm prefix-cache choice, and drops an empty dtype', () => {
+    expect(stripEmptyOptionalFields({ backend_type: 'vllm', dtype: '' })).toEqual({ backend_type: 'vllm' });
+    expect(stripEmptyOptionalFields({ backend_type: 'vllm', enable_prefix_caching: false })).toEqual({
+      backend_type: 'vllm',
+      enable_prefix_caching: false,
+    });
+    expect(stripEmptyOptionalFields({ backend_type: 'vllm', enable_prefix_caching: true })).toEqual({
+      backend_type: 'vllm',
+      enable_prefix_caching: true,
+    });
   });
 
   it("drops an empty sglang dtype but keeps huggingface's 'auto'", () => {

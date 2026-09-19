@@ -10,6 +10,8 @@ from solar_host.main import app
 from solar_host.models.base import Instance, InstanceStatus
 from solar_host.models.huggingface import HuggingFaceCausalConfig
 from solar_host.models.llamacpp import LlamaCppConfig
+from solar_host.models.sglang import SglangConfig
+from solar_host.models.vllm import VllmConfig
 from solar_host.models_manager import (
     Manifest,
     ManifestEntry,
@@ -242,6 +244,18 @@ def _make_hf_instance(
     return Instance(id=instance_id, config=cfg, status=status)
 
 
+def _make_cuda_engine_instance(
+    instance_id: str,
+    backend_type: str,
+    model_path: str,
+    status: InstanceStatus = InstanceStatus.RUNNING,
+) -> Instance:
+    """An SGLang or vLLM instance serving *model_path* as a directory."""
+    config_cls = SglangConfig if backend_type == "sglang" else VllmConfig
+    cfg = config_cls(model_path=model_path, alias="test:engine")
+    return Instance(id=instance_id, config=cfg, status=status)
+
+
 class TestDeleteModel:
     # --- Authentication ---
 
@@ -375,6 +389,57 @@ class TestDeleteModel:
         resp = client.delete("/models/hf--org--mymodel", headers=_headers())
         assert resp.status_code == 409
         assert "inst-hf-1" in resp.json()["detail"]
+
+    @pytest.mark.parametrize("backend_type", ["sglang", "vllm"])
+    def test_delete_in_use_cuda_engine_model_path_returns_409(
+        self, client: TestClient, _isolated_env: Path, monkeypatch, backend_type: str
+    ):
+        """The CUDA engines serve a *directory* through ``model_path``; without
+        this the guard never fired and the delete would rmtree the model files
+        under a live server."""
+        ensure_models_dir()
+        slug = f"{backend_type}--glm"
+        model_dir = _isolated_env / slug
+        model_dir.mkdir()
+        add_manifest_entry(
+            _make_entry(
+                slug=slug,
+                source_uri=f"repo://{slug}:latest",
+                path=str(model_dir.resolve()),
+            )
+        )
+
+        instance = _make_cuda_engine_instance(
+            "inst-engine", backend_type, str(model_dir.resolve())
+        )
+        monkeypatch.setattr(config_manager, "instances", {"inst-engine": instance})
+
+        resp = client.delete(f"/models/{slug}", headers=_headers())
+        assert resp.status_code == 409
+        assert "inst-engine" in resp.json()["detail"]
+
+    def test_delete_a_stopped_cuda_engine_instance_does_not_block(
+        self, client: TestClient, _isolated_env: Path, monkeypatch
+    ):
+        ensure_models_dir()
+        slug = "vllm--glm"
+        model_dir = _isolated_env / slug
+        model_dir.mkdir()
+        add_manifest_entry(
+            _make_entry(
+                slug=slug,
+                source_uri=f"repo://{slug}:latest",
+                path=str(model_dir.resolve()),
+            )
+        )
+
+        instance = _make_cuda_engine_instance(
+            "inst-stopped", "vllm", str(model_dir.resolve()), InstanceStatus.STOPPED
+        )
+        monkeypatch.setattr(config_manager, "instances", {"inst-stopped": instance})
+
+        resp = client.delete(f"/models/{slug}", headers=_headers())
+        assert resp.status_code == 200
 
     def test_delete_huggingface_hub_id_not_blocked(
         self, client: TestClient, _isolated_env: Path, monkeypatch
@@ -606,6 +671,33 @@ class TestDeleteModelFiltered:
 
         resp = _filtered_delete(client, "hf--org--qwen", ["*Q4_K_M*"])
         assert resp.status_code == 409
+
+    @pytest.mark.parametrize("backend_type", ["sglang", "vllm"])
+    def test_filtered_delete_cuda_engine_overlap_is_decided_by_filters(
+        self, client: TestClient, _isolated_env: Path, monkeypatch, backend_type: str
+    ):
+        """The filtered path reuses the in-use guard, so for the CUDA engines
+        too: non-overlapping filters let a targeted delete through, and an
+        instance without filters blocks conservatively."""
+        ensure_models_dir()
+        model_dir = _isolated_env / "hf--org--qwen"
+        _populate_multi_quant_dir(model_dir)
+        add_manifest_entry(_make_multi_quant_entry(model_dir))
+
+        instance = _make_cuda_engine_instance(
+            "inst-engine", backend_type, str(model_dir.resolve())
+        )
+        instance.config.file_filters = ["*Q8_0*"]
+        monkeypatch.setattr(config_manager, "instances", {"inst-engine": instance})
+
+        allowed = _filtered_delete(client, "hf--org--qwen", ["*Q4_K_M*"])
+        assert allowed.status_code == 200
+        assert allowed.json()["removed"] == ["model-Q4_K_M.gguf"]
+
+        instance.config.file_filters = None
+        refused = _filtered_delete(client, "hf--org--qwen", ["*Q8_0*"])
+        assert refused.status_code == 409
+        assert (model_dir / "model-Q8_0.gguf").exists()
 
     def test_filtered_delete_ignores_stopped_instance(
         self, client: TestClient, _isolated_env: Path, monkeypatch

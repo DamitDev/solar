@@ -83,7 +83,7 @@ def capabilities_for_config(config: Any) -> list[str] | None:
             return list(VISION_CAPABILITIES)
         return None
 
-    if backend_type not in ("sglang", "huggingface_causal"):
+    if backend_type not in ("sglang", "vllm", "huggingface_causal"):
         return None
 
     model_dir = _model_dir(config)

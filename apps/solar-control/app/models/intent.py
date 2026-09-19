@@ -27,15 +27,6 @@ class ReconcileState(str, Enum):
 
 VALID_PRIORITIES: frozenset[str] = frozenset({"production", "staging", "ephemeral"})
 VALID_STRATEGIES: frozenset[str] = frozenset({"rolling", "immediate"})
-VALID_BACKEND_TYPES: frozenset[str] = frozenset(
-    {
-        "llamacpp",
-        "huggingface_causal",
-        "huggingface_classification",
-        "huggingface_embedding",
-        "huggingface_vision",
-    }
-)
 VALID_MODEL_SOURCE_SCHEMES: frozenset[str] = frozenset({"repo", "huggingface", "local"})
 FORBIDDEN_BACKEND_FIELDS: frozenset[str] = frozenset(
     {

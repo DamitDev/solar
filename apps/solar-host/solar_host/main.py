@@ -90,7 +90,8 @@ async def instance_metrics_poll_loop(app: FastAPI, interval: float = 2.0):
     The counters also drive the authoritative busy signal — SGLang simply
     stops logging decode lines instead of emitting a terminal
     ``#running-req: 0``, which left instances busy forever — and finalize
-    per-request SGLang metrics from the running-request 0→1/1→0 deltas.
+    per-request metrics for the cache-aware CUDA engines (SGLang, vLLM)
+    from the running-request 0→1/1→0 deltas.
     """
     while True:
         try:
@@ -389,7 +390,7 @@ async def root():
         "version": __version__,
         "description": (
             "Process manager for model inference backends "
-            "(llama.cpp, HuggingFace, SGLang)"
+            "(llama.cpp, HuggingFace, SGLang, vLLM)"
         ),
         "supported_backends": await asyncio.to_thread(supported_backend_types),
     }

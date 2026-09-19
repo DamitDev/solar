@@ -16,7 +16,8 @@ export type BackendType =
   | 'huggingface_classification'
   | 'huggingface_embedding'
   | 'huggingface_vision'
-  | 'sglang';
+  | 'sglang'
+  | 'vllm';
 
 /**
  * Speculative decoding implementations solar supports (llama-server --spec-type).
@@ -178,13 +179,55 @@ export interface SglangConfig extends BaseInstanceConfig {
   extra_env?: Record<string, string>;
 }
 
+/**
+ * vLLM config. Typed fields cover the knobs that are stable across vLLM
+ * releases; `extra_args` / `extra_env` carry everything else.
+ *
+ * The host owns `--host`, `--port`, `--api-key`, `--model`,
+ * `--served-model-name`, `--enable-prompt-tokens-details` and
+ * `--disable-log-stats`, and resolves `model_path` from `model_source` for
+ * intents. Unlike SGLang, vLLM performs no `:` parsing on model names, so the
+ * alias is served verbatim.
+ */
+export interface VllmConfig extends BaseInstanceConfig {
+  backend_type: 'vllm';
+  /** Local path to the served model directory (the positional `vllm serve` model argument) */
+  model_path: string;
+  model_source?: string | null;
+  // Parallelism and memory
+  tensor_parallel_size?: number;
+  pipeline_parallel_size?: number;
+  max_model_len?: number;
+  gpu_memory_utilization?: number;
+  max_num_seqs?: number;
+  max_num_batched_tokens?: number;
+  // Model and kernels
+  dtype?: string;
+  quantization?: string;
+  kv_cache_dtype?: string;
+  moe_backend?: string;
+  trust_remote_code?: boolean;
+  enforce_eager?: boolean;
+  /** Prefix cache on/off (`--enable-prefix-caching` / `--no-enable-prefix-caching`); undefined leaves the engine default */
+  enable_prefix_caching?: boolean;
+  /** JSON object string, e.g. '{"method":"mtp","num_speculative_tokens":5}' */
+  speculative_config?: string;
+  tool_call_parser?: string;
+  reasoning_parser?: string;
+  enable_auto_tool_choice?: boolean;
+  // Escape hatches
+  extra_args?: string[];
+  extra_env?: Record<string, string>;
+}
+
 // Union type for all config types
 export type InstanceConfig =
   | LlamaCppConfig
   | HuggingFaceCausalConfig
   | HuggingFaceClassificationConfig
   | HuggingFaceEmbeddingConfig
-  | SglangConfig;
+  | SglangConfig
+  | VllmConfig;
 
 // Helper to check backend type
 export function isLlamaCppConfig(config: InstanceConfig): config is LlamaCppConfig {
@@ -207,6 +250,10 @@ export function isSglangConfig(config: InstanceConfig): config is SglangConfig {
   return config.backend_type === 'sglang';
 }
 
+export function isVllmConfig(config: InstanceConfig): config is VllmConfig {
+  return config.backend_type === 'vllm';
+}
+
 export function getBackendType(config: InstanceConfig): BackendType {
   if ('backend_type' in config && config.backend_type) {
     return config.backend_type;
@@ -227,6 +274,8 @@ export function getBackendLabel(backendType: BackendType): string {
       return 'HF Embedding';
     case 'sglang':
       return 'SGLang';
+    case 'vllm':
+      return 'vLLM';
     default:
       return backendType;
   }
@@ -244,6 +293,8 @@ export function getBackendColor(backendType: BackendType): string {
       return 'bg-nord-15 text-nord-6'; // Purple
     case 'sglang':
       return 'bg-nord-7 text-nord-0'; // Teal
+    case 'vllm':
+      return 'bg-nord-12 text-nord-0'; // Orange
     default:
       return 'bg-nord-3 text-nord-4';
   }
@@ -328,6 +379,8 @@ export function getFullModelHexColor(config: InstanceConfig): string {
       return '#B48EAD'; // Purple
     case 'sglang':
       return '#8FBCBB'; // Teal
+    case 'vllm':
+      return '#D08770'; // Orange
     default:
       return '#4C566A';
   }

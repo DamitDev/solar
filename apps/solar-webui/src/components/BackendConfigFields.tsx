@@ -15,7 +15,7 @@
  */
 
 import { useState, type ReactNode } from 'react';
-import { Cpu, Brain, Zap } from 'lucide-react';
+import { Cpu, Brain, Zap, Rocket } from 'lucide-react';
 import {
   PrimaryBackend,
   LlamaCppMode,
@@ -29,6 +29,7 @@ import {
   getDefaultConfig,
 } from '@/lib/backendConfig';
 import { SglangConfigFields } from './SglangConfigFields';
+import { VllmConfigFields } from './VllmConfigFields';
 import { SpeculativeDecodingFields } from './SpeculativeDecodingFields';
 
 export type { PrimaryBackend, LlamaCppMode, HuggingFaceMode, ModeOption };
@@ -55,17 +56,19 @@ interface BackendConfigFieldsProps {
    */
   fieldError?: (field: string) => ReactNode;
   /**
-   * Backends the target host cannot run (SGLang needs an NVIDIA host with
-   * SGLang installed). Rendered disabled with *disabledReason* as the tooltip.
+   * Backends the target host cannot run (SGLang and vLLM each need an NVIDIA
+   * host with the engine installed). Rendered disabled, with the matching
+   * entry of *disabledReasons* (or a generic label) as the tooltip.
    */
   disabledBackends?: PrimaryBackend[];
-  disabledReason?: string;
+  disabledReasons?: Partial<Record<PrimaryBackend, string>>;
 }
 
 /** Derive the initial tab/mode selection from an existing backend object. */
 function getInitialSelection(value: Record<string, any>): { primary: PrimaryBackend; mode: string } {
   const backendType = value?.backend_type;
   if (backendType === 'sglang') return { primary: 'sglang', mode: '' };
+  if (backendType === 'vllm') return { primary: 'vllm', mode: '' };
   if (backendType === 'huggingface_causal') return { primary: 'huggingface', mode: 'causal' };
   if (backendType === 'huggingface_classification') return { primary: 'huggingface', mode: 'classifier' };
   if (backendType === 'huggingface_embedding') return { primary: 'huggingface', mode: 'embedding' };
@@ -85,7 +88,7 @@ export function BackendConfigFields({
   onAliasChange,
   fieldError = () => null,
   disabledBackends = [],
-  disabledReason,
+  disabledReasons = {},
 }: BackendConfigFieldsProps) {
   const initial = getInitialSelection(value);
   const [primaryBackend, setPrimaryBackend] = useState<PrimaryBackend>(initial.primary);
@@ -130,17 +133,22 @@ export function BackendConfigFields({
     });
   };
 
-  // SGLang serves generation models only, so it contributes no mode cards.
+  // SGLang and vLLM serve generation models only, so they contribute no mode cards.
   const modeOptions =
-    primaryBackend === 'sglang' ? [] : primaryBackend === 'llamacpp' ? LLAMACPP_MODES : HUGGINGFACE_MODES;
+    primaryBackend === 'sglang' || primaryBackend === 'vllm'
+      ? []
+      : primaryBackend === 'llamacpp'
+        ? LLAMACPP_MODES
+        : HUGGINGFACE_MODES;
   const sglangDisabled = disabledBackends.includes('sglang');
+  const vllmDisabled = disabledBackends.includes('vllm');
 
   return (
     <div className="space-y-6">
       {/* Step 1: Primary Backend Selection */}
       <div>
         <label className="block text-sm font-medium text-nord-4 mb-3">Backend</label>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 gap-3">
           {/* Llama.cpp */}
           <button
             type="button"
@@ -200,7 +208,7 @@ export function BackendConfigFields({
             type="button"
             onClick={() => handlePrimaryBackendChange('sglang')}
             disabled={sglangDisabled}
-            title={sglangDisabled ? disabledReason : undefined}
+            title={sglangDisabled ? disabledReasons.sglang : undefined}
             className={`p-4 rounded-lg border-2 transition-all text-left ${
               sglangDisabled
                 ? 'border-nord-3 bg-nord-2 opacity-50 cursor-not-allowed'
@@ -222,7 +230,38 @@ export function BackendConfigFields({
                   SGLang
                 </div>
                 <div className="text-xs text-nord-4">
-                  {sglangDisabled ? (disabledReason ?? 'Unavailable') : 'High-throughput CUDA serving'}
+                  {sglangDisabled ? (disabledReasons.sglang ?? 'Unavailable') : 'High-throughput CUDA serving'}
+                </div>
+              </div>
+            </div>
+          </button>
+
+          {/* vLLM */}
+          <button
+            type="button"
+            onClick={() => handlePrimaryBackendChange('vllm')}
+            disabled={vllmDisabled}
+            title={vllmDisabled ? disabledReasons.vllm : undefined}
+            className={`p-4 rounded-lg border-2 transition-all text-left ${
+              vllmDisabled
+                ? 'border-nord-3 bg-nord-2 opacity-50 cursor-not-allowed'
+                : primaryBackend === 'vllm'
+                  ? 'border-nord-12 bg-nord-12 bg-opacity-15'
+                  : 'border-nord-3 hover:border-nord-4 bg-nord-2'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <div className={`p-2 rounded-lg ${primaryBackend === 'vllm' ? 'bg-nord-12 bg-opacity-20' : 'bg-nord-3'}`}>
+                <Rocket size={24} className={primaryBackend === 'vllm' ? 'text-nord-12' : 'text-nord-4'} />
+              </div>
+              <div>
+                <div
+                  className={`text-base font-semibold ${primaryBackend === 'vllm' ? 'text-nord-12' : 'text-nord-6'}`}
+                >
+                  vLLM
+                </div>
+                <div className="text-xs text-nord-4">
+                  {vllmDisabled ? (disabledReasons.vllm ?? 'Unavailable') : 'High-throughput CUDA serving'}
                 </div>
               </div>
             </div>
@@ -283,7 +322,18 @@ export function BackendConfigFields({
       {/* Configuration Fields */}
       <div className="border-t border-nord-3 pt-4">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {primaryBackend === 'sglang' ? (
+          {primaryBackend === 'vllm' ? (
+            <VllmConfigFields
+              value={value}
+              onChange={onChange}
+              showAlias={showAlias}
+              showModelFields={showModelFields}
+              aliasValue={aliasValue}
+              onAliasChange={onAliasChange}
+              fieldError={fieldError}
+              idPrefix={forIntent ? 'intent-vllm' : 'add-vllm'}
+            />
+          ) : primaryBackend === 'sglang' ? (
             <SglangConfigFields
               value={value}
               onChange={onChange}

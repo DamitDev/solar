@@ -7,7 +7,7 @@
 import { Cpu, MessageSquare, Binary, Tags, Search } from 'lucide-react';
 import { BackendType, LlamaCppSplitMode, SpecType } from '@/api/types';
 
-export type PrimaryBackend = 'llamacpp' | 'huggingface' | 'sglang';
+export type PrimaryBackend = 'llamacpp' | 'huggingface' | 'sglang' | 'vllm';
 
 export type LlamaCppMode = 'llm' | 'embedding' | 'reranker';
 export type HuggingFaceMode = 'causal' | 'classifier' | 'embedding';
@@ -226,6 +226,10 @@ export const getBackendTypeFromSelection = (primary: PrimaryBackend, mode: strin
   if (primary === 'sglang') {
     return 'sglang';
   }
+  // vLLM likewise serves generation models only.
+  if (primary === 'vllm') {
+    return 'vllm';
+  }
   switch (mode) {
     case 'causal':
       return 'huggingface_causal';
@@ -312,6 +316,36 @@ export const getDefaultConfig = (primary: PrimaryBackend, mode: string, forInten
     };
   }
 
+  if (primary === 'vllm') {
+    return {
+      ...base,
+      backend_type: 'vllm',
+      // Intents resolve model_source into model_path server-side.
+      ...(forIntent ? {} : { model_path: '', alias: '' }),
+      tensor_parallel_size: 1,
+      pipeline_parallel_size: undefined,
+      max_model_len: undefined,
+      gpu_memory_utilization: 0.9,
+      max_num_seqs: undefined,
+      max_num_batched_tokens: undefined,
+      dtype: '',
+      quantization: '',
+      kv_cache_dtype: '',
+      moe_backend: '',
+      trust_remote_code: false,
+      enforce_eager: false,
+      // Tri-state: undefined leaves the engine default (enabled on most
+      // builds), so the form starts without an opinion.
+      enable_prefix_caching: undefined,
+      speculative_config: '',
+      tool_call_parser: '',
+      reasoning_parser: '',
+      enable_auto_tool_choice: false,
+      extra_args: [],
+      extra_env: {},
+    };
+  }
+
   // HuggingFace modes
   switch (mode) {
     case 'causal':
@@ -376,8 +410,8 @@ export const stripEmptyOptionalFields = (config: Record<string, any>): Record<st
     'devices',
     'split_mode',
     'tensor_split',
-    // SGLang: an omitted flag means "SGLang's own default", so an empty
-    // string must not be sent as an explicit value.
+    // SGLang / vLLM: an omitted flag means "the engine's own default", so an
+    // empty string must not be sent as an explicit value.
     'quantization',
     'kv_cache_dtype',
     'moe_runner_backend',
@@ -387,13 +421,17 @@ export const stripEmptyOptionalFields = (config: Record<string, any>): Record<st
     'hicache_storage_backend',
     'hicache_storage_backend_extra_config',
     'hicache_storage_prefetch_policy',
+    'moe_backend',
+    'speculative_config',
+    'tool_call_parser',
+    'reasoning_parser',
   ]) {
     if (!next[field]) delete next[field];
   }
 
-  // 'dtype' is shared: HuggingFace treats 'auto' as a real value, SGLang has
-  // no such token and wants the flag omitted instead.
-  if (next.backend_type === 'sglang' && !next.dtype) delete next.dtype;
+  // 'dtype' is shared: HuggingFace treats 'auto' as a real value, SGLang and
+  // vLLM have no such token and want the flag omitted instead.
+  if ((next.backend_type === 'sglang' || next.backend_type === 'vllm') && !next.dtype) delete next.dtype;
 
   if (Array.isArray(next.extra_args) && next.extra_args.length === 0) delete next.extra_args;
   if (next.extra_env && typeof next.extra_env === 'object' && Object.keys(next.extra_env).length === 0) {

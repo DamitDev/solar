@@ -25,6 +25,7 @@ from solar_host.backends.sglang import (
     detach_instance_prompt_cache,
     purge_in_background,
 )
+from solar_host.backends.vllm import VllmRunner
 from solar_host.config import config_manager, parse_instance_config, settings
 from solar_host.memory_monitor import verify_gpu_capacity
 from solar_host.models import (
@@ -66,6 +67,8 @@ def get_runner_for_config(config) -> BackendRunner:
         return LlamaCppRunner()
     elif backend_type == BackendType.SGLANG or backend_type == "sglang":
         return SglangRunner()
+    elif backend_type == BackendType.VLLM or backend_type == "vllm":
+        return VllmRunner()
     elif backend_type in (
         BackendType.HUGGINGFACE_CAUSAL,
         BackendType.HUGGINGFACE_CLASSIFICATION,
@@ -654,9 +657,9 @@ class ProcessManager:
         Synchronous (``urllib`` is blocking); the caller wraps it in a
         thread. Each snapshot is stored for the ``/usage`` endpoint, fed to
         the runner's :meth:`BackendRunner.apply_usage_snapshot` so the
-        backend counters drive the authoritative busy signal, and — for
-        SGLang — finalizes per-request GenerationMetrics from the running-
-        request 0→1/1→0 counter deltas.
+        backend counters drive the authoritative busy signal, and — for the
+        cache-aware CUDA engines (SGLang, vLLM) — finalizes per-request
+        GenerationMetrics from the running-request 0→1/1→0 counter deltas.
         """
         for instance in config_manager.get_all_instances():
             if instance.status != InstanceStatus.RUNNING:

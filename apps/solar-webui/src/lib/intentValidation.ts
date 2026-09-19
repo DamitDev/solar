@@ -20,6 +20,7 @@ export const INTENT_BACKEND_TYPES = [
   'huggingface_embedding',
   'huggingface_vision',
   'sglang',
+  'vllm',
 ] as const;
 
 export const INTENT_PRIORITIES = ['production', 'staging', 'ephemeral'] as const;
@@ -62,8 +63,23 @@ export const FORBIDDEN_BACKEND_FIELDS = ['alias', 'model_source', 'host', 'port'
 /** SGLang only runs on CUDA, mirroring the server's SGLANG_GPU_TYPE. */
 export const SGLANG_GPU_TYPE = 'nvidia_cuda';
 
+/** vLLM only runs on CUDA, mirroring the server's VLLM_GPU_TYPE. */
+export const VLLM_GPU_TYPE = 'nvidia_cuda';
+
 /** CLI flags solar-host derives itself, mirroring RESERVED_SGLANG_ARGS. */
 export const RESERVED_SGLANG_ARGS = ['--host', '--port', '--api-key', '--model-path', '--served-model-name'];
+
+/** CLI flags solar-host derives itself, mirroring RESERVED_VLLM_ARGS. */
+export const RESERVED_VLLM_ARGS = [
+  '--host',
+  '--port',
+  '--api-key',
+  '--model',
+  '--served-model-name',
+  '--enable-prompt-tokens-details',
+  '--no-enable-prompt-tokens-details',
+  '--disable-log-stats',
+];
 
 /**
  * Backend fields only SGLang accepts, mirroring the server's `_SGLANG_FIELDS`
@@ -90,6 +106,30 @@ export const SGLANG_ONLY_FIELDS = [
   'hicache_storage_backend',
   'hicache_storage_backend_extra_config',
   'hicache_storage_prefetch_policy',
+  'extra_args',
+  'extra_env',
+];
+
+/**
+ * Backend fields only vLLM accepts, mirroring the server's `_VLLM_FIELDS`
+ * minus `dtype`/`trust_remote_code`, which the other backends share.
+ */
+export const VLLM_ONLY_FIELDS = [
+  'tensor_parallel_size',
+  'pipeline_parallel_size',
+  'max_model_len',
+  'gpu_memory_utilization',
+  'max_num_seqs',
+  'max_num_batched_tokens',
+  'quantization',
+  'kv_cache_dtype',
+  'moe_backend',
+  'enforce_eager',
+  'enable_prefix_caching',
+  'speculative_config',
+  'tool_call_parser',
+  'reasoning_parser',
+  'enable_auto_tool_choice',
   'extra_args',
   'extra_env',
 ];
@@ -185,38 +225,28 @@ function validateMultiGpu(backend: Record<string, any>): IntentFieldError[] {
 }
 
 /**
- * Mirror the server's `_validate_sglang`: field ownership, the NVIDIA-only
- * placement contract, and the `extra_args`/`extra_env` escape hatches.
+ * The shared CUDA-only contract (SGLang, vLLM): the NVIDIA-only placement
+ * contract and the `extra_args`/`extra_env` escape hatches.
  *
- * The form pins `placement.gpu_type` for SGLang, so a contradiction here means
- * the user changed the backend after the fact — worth saying plainly rather
- * than as a 422 from the server.
+ * The form pins `placement.gpu_type` for these backends, so a contradiction
+ * here means the user changed the backend after the fact — worth saying
+ * plainly rather than as a 422 from the server.
  */
-function validateSglang(
+function validateCudaOnlyContract(
   backend: Record<string, any>,
   placement: IntentCreateRequest['placement'],
-  unchanged: readonly string[],
+  engine: string,
+  gpuTypeToken: string,
+  reservedArgs: readonly string[],
 ): IntentFieldError[] {
   const errors: IntentFieldError[] = [];
-  const isSglang = backend.backend_type === 'sglang';
-
-  if (!isSglang) {
-    for (const field of SGLANG_ONLY_FIELDS) {
-      const value = backend[field];
-      if (value === undefined || value === null || value === '' || value === false) continue;
-      if (Array.isArray(value) && value.length === 0) continue;
-      if (unchanged.includes(field)) continue;
-      errors.push({ field: `backend.${field}`, message: `${field} is only supported for the sglang backend` });
-    }
-    return errors;
-  }
 
   const gpuType = placement?.gpu_type;
   const canonical = gpuType ? (normalizeGpuType(gpuType) ?? gpuType) : null;
-  if (canonical && canonical !== SGLANG_GPU_TYPE) {
+  if (canonical && canonical !== gpuTypeToken) {
     errors.push({
       field: 'placement.gpu_type',
-      message: `the sglang backend requires gpu_type '${SGLANG_GPU_TYPE}', but placement.gpu_type is '${canonical}'`,
+      message: `the ${engine} backend requires gpu_type '${gpuTypeToken}', but placement.gpu_type is '${canonical}'`,
     });
   }
 
@@ -227,7 +257,7 @@ function validateSglang(
     } else {
       for (const arg of extraArgs) {
         const flag = arg.trim().split('=')[0];
-        if (RESERVED_SGLANG_ARGS.includes(flag)) {
+        if (reservedArgs.includes(flag)) {
           errors.push({
             field: 'backend.extra_args',
             message: `'${flag}' is managed by solar-host and must not be set through extra args`,
@@ -246,6 +276,65 @@ function validateSglang(
     if (!isFlatMap) {
       errors.push({ field: 'backend.extra_env', message: 'Every environment entry must be NAME=value with a name' });
     }
+  }
+
+  return errors;
+}
+
+/**
+ * Mirror the server's `_validate_sglang`: the CUDA-only contract.
+ */
+function validateSglang(backend: Record<string, any>, placement: IntentCreateRequest['placement']): IntentFieldError[] {
+  if (backend.backend_type !== 'sglang') return [];
+  return validateCudaOnlyContract(backend, placement, 'sglang', SGLANG_GPU_TYPE, RESERVED_SGLANG_ARGS);
+}
+
+/**
+ * Mirror the server's `_validate_vllm`: the CUDA-only contract, against
+ * vLLM's own reserved-flag set.
+ */
+function validateVllm(backend: Record<string, any>, placement: IntentCreateRequest['placement']): IntentFieldError[] {
+  if (backend.backend_type !== 'vllm') return [];
+  return validateCudaOnlyContract(backend, placement, 'vllm', VLLM_GPU_TYPE, RESERVED_VLLM_ARGS);
+}
+
+/** Every backend that owns *field*, mirroring the server's owner table. */
+function cudaFieldOwners(field: string): string[] {
+  const owners: string[] = [];
+  if (SGLANG_ONLY_FIELDS.includes(field)) owners.push('sglang');
+  if (VLLM_ONLY_FIELDS.includes(field)) owners.push('vllm');
+  return owners;
+}
+
+/** 'the sglang backend' / 'the sglang or vllm backends'. */
+function describeOwners(owners: readonly string[]): string {
+  return owners.length === 1 ? `the ${owners[0]} backend` : `the ${owners.join(' or ')} backends`;
+}
+
+/**
+ * Mirror the server's field-ownership rule for the CUDA engines: a field
+ * owned by SGLang, vLLM or both is rejected on every backend that does not
+ * own it.
+ *
+ * Ownership is many-to-many — `extra_args`, `extra_env`, `quantization` and
+ * `kv_cache_dtype` belong to both engines — so a per-engine check would
+ * reject a valid intent built for the sibling backend.
+ */
+function validateCudaEngineFieldOwnership(
+  backend: Record<string, any>,
+  unchanged: readonly string[],
+): IntentFieldError[] {
+  const errors: IntentFieldError[] = [];
+  const backendType = backend.backend_type;
+
+  for (const field of new Set([...SGLANG_ONLY_FIELDS, ...VLLM_ONLY_FIELDS])) {
+    const value = backend[field];
+    if (value === undefined || value === null || value === '' || value === false) continue;
+    if (Array.isArray(value) && value.length === 0) continue;
+    if (unchanged.includes(field)) continue;
+    const owners = cudaFieldOwners(field);
+    if (owners.includes(backendType)) continue;
+    errors.push({ field: `backend.${field}`, message: `${field} is only supported for ${describeOwners(owners)}` });
   }
 
   return errors;
@@ -300,7 +389,8 @@ function validateDevice(
 
 /**
  * S-058: mirror the server's `derive_gpu_count` — the GPU count the
- * backend implies: sglang `tp_size`; llama.cpp `devices` list length or
+ * backend implies: sglang `tp_size`; vllm `tensor_parallel_size` ×
+ * `pipeline_parallel_size`; llama.cpp `devices` list length or
  * the `tensor_split` count when devices is absent.
  */
 function deriveGpuCount(backend: Record<string, any>): number | null {
@@ -310,6 +400,15 @@ function deriveGpuCount(backend: Record<string, any>): number | null {
     const tpSize = backend.tp_size;
     if (Number.isInteger(tpSize) && tpSize >= 1) return tpSize;
     return null;
+  }
+  if (backendType === 'vllm') {
+    const tpSize = backend.tensor_parallel_size ?? null;
+    const ppSize = backend.pipeline_parallel_size ?? null;
+    if (tpSize === null && ppSize === null) return null;
+    // Mirrors the server: an out-of-range dimension is no signal at all.
+    const dimension = (v: number | null) => v === null || (Number.isInteger(v) && v >= 1);
+    if (!dimension(tpSize) || !dimension(ppSize)) return null;
+    return (tpSize ?? 1) * (ppSize ?? 1);
   }
   if (backendType === 'llamacpp') {
     const devices = backend.devices;
@@ -326,12 +425,20 @@ function deriveGpuCount(backend: Record<string, any>): number | null {
   return null;
 }
 
-/**
- * Device-name suffix of a llama.cpp `devices` entry ('CUDA0' → suffix 0).
+/** Device-name suffix of a llama.cpp `devices` entry ('CUDA0' → suffix 0).
  * Entries without a numeric suffix ('none', and anything non-CUDA) do not
  * match and stay legal — they never index a visible device.
  */
 const DEVICE_NAME_RE = /^([A-Za-z]+)(\d+)$/;
+
+/** The vLLM field(s) that implied a GPU count, for the disagreement message. */
+function vllmCountHint(backend: Record<string, any>): string {
+  const hasTp = backend.tensor_parallel_size !== undefined && backend.tensor_parallel_size !== null;
+  const hasPp = backend.pipeline_parallel_size !== undefined && backend.pipeline_parallel_size !== null;
+  if (hasTp && hasPp) return 'backend.tensor_parallel_size × backend.pipeline_parallel_size';
+  if (hasTp) return 'backend.tensor_parallel_size';
+  return 'backend.pipeline_parallel_size';
+}
 
 /**
  * S-058: mirror the server's `_validate_gpu_device_positions`.
@@ -467,7 +574,9 @@ export function validateIntentRequest(
 
     errors.push(...validateMultiGpu(req.backend));
     errors.push(...validateDevice(req.backend, req.placement, unchangedFields));
-    errors.push(...validateSglang(req.backend, req.placement, unchangedFields));
+    errors.push(...validateCudaEngineFieldOwnership(req.backend, unchangedFields));
+    errors.push(...validateSglang(req.backend, req.placement));
+    errors.push(...validateVllm(req.backend, req.placement));
   }
 
   if (req.placement?.roles !== undefined && req.placement.roles.length === 0) {
@@ -509,7 +618,13 @@ export function validateIntentRequest(
       if (derived !== null && explicitGpuCount !== derived) {
         const backendType = req.backend?.backend_type;
         const hint =
-          backendType === 'sglang' ? 'backend.tp_size' : backendType === 'llamacpp' ? 'backend.devices' : 'backend';
+          backendType === 'sglang'
+            ? 'backend.tp_size'
+            : backendType === 'vllm'
+              ? vllmCountHint(req.backend)
+              : backendType === 'llamacpp'
+                ? 'backend.devices'
+                : 'backend';
         errors.push({
           field: 'resources.gpu_count',
           message: `resources.gpu_count is ${explicitGpuCount} but ${hint} implies ${derived} — they must agree`,

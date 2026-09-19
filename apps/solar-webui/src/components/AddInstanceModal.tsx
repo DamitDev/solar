@@ -6,6 +6,7 @@ import {
   HuggingFaceCausalConfig,
   HuggingFaceClassificationConfig,
   SglangConfig,
+  VllmConfig,
   getBackendLabel,
 } from '@/api/types';
 import { BackendConfigFields } from './BackendConfigFields';
@@ -38,9 +39,11 @@ export function AddInstanceModal({
   const backendType = getBackendTypeFromSelection(
     formData.backend_type === 'sglang'
       ? 'sglang'
-      : (formData.backend_type ?? 'llamacpp').startsWith('huggingface')
-        ? 'huggingface'
-        : 'llamacpp',
+      : formData.backend_type === 'vllm'
+        ? 'vllm'
+        : (formData.backend_type ?? 'llamacpp').startsWith('huggingface')
+          ? 'huggingface'
+          : 'llamacpp',
     formData.backend_type === 'huggingface_causal'
       ? 'causal'
       : formData.backend_type === 'huggingface_classification'
@@ -50,9 +53,9 @@ export function AddInstanceModal({
           : ((formData as Partial<LlamaCppConfig>).model_type ?? 'llm'),
   );
 
-  // SGLang runs on CUDA only, and it is a separate install the host has to
-  // advertise — the server rejects the mismatch, so the button is disabled
-  // rather than offered and refused.
+  // SGLang and vLLM run on CUDA only, and each is a separate install the
+  // host has to advertise — the server rejects the mismatch, so the button is
+  // disabled rather than offered and refused.
   const sglangUnavailable =
     hostGpuType !== 'nvidia_cuda' ||
     (hostSupportedBackends !== undefined &&
@@ -60,6 +63,12 @@ export function AddInstanceModal({
       !hostSupportedBackends.includes('sglang'));
   const sglangReason =
     hostGpuType !== 'nvidia_cuda' ? 'Requires an NVIDIA host' : `SGLang is not installed on ${hostName}`;
+  const vllmUnavailable =
+    hostGpuType !== 'nvidia_cuda' ||
+    (hostSupportedBackends !== undefined &&
+      hostSupportedBackends.length > 0 &&
+      !hostSupportedBackends.includes('vllm'));
+  const vllmReason = hostGpuType !== 'nvidia_cuda' ? 'Requires an NVIDIA host' : `vLLM is not installed on ${hostName}`;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -73,6 +82,12 @@ export function AddInstanceModal({
       }
     } else if (backendType === 'sglang') {
       const config = formData as Partial<SglangConfig>;
+      if (!config.model_path || !config.alias) {
+        alert('Model Path and Alias are required');
+        return;
+      }
+    } else if (backendType === 'vllm') {
+      const config = formData as Partial<VllmConfig>;
       if (!config.model_path || !config.alias) {
         alert('Model Path and Alias are required');
         return;
@@ -121,8 +136,14 @@ export function AddInstanceModal({
             showModelFields
             aliasValue={formData.alias}
             onAliasChange={(v) => setFormData((prev) => ({ ...prev, alias: v }))}
-            disabledBackends={sglangUnavailable ? ['sglang'] : []}
-            disabledReason={sglangReason}
+            disabledBackends={[
+              ...(sglangUnavailable ? (['sglang'] as const) : []),
+              ...(vllmUnavailable ? (['vllm'] as const) : []),
+            ]}
+            disabledReasons={{
+              ...(sglangUnavailable ? { sglang: sglangReason } : {}),
+              ...(vllmUnavailable ? { vllm: vllmReason } : {}),
+            }}
           />
 
           {/* Actions */}

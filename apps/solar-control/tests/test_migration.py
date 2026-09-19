@@ -133,6 +133,39 @@ async def test_create_instance_on_host_resolves_sglang_model_path(target_host):
 
 
 @pytest.mark.anyio
+async def test_create_instance_on_host_resolves_vllm_model_path(target_host):
+    """vLLM takes the model directory like SGLang, not llama.cpp's `model`
+    file nor HuggingFace's `model_id` repo id."""
+    sent: dict = {}
+
+    with (
+        patch("app.services.migration.resolve") as mock_resolve,
+        patch("aiohttp.ClientSession.post") as mock_post,
+    ):
+        mock_resolve.return_value = "local:///srv/models/glm53"
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"instance_id": "new-inst"})
+        mock_post.return_value.__aenter__.return_value = mock_resp
+
+        payload = {
+            "config": {
+                "backend_type": "vllm",
+                "alias": "glm-5.3-flash:320b",
+                "model_source": "repo://glm53:320b",
+            }
+        }
+        await create_instance_on_host(target_host, payload)
+        sent = mock_post.call_args.kwargs["json"]["config"]
+
+    assert sent["model_path"] == "/srv/models/glm53"
+    assert "model" not in sent and "model_id" not in sent
+    # The URI survives so a later migration can re-resolve on the new host.
+    assert sent["model_source"] == "repo://glm53:320b"
+    assert mock_resolve.call_args.kwargs["backend_type"] == "vllm"
+
+
+@pytest.mark.anyio
 async def test_create_instance_on_host_keeps_an_already_resolved_model_path(
     target_host,
 ):

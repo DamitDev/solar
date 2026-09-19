@@ -23,6 +23,7 @@ VALID_BACKEND_TYPES: frozenset[str] = frozenset(
         "huggingface_embedding",
         "huggingface_vision",
         "sglang",
+        "vllm",
     }
 )
 VALID_MODEL_SOURCE_SCHEMES: frozenset[str] = frozenset({"repo", "huggingface", "local"})
@@ -132,6 +133,31 @@ _SGLANG_FIELDS: frozenset[str] = frozenset(
         "extra_env",
     }
 )
+# vLLM's typed surface (S-061). ``dtype`` and ``trust_remote_code`` are
+# shared with the other backends, exactly as in the SGLang set.
+_VLLM_FIELDS: frozenset[str] = frozenset(
+    {
+        "dtype",
+        "trust_remote_code",
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "max_model_len",
+        "gpu_memory_utilization",
+        "max_num_seqs",
+        "max_num_batched_tokens",
+        "quantization",
+        "kv_cache_dtype",
+        "moe_backend",
+        "enforce_eager",
+        "enable_prefix_caching",
+        "speculative_config",
+        "tool_call_parser",
+        "reasoning_parser",
+        "enable_auto_tool_choice",
+        "extra_args",
+        "extra_env",
+    }
+)
 BACKEND_FIELD_OWNERS: dict[str, frozenset[str]] = {
     "llamacpp": _LLAMACPP_ONLY_FIELDS,
     "huggingface": _HUGGINGFACE_ONLY_FIELDS,
@@ -140,11 +166,16 @@ BACKEND_FIELD_OWNERS: dict[str, frozenset[str]] = {
     "huggingface_causal": frozenset({"use_flash_attention"}),
     "huggingface_vision": frozenset({"use_flash_attention"}),
     "sglang": _SGLANG_FIELDS,
+    "vllm": _VLLM_FIELDS,
 }
 
 # SGLang's kernels are CUDA-only, so an SGLang intent can only ever land on an
 # NVIDIA host. The token is set for the user when the placement leaves it open.
 SGLANG_GPU_TYPE: str = "nvidia_cuda"
+
+# vLLM's kernels are CUDA-only as well, and the placement contract mirrors
+# SGLang's; the token is shared.
+VLLM_GPU_TYPE: str = "nvidia_cuda"
 
 # Flags solar-host derives itself (port allocator, host API key, alias-based
 # served name). Mirrors RESERVED_SGLANG_ARGS in the host's SGlang config model.
@@ -155,6 +186,22 @@ RESERVED_SGLANG_ARGS: frozenset[str] = frozenset(
         "--api-key",
         "--model-path",
         "--served-model-name",
+    }
+)
+
+# Mirrors RESERVED_VLLM_ARGS in the host's Vllm config model: the served name
+# is the alias verbatim, and the prompt-token-details flag plus the stats-log
+# switch belong to the usage-accounting contract.
+RESERVED_VLLM_ARGS: frozenset[str] = frozenset(
+    {
+        "--host",
+        "--port",
+        "--api-key",
+        "--model",
+        "--served-model-name",
+        "--enable-prompt-tokens-details",
+        "--no-enable-prompt-tokens-details",
+        "--disable-log-stats",
     }
 )
 
@@ -223,15 +270,17 @@ def validate_host_supports_backend(host: Any, backend_type: Any) -> None:
     if not isinstance(backend_type, str) or backend_type not in VALID_BACKEND_TYPES:
         return
 
-    if backend_type == "sglang" and getattr(host, "gpu_type", None) != SGLANG_GPU_TYPE:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"The sglang backend requires an NVIDIA host, but "
-                f"'{host.name}' reports gpu_type "
-                f"'{getattr(host, 'gpu_type', None)}'"
-            ),
-        )
+    if backend_type in ("sglang", "vllm"):
+        required_gpu_type = VLLM_GPU_TYPE if backend_type == "vllm" else SGLANG_GPU_TYPE
+        if getattr(host, "gpu_type", None) != required_gpu_type:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"The {backend_type} backend requires an NVIDIA host, but "
+                    f"'{host.name}' reports gpu_type "
+                    f"'{getattr(host, 'gpu_type', None)}'"
+                ),
+            )
 
     supported = getattr(host, "supported_backends", None) or []
     if supported and backend_type not in supported:
@@ -554,44 +603,16 @@ def _validate_device(
     return errors
 
 
-def _validate_sglang(
-    backend: dict[str, Any],
-    data: dict[str, Any],
+def _validate_escape_hatches(
+    backend: dict[str, Any], reserved_args: frozenset[str]
 ) -> list[dict[str, str]]:
-    """Validate the SGLang contract and pin the placement to NVIDIA.
+    """Shape-check ``extra_args``/``extra_env`` and reject host-managed flags.
 
-    SGLang only runs on CUDA, so an unset ``placement.gpu_type`` is filled in
-    on *data* rather than left to chance (placement filters on exact equality,
-    and an unset token would let the reconciler pick a CPU or Apple host and
-    fail at start). A gpu_type naming a different accelerator is a hard 422.
-
-    ``extra_args``/``extra_env`` are the version-specific escape hatches; they
-    are shape-checked here, and ``extra_args`` may not carry a flag solar-host
-    derives itself — a second ``--port`` would silently break gateway routing.
+    The escape hatches are how a version-specific option gets through without
+    a typed field; ``extra_args`` may not carry a flag solar-host derives
+    itself — a second ``--port`` would silently break gateway routing.
     """
     errors: list[dict[str, str]] = []
-    if backend.get("backend_type") != "sglang":
-        return errors
-
-    placement = data.get("placement")
-    if placement is None:
-        placement = {}
-        data["placement"] = placement
-    if isinstance(placement, dict):
-        gpu_type = placement.get("gpu_type")
-        if gpu_type is None:
-            placement["gpu_type"] = SGLANG_GPU_TYPE
-        elif gpu_type != SGLANG_GPU_TYPE:
-            errors.append(
-                {
-                    "field": "placement.gpu_type",
-                    "message": (
-                        f"the sglang backend requires gpu_type "
-                        f"'{SGLANG_GPU_TYPE}', but placement.gpu_type is "
-                        f"'{gpu_type}'"
-                    ),
-                }
-            )
 
     extra_args = backend.get("extra_args")
     if extra_args is not None:
@@ -607,7 +628,7 @@ def _validate_sglang(
         else:
             for arg in extra_args:
                 flag = arg.strip().split("=", 1)[0]
-                if flag in RESERVED_SGLANG_ARGS:
+                if flag in reserved_args:
                     errors.append(
                         {
                             "field": "backend.extra_args",
@@ -636,10 +657,89 @@ def _validate_sglang(
     return errors
 
 
+def _validate_cuda_backend(
+    backend: dict[str, Any],
+    data: dict[str, Any],
+    *,
+    backend_name: str,
+    gpu_type_token: str,
+    reserved_args: frozenset[str],
+) -> list[dict[str, str]]:
+    """Shared contract of the CUDA-only backends (SGLang, vLLM).
+
+    Both only run on CUDA, so an unset ``placement.gpu_type`` is filled in on
+    *data* rather than left to chance (placement filters on exact equality,
+    and an unset token would let the reconciler pick a CPU or Apple host and
+    fail at start). A gpu_type naming a different accelerator is a hard 422.
+    """
+    errors: list[dict[str, str]] = []
+
+    placement = data.get("placement")
+    if placement is None:
+        placement = {}
+        data["placement"] = placement
+    if isinstance(placement, dict):
+        gpu_type = placement.get("gpu_type")
+        if gpu_type is None:
+            placement["gpu_type"] = gpu_type_token
+        elif gpu_type != gpu_type_token:
+            errors.append(
+                {
+                    "field": "placement.gpu_type",
+                    "message": (
+                        f"the {backend_name} backend requires gpu_type "
+                        f"'{gpu_type_token}', but placement.gpu_type is "
+                        f"'{gpu_type}'"
+                    ),
+                }
+            )
+
+    errors.extend(_validate_escape_hatches(backend, reserved_args))
+    return errors
+
+
+def _validate_sglang(
+    backend: dict[str, Any],
+    data: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Validate the SGLang contract and pin the placement to NVIDIA."""
+    if backend.get("backend_type") != "sglang":
+        return []
+    return _validate_cuda_backend(
+        backend,
+        data,
+        backend_name="sglang",
+        gpu_type_token=SGLANG_GPU_TYPE,
+        reserved_args=RESERVED_SGLANG_ARGS,
+    )
+
+
+def _validate_vllm(
+    backend: dict[str, Any],
+    data: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Validate the vLLM contract and pin the placement to NVIDIA.
+
+    Mirrors :func:`_validate_sglang`: the same CUDA-only placement pin and the
+    same escape-hatch shape checks, against vLLM's own reserved-flag set.
+    """
+    if backend.get("backend_type") != "vllm":
+        return []
+    return _validate_cuda_backend(
+        backend,
+        data,
+        backend_name="vllm",
+        gpu_type_token=VLLM_GPU_TYPE,
+        reserved_args=RESERVED_VLLM_ARGS,
+    )
+
+
 def derive_gpu_count(data: dict[str, Any]) -> int | None:
     """Derive the implied GPU count from the backend (S-058 spec §5).
 
-    sglang → ``tp_size``; llama.cpp → the ``devices`` list length, or the
+    sglang → ``tp_size``; vllm → ``tensor_parallel_size ×
+    pipeline_parallel_size`` (each defaulting to 1, so either alone yields
+    its own value); llama.cpp → the ``devices`` list length, or the
     ``tensor_split`` count when ``devices`` is absent (the host's
     ``check_tensor_split`` validator already enforces they agree). Returns
     None when the backend carries no count signal.
@@ -655,6 +755,22 @@ def derive_gpu_count(data: dict[str, Any]) -> int | None:
             return tp_size
         return None
 
+    if backend_type == "vllm":
+        tp_size = backend.get("tensor_parallel_size")
+        pp_size = backend.get("pipeline_parallel_size")
+        if tp_size is None and pp_size is None:
+            return None
+        # Each dimension defaults to 1 on the engine side, so a lone setting
+        # is the count; a non-integer or out-of-range one is no signal at all.
+        dimensions = (tp_size, pp_size)
+        if any(
+            size is not None
+            and (not isinstance(size, int) or isinstance(size, bool) or size < 1)
+            for size in dimensions
+        ):
+            return None
+        return (tp_size or 1) * (pp_size or 1)
+
     if backend_type == "llamacpp":
         devices = backend.get("devices")
         if isinstance(devices, str) and devices.strip():
@@ -669,11 +785,24 @@ def derive_gpu_count(data: dict[str, Any]) -> int | None:
     return None
 
 
+def _vllm_count_hint(backend: dict[str, Any]) -> str:
+    """The field(s) that implied a vLLM GPU count, for the 422 message."""
+    if (
+        backend.get("tensor_parallel_size") is not None
+        and backend.get("pipeline_parallel_size") is not None
+    ):
+        return "backend.tensor_parallel_size × backend.pipeline_parallel_size"
+    if backend.get("tensor_parallel_size") is not None:
+        return "backend.tensor_parallel_size"
+    return "backend.pipeline_parallel_size"
+
+
 def _validate_gpu_count(data: dict[str, Any], errors: list[dict[str, str]]) -> None:
     """Validate and resolve ``resources.gpu_count`` (S-058 spec §5).
 
-    - Derive from the backend when not explicit (sglang ``tp_size``;
-      llama.cpp ``devices`` list length / ``tensor_split`` count).
+    - Derive from the backend when not explicit (sglang ``tp_size``; vllm
+      ``tensor_parallel_size × pipeline_parallel_size``; llama.cpp ``devices``
+      list length / ``tensor_split`` count).
     - Explicit and derived disagreement → 422.
     - Explicit ``> 1`` with a ``huggingface_*`` backend → 422 (HF stays
       single-GPU).
@@ -702,6 +831,8 @@ def _validate_gpu_count(data: dict[str, Any], errors: list[dict[str, str]]) -> N
     if explicit is not None and derived is not None and explicit != derived:
         if backend_type == "sglang":
             hint = "backend.tp_size"
+        elif backend_type == "vllm":
+            hint = _vllm_count_hint(data.get("backend") or {})
         elif backend_type == "llamacpp":
             hint = "backend.devices"
         else:
@@ -1147,6 +1278,7 @@ def validate_intent_create(
         )
         errors.extend(_validate_backend_speculative_decoding(backend))
         errors.extend(_validate_sglang(backend, data))
+        errors.extend(_validate_vllm(backend, data))
 
     # resources.gpu_count (S-058): derive from the backend, reject
     # disagreement, and resolve the concrete count in place.
@@ -1256,6 +1388,12 @@ def _canonicalize_json_object_field(
         parsed = value
     elif isinstance(value, str):
         if not value.strip():
+            # An empty form value configures nothing: the owning host model
+            # turns a blank string into None, so storing "" here would read
+            # as permanent backend drift (the reconciler compares the stored
+            # spec against the host's normalized config) and restart the
+            # instance on every pass.
+            backend.pop(field, None)
             return
         try:
             parsed = json.loads(value)
@@ -1281,12 +1419,13 @@ def canonicalize_intent_backend(backend: dict[str, Any]) -> None:
     form sends, or a dict), recursively coerced so boolean-looking strings
     become real booleans, and re-serialized as compact canonical JSON — the
     exact form the host's ``LlamaCppConfig.normalize_chat_template_kwargs``
-    produces. SGLang's ``hicache_storage_backend_extra_config`` gets the same
-    treatment minus the boolean coercion (its host model does not coerce), and
-    ``devices``/``tensor_split`` the comma-separated equivalent. Storing the
-    canonical form means new intents never carry a representation that drift
-    detection would flag; the normalization-aware comparison in the reconciler
-    remains for already-stored intents.
+    produces. SGLang's ``hicache_storage_backend_extra_config`` and vLLM's
+    ``speculative_config`` get the same treatment minus the boolean coercion
+    (their host models do not coerce), and ``devices``/``tensor_split`` the
+    comma-separated equivalent. Storing the canonical form means new intents
+    never carry a representation that drift detection would flag; the
+    normalization-aware comparison in the reconciler remains for
+    already-stored intents.
 
     Raises HTTPException(422) on malformed JSON or a non-object value.
     """
@@ -1296,4 +1435,7 @@ def canonicalize_intent_backend(backend: dict[str, Any]) -> None:
     )
     _canonicalize_json_object_field(
         backend, "hicache_storage_backend_extra_config", coerce_booleans=False
+    )
+    _canonicalize_json_object_field(
+        backend, "speculative_config", coerce_booleans=False
     )

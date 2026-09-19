@@ -217,7 +217,7 @@ Implicit constraint (not configurable): **anti-affinity by alias** — at most o
 |-------|------|-------------|
 | `vram_gb` | number \| null | Estimated VRAM the instance needs **per GPU** (S-058). Used to filter/rank candidate hosts by `memory_available_gb`. With `gpu_count: 1` (the default) the arithmetic is identical to the pre-S-058 total-VRAM reading. |
 | `ram_gb` | number \| null | Estimated system RAM (mainly relevant for Mac/`apple_mps` unified memory and CPU backends). |
-| `gpu_count` | integer \| null | (S-058) Explicit number of GPUs. When set it MUST match the count the backend implies (`tp_size` for `sglang`; `devices` list length, or the `tensor_split` entry count when `devices` is absent, for `llamacpp`) — a disagreement is a 422. May not exceed 1 for `huggingface_*` backends. When omitted, the derived count is resolved and stored at create time. Physical device ids are **never user-settable**; assignment is automatic (Section 8.4). |
+| `gpu_count` | integer \| null | (S-058) Explicit number of GPUs. When set it MUST match the count the backend implies (`tp_size` for `sglang`; `tensor_parallel_size` × `pipeline_parallel_size` for `vllm`, each defaulting to 1; `devices` list length, or the `tensor_split` entry count when `devices` is absent, for `llamacpp`) — a disagreement is a 422. May not exceed 1 for `huggingface_*` backends. When omitted, the derived count is resolved and stored at create time. Physical device ids are **never user-settable**; assignment is automatic (Section 8.4). |
 
 Semantics by phase:
 
@@ -237,7 +237,7 @@ The S-040 API must reject invalid intents with `400`/`422` (Section 12.5):
 - `replicas >= 0`.
 - `priority` ∈ {`production`, `staging`, `ephemeral`}.
 - `strategy` ∈ {`rolling`, `immediate`}.
-- `backend.backend_type` ∈ the supported backend types (`llamacpp`, `huggingface_causal`, `huggingface_classification`, `huggingface_embedding`, `huggingface_vision`, `sglang`).
+- `backend.backend_type` ∈ the supported backend types (`llamacpp`, `huggingface_causal`, `huggingface_classification`, `huggingface_embedding`, `huggingface_vision`, `sglang`, `vllm`).
 - `backend` must not contain `alias`, `model_source`, `host`, `port`, `api_key`, or `model_path` (these are server-derived).
 - `backend.model_file` (if set) requires `backend_type == "llamacpp"` and must be a non-empty string.
 - `backend.file_filters` (if set) must be a list of non-empty patterns, and a non-empty list requires a `huggingface://` `model_source`.
@@ -245,6 +245,7 @@ The S-040 API must reject invalid intents with `400`/`422` (Section 12.5):
 - `backend.spec_draft_model` is required by `spec_type == "draft-dspark"` and rejected for every other type; `backend.spec_draft_conf_min` is `draft-dspark`-only and must be between 0 and 1.
 - `placement.roles` non-empty; `gpu_type` (if set) is a known type.
 - `backend_type == "sglang"` requires `placement.gpu_type == "nvidia_cuda"`; an unset value is pinned to it on save and any other accelerator is a 422 (Section 4.7.5).
+- `backend_type == "vllm"` carries the same CUDA-only contract as SGLang (Section 4.7.6).
 
 #### 4.7.1 Accelerator vocabulary and field ownership (S-052)
 
@@ -370,6 +371,35 @@ A DSpark drafter is trained for one specific target model, so it lives beside th
 
 The file-backed prompt cache directory is host configuration (`SGLANG_PROMPT_CACHE_DIR`), not part of the intent: Solar Host gives each instance its own subdirectory under it and drops the `--hicache-storage-*` flags when the root is unset. `hicache_storage_backend_extra_config` is canonicalized at the API boundary like `chat_template_kwargs` (Section 8.2.1), so reformatting the JSON is not drift.
 
+#### 4.7.6 vLLM backend
+
+`vllm` serves generation models through `vllm serve` and, like SGLang, has no model-type variants: `backend_type: "vllm"` is the whole selection. It mirrors the SGLang contract, with these differences:
+
+- **CUDA-only placement.** vLLM's kernels require NVIDIA hardware, so `placement.gpu_type` is pinned to `nvidia_cuda` when unset and a contradiction is a 422. Solar Host advertises `vllm` in its `supported_backends` only on an NVIDIA host where the executable resolves: a `vllm` console script inside `VLLM_VENV_PATH`, that venv's interpreter running `vllm.entrypoints.cli.main`, or a `vllm` on `PATH`. Placement drops hosts that advertise a list without it; a host that advertises nothing is treated as having no opinion.
+- **`model_path`, not `model`/`model_id`.** The resolver hands vLLM the model *directory* (the positional `vllm serve` argument), written into `backend.model_path` per host. Like `model`/`model_id` it is server-derived and rejected inside an intent's `backend`.
+- **Typed fields plus escape hatches.** `tensor_parallel_size`, `pipeline_parallel_size`, `max_model_len`, `gpu_memory_utilization`, `max_num_seqs`, `max_num_batched_tokens`, `dtype`, `quantization`, `kv_cache_dtype`, `moe_backend`, `trust_remote_code`, `enforce_eager`, `enable_prefix_caching` (tri-state: `--enable-prefix-caching`, `--no-enable-prefix-caching`, or the engine default when omitted), `speculative_config`, `tool_call_parser`, `reasoning_parser` and `enable_auto_tool_choice` each map to one CLI flag. `extra_args` (argv entries) and `extra_env` (environment variables) carry everything else. `extra_args` is appended last, so an entry there overrides the typed flag above it, and it may not set `--host`, `--port`, `--api-key`, `--model`, `--served-model-name`, `--enable-prompt-tokens-details`, `--no-enable-prompt-tokens-details` or `--disable-log-stats`: the first five are host-derived, and the last three belong to the usage-accounting contract (the cached split in served responses and the engine stats line the live decode throughput comes from).
+- **The alias is served verbatim.** vLLM performs no `:` parsing on model names; the served-model registry is exact-match. An alias following the `name:tag` convention is therefore launched under exactly that name and reported as `served_model_name`. Solar Control's rewrite step is keyed on `served_model_name != alias` and stays a no-op for this backend.
+- **`speculative_config` is canonicalized.** It is parsed and re-serialized as compact JSON at the API boundary, like `hicache_storage_backend_extra_config` (Section 8.2.1) and without boolean coercion, so reformatting the JSON is not drift. The `resources.gpu_count` derivation multiplies `tensor_parallel_size` by `pipeline_parallel_size`, each defaulting to 1.
+
+```json
+{
+  "alias": "glm-5.3-flash:320b",
+  "model_source": "repo://glm53:320b",
+  "backend": {
+    "backend_type": "vllm",
+    "tensor_parallel_size": 4,
+    "gpu_memory_utilization": 0.9,
+    "max_model_len": 1048576,
+    "kv_cache_dtype": "fp8",
+    "speculative_config": "{\"method\": \"mtp\", \"num_speculative_tokens\": 5}",
+    "extra_env": { "VLLM_USE_FLASHINFER_MOE_FP4": "1" }
+  },
+  "placement": { "gpu_type": "nvidia_cuda" }
+}
+```
+
+Solar Host launches a vLLM instance with the host's own port, API key and served name, and always requests `--enable-prompt-tokens-details` so served responses carry the cached split the usage accounting reads. Per-request token counts come from the `vllm:*` Prometheus counters at request end (prompt, cached and generated token deltas across the running-request window), with the live decode throughput from the engine stats line. A cold first boot can take ten minutes while the JIT cache fills, which the ordinary instance ready timeout covers.
+
 ---
 
 ## 5. Ownership Model
@@ -423,7 +453,7 @@ The reconciler composes a concrete Solar Host `InstanceConfig` for each replica 
 | `backend_type` | `intent.backend.backend_type` |
 | `alias` | `intent.alias` |
 | `model_source` | `intent.model_source` (resolved per Section 9 before instance creation) |
-| `model` / `model_id` / `model_path` | the resolved local path, written into the field the backend reads: `model` for `llamacpp`, `model_id` for the HuggingFace backends, `model_path` for `sglang` |
+| `model` / `model_id` / `model_path` | the resolved local path, written into the field the backend reads: `model` for `llamacpp`, `model_id` for the HuggingFace backends, `model_path` for `sglang` and `vllm` |
 | `priority` | `intent.priority` (S-036) |
 | `managed_by` | `"intent"` (Section 5) |
 | `intent_id` | `intent.id` |

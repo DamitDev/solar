@@ -287,6 +287,44 @@ class TestWarnings:
         assert not any(w["field"] == "backend.backend_type" for w in warnings)
 
     @pytest.mark.anyio
+    async def test_a_vllm_intent_needs_a_host_that_advertises_it(self):
+        """vLLM is a separate CUDA-only install, exactly like SGLang."""
+        hosts = [
+            _host(
+                "h1",
+                gpu_type="nvidia_cuda",
+                supported_backends=["llamacpp", "sglang"],
+            )
+        ]
+        payload = _payload(
+            backend={"backend_type": "vllm"},
+            placement={"gpu_type": "nvidia_cuda"},
+        )
+
+        hard, warnings = await _validate(payload, hosts)
+
+        assert hard == []
+        assert any(
+            w["field"] == "backend.backend_type" and "vllm" in w["message"]
+            for w in warnings
+        )
+
+    @pytest.mark.anyio
+    async def test_a_host_advertising_vllm_does_not_warn(self):
+        hosts = [
+            _host("h1", gpu_type="nvidia_cuda", supported_backends=["vllm"]),
+        ]
+        payload = _payload(
+            backend={"backend_type": "vllm"},
+            placement={"gpu_type": "nvidia_cuda"},
+        )
+
+        hard, warnings = await _validate(payload, hosts)
+
+        assert hard == []
+        assert not any(w["field"] == "backend.backend_type" for w in warnings)
+
+    @pytest.mark.anyio
     async def test_a_fleet_that_advertises_nothing_does_not_warn(self):
         """Hosts predating advertisement report an empty list; treating that as
         a denial would warn on every intent in an un-upgraded fleet."""

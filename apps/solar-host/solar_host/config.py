@@ -20,6 +20,7 @@ from solar_host.models.huggingface import (
 )
 from solar_host.models.llamacpp import LlamaCppConfig
 from solar_host.models.sglang import SglangConfig
+from solar_host.models.vllm import VllmConfig
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,12 @@ class Settings(BaseSettings):
     # Root for SGLang's file-backed prompt cache. Each instance gets its own
     # subdirectory under it; when empty the file storage backend is skipped.
     sglang_prompt_cache_dir: str = ""
+
+    # vLLM backend (optional, NVIDIA hosts only). vllm_venv_path is the
+    # virtualenv vLLM is installed into (the directory holding bin/vllm);
+    # when empty the runner falls back to `vllm` on PATH, and when neither
+    # resolves the host does not advertise the backend at all.
+    vllm_venv_path: str = ""
 
     # GPU telemetry override (dev/test only, L2): a JSON array of
     # {"index", "name", "total_gb", "used_gb"} describing the devices this
@@ -289,7 +296,8 @@ def parse_instance_config(config_data: dict[str, Any], strict: bool = True) -> A
         resolved_path = resolve_model_source(model_source)
         if backend_type == "llamacpp":
             config_data["model"] = resolved_path
-        elif backend_type == "sglang":
+        elif backend_type in ("sglang", "vllm"):
+            # Both CUDA engines take the model directory as a path argument.
             config_data["model_path"] = resolved_path
         else:
             # All HuggingFace types use model_id
@@ -308,6 +316,8 @@ def parse_instance_config(config_data: dict[str, Any], strict: bool = True) -> A
         return HuggingFaceVisionConfig(**config_data)
     elif backend_type == "sglang":
         return SglangConfig(**config_data)
+    elif backend_type == "vllm":
+        return VllmConfig(**config_data)
     else:
         raise ValueError(f"Unknown backend_type: {backend_type!r}")
 
