@@ -77,7 +77,8 @@ def test_a_vllm_instance_is_served_under_its_alias_verbatim(
     client: TestClient,
 ) -> None:
     """vLLM does no `:` parsing, so the colon survives into the served name —
-    control's translation machinery keys on served != alias and no-ops."""
+    control's translation is a no-op for direct requests; a request under a
+    virtual model name is still rewritten to this name."""
     instance = _create(
         client,
         {

@@ -274,7 +274,7 @@ curl -X POST http://localhost:8001/instances \
   }'
 ```
 
-`--host`, `--port`, `--api-key`, `--model`, `--served-model-name`, `--enable-prompt-tokens-details` and `--disable-log-stats` are not config fields: the host binds the port from its own allocator, authenticates with its own API key, and serves the alias verbatim — vLLM performs no `:` parsing on model names (registry lookup is exact-match), so `glm-5.3-flash:320b` is served under exactly that name and solar-control's request translation is a no-op for this backend. `extra_args` is rejected when it tries to set one of the host-managed flags.
+`--host`, `--port`, `--api-key`, `--model`, `--served-model-name`, `--enable-prompt-tokens-details` and `--disable-log-stats` are not config fields: the host binds the port from its own allocator, authenticates with its own API key, and serves the alias verbatim — vLLM performs no `:` parsing on model names (registry lookup is exact-match), so `glm-5.3-flash:320b` is served under exactly that name and solar-control's request translation is a no-op for direct-alias requests to this backend; a request under a virtual model name is still translated to the served name. `extra_args` is rejected when it tries to set one of the host-managed flags.
 
 Usage metrics: per-request token counts (prompt, cached split, generated) come from the `vllm:*` Prometheus counters at request end, and `decode_tps` is the engine's last ~10 s stats-window average seen while the request ran — a best-effort live number, not an exact per-request measurement, with the token counts the exact part.
 

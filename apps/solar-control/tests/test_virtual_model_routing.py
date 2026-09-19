@@ -338,7 +338,10 @@ class TestResolveVirtual:
             async def __aexit__(self, *exc):
                 return False
 
-        def ok_post(_url, **_kwargs):
+        posted = {}
+
+        def ok_post(_url, **kwargs):
+            posted.update(kwargs.get("json") or {})
             return _Ctx(ok_resp)
 
         async def fake_find(
@@ -402,6 +405,9 @@ class TestResolveVirtual:
 
         assert tried == ["a-first:8b", "b-second:8b"]
         assert result == {"ok": True}
+        # Failover must not resurrect the virtual name on the wire: the body
+        # goes out under the alias of the instance that actually served it.
+        assert posted["model"] == "b-second:8b"
 
     @pytest.mark.anyio
     async def test_all_targets_vanished_midflight_raises_unavailable(self, gateway):
@@ -439,6 +445,89 @@ class TestResolveVirtual:
             )
 
         assert set(excinfo.value.reasons) == {"dead:8b", "gone:8b"}
+
+    @pytest.mark.anyio
+    async def test_route_request_sends_the_resolved_name(self, gateway):
+        """The virtual name is a routing name only: vLLM serves its alias
+        verbatim, so a body still carrying ``team`` would 404 at the
+        instance (Commander's report on the vLLM intent)."""
+        registry = {"resolved:8b": [_inst()]}
+        posted = {}
+
+        ok_resp = MagicMock()
+        ok_resp.status = 200
+        ok_resp.json = AsyncMock(return_value={"ok": True})
+
+        class _Ctx:
+            def __init__(self, resp):
+                self._resp = resp
+
+            async def __aenter__(self):
+                return self._resp
+
+            async def __aexit__(self, *exc):
+                return False
+
+        def ok_post(_url, **kwargs):
+            posted.update(kwargs.get("json") or {})
+            return _Ctx(ok_resp)
+
+        async def fake_find(
+            model, fe, attempted, retry, patterns, contract_filter=None
+        ):
+            return SimpleNamespace(
+                host_id="h1",
+                instance_id="i-1",
+                model_alias="resolved:8b",
+                context_size=4096,
+                capabilities=None,
+                url="http://127.0.0.1:9999",
+                api_key="k",
+                served_model_name="resolved:8b",
+                supported_endpoints=["/v1/chat/completions"],
+                backend_type="vllm",
+            )
+
+        null_cm = AsyncMock()
+        null_cm.__aenter__ = AsyncMock(return_value=None)
+        null_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch.object(gateway, "_ensure_session", AsyncMock()),
+            patch.object(gateway, "session", MagicMock(post=ok_post)),
+            patch(
+                "app.services.virtual_model_cache.virtual_model_cache.get_all",
+                return_value=[_vm("team", ("resolved:8b",))],
+            ),
+            patch(
+                "app.redis_state.registry_store.get_registry",
+                new=AsyncMock(return_value=registry),
+            ),
+            patch(
+                "app.gateway.OpenAIGateway._find_instance_or_retry",
+                side_effect=fake_find,
+            ),
+            patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+            patch.object(gateway, "_emit_success", AsyncMock()),
+            patch("app.gateway.host_db.get_host", AsyncMock(return_value=None)),
+            patch.object(gateway, "_routing_context", return_value=null_cm),
+            patch(
+                "app.gateway.health_store.mark_healthy", AsyncMock(return_value=True)
+            ),
+            patch("app.gateway.health_store.mark_failed", AsyncMock(return_value=None)),
+            patch(
+                "app.gateway.routing_store.get_host_active", AsyncMock(return_value=0)
+            ),
+            patch("app.gateway.routing_store.get_weight", AsyncMock(return_value=0.0)),
+            patch("app.gateway.settings.route_max_attempts", 1),
+        ):
+            await gateway.route_request(
+                "team",
+                "/v1/chat/completions",
+                {"model": "team"},
+            )
+
+        assert posted["model"] == "resolved:8b"
 
 
 class TestVirtualModelsEntries:
