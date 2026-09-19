@@ -14,7 +14,7 @@ import { AlertCircle, RefreshCw, Target, Trash2, Plus, Pencil, TriangleAlert, X 
 import solarClient from '@/api/client';
 import { Intent, IntentCreateRequest, IntentFieldNotice } from '@/api/types';
 import { useEventStreamContext } from '@/context/EventStreamContext';
-import { PULL_PHASE_LABELS, type PullProgressEvent } from '@/hooks/useEventStream';
+import { PULL_PHASE_LABELS, type PullProgressEvent } from '@/hooks/eventStream/useEventStream';
 import { useFallbackPolling } from '@/hooks/useFallbackPolling';
 import { formatRelativeTime } from '@/lib/utils';
 import { sortIntents } from '@/lib/intents';

@@ -9,7 +9,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import solarClient from '@/api/client';
 import { Intent, PullProgressEntry } from '@/api/types';
-import { prunePullProgress, type PullProgressEvent } from '@/hooks/useEventStream';
+import { prunePullProgress, type PullProgressEvent } from '@/hooks/eventStream/useEventStream';
 
 const eventStream = {
   intents: new Map<string, Intent>(),

@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { buildFlowGraph, FlowGraph, NODE_SIZE } from '../graph';
 import { atLeast, boundsOf, layoutGraph } from '../layout';
-import { HostWithInstances, Instance } from '@/api/types';
+import { HostWithInstances, Instance, RoutingStateAggregates } from '@/api/types';
+
+const emptyAggregates = (): RoutingStateAggregates => ({
+  by_instance: {},
+  by_host: {},
+  by_model: {},
+  by_endpoint: {},
+  queued: 0,
+  processing: 0,
+  errored: 0,
+});
 
 function instance(id: string, alias: string, model: string, status: Instance['status'] = 'running') {
   return {
@@ -37,6 +47,7 @@ function graphFor(hosts: HostWithInstances[], expandAll = true): FlowGraph {
       { id: 'e2', name: 'dev' },
     ],
     getInstanceState: () => null,
+    aggregates: emptyAggregates(),
     expandAll,
     // Past the cap the graph rolls hosts up, and the layout would never see a
     // wide fan-out at all.

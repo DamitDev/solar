@@ -12,8 +12,8 @@ import {
   traceRequest,
   traceThrough,
 } from '../graph';
-import { HostWithInstances, Instance } from '@/api/types';
-import { InstanceStateData, RequestState } from '@/hooks/useEventStream';
+import { HostWithInstances, Instance, RoutingStateAggregates } from '@/api/types';
+import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
 
 function instance(id: string, alias: string, model = alias, status: Instance['status'] = 'running') {
   return {
@@ -59,8 +59,26 @@ const endpoints = [
 
 const noState = () => null;
 
+const emptyAggregates = (over: Partial<RoutingStateAggregates> = {}): RoutingStateAggregates => ({
+  by_instance: {},
+  by_host: {},
+  by_model: {},
+  by_endpoint: {},
+  queued: 0,
+  processing: 0,
+  errored: 0,
+  ...over,
+});
+
 const build = (overrides: Partial<Parameters<typeof buildFlowGraph>[0]> = {}) =>
-  buildFlowGraph({ hosts, requests: [], endpoints, getInstanceState: noState, ...overrides });
+  buildFlowGraph({
+    hosts,
+    requests: [],
+    endpoints,
+    getInstanceState: noState,
+    aggregates: emptyAggregates(),
+    ...overrides,
+  });
 
 const kindCounts = (graph: ReturnType<typeof build>) =>
   graph.nodes.reduce<Record<string, number>>((acc, node) => {
@@ -132,6 +150,7 @@ describe('buildFlowGraph', () => {
       requests: [],
       endpoints,
       getInstanceState: noState,
+      aggregates: emptyAggregates(),
     });
 
     expect(modelData(graph, 'qwen3.6:35b').model).toBeNull();
@@ -141,15 +160,19 @@ describe('buildFlowGraph', () => {
     expect(build({ expandAll: true }).nodes.every((node) => node.width > 0 && node.height > 0)).toBe(true);
   });
 
-  it('keeps the node count flat as traffic arrives, and moves it onto the edges', () => {
+  it('keeps the node count flat as load arrives, and moves it onto the edges', () => {
     const idle = build({ expanded: new Set(['chat']) });
     const busy = build({
       expanded: new Set(['chat']),
-      requests: [
-        request({ endpoint_id: 'e1', host_id: 'h1', instance_id: 'i1' }),
-        request({ endpoint_id: 'e1', host_id: 'h1', instance_id: 'i1' }),
-        request({ endpoint_id: 'e2', host_id: 'h2', instance_id: 'i3' }),
-      ],
+      aggregates: emptyAggregates({
+        by_instance: { 'h1:i1': 2, 'h2:i3': 1 },
+        by_host: { h1: 2, h2: 1 },
+        by_model: { chat: 3 },
+        by_endpoint: { e1: 2, e2: 1 },
+        queued: 0,
+        processing: 3,
+        errored: 0,
+      }),
     });
 
     expect(busy.nodes).toHaveLength(idle.nodes.length);
@@ -160,9 +183,9 @@ describe('buildFlowGraph', () => {
     expect(busy.edges.find((edge) => edge.target === modelNodeId('chat'))!.inFlight).toBe(3);
   });
 
-  it('places a queued request on its model before it has a host', () => {
+  it('places a queued request on its model and reports the gateway totals', () => {
     const graph = build({
-      requests: [request({ status: 'pending', endpoint_id: 'e1', model: 'chat' })],
+      aggregates: emptyAggregates({ by_instance: {}, by_host: {}, by_model: { chat: 1 }, by_endpoint: {}, queued: 1 }),
     });
 
     expect(graph.nodes.find((node) => node.id === GATEWAY_NODE_ID)!.data).toMatchObject({ queued: 1, processing: 0 });
@@ -185,6 +208,7 @@ describe('buildFlowGraph', () => {
       requests: [],
       endpoints,
       getInstanceState: noState,
+      aggregates: emptyAggregates(),
     });
 
     expect(graph.edges.find((edge) => edge.target === modelNodeId('chat'))!.tone).toBe('ready');
@@ -197,6 +221,7 @@ describe('buildFlowGraph', () => {
       requests: [],
       endpoints,
       getInstanceState: noState,
+      aggregates: emptyAggregates(),
       expandAll: true,
     });
 
@@ -210,6 +235,7 @@ describe('buildFlowGraph', () => {
       requests: [],
       endpoints,
       getInstanceState: noState,
+      aggregates: emptyAggregates(),
       expandAll: true,
     });
 
@@ -222,6 +248,7 @@ describe('buildFlowGraph', () => {
       requests: [],
       endpoints,
       getInstanceState: (_h, id) => ({ busy: id === 'i2', decode_tps: id === 'i2' ? 30 : 0 }) as InstanceStateData,
+      aggregates: emptyAggregates(),
       expandAll: true,
     });
 
@@ -238,6 +265,67 @@ describe('buildFlowGraph', () => {
   });
 });
 
+describe('buildFlowGraph snapshot aggregates', () => {
+  // chat on h1/i1, h2/i3; embed on h1/i2. Load told by the server aggregates,
+  // independent of the (stale/empty) client request Map.
+  const aggregates: RoutingStateAggregates = {
+    by_instance: { 'h1:i1': 2, 'h1:i2': 0, 'h2:i3': 3 },
+    by_host: { h1: 2, h2: 3 },
+    by_model: { chat: 5, embed: 0 },
+    by_endpoint: { e1: 3, e2: 2 },
+    queued: 1,
+    processing: 4,
+    errored: 1,
+  };
+
+  it('weights the hops and gateway from the aggregates', () => {
+    const graph = buildFlowGraph({
+      hosts,
+      requests: [],
+      endpoints,
+      getInstanceState: noState,
+      aggregates,
+      expanded: new Set(['chat']),
+    });
+
+    expect(graph.edges.find((edge) => edge.source === endpointNodeId('e1'))!.inFlight).toBe(3);
+    expect(graph.edges.find((edge) => edge.target === modelNodeId('chat'))!.inFlight).toBe(5);
+    expect(graph.edges.find((edge) => edge.target === hostNodeId('chat', 'h1'))!.inFlight).toBe(2);
+    expect(graph.edges.find((edge) => edge.target === hostNodeId('chat', 'h2'))!.inFlight).toBe(3);
+    expect(graph.nodes.find((node) => node.id === GATEWAY_NODE_ID)!.data).toMatchObject({
+      queued: 1,
+      processing: 4,
+      errored: 1,
+    });
+  });
+
+  it('keeps per-hop error tone from the request Map even with aggregates', () => {
+    const graph = buildFlowGraph({
+      hosts,
+      requests: [request({ status: 'error', endpoint_id: 'e1', host_id: 'h1', instance_id: 'i1' })],
+      endpoints,
+      getInstanceState: noState,
+      aggregates,
+      expanded: new Set(['chat']),
+    });
+
+    const edge = graph.edges.find((candidate) => candidate.target === hostNodeId('chat', 'h1'))!;
+    expect(edge).toMatchObject({ inFlight: 2, errors: 1, tone: 'error' });
+  });
+
+  it('does not double-count the aggregate errored total from error requests', () => {
+    const graph = buildFlowGraph({
+      hosts,
+      requests: [request({ status: 'error', endpoint_id: 'e1' })],
+      endpoints,
+      getInstanceState: noState,
+      aggregates,
+    });
+
+    expect(graph.nodes.find((node) => node.id === GATEWAY_NODE_ID)!.data).toMatchObject({ errored: 1 });
+  });
+});
+
 describe('buildFlowGraph fan-out cap', () => {
   const wide = Array.from({ length: 30 }, (_, i) =>
     host(`h${i}`, `host${String(i).padStart(2, '0')}`, [instance(`i${i}`, 'chat')]),
@@ -249,6 +337,7 @@ describe('buildFlowGraph fan-out cap', () => {
       requests: [],
       endpoints,
       getInstanceState: noState,
+      aggregates: emptyAggregates(),
       expandAll: true,
       ...overrides,
     });
@@ -268,10 +357,11 @@ describe('buildFlowGraph fan-out cap', () => {
   });
 
   it('keeps the hosts that are failing or working, whatever their name', () => {
-    // host29 sorts last, so it is only drawn because something is happening.
+    // host29 sorts last, so it is only drawn because it is failing; host28 is
+    // drawn for being under load. Both must survive the fan-out cap.
     const graph = buildWide({
       hosts: [...wide.slice(0, 29), host('h29', 'host29', [instance('i29', 'chat', 'chat', 'failed')])],
-      requests: [request({ host_id: 'h28', instance_id: 'i28' })],
+      aggregates: emptyAggregates({ by_instance: { 'h28:i28': 2 }, by_host: { h28: 2 } }),
     });
     const drawn = graph.nodes.filter((node) => node.kind === 'host').map((node) => node.id);
 
@@ -290,10 +380,10 @@ describe('buildFlowGraph fan-out cap', () => {
   it('carries the traffic of hosts that did not fit onto the rollup', () => {
     // More busy hosts than slots, so some genuinely busy ones roll up and
     // their load has to survive the summarising.
-    const busy = Array.from({ length: MAX_HOSTS_PER_MODEL + 4 }, (_, i) =>
-      request({ host_id: `h${i}`, instance_id: `i${i}` }),
-    );
-    const graph = buildWide({ requests: busy });
+    const busyInstances = Array.from({ length: MAX_HOSTS_PER_MODEL + 4 }, (_, i) => ({ [`h${i}:i${i}`]: 1 }));
+    const by_instance = Object.assign({}, ...busyInstances);
+    const by_host = Object.fromEntries(Object.keys(by_instance).map((cell) => [cell.split(':')[0], 1]));
+    const graph = buildWide({ aggregates: emptyAggregates({ by_instance, by_host }) });
     const edge = graph.edges.find((candidate) => candidate.target === overflowNodeId('chat'))!;
 
     expect(edge).toMatchObject({ inFlight: 4, errors: 0, tone: 'active' });
@@ -306,6 +396,7 @@ describe('buildFlowGraph fan-out cap', () => {
       requests: [],
       endpoints,
       getInstanceState: noState,
+      aggregates: emptyAggregates(),
       expandAll: true,
       showAllHosts: new Set(['chat']),
     });

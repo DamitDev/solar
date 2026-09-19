@@ -46,6 +46,7 @@ import {
   UploadFileResult,
   UploadStatusResponse,
   CompleteUploadResponse,
+  RoutingState,
 } from './types';
 
 const DEFAULT_RELATIVE_CONTROL_BASE = '/api/control';
@@ -471,6 +472,12 @@ class SolarClient {
   // API Endpoint management
   async getEndpoints(): Promise<ApiEndpoint[]> {
     const response = await this.client.get('/api/endpoints');
+    return response.data;
+  }
+
+  // Authoritative fleet routing snapshot (GET /api/routing/state)
+  async getRoutingState(): Promise<RoutingState> {
+    const response = await this.client.get('/api/routing/state');
     return response.data;
   }
 

@@ -8,13 +8,17 @@
  * - log: Instance log messages from hosts
  * - instance_state: Instance runtime state updates from hosts
  * - request_start, request_routed, request_success, request_error, request_reroute: Routing events
+ * - routing_snapshot: Authoritative fleet state on connect (requests, instance
+ *   states, endpoints) that resets and seeds the routing view before deltas flow
  * - gateway_request: Completed request summaries (filterable)
  * - filter_status: Current filter configuration acknowledgement
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { io, Socket } from 'socket.io-client';
 import solarClient from '@/api/client';
+import { buildRegistry } from '@/hooks/eventStream/eventHandlers/registry';
+import type { DispatchContext, RegisteredHandler } from '@/hooks/eventStream/eventHandlers/types';
 import {
   ApiEndpoint,
   ApiKey,
@@ -24,11 +28,22 @@ import {
   Intent,
   ActiveJobSummary,
   DrainState,
+  InstanceStateData,
+  RoutingState,
+  RoutingStateAggregates,
+  GatewayRequestSummary,
 } from '@/api/types';
+
+// Wire shapes describing the shared server contract live once in @/api/types
+// (REST client and this WS client code against the same schema, so they cannot
+// drift). Re-exported here so existing consumers can keep importing from this
+// module unchanged.
+export type { InstanceStateData, RoutingState, RoutingStateAggregates, GatewayRequestSummary } from '@/api/types';
 
 // Event type definitions
 export type WSMessageType =
   | 'initial_status'
+  | 'routing_snapshot'
   | 'host_status'
   | 'host_pending'
   | 'host_pending_removed'
@@ -50,103 +65,17 @@ export type WSMessageType =
   | 'api_keys_update'
   | 'keepalive';
 
-/** C4: model pull progress pushed by a host and rebroadcast by control. */
-export interface PullProgressData {
-  source_uri: string;
-  phase: 'resolving' | 'downloading' | 'verifying' | 'finalizing' | 'completed' | 'failed' | string;
-  bytes_done?: number | null;
-  bytes_total?: number | null;
-  speed_bps?: number | null;
-  error?: string | null;
-}
-
-export interface PullProgressEvent {
-  host_id: string;
-  host_name?: string | null;
-  timestamp?: string;
-  data: PullProgressData;
-}
-
-/** A pull that ended: nothing further will arrive on this key. */
-export function isTerminalPullPhase(phase: string | undefined): boolean {
-  return phase === 'completed' || phase === 'failed';
-}
-
-/**
- * Labels for the phases a pull passes through before it ends (C4).
- *
- * Only `downloading` carries byte counts; the others report progress by name
- * alone, and `verifying` in particular walks the whole artifact, so a large
- * model can sit there long enough that showing nothing reads as a stall.
- */
-export const PULL_PHASE_LABELS: Record<string, string> = {
-  resolving: 'Resolving',
-  downloading: 'Downloading',
-  verifying: 'Verifying',
-  finalizing: 'Finalizing',
-};
-
-/**
- * How long a finished pull stays visible before it is dropped (C4).
- *
- * Deliberately shorter than the server's `pull_progress_terminal_grace_s`
- * (300 s). The server grace exists so a client that loads mid-pull still gets
- * the outcome from `GET /api/pulls`; this one only has to cover how long a
- * viewer already on the page should keep seeing "completed" before the row
- * disappears.
- */
-export const PULL_PROGRESS_TERMINAL_GRACE_MS = 60_000;
-/**
- * How long a pull may go silent before it stops counting as in flight.
- *
- * Mirrors the server's `pull_progress_stale_after_s` (180 s) plus the same
- * margin `GET /api/pulls` applies, so a host that dies mid-download does not
- * leave a frozen byte count on screen — and so the two sides do not disagree
- * about which pulls are live.
- */
-export const PULL_PROGRESS_STALE_MS = 360_000;
-/** Hard ceiling on tracked pulls, mirroring the per-instance log cap. */
-const MAX_PULL_PROGRESS_ENTRIES = 200;
-
-/**
- * Keep the pull-progress map bounded.
- *
- * Every (host, model) pair a session ever sees adds a key that nothing else
- * removes, and a stale entry would otherwise be reported as current forever.
- * Finished pulls age out after a grace so a late-arriving viewer still sees
- * the outcome; unfinished ones age out once the host has stopped reporting,
- * which is the only signal a host that died mid-pull ever gives. *keepKey* is
- * never dropped so the entry just written always survives.
- */
-export function prunePullProgress(
-  entries: Map<string, PullProgressEvent>,
-  keepKey?: string,
-  now: number = Date.now(),
-): Map<string, PullProgressEvent> {
-  for (const [key, entry] of entries) {
-    if (key === keepKey) continue;
-    const terminal = isTerminalPullPhase(entry.data?.phase);
-    const at = entry.timestamp ? Date.parse(entry.timestamp) : NaN;
-    if (Number.isNaN(at)) {
-      // A terminal entry we cannot age is exactly the one that would linger
-      // forever. An unstamped in-flight one may simply be brand new, so it is
-      // left to the size cap below rather than guessed at.
-      if (terminal) entries.delete(key);
-      continue;
-    }
-    const limit = terminal ? PULL_PROGRESS_TERMINAL_GRACE_MS : PULL_PROGRESS_STALE_MS;
-    if (now - at > limit) {
-      entries.delete(key);
-    }
-  }
-  if (entries.size <= MAX_PULL_PROGRESS_ENTRIES) return entries;
-  const oldestFirst = [...entries.entries()].sort((a, b) => (a[1].timestamp ?? '').localeCompare(b[1].timestamp ?? ''));
-  for (const [key] of oldestFirst) {
-    if (entries.size <= MAX_PULL_PROGRESS_ENTRIES) break;
-    if (key !== keepKey) entries.delete(key);
-  }
-  return entries;
-}
+// Pull-progress utilities/types live in eventHandlers/pullProgress.ts (this
+// module re-exports them so consumers keep importing from here).
+import type { PullProgressEvent } from '@/hooks/eventStream/eventHandlers/pullProgress';
+export type { PullProgressData, PullProgressEvent } from '@/hooks/eventStream/eventHandlers/pullProgress';
+export {
+  PULL_PHASE_LABELS,
+  PULL_PROGRESS_TERMINAL_GRACE_MS,
+  PULL_PROGRESS_STALE_MS,
+  isTerminalPullPhase,
+  prunePullProgress,
+} from '@/hooks/eventStream/eventHandlers/pullProgress';
 
 export interface InstanceSummary {
   id: string;
@@ -184,21 +113,6 @@ export interface LogEventData {
   level?: string;
 }
 
-export interface InstanceStateData {
-  busy: boolean;
-  phase?: string | null;
-  prefill_progress?: number | null;
-  active_slots: number;
-  slot_id?: number | null;
-  task_id?: number | null;
-  prefill_prompt_tokens?: number | null;
-  generated_tokens?: number | null;
-  decode_tps?: number | null;
-  decode_ms_per_token?: number | null;
-  checkpoint_index?: number | null;
-  checkpoint_total?: number | null;
-}
-
 export interface RoutingEventData {
   request_id: string;
   model?: string;
@@ -219,35 +133,6 @@ export interface RoutingEventData {
   completion_tokens?: number;
   total_tokens?: number;
   decode_tps?: number;
-}
-
-// Gateway request summary (completed request)
-export interface GatewayRequestSummary {
-  request_id: string;
-  request_type?: string; // chat, completion, embedding, classification, etc.
-  status: 'success' | 'error' | 'missed';
-  model?: string;
-  resolved_model?: string;
-  endpoint?: string;
-  endpoint_id?: string;
-  client_ip?: string;
-  stream?: boolean;
-  attempts: number;
-  start_timestamp?: string;
-  end_timestamp: string;
-  duration_s?: number;
-  host_id?: string;
-  host_name?: string;
-  instance_id?: string;
-  instance_url?: string;
-  error_message?: string;
-  prompt_tokens?: number;
-  /** Prompt-cache hit portion of prompt_tokens; absent = not cache-aware. */
-  cached_tokens?: number;
-  completion_tokens?: number;
-  total_tokens?: number;
-  decode_tps?: number;
-  decode_ms_per_token?: number;
 }
 
 // Gateway filter configuration
@@ -295,6 +180,7 @@ export interface EventHandlers {
   onLog?: (hostId: string, instanceId: string, data: LogEventData) => void;
   onInstanceState?: (hostId: string, instanceId: string, data: InstanceStateData) => void;
   onRoutingEvent?: (type: WSMessageType, data: RoutingEventData) => void;
+  onRoutingSnapshot?: (snapshot: RoutingState) => void;
   onGatewayRequest?: (data: GatewayRequestSummary) => void;
   onFilterStatus?: (filter: GatewayFilter) => void;
   onIntentUpdate?: (intent: Intent) => void;
@@ -327,10 +213,21 @@ export function useEventStream(handlers: EventHandlers = {}) {
   // API key records, event-driven (api_keys_update; cascades on
   // endpoint delete arrive as a list refresh from the same endpoint).
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
+  // Server-computed routing aggregates: the authoritative source for the routing
+  // view's load bars and totals, so they stay consistent fleet-wide instead of
+  // being re-derived from the transient client Map.
+  const [aggregates, setAggregates] = useState<RoutingStateAggregates | null>(null);
 
   const socketRef = useRef<Socket | null>(null);
   const handlersRef = useRef(handlers);
   const gatewayFilterRef = useRef(gatewayFilter);
+  // While true, request_*/instance_state deltas are gated until the
+  // authoritative routing_snapshot arrives (a delta that races the connect can
+  // otherwise land on a stale base and be lost or double-applied).
+  const awaitingSnapshotRef = useRef(false);
+  // Consumers that react to a freshly-applied authoritative snapshot (e.g. the
+  // Routing page backs the ticker with recent terminal events after one lands).
+  const snapshotListenersRef = useRef<Set<(snapshot: RoutingState) => void>>(new Set());
 
   // Keep refs updated
   useEffect(() => {
@@ -377,269 +274,72 @@ export function useEventStream(handlers: EventHandlers = {}) {
     }, 350);
   }, []);
 
-  const handleEvent = useCallback(
-    (event: WSEvent) => {
-      const h = handlersRef.current;
+  // ---- event handler registry -------------------------------------------------
+  // Each WS event type is a single registered handler instead of a growing
+  // switch branch. Built-ins live in this module's sibling eventHandlers/ dir
+  // and are seeded once into the registry; consumers can extend or override it
+  // via the public registerHandler without editing the dispatch.
+  const registryRef = useRef<Partial<Record<WSMessageType, RegisteredHandler>>>({});
 
-      switch (event.type) {
-        case 'initial_status':
-          if (Array.isArray(event.data)) {
-            const hostMap = new Map<string, HostStatusData>();
-            event.data.forEach((host: HostStatusData) => {
-              hostMap.set(host.host_id, host);
-            });
-            setHosts(hostMap);
-            h.onInitialStatus?.(event.data);
-          }
-          break;
+  const registerHandler = useCallback((type: WSMessageType, handler: (event: WSEvent) => void) => {
+    registryRef.current[type] = (event) => handler(event);
+  }, []);
 
-        case 'host_status':
-          if (event.data) {
-            setHosts((prev) => {
-              const newMap = new Map(prev);
-              newMap.set(event.data.host_id, event.data);
-              return newMap;
-            });
-            h.onHostStatus?.(event.data);
-          }
-          break;
+  /**
+   * Subscribe to fresh authoritative snapshots. `handleRoutingSnapshot` runs
+   * these after applying the snapshot, so consumers (e.g. the Routing page's
+   * ticker backfill) react to the same state the view just reset to. Returns an
+   * unsubscribe that drops the listener.
+   */
+  const registerRoutingSnapshotHandler = useCallback((listener: (snapshot: RoutingState) => void) => {
+    snapshotListenersRef.current.add(listener);
+    return () => {
+      snapshotListenersRef.current.delete(listener);
+    };
+  }, []);
 
-        case 'host_pending':
-          if (event.data?.pending_id) {
-            setPendingHosts((prev) => {
-              const newMap = new Map(prev);
-              newMap.set(event.data.pending_id, event.data as PendingHost);
-              return newMap;
-            });
-          }
-          break;
-
-        case 'host_pending_removed':
-          if (event.data?.pending_id) {
-            setPendingHosts((prev) => {
-              const newMap = new Map(prev);
-              newMap.delete(event.data.pending_id);
-              return newMap;
-            });
-          }
-          break;
-
-        case 'instances_update':
-          if (event.data?.host_id && Array.isArray(event.data?.instances)) {
-            setHostInstances((prev) => {
-              const newMap = new Map(prev);
-              newMap.set(event.data.host_id, event.data.instances);
-              return newMap;
-            });
-          }
-          break;
-
-        case 'log':
-          if (event.host_id && event.instance_id && event.data) {
-            const key = `${event.host_id}:${event.instance_id}`;
-            const logMsg: LogMessage = {
-              seq: event.data.seq,
-              timestamp: event.timestamp || new Date().toISOString(),
-              line: event.data.line,
-            };
-            setLogs((prev) => {
-              const newMap = new Map(prev);
-              const existing = newMap.get(key) || [];
-              // Keep last 1000 logs
-              const updated = [...existing, logMsg].slice(-1000);
-              newMap.set(key, updated);
-              return newMap;
-            });
-            h.onLog?.(event.host_id, event.instance_id, event.data);
-          }
-          break;
-
-        case 'instance_state':
-          if (event.host_id && event.instance_id && event.data) {
-            const key = `${event.host_id}:${event.instance_id}`;
-            setInstanceStates((prev) => {
-              const newMap = new Map(prev);
-              newMap.set(key, event.data);
-              return newMap;
-            });
-            h.onInstanceState?.(event.host_id, event.instance_id, event.data);
-          }
-          break;
-
-        case 'host_health':
-          if (event.host_id && event.data) {
-            const hostId = event.host_id;
-            setHosts((prev) => {
-              const newMap = new Map(prev);
-              const existing = newMap.get(hostId);
-              if (existing) {
-                newMap.set(hostId, {
-                  ...existing,
-                  memory: event.data.memory ?? existing.memory,
-                  ...(event.data.gpu_type && { gpu_type: event.data.gpu_type }),
-                  ...(event.data.roles && { roles: event.data.roles }),
-                  ...(event.data.disk_total_gb != null && { disk_total_gb: event.data.disk_total_gb }),
-                  ...(event.data.disk_used_gb != null && { disk_used_gb: event.data.disk_used_gb }),
-                  ...(event.data.disk_available_gb != null && { disk_available_gb: event.data.disk_available_gb }),
-                  ...(event.data.memory_available_gb != null && {
-                    memory_available_gb: event.data.memory_available_gb,
-                  }),
-                  ...(event.data.version && { version: event.data.version }),
-                });
-              }
-              return newMap;
-            });
-          }
-          break;
-
-        case 'request_start':
-          if (event.data?.request_id) {
-            updateRequest(event.data.request_id, {
-              model: event.data.model,
-              endpoint: event.data.endpoint,
-              endpoint_id: event.data.endpoint_id,
-              status: 'pending',
-              timestamp: event.data.timestamp,
-              stream: event.data.stream,
-              client_ip: event.data.client_ip,
-            });
-            h.onRoutingEvent?.(event.type, event.data);
-          }
-          break;
-
-        case 'request_routed':
-          if (event.data?.request_id) {
-            updateRequest(event.data.request_id, {
-              host_id: event.data.host_id,
-              host_name: event.data.host_name,
-              instance_id: event.data.instance_id,
-              instance_url: event.data.instance_url,
-              resolved_model: event.data.resolved_model,
-              endpoint_id: event.data.endpoint_id,
-              status: 'processing',
-            });
-            h.onRoutingEvent?.(event.type, event.data);
-          }
-          break;
-
-        case 'request_success':
-          if (event.data?.request_id) {
-            updateRequest(event.data.request_id, {
-              status: 'success',
-              duration: event.data.duration,
-            });
-            h.onRoutingEvent?.(event.type, event.data);
-            // Auto-remove after 5 seconds
-            setTimeout(() => {
-              removeRequest(event.data.request_id);
-            }, 5000);
-          }
-          break;
-
-        case 'request_error':
-          if (event.data?.request_id) {
-            updateRequest(event.data.request_id, {
-              status: 'error',
-              error_message: event.data.error_message,
-              duration: event.data.duration,
-              host_id: event.data.host_id,
-              instance_id: event.data.instance_id,
-            });
-            h.onRoutingEvent?.(event.type, event.data);
-          }
-          break;
-
-        case 'request_reroute':
-          h.onRoutingEvent?.(event.type, event.data);
-          break;
-
-        case 'gateway_request':
-          // Completed request summary (client-side filter by endpoint_id)
-          if (event.data) {
-            const summary: GatewayRequestSummary = event.data;
-            const filterEp = gatewayFilterRef.current.endpoint_id;
-            if (filterEp && summary.endpoint_id !== filterEp) {
-              break;
-            }
-            setGatewayRequests((prev) => {
-              const updated = [summary, ...prev].slice(0, 500);
-              return updated;
-            });
-            h.onGatewayRequest?.(summary);
-          }
-          break;
-
-        case 'filter_status':
-          // Filter configuration acknowledgement
-          if (event.filter) {
-            setGatewayFilter(event.filter);
-            h.onFilterStatus?.(event.filter);
-          }
-          break;
-
-        case 'intent_update':
-          // Full intent record (reconciler emits the bare record — bindEvent wraps it in data)
-          if (event.data?.id) {
-            setIntents((prev) => {
-              const m = new Map(prev);
-              m.set(event.data.id, event.data as Intent);
-              return m;
-            });
-            h.onIntentUpdate?.(event.data as Intent);
-          }
-          break;
-
-        case 'intent_removed':
-          if (event.data?.id) {
-            setIntents((prev) => {
-              const m = new Map(prev);
-              m.delete(event.data.id);
-              return m;
-            });
-            h.onIntentRemoved?.(event.data.id, event.data.alias);
-          }
-          break;
-
-        case 'pull_progress':
-          // C4: latest pull progress per host|source_uri, as rebroadcast
-          // by control ({host_id, host_name, timestamp, data}).
-          if (event.host_id && event.data?.source_uri) {
-            const key = `${event.host_id}|${event.data.source_uri}`;
-            setPullProgress((prev) => {
-              const m = new Map(prev);
-              m.set(key, {
-                host_id: event.host_id!,
-                host_name: event.host_name ?? null,
-                timestamp: event.timestamp,
-                data: event.data,
-              });
-              return prunePullProgress(m, key);
-            });
-          }
-          break;
-
-        case 'endpoints_update':
-          // C5: endpoint records change only on edits — event-driven.
-          if (Array.isArray(event.data?.endpoints)) {
-            setEndpoints(event.data.endpoints as ApiEndpoint[]);
-          }
-          break;
-
-        case 'api_keys_update':
-          // Key records change only on explicit key CRUD.
-          if (Array.isArray(event.data?.api_keys)) {
-            setApiKeys(event.data.api_keys as ApiKey[]);
-          }
-          break;
-
-        case 'keepalive':
-          // Ignore keepalives
-          break;
-      }
-    },
+  // A context bundling every stable React value the handlers touch (state
+  // setters, refs, and the stable updateRequest/removeRequest callbacks), all
+  // of which keep the same identity across renders. Building it once means the
+  // built-in registry never needs rebuilding.
+  const ctx: DispatchContext = useMemo(
+    () => ({
+      setHosts,
+      setPendingHosts,
+      setHostInstances,
+      setRequests,
+      setInstanceStates,
+      setLogs,
+      setGatewayRequests,
+      setGatewayFilter,
+      setIntents,
+      setPullProgress,
+      setEndpoints,
+      setApiKeys,
+      setAggregates,
+      awaitingSnapshotRef,
+      gatewayFilterRef,
+      handlersRef,
+      snapshotListenersRef,
+      updateRequest,
+      removeRequest,
+    }),
     [updateRequest, removeRequest],
   );
 
+  // Seed the built-in handlers once on mount. Mutation (Object.assign) keeps
+  // the same ref object alive so later registerHandler overrides persist.
+  useEffect(() => {
+    Object.assign(registryRef.current, buildRegistry());
+  }, []);
+
+  const handleEvent = useCallback(
+    (event: WSEvent) => {
+      // Dispatch through the registry; unregistered types fall back to a no-op.
+      registryRef.current[event.type]?.(event, ctx);
+    },
+    [ctx],
+  );
   const setFilter = useCallback((filter: Partial<GatewayFilter>) => {
     setGatewayFilter((prevFilter) => {
       return { ...prevFilter, ...filter };
@@ -690,6 +390,13 @@ export function useEventStream(handlers: EventHandlers = {}) {
       webuiSocket.on('connect', () => {
         console.log('EventStream: Connected');
         setIsConnected(true);
+        // Reset the routing view before the authoritative snapshot lands so any
+        // delta that races the connect has no stale base to corrupt.
+        awaitingSnapshotRef.current = true;
+        setRequests(new Map());
+        setInstanceStates(new Map());
+        setEndpoints([]);
+        setAggregates(null);
       });
 
       webuiSocket.on('disconnect', (reason) => {
@@ -710,6 +417,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
       };
 
       bindEvent('initial_status', (payload) => ({ type: 'initial_status', data: payload }));
+      bindEvent('routing_snapshot', (payload) => ({ type: 'routing_snapshot', data: payload }));
       bindEvent('host_status', (payload) => ({ type: 'host_status', data: payload }));
       bindEvent('host_pending', (payload) => ({ type: 'host_pending', data: payload }));
       bindEvent('host_pending_removed', (payload) => ({ type: 'host_pending_removed', data: payload }));
@@ -844,6 +552,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
     pullProgress,
     endpoints,
     apiKeys,
+    aggregates,
     getInstanceLogs,
     getInstanceState,
     getPullProgress,
@@ -851,5 +560,7 @@ export function useEventStream(handlers: EventHandlers = {}) {
     removeRequest,
     setFilter,
     clearGatewayRequests,
+    registerHandler,
+    registerRoutingSnapshotHandler,
   };
 }
