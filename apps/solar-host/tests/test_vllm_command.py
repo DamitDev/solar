@@ -48,8 +48,8 @@ def test_host_managed_flags_come_from_the_host_not_the_config() -> None:
 
 def test_a_colon_alias_is_served_verbatim() -> None:
     """vLLM does no `:` parsing — registry lookup is exact-match, so an alias
-    like glm-5.3-flash:320b is served under exactly that name and control's
-    request translation is a no-op."""
+    like glm-5.3-flash:320b is served under exactly that name; control's
+    translation is a no-op for direct requests."""
     config = VllmConfig(model_path="/models/glm", alias="glm-5.3-flash:320b")
     instance = SimpleNamespace(config=config, port=8080, id="inst-1")
     runner = VllmRunner()

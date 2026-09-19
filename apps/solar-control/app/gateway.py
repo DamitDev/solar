@@ -679,6 +679,7 @@ class OpenAIGateway:
         data: dict[str, Any],
         *,
         stream: bool = False,
+        virtual: bool = False,
     ) -> tuple[dict[str, Any], bool]:
         """Translate the request's ``model`` to the name the backend serves.
 
@@ -688,9 +689,20 @@ class OpenAIGateway:
         colon-free name and reports it. Forwarding the alias verbatim would
         turn every request to such an instance into a 400.
 
+        A virtual-model request is the second case: the client named ``core``,
+        the router resolved it to this instance's alias, but the backend only
+        answers the name it reports. When that equals the alias (vLLM serves
+        the alias verbatim), the ``served != alias`` gate alone would forward
+        ``core`` and the instance would 404 — *virtual* marks such requests
+        and forces the rewrite. When the host is too old to report a served
+        name, the rewrite targets the alias instead: it is the only name that
+        ever existed on the host side.
+
         Backends that do serve the alias (llama.cpp, HuggingFace) get the body
         untouched, including a partial name the client used — rewriting that
-        would change long-standing behaviour for them.
+        would change long-standing behaviour for them. vLLM also serves the
+        alias, but its lookup is exact-match: a partial (prefix-resolved) name
+        is unanswerable there, a pre-existing gap for direct requests.
 
         With *stream* the caller is the streaming relay, which can read the
         terminal ``usage`` block only when the upstream is asked to include
@@ -704,8 +716,13 @@ class OpenAIGateway:
         """
         served = instance.served_model_name
         body = data
-        if served and served != instance.model_alias and "model" in data:
-            body = {**data, "model": served}
+        if "model" in data:
+            if served and (served != instance.model_alias or virtual):
+                body = {**data, "model": served}
+            elif virtual:
+                # No reported served name (an older host): the alias is the
+                # only name that ever existed on the host side.
+                body = {**data, "model": instance.model_alias}
 
         injected = False
         if stream:
@@ -1596,7 +1613,9 @@ class OpenAIGateway:
 
                         async with self.session.post(
                             url,
-                            json=self._upstream_body(instance, data)[0],
+                            json=self._upstream_body(
+                                instance, data, virtual=virtual_target is not None
+                            )[0],
                             headers=headers,
                             timeout=timeout,
                         ) as response:
@@ -1821,6 +1840,7 @@ class OpenAIGateway:
                         instance,
                         data,
                         stream=(endpoint in _STREAM_USAGE_ENDPOINTS),
+                        virtual=virtual_target is not None,
                     )
 
                     async with self.session.post(

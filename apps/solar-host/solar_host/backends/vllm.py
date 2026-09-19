@@ -8,8 +8,9 @@ through a shell.
 
 Unlike SGLang, vLLM performs no ``:`` parsing on model names: registry lookup
 is exact-match and LoRA adapters resolve by dict lookup rather than a
-``base:adapter`` syntax, so the alias is served verbatim and solar-control
-needs no request translation.
+``base:adapter`` syntax, so the alias is served verbatim and solar-control's
+request translation is a no-op for direct-alias requests; a request under a
+virtual model name is still translated to the served name.
 """
 
 import logging
@@ -119,9 +120,9 @@ class VllmRunner(BackendRunner):
 
         Unlike SGLang (which reads ``:`` as its LoRA separator), vLLM's
         request path does no colon parsing — the registry lookup is
-        exact-match — so there is nothing to translate. solar-control keys
-        its translation machinery on ``served != alias`` and becomes a
-        no-op for this backend.
+        exact-match — so direct-alias requests need no translation and
+        solar-control's rewrite is a no-op for them. Virtual-model requests
+        are still translated: the body goes out under this served name.
         """
         return config.alias
 

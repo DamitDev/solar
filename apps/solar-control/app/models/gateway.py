@@ -30,7 +30,8 @@ class RegistryEntry(BaseModel):
     # The name the backend process was actually launched with, as reported by
     # the host. Differs from the alias only where a backend cannot serve it
     # verbatim (SGLang reads ``:`` as its LoRA separator). None means the
-    # backend serves the alias, so nothing needs translating — the host is the
+    # host reported nothing: direct requests then need no translation, while
+    # a virtual-model request still falls back to the alias — the host is the
     # only authority here, since it is what ran the command.
     served_model_name: str | None = None
 

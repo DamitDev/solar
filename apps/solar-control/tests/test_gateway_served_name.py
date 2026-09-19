@@ -19,6 +19,7 @@ from app.gateway import (
     OpenAIGateway,
 )
 from app.models import Host, HostStatus, RegistryEntry
+from app.models.virtual_model import VirtualModelContract, VirtualModelResponse
 
 ALIAS = "deepseek-v4-flash:284b"
 SERVED = "deepseek-v4-flash-284b"
@@ -168,6 +169,55 @@ class TestOutgoingRequest:
         """Both endpoints stream_request relays accept the option; anything
         else (embeddings, rerank) would reject an unknown body field."""
         assert _STREAM_USAGE_ENDPOINTS == {"/v1/chat/completions", "/v1/completions"}
+
+
+class TestVirtualRequests:
+    """A virtual name is a routing name: the router resolves it to an alias
+    before an instance is picked, so the body must carry the name the
+    backend actually answers."""
+
+    def test_rewritten_even_when_the_backend_serves_the_alias(self):
+        """vLLM is served the alias verbatim (served == alias), so without
+        the virtual marker the name would sail through untranslated and the
+        instance would 404 on it."""
+        entry = _entry(model_alias=ALIAS, backend_type="vllm", served_model_name=ALIAS)
+
+        body, injected = OpenAIGateway._upstream_body(
+            entry, {"model": "core"}, virtual=True
+        )
+
+        assert body["model"] == ALIAS
+        assert injected is False
+
+    def test_rewritten_to_the_served_name_when_they_differ(self):
+        """SGLang's colon-free served name wins over both the alias and the
+        virtual name the client sent."""
+        body, _ = OpenAIGateway._upstream_body(
+            _entry(), {"model": "core"}, virtual=True
+        )
+
+        assert body["model"] == SERVED
+
+    def test_the_rewrite_does_not_mutate_the_caller_s_body(self):
+        entry = _entry(model_alias=ALIAS, backend_type="vllm", served_model_name=ALIAS)
+        data = {"model": "core"}
+
+        body, _ = OpenAIGateway._upstream_body(entry, data, virtual=True)
+
+        assert body is not data
+        assert data == {"model": "core"}
+
+    def test_no_served_name_falls_back_to_the_alias(self):
+        """Older hosts do not report a served name; the virtual name can
+        never be answerable, so the alias — the only name that ever existed
+        on the host side — stands in."""
+        entry = _entry(served_model_name=None)
+        data = {"model": "core"}
+
+        body, _ = OpenAIGateway._upstream_body(entry, data, virtual=True)
+
+        assert body["model"] == ALIAS
+        assert data == {"model": "core"}
 
 
 class TestStreamingUsage:
@@ -561,6 +611,62 @@ async def test_a_streamed_request_reaches_the_backend_translated():
 
     assert chunks == [b"data: {}\n"]
     assert session.posted["model"] == SERVED
+
+
+@pytest.mark.anyio
+async def test_a_streamed_virtual_request_reaches_the_backend_resolved():
+    """The wiring, not just the helper: a request under a virtual name must
+    reach the instance under the alias it serves. vLLM answers the alias
+    verbatim, so an untranslated body would 404 at the instance."""
+    gateway = OpenAIGateway()
+    session = _RecordingSession(_Response(200, lines=[b"data: {}\n"]))
+    gateway.session = session
+    entry = _entry(model_alias=ALIAS, backend_type="vllm", served_model_name=ALIAS)
+    virtual = VirtualModelResponse(
+        id="00000000-0000-0000-0000-000000000001",
+        name="core",
+        targets=[ALIAS],
+        contract=VirtualModelContract(),
+    )
+    host = Host(
+        id="host-1",
+        name="Test Host",
+        url="http://test-host:8000",
+        api_key="host-api-key",
+        status=HostStatus.ONLINE,
+    )
+
+    with (
+        patch.object(gateway, "_ensure_session", AsyncMock()),
+        patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+        patch.object(gateway, "_find_instance_or_retry", AsyncMock(return_value=entry)),
+        patch.object(
+            gateway, "_fetch_last_generation_metrics", AsyncMock(return_value={})
+        ),
+        patch.object(gateway, "_emit_success", AsyncMock()),
+        patch("app.gateway.host_db.get_host", AsyncMock(return_value=host)),
+        patch("app.gateway.health_store.mark_healthy", AsyncMock()),
+        patch("app.gateway.routing_store", AsyncMock()),
+        patch(
+            "app.services.virtual_model_cache.virtual_model_cache.get_all",
+            return_value=[virtual],
+        ),
+        patch(
+            "app.redis_state.registry_store.get_registry",
+            new=AsyncMock(return_value={ALIAS: [entry]}),
+        ),
+    ):
+        chunks = [
+            chunk
+            async for chunk in gateway.stream_request(
+                model="core",
+                endpoint="/v1/chat/completions",
+                data={"model": "core", "stream": True},
+            )
+        ]
+
+    assert chunks == [b"data: {}\n"]
+    assert session.posted["model"] == ALIAS
 
 
 class TestRegistryEntry:
