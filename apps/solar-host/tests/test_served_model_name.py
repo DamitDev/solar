@@ -71,3 +71,20 @@ def test_an_sglang_instance_reports_its_colon_free_name(client: TestClient) -> N
 
     listed = client.get("/instances", headers={"X-API-Key": API_KEY}).json()
     assert listed[0]["served_model_name"] == "deepseek-v4-flash-284b"
+
+
+def test_a_vllm_instance_is_served_under_its_alias_verbatim(
+    client: TestClient,
+) -> None:
+    """vLLM does no `:` parsing, so the colon survives into the served name —
+    control's translation machinery keys on served != alias and no-ops."""
+    instance = _create(
+        client,
+        {
+            "backend_type": "vllm",
+            "model_path": "/models/glm",
+            "alias": "glm-5.3-flash:320b",
+        },
+    )
+
+    assert instance["served_model_name"] == "glm-5.3-flash:320b"

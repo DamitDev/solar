@@ -53,6 +53,10 @@ pip install -e ".[all,dev]"
 - NVIDIA CUDA host only — the host does not advertise the backend anywhere else, so solar-control never places an SGLang instance on a CPU or Apple host.
 - SGLang lives in its own virtualenv (its dependency set conflicts with solar-host's), pointed at by `SGLANG_VENV_PATH`. Without that variable the runner falls back to a `sglang` on `PATH`; with neither, the backend is simply not advertised.
 
+**For the vLLM backend:**
+- NVIDIA CUDA host only, same advertisement rule as SGLang.
+- vLLM lives in its own virtualenv, pointed at by `VLLM_VENV_PATH`; the runner prefers `bin/vllm`, then `bin/python -m vllm.entrypoints.cli.main`, then a `vllm` on `PATH`. First boot can take ten minutes or more on a cold JIT cache, which the ordinary `INSTANCE_READY_TIMEOUT_S` window covers.
+
 ## Setup
 
 ### 1. Create .env file
@@ -72,6 +76,9 @@ SOLAR_CONTROL_API_KEY=your-solar-control-management-api-key
 # SGLang backend (optional, NVIDIA hosts only)
 SGLANG_VENV_PATH=/opt/venvs/sglang
 SGLANG_PROMPT_CACHE_DIR=/var/cache/sglang
+
+# vLLM backend (optional, NVIDIA hosts only)
+VLLM_VENV_PATH=/opt/venvs/vllm
 ```
 
 - **API_KEY** - Used by solar-control (and other callers) to access this host’s REST API.
@@ -80,6 +87,7 @@ SGLANG_PROMPT_CACHE_DIR=/var/cache/sglang
 - **SOLAR_CONTROL_API_KEY** - Management API key from solar-control. The host uses it to connect to the `/hosts` namespace; it must be approved via the management API or WebUI before it appears in the gateway pool.
 - **SGLANG_VENV_PATH** - Virtualenv SGLang is installed into (the directory holding `bin/sglang`). The host launches the executable from it directly, setting `VIRTUAL_ENV` and prepending `bin/` to `PATH` the way `activate` would. Leave empty to use a `sglang` on `PATH`; with neither, `sglang` is dropped from the advertised backends.
 - **SGLANG_PROMPT_CACHE_DIR** - Root of SGLang's file-backed prompt cache. Each instance gets its own `<root>/<alias>-<instance_id>` subdirectory, exported as `SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR`. When it is empty the `--hicache-storage-*` flags are dropped with a warning (the in-memory hierarchical cache still works). The host deletes the subdirectory when the instance stops and sweeps leftovers at startup, so point it at a dedicated path. While a stop is in flight the dir is transiently visible as `.trash-<uuid>` until the background purge finishes, and the root must be dedicated to a single host — a second host's startup sweep would otherwise discard the first's live caches.
+- **VLLM_VENV_PATH** - Virtualenv vLLM is installed into (the directory holding `bin/vllm`). The host launches the executable from it directly, setting `VIRTUAL_ENV` and prepending `bin/` to `PATH` the way `activate` would. Leave empty to use a `vllm` on `PATH`; with neither, `vllm` is dropped from the advertised backends.
 - **GPU_TELEMETRY_OVERRIDE** - (S-058, dev/test only) JSON array of `{"index", "name", "total_gb", "used_gb"}` entries that fakes per-device NVIDIA telemetry without a physical GPU. When set, `GET /resources`, the `host_health` push and every GPU capacity check read these devices instead of NVML — the integration suite uses it to exercise the whole S-058 chain on CPU-only CI runners. Unset on production hosts.
 
 ### 2. Start the server
@@ -244,6 +252,31 @@ curl -X POST http://localhost:8001/instances \
 `--host`, `--port`, `--api-key` and `--served-model-name` are not config fields: the host binds the port from its own allocator, authenticates with its own API key, and derives the served name from `alias`. `extra_args` is rejected when it tries to set one of them.
 
 A colon in the alias is translated for SGLang, which reads `alias:tag` as base model plus LoRA adapter: `deepseek-v4-flash:284b` is served as `deepseek-v4-flash-284b`. The host reports that name as `served_model_name` on the instance (REST and `instances_update`), and solar-control rewrites the `model` field of each forwarded request to it while continuing to route on — and advertise — the alias. Clients keep using the alias.
+
+### Creating a vLLM Instance
+
+```bash
+curl -X POST http://localhost:8001/instances \
+  -H "X-API-Key: your-secret-key-here" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "config": {
+      "backend_type": "vllm",
+      "model_path": "/path/to/model-directory",
+      "alias": "glm-5.3-flash:320b",
+      "tensor_parallel_size": 4,
+      "gpu_memory_utilization": 0.9,
+      "max_model_len": 1048576,
+      "kv_cache_dtype": "fp8",
+      "speculative_config": "{\"method\": \"mtp\", \"num_speculative_tokens\": 5}",
+      "extra_env": {"VLLM_USE_FLASHINFER_MOE_FP4": "1"}
+    }
+  }'
+```
+
+`--host`, `--port`, `--api-key`, `--model`, `--served-model-name`, `--enable-prompt-tokens-details` and `--disable-log-stats` are not config fields: the host binds the port from its own allocator, authenticates with its own API key, and serves the alias verbatim — vLLM performs no `:` parsing on model names (registry lookup is exact-match), so `glm-5.3-flash:320b` is served under exactly that name and solar-control's request translation is a no-op for this backend. `extra_args` is rejected when it tries to set one of the host-managed flags.
+
+Usage metrics: per-request token counts (prompt, cached split, generated) come from the `vllm:*` Prometheus counters at request end, and `decode_tps` is the engine's last ~10 s stats-window average seen while the request ran — a best-effort live number, not an exact per-request measurement, with the token counts the exact part.
 
 ### Starting an Instance
 
@@ -411,6 +444,37 @@ Every optional flag defaults to "omitted", so SGLang's own default applies. The 
 | `hicache_storage_prefetch_policy` | No | - | Prefetch policy, e.g. `"wait_complete"` (`--hicache-storage-prefetch-policy`) |
 | `extra_args` | No | - | Raw argv entries appended after the typed flags, so an entry here overrides one above it |
 | `extra_env` | No | - | Extra environment variables for the SGLang process |
+| `host` | No | "0.0.0.0" | Host to bind to |
+| `port` | No | auto | Port (auto-assigned if not specified) |
+
+### vLLM Config Parameters
+
+Every optional flag defaults to "omitted", so vLLM's own default applies. The typed fields below cover the knobs that are stable across releases; anything else goes into `extra_args` / `extra_env`.
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `backend_type` | Yes | - | Must be `"vllm"` |
+| `model_path` | Yes | - | Local directory of the model weights (the positional model argument of `vllm serve`); derived from `model_source` when the instance is created through solar-control |
+| `alias` | Yes | - | Model alias for routing; `--served-model-name` is the alias verbatim |
+| `tensor_parallel_size` | No | - | Tensor parallel size (`--tensor-parallel-size`) |
+| `pipeline_parallel_size` | No | - | Pipeline parallel size (`--pipeline-parallel-size`) |
+| `max_model_len` | No | - | Maximum context length (`--max-model-len`) |
+| `gpu_memory_utilization` | No | - | Fraction of GPU memory reserved for the engine (`--gpu-memory-utilization`) |
+| `max_num_seqs` | No | - | Maximum concurrent sequences (`--max-num-seqs`) |
+| `max_num_batched_tokens` | No | - | Maximum tokens per scheduler step (`--max-num-batched-tokens`) |
+| `dtype` | No | - | Weight dtype, e.g. `"bfloat16"` (`--dtype`) |
+| `quantization` | No | - | Quantization method, e.g. `"fp8"` (`--quantization`) |
+| `kv_cache_dtype` | No | - | KV cache dtype, e.g. `"fp8"` (`--kv-cache-dtype`) |
+| `moe_backend` | No | - | MoE kernel backend, e.g. `"cutlass"` (`--moe-backend`) |
+| `trust_remote_code` | No | false | Allow the model repo's own modelling code (`--trust-remote-code`) |
+| `enforce_eager` | No | false | Skip CUDA graph capture (`--enforce-eager`) |
+| `enable_prefix_caching` | No | - | Prefix cache on/off (`--enable-prefix-caching` / `--no-enable-prefix-caching`); omitted leaves the engine default |
+| `speculative_config` | No | - | JSON object string of speculative-decoding settings, e.g. `{"method":"mtp","num_speculative_tokens":5}` (`--speculative-config`) |
+| `tool_call_parser` | No | - | Tool-call parser, e.g. `"hermes"` (`--tool-call-parser`) |
+| `reasoning_parser` | No | - | Reasoning parser, e.g. `"deepseek_r1"` (`--reasoning-parser`) |
+| `enable_auto_tool_choice` | No | false | Let the model choose tool calls (`--enable-auto-tool-choice`) |
+| `extra_args` | No | - | Raw argv entries appended after the typed flags, so an entry here overrides one above it |
+| `extra_env` | No | - | Extra environment variables for the vLLM process |
 | `host` | No | "0.0.0.0" | Host to bind to |
 | `port` | No | auto | Port (auto-assigned if not specified) |
 

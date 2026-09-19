@@ -3272,6 +3272,24 @@ _PATH_RESOLVED_KEYS: frozenset[str] = frozenset(
     {"mmproj", "chat_template_file", "model_file", "spec_draft_model"}
 )
 
+# Backend keys the control canonicalizer stores as compact JSON (or drops when
+# blank) and the host normalizes to None when empty. A legacy row that stored
+# "" and an instance reporting None describe the same configuration, so the
+# comparison must not read that pair as drift — the REPLACE-stop loop it would
+# drive never settles.
+_JSON_OBJECT_KEYS: frozenset[str] = frozenset(
+    {
+        "chat_template_kwargs",
+        "hicache_storage_backend_extra_config",
+        "speculative_config",
+    }
+)
+
+
+def _blank_or_none(value: Any) -> bool:
+    """True for None or a whitespace-only string (both mean "not set")."""
+    return value is None or (isinstance(value, str) and not value.strip())
+
 
 def _strip_relative_prefix(value: str) -> str:
     """Drop leading './' segments from a relative spec path.
@@ -3307,6 +3325,17 @@ def _backend_value_matches(spec_value: Any, inst_value: Any, *, key: str = "") -
        in a REPLACE-stop churn that never lets the edit settle.
     """
     if spec_value == inst_value:
+        return True
+
+    # A blank JSON-object spec value and an absent instance value describe the
+    # same configuration: control drops the blank on write, the host normalizes
+    # it to None, and a row stored before either happened must not read as
+    # permanent drift.
+    if (
+        key in _JSON_OBJECT_KEYS
+        and _blank_or_none(spec_value)
+        and _blank_or_none(inst_value)
+    ):
         return True
 
     parsed_spec = _jsonish(spec_value)

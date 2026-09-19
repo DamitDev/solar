@@ -455,4 +455,31 @@ describe('IntentFormModal in create mode', () => {
       placement: { gpu_type: 'nvidia_cuda' },
     });
   });
+
+  it('pins the accelerator to NVIDIA for vLLM, which only runs on CUDA', async () => {
+    const createIntent = vi.spyOn(solarClient, 'createIntent').mockResolvedValue(intent);
+
+    render(
+      <IntentFormModal
+        initial={{ alias: 'glm-5.3-flash:320b', model_source: 'repo://glm53:320b' }}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: /vLLM/ }));
+
+    const gpuSelect = screen.getByLabelText('GPU type') as HTMLSelectElement;
+    await waitFor(() => expect(gpuSelect.value).toBe('nvidia_cuda'));
+    // Editable, it would only ever produce a spec the server rejects.
+    expect(gpuSelect).toBeDisabled();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Submit Intent' }));
+
+    await waitFor(() => expect(createIntent).toHaveBeenCalled());
+    expect(createIntent.mock.calls[0][0]).toMatchObject({
+      backend: { backend_type: 'vllm' },
+      placement: { gpu_type: 'nvidia_cuda' },
+    });
+  });
 });

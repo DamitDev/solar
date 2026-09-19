@@ -302,7 +302,9 @@ def _instance_uses_model(instance_config: object, model_dir: Path) -> bool:
     For LlamaCpp configs the ``model`` field is always a filesystem path to a
     GGUF file.  For HuggingFace configs the ``model_id`` may be a Hub ID (e.g.
     ``meta-llama/Llama-2-7b-hf``) or a local absolute path; only absolute
-    paths are checked against the model directory.
+    paths are checked against the model directory.  The CUDA engines (sglang,
+    vllm) serve a model *directory* from ``model_path``, which is always a
+    local path.
     """
     backend_type: str = getattr(instance_config, "backend_type", "")
 
@@ -311,6 +313,13 @@ def _instance_uses_model(instance_config: object, model_dir: Path) -> bool:
         if not instance_model:
             return False
         resolved = Path(instance_model).resolve()
+        return resolved == model_dir or resolved.is_relative_to(model_dir)
+
+    if backend_type in ("sglang", "vllm"):
+        model_path = getattr(instance_config, "model_path", None)
+        if not model_path:
+            return False
+        resolved = Path(model_path).resolve()
         return resolved == model_dir or resolved.is_relative_to(model_dir)
 
     if backend_type.startswith("huggingface_"):

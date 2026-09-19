@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { BackendConfigFields } from '@/components/BackendConfigFields';
 
 const sglangButton = () => screen.getByRole('button', { name: /SGLang/ });
+const vllmButton = () => screen.getByRole('button', { name: /vLLM/ });
 
 describe('BackendConfigFields backend selection', () => {
   it('offers SGLang alongside llama.cpp and HuggingFace', () => {
@@ -12,6 +13,12 @@ describe('BackendConfigFields backend selection', () => {
     expect(screen.getByRole('button', { name: /llama\.cpp/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /HuggingFace/ })).toBeInTheDocument();
     expect(sglangButton()).toBeEnabled();
+  });
+
+  it('offers vLLM alongside the other backends', () => {
+    render(<BackendConfigFields value={{ backend_type: 'llamacpp' }} onChange={vi.fn()} forIntent />);
+
+    expect(vllmButton()).toBeEnabled();
   });
 
   it('switches the backend object to sglang defaults when selected', async () => {
@@ -34,6 +41,26 @@ describe('BackendConfigFields backend selection', () => {
     expect(screen.queryByRole('button', { name: /Text Generation/ })).not.toBeInTheDocument();
   });
 
+  it('switches the backend object to vllm defaults when selected', async () => {
+    const onChange = vi.fn();
+    render(<BackendConfigFields value={{ backend_type: 'llamacpp' }} onChange={onChange} forIntent />);
+
+    await userEvent.click(vllmButton());
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    const next = onChange.mock.calls[0][0];
+    expect(next.backend_type).toBe('vllm');
+    // An intent resolves model_source into model_path server-side.
+    expect(next.model_path).toBeUndefined();
+    expect(next.tensor_parallel_size).toBe(1);
+  });
+
+  it('shows no mode cards for vLLM either', () => {
+    render(<BackendConfigFields value={{ backend_type: 'vllm' }} onChange={vi.fn()} forIntent />);
+
+    expect(screen.queryByText('Mode')).not.toBeInTheDocument();
+  });
+
   it('keeps the mode cards for the backends that have several', () => {
     render(<BackendConfigFields value={{ backend_type: 'llamacpp' }} onChange={vi.fn()} forIntent />);
 
@@ -47,7 +74,7 @@ describe('BackendConfigFields backend selection', () => {
         value={{ backend_type: 'llamacpp' }}
         onChange={onChange}
         disabledBackends={['sglang']}
-        disabledReason="Requires an NVIDIA host with SGLang installed"
+        disabledReasons={{ sglang: 'Requires an NVIDIA host with SGLang installed' }}
       />,
     );
 
@@ -60,10 +87,40 @@ describe('BackendConfigFields backend selection', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  it('disables vLLM on a host that cannot run it, and says why', async () => {
+    const onChange = vi.fn();
+    render(
+      <BackendConfigFields
+        value={{ backend_type: 'llamacpp' }}
+        onChange={onChange}
+        disabledBackends={['vllm']}
+        disabledReasons={{ vllm: 'vLLM is not installed on gpu-1' }}
+      />,
+    );
+
+    const button = vllmButton();
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute('title', 'vLLM is not installed on gpu-1');
+
+    await userEvent.click(button);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it('renders the SGLang fields when the stored backend is sglang', () => {
     render(<BackendConfigFields value={{ backend_type: 'sglang', tp_size: 8 }} onChange={vi.fn()} forIntent />);
 
     expect(screen.getByLabelText('Tensor Parallel Size')).toHaveValue(8);
+    expect(screen.getByLabelText('Extra Arguments')).toBeInTheDocument();
+    expect(screen.getByLabelText('Extra Environment')).toBeInTheDocument();
+  });
+
+  it('renders the vLLM fields when the stored backend is vllm', () => {
+    render(
+      <BackendConfigFields value={{ backend_type: 'vllm', tensor_parallel_size: 4 }} onChange={vi.fn()} forIntent />,
+    );
+
+    expect(screen.getByLabelText('Tensor Parallel Size')).toHaveValue(4);
+    expect(screen.getByLabelText('Speculative Config')).toBeInTheDocument();
     expect(screen.getByLabelText('Extra Arguments')).toBeInTheDocument();
     expect(screen.getByLabelText('Extra Environment')).toBeInTheDocument();
   });

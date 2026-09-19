@@ -19,6 +19,7 @@ from solar_host.models.huggingface import (
 )
 from solar_host.models.llamacpp import LlamaCppConfig
 from solar_host.models.sglang import SglangConfig
+from solar_host.models.vllm import VllmConfig
 
 API_KEY = "test-capabilities-key"
 
@@ -62,6 +63,20 @@ def test_an_sglang_model_with_a_vl_model_type_is_multimodal(tmp_path) -> None:
 def test_a_text_sglang_model_stays_quiet(tmp_path) -> None:
     _write_config(tmp_path / "m", {"model_type": "qwen3_moe"})
     config = SglangConfig(alias="qwen3.6:35b", model_path=str(tmp_path / "m"))
+
+    assert capabilities_for_config(config) is None
+
+
+def test_a_vllm_model_with_vision_config_is_multimodal(tmp_path) -> None:
+    _write_config(tmp_path / "m", {"model_type": "glm4_moe", "vision_config": {}})
+    config = VllmConfig(alias="glm-5.3-flash:320b", model_path=str(tmp_path / "m"))
+
+    assert capabilities_for_config(config) == VISION_CAPS
+
+
+def test_a_text_vllm_model_stays_quiet(tmp_path) -> None:
+    _write_config(tmp_path / "m", {"model_type": "glm4_moe"})
+    config = VllmConfig(alias="glm-5.3-flash:320b", model_path=str(tmp_path / "m"))
 
     assert capabilities_for_config(config) is None
 

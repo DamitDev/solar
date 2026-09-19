@@ -85,7 +85,7 @@ async def create_instance_on_host(
             model_path = resolved[8:]
         else:
             model_path = resolved
-        if backend_type == "sglang":
+        if backend_type in ("sglang", "vllm"):
             config["model_path"] = model_path
         elif backend_type.startswith("huggingface"):
             config["model_id"] = model_path
@@ -797,7 +797,7 @@ def _build_target_create(
     # Preserve model_source alongside the resolved path for intent
     # linking and cross-host operations (S-037/D-017).
     backend_type = str(create_payload.get("backend_type", "llamacpp"))
-    if backend_type == "sglang":
+    if backend_type in ("sglang", "vllm"):
         create_payload["model_path"] = path
     elif backend_type.startswith("huggingface"):
         create_payload["model_id"] = path

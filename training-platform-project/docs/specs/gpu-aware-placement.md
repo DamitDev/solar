@@ -52,7 +52,8 @@ Two principles shape the design:
 - **Backends already carry device knobs, unenforced.** llama.cpp exposes
   `devices`, `split_mode`, `tensor_split`, `main_gpu`
   (`backends/llamacpp.py` `_multi_gpu_args` → `--device`/`--split-mode`/
-  `--tensor-split`/`--main-gpu`); sglang exposes `tp_size`; HuggingFace
+  `--tensor-split`/`--main-gpu`); sglang exposes `tp_size`; vllm exposes
+  `tensor_parallel_size` and `pipeline_parallel_size`; HuggingFace
   exposes `--device`. All of these are raw physical indices or CUDA-visible
   defaults. Nothing sets `CUDA_VISIBLE_DEVICES`, so a process sees every GPU
   and picks device 0 implicitly.
@@ -126,13 +127,15 @@ gpu_count: int = 1   # how many GPUs this intent needs
 
 - `vram_gb` is per-GPU (D3).
 - Derived counts: when `gpu_count` is not set, validation derives it from
-  backend fields: sglang `tp_size`, llama.cpp `devices` list length (and
-  `tensor_split` count when present — must match `devices`). When both
-  explicit and derived values exist they must agree, else 422.
+  backend fields: sglang `tp_size`; vllm `tensor_parallel_size` ×
+  `pipeline_parallel_size` (each defaulting to 1); llama.cpp `devices` list
+  length (and `tensor_split` count when present — must match `devices`). When
+  both explicit and derived values exist they must agree, else 422.
 - Backend device fields become positions in the visible set (D5):
   llama.cpp `devices: "0,1"` on a two-GPU assignment means "both chosen
   GPUs", `main_gpu: 0` means the first chosen GPU; sglang `tp_size` must
-  equal `gpu_count`. Physical pinning of a specific device id is no longer
+  equal `gpu_count`, and vllm's parallel dimensions must multiply to it.
+  Physical pinning of a specific device id is no longer
   expressible — that is deliberate and documented in the webui form tooltip.
 - HuggingFace backends stay single-GPU (`gpu_count` must be 1).
 - Unified-memory hosts (Mac/CPU): `gpu_count` is ignored, the VRAM
@@ -276,7 +279,8 @@ them in the storage manifest per-instance rows.
 
 - **Unit (solar-control):** `find_gpu_assignment` bin-packing (fits,
   fragmentation ranking, count unmet, empty gpus fallback); validation of
-  derived `gpu_count` vs explicit (sglang `tp_size`, llama.cpp `devices`);
+  derived `gpu_count` vs explicit (sglang `tp_size`, vllm
+  `tensor_parallel_size` × `pipeline_parallel_size`, llama.cpp `devices`);
   unified-memory folding; double-booking prevention across two concurrent
   claims.
 - **Unit (solar-host):** `CUDA_VISIBLE_DEVICES` injection in all three
@@ -294,7 +298,8 @@ them in the storage manifest per-instance rows.
 solar-host and solar-control ship together. During the transition, hosts
 without a `gpus` list use the aggregate path (D6), so nothing regresses.
 The intent `gpu_count` field is optional: on read, an intent stored without
-it derives the count from its backend (sglang `tp_size`; llama.cpp
+it derives the count from its backend (sglang `tp_size`; vllm
+`tensor_parallel_size` / `pipeline_parallel_size`; llama.cpp
 `devices` / `tensor_split`), defaulting to 1 — so existing single-GPU
 intents behave identically, and existing multi-GPU intents keep their
 device count instead of falling back to one.

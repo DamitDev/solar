@@ -12,8 +12,10 @@ import pytest
 
 from solar_host.backends.llamacpp import LlamaCppRunner
 from solar_host.backends.sglang import SglangRunner
+from solar_host.backends.vllm import VllmRunner
 from solar_host.models.llamacpp import LlamaCppConfig
 from solar_host.models.sglang import SglangConfig
+from solar_host.models.vllm import VllmConfig
 
 
 def _llamacpp_command(**overrides) -> list[str]:
@@ -40,6 +42,28 @@ def _sglang_available(tmp_path, monkeypatch):
 def _sglang_command(**overrides) -> list[str]:
     config = SglangConfig(model_path="/models/test", alias="test", **overrides)
     return SglangRunner().build_command(
+        SimpleNamespace(config=config, port=8080, id="inst-1")
+    )
+
+
+@pytest.fixture(autouse=True)
+def _vllm_available(tmp_path, monkeypatch):
+    """Pretend this host is an NVIDIA box with vLLM in a venv."""
+    venv = tmp_path / "vllm-venv"
+    (venv / "bin").mkdir(parents=True)
+    console_script = venv / "bin" / "vllm"
+    console_script.write_text("#!/bin/sh\n")
+    console_script.chmod(0o755)
+    monkeypatch.setattr("solar_host.config.settings.vllm_venv_path", str(venv))
+    monkeypatch.setattr(
+        "solar_host.backends.vllm.detect_gpu_type", lambda: "nvidia_cuda"
+    )
+    return venv
+
+
+def _vllm_command(**overrides) -> list[str]:
+    config = VllmConfig(model_path="/models/test", alias="test", **overrides)
+    return VllmRunner().build_command(
         SimpleNamespace(config=config, port=8080, id="inst-1")
     )
 
@@ -79,12 +103,40 @@ class TestSglangMetricsFlags:
         assert command[-2:] == ["--enable-metrics", "--schedule-policy"]
 
 
+class TestVllmTelemetryFlags:
+    def test_prompt_token_details_are_added(self):
+        command = _vllm_command()
+
+        assert command.count("--enable-prompt-tokens-details") == 1
+
+    def test_prompt_token_details_cannot_be_duplicated_via_extra_args(self):
+        with pytest.raises(ValueError, match="managed by solar-host"):
+            _vllm_command(extra_args=["--enable-prompt-tokens-details"])
+
+    def test_the_stats_log_switch_is_host_managed(self):
+        """--disable-log-stats would remove the live decode throughput source."""
+        with pytest.raises(ValueError, match="managed by solar-host"):
+            _vllm_command(extra_args=["--disable-log-stats"])
+
+    def test_extra_args_still_come_last_for_raw_overrides(self):
+        command = _vllm_command(extra_args=["--max-num-partial-prefills", "4"])
+
+        assert command[-3:] == [
+            "--enable-prompt-tokens-details",
+            "--max-num-partial-prefills",
+            "4",
+        ]
+
+
 class TestMetricsEndpoints:
     def test_llamacpp_serves_metrics_at_the_canonical_path(self):
         assert LlamaCppRunner().get_metrics_path() == "/metrics"
 
     def test_sglang_serves_metrics_at_the_canonical_path(self):
         assert SglangRunner().get_metrics_path() == "/metrics"
+
+    def test_vllm_serves_metrics_at_the_canonical_path(self):
+        assert VllmRunner().get_metrics_path() == "/metrics"
 
     def test_the_base_runner_has_no_metrics_path(self):
         from solar_host.backends.base import BackendRunner

@@ -300,6 +300,44 @@ class TestHelpers:
         }
         assert _detect_backend_drift(intent, instance_config) == []
 
+    @pytest.mark.parametrize(
+        ("backend_type", "key"),
+        [
+            ("vllm", "speculative_config"),
+            ("sglang", "hicache_storage_backend_extra_config"),
+            ("llamacpp", "chat_template_kwargs"),
+        ],
+    )
+    def test_detect_backend_drift_treats_a_legacy_blank_json_field_as_absent(
+        self, backend_type: str, key: str
+    ):
+        """A row stored before the canonicalizer dropped blanks carries "" while
+        the host reports None — the same configuration, not drift. Pinned for
+        every key the equivalence covers."""
+        intent = _make_intent(backend={"backend_type": backend_type, key: ""})
+        instance_config = {"backend_type": backend_type, key: None}
+
+        assert _detect_backend_drift(intent, instance_config) == []
+
+    @pytest.mark.parametrize(
+        ("backend_type", "key"),
+        [
+            ("vllm", "speculative_config"),
+            ("sglang", "hicache_storage_backend_extra_config"),
+            ("llamacpp", "chat_template_kwargs"),
+        ],
+    )
+    def test_detect_backend_drift_sees_a_real_json_value_change(
+        self, backend_type: str, key: str
+    ):
+        intent = _make_intent(backend={"backend_type": backend_type, key: ""})
+        instance_config = {
+            "backend_type": backend_type,
+            key: '{"method":"mtp","num_speculative_tokens":5}',
+        }
+
+        assert _detect_backend_drift(intent, instance_config) == [key]
+
     def test_detect_backend_drift_sees_a_real_hicache_config_change(self):
         intent = _make_intent(
             backend={

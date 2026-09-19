@@ -511,13 +511,13 @@ class OpenAIGateway:
     ) -> bool:
         """Whether the host's last-generation metrics should fill usage gaps.
 
-        Only cache-aware backends (llama.cpp, SGLang) can supply a cached
-        split, so a HuggingFace instance never warrants the round-trip. The
-        upstream ``usage`` block stays authoritative; the host only fills
+        Only cache-aware backends (llama.cpp, SGLang, vLLM) can supply a
+        cached split, so a HuggingFace instance never warrants the round-trip.
+        The upstream ``usage`` block stays authoritative; the host only fills
         holes (``cached_tokens`` above all, but also a missing prompt or
         completion count).
         """
-        if instance.backend_type not in {"llamacpp", "sglang"}:
+        if instance.backend_type not in {"llamacpp", "sglang", "vllm"}:
             return False
         return (
             "prompt_tokens" not in usage_fields
@@ -559,8 +559,9 @@ class OpenAIGateway:
 
         The upstream usage block stays authoritative: the host only fills
         holes (``cached_tokens`` above all, but also a missing prompt or
-        completion count). Only cache-aware backends (llama.cpp, SGLang) can
-        supply a cached split, so HuggingFace never warrants the round-trip.
+        completion count). Only cache-aware backends (llama.cpp, SGLang,
+        vLLM) can supply a cached split, so HuggingFace never warrants the
+        round-trip.
 
         When the only gap is the cached split and a recent host answer also
         lacked one, the instance is remembered as split-less and the

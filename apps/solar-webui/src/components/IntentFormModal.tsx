@@ -22,6 +22,7 @@ import { extractApiError } from '@/lib/apiErrors';
 import { cn } from '@/lib/utils';
 import {
   SGLANG_GPU_TYPE,
+  VLLM_GPU_TYPE,
   unchangedBackendFields,
   validateIntentRequest,
   sanitizeIntentBackend,
@@ -160,12 +161,14 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
     };
   }, []);
 
-  // SGLang is CUDA-only and the server pins the same token, so the placement
-  // follows the backend rather than letting the operator save a 422.
-  const sglangSelected = backend.backend_type === 'sglang';
+  // SGLang and vLLM are CUDA-only and the server pins the same token, so the
+  // placement follows the backend rather than letting the operator save a 422.
+  const cudaOnlySelected = backend.backend_type === 'sglang' || backend.backend_type === 'vllm';
+  const cudaOnlyGpuType = backend.backend_type === 'vllm' ? VLLM_GPU_TYPE : SGLANG_GPU_TYPE;
+  const cudaOnlyEngine = backend.backend_type === 'vllm' ? 'vLLM' : 'SGLang';
   useEffect(() => {
-    if (sglangSelected) setGpuType(SGLANG_GPU_TYPE);
-  }, [sglangSelected]);
+    if (cudaOnlySelected) setGpuType(cudaOnlyGpuType);
+  }, [cudaOnlySelected, cudaOnlyGpuType]);
 
   const gpuTypes = useMemo(() => {
     const values = new Set<string>();
@@ -174,9 +177,9 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
     }
     // Offer the pinned token even when no NVIDIA host is connected yet, so the
     // select shows what it is set to instead of an empty row.
-    if (sglangSelected) values.add(SGLANG_GPU_TYPE);
+    if (cudaOnlySelected) values.add(cudaOnlyGpuType);
     return [...values].sort();
-  }, [hosts, sglangSelected]);
+  }, [hosts, cudaOnlySelected, cudaOnlyGpuType]);
 
   const roleOptions = useMemo(() => {
     const values = new Set<string>(['inference']);
@@ -605,8 +608,8 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
                   id="intent-gpu-type"
                   value={gpuType}
                   onChange={(e) => setGpuType(e.target.value)}
-                  disabled={sglangSelected}
-                  className={cn(selectClass, sglangSelected && 'opacity-60 cursor-not-allowed')}
+                  disabled={cudaOnlySelected}
+                  className={cn(selectClass, cudaOnlySelected && 'opacity-60 cursor-not-allowed')}
                 >
                   <option value="">Any</option>
                   {gpuTypes.map((g) => (
@@ -615,8 +618,10 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
                     </option>
                   ))}
                 </select>
-                {sglangSelected && (
-                  <p className="text-xs text-nord-4 mt-1">Fixed to {SGLANG_GPU_TYPE} — SGLang only runs on CUDA.</p>
+                {cudaOnlySelected && (
+                  <p className="text-xs text-nord-4 mt-1">
+                    Fixed to {cudaOnlyGpuType} — {cudaOnlyEngine} only runs on CUDA.
+                  </p>
                 )}
                 {fieldError('placement.gpu_type')}
               </div>

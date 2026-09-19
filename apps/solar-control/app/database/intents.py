@@ -24,8 +24,9 @@ def _hydrate_resources(row: IntentRow) -> ResourceRequirements:
 
     Intents stored before S-058 carry no ``gpu_count`` key in their
     ``resources`` JSON. Deriving the count here — from the stored backend
-    (sglang ``tp_size``; llama.cpp ``devices`` / ``tensor_split``) rather
-    than via an Alembic backfill — also covers rows an older control
+    (sglang ``tp_size``; vllm ``tensor_parallel_size`` /
+    ``pipeline_parallel_size``; llama.cpp ``devices`` / ``tensor_split``)
+    rather than via an Alembic backfill — also covers rows an older control
     replica writes during a rolling upgrade. Every consumer (reconciler,
     cold-start reservations, fleet validation, the API response) inherits
     the resolved count with one change of layer.
