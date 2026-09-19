@@ -178,6 +178,20 @@ dedicated webui page. See
 
 ---
 
+### Milestone 0.11: vLLM backend
+
+Adds vLLM as a first-class generation backend next to SGLang: typed config
+fields with `extra_args` / `extra_env` escape hatches, log-gated readiness,
+Prometheus usage accounting with per-request finalization, context probing,
+CUDA-only placement, and the webui config form. See
+[issues/Phase 0/Milestone 0.11/S-061.md](issues/Phase%200/Milestone%200.11/S-061.md).
+
+| ID | Issue | Repo | Size | Depends on |
+|----|-------|------|------|------------|
+| S-061 | vLLM serving backend end to end: solar-host `VllmConfig` + `VllmRunner` (venv resolution, command/env building, readiness, `/metrics` usage finalization, context probe, capabilities), solar-control validation (field ownership, CUDA pin, reserved args, `speculative_config` canonicalization, derived `gpu_count`, `model_path` mapping, usage fallback), webui backend card + `VllmConfigFields` + validation mirror, tests and doc amendments. | solar-host, solar-control, solar-webui | L | - |
+
+---
+
 ## Phase 1: Data Repository
 
 > Centralized storage for models and training datasets. Can start in parallel with Phase 0.
