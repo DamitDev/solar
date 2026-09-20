@@ -438,8 +438,14 @@ function toFlowNodes(graph: FlowGraph, layout: LayoutResult, trace: Trace | null
     id: node.id,
     type: node.kind,
     position: layout.positions.get(node.id) ?? { x: 0, y: 0 },
-    // Size lives on the node component. Setting it here too makes React Flow
-    // draw its own wrapper box behind the node.
+    // Size lives on the node component. Passing it here too marks the nodes as
+    // measured: without it, React Flow sets `visibility: hidden` on every node
+    // until its ResizeObserver re-measures, and this array is rebuilt on every
+    // graph change, so a lost re-measure cycle blanks the whole canvas. The
+    // sizes are exactly what NodeBox renders, so the wrapper box React Flow
+    // draws behind each node aligns pixel-for-pixel.
+    width: node.width,
+    height: node.height,
     data: { ...node.data, dimmed: trace ? !trace.nodes.has(node.id) : false, selected: trace?.origin === node.id },
   }));
 }
