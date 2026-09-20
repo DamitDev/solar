@@ -390,13 +390,11 @@ export function useEventStream(handlers: EventHandlers = {}) {
       webuiSocket.on('connect', () => {
         console.log('EventStream: Connected');
         setIsConnected(true);
-        // Reset the routing view before the authoritative snapshot lands so any
-        // delta that races the connect has no stale base to corrupt.
+        // Gate deltas until the authoritative snapshot lands. No state wipe
+        // here: the snapshot wholesale-replaces requests, instance states,
+        // endpoints, and aggregates — and the server can deliver it before
+        // this `connect` event fires, so a wipe racing it would destroy it.
         awaitingSnapshotRef.current = true;
-        setRequests(new Map());
-        setInstanceStates(new Map());
-        setEndpoints([]);
-        setAggregates(null);
       });
 
       webuiSocket.on('disconnect', (reason) => {
