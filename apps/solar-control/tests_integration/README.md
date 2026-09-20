@@ -68,7 +68,7 @@ Markers (applied automatically by folder):
 -m repo_path        # minimal repo path (registration, resolve, distribute, inference)
 -m intent_path      # declarative intents (API, reconcile, scaling, strategies)
 -m migration_path   # S-037 migration (explicit, reconciler, guards) + S-043 host drain
--m infrastructure   # WS seam, gateway registry, model cache, reconciler wake
+-m infrastructure   # WS seam, gateway registry, model cache, reconciler wake, routing view
 ```
 
 Run one file:
@@ -133,7 +133,7 @@ tests_integration/
 ├── repo_path/             # minimal repo path (9 tests)
 ├── intent_path/           # declarative path (21 tests)
 ├── migration_path/        # S-037 + S-043 drain (13 tests)
-└── infrastructure/        # WS seam, registry, cache, wake (6 tests)
+└── infrastructure/        # WS seam, registry, cache, wake, routing view (14 tests)
 ```
 
 ## Fixture regeneration
@@ -233,6 +233,15 @@ Add a manager.
   cross-reconcile — a second control resolves "host-a" to the other stack's
   host and races every intent). `test_failed_create_backoff` lives in its
   own module because it needs a live control.
+- **Never `flushall()` the session Redis.** In-process store tests
+  (`test_instance_state_ttl`, `test_routing_registry_ttl`) must
+  `init_redis(stack.db_env["redis"])` first — the pytest process never runs
+  the app lifespan, so `redis_client()` raises otherwise — and must clean
+  only their own key prefixes. A `flushall` wipes `solar:hosts:*`
+  (WS sid→host map, instances cache) and the `solar:disowned` tombstones;
+  hosts stay WS-connected but control drops every `pull_progress` /
+  `instances_update` event and re-seeds caches over HTTP, cascading into
+  timeouts and stale-state failures in every later module.
 - **Version-change artifacts:** `_register_v2` registers a second version
   with identical tensors but a different `model.safetensors` (re-saved with
   a `version: v2` header entry via `rewrite_safetensors_with_metadata` —

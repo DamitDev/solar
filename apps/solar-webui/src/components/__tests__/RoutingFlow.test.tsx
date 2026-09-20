@@ -1,8 +1,8 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import solarClient from '@/api/client';
-import { ApiEndpoint, HostWithInstances, Instance } from '@/api/types';
-import { RequestState } from '@/hooks/useEventStream';
+import { ApiEndpoint, HostWithInstances, Instance, RoutingState, RoutingStateAggregates } from '@/api/types';
+import { RequestState } from '@/hooks/eventStream/useEventStream';
 
 /**
  * React Flow needs a measured container, which jsdom cannot give it, so the
@@ -57,7 +57,15 @@ const eventStream = {
 
 const routingEvents = {
   requests: new Map<string, RequestState>(),
+  aggregates: null as RoutingStateAggregates | null,
   removeRequest: vi.fn(),
+  snapshotListener: null as ((snapshot: unknown) => void) | null,
+  registerRoutingSnapshotHandler: (listener: (snapshot: unknown) => void) => {
+    routingEvents.snapshotListener = listener;
+    return () => {
+      routingEvents.snapshotListener = null;
+    };
+  },
 };
 
 const instancesHook = {
@@ -123,33 +131,76 @@ const clickNode = (id: string) => fireEvent.click(screen.getByTestId(`node-${id}
 
 beforeEach(() => {
   vi.restoreAllMocks();
-  eventStream.endpoints = [];
+  // The WS routing_snapshot seeds eventEndpoints on connect; the routing view
+  // consumes endpoints from the snapshot, not getEndpoints().
+  eventStream.endpoints = [endpoint('e1', 'prod'), endpoint('e2', 'dev')];
   eventStream.isConnected = true;
   routingEvents.requests = new Map();
+  routingEvents.aggregates = null;
+  routingEvents.snapshotListener = null;
   instancesHook.hosts = [
     host('h1', 'alpha', [instance('i1', 'chat', 'qwen3.6:35b'), instance('i2', 'embed', 'iris:110m')]),
     host('h2', 'beta', [instance('i3', 'chat', 'qwen3.6:35b')]),
   ];
   instancesHook.loading = false;
-  vi.spyOn(solarClient, 'getEndpoints').mockResolvedValue([endpoint('e1', 'prod'), endpoint('e2', 'dev')]);
+  spyGetRoutingState([endpoint('e1', 'prod'), endpoint('e2', 'dev')]);
 });
 
-describe('RoutingFlow endpoints', () => {
-  it('fetches endpoints over REST when the socket is connected but has no events', async () => {
-    // endpoints_update only fires on endpoint CRUD, so a connected socket with
-    // no event data must still bootstrap or the graph has no entry points.
-    await renderPage();
-
-    await waitFor(() => expect(solarClient.getEndpoints).toHaveBeenCalled());
-    await waitFor(() => expect(nodeIds()).toContain('endpoint:e1'));
+function spyGetRoutingState(endpoints: ApiEndpoint[], activeRequests: RoutingState['active_requests'] = []) {
+  vi.spyOn(solarClient, 'getRoutingState').mockResolvedValue({
+    schema_version: 1,
+    generated_at: '2026-08-13T12:00:00Z',
+    instance_states: [],
+    active_requests: activeRequests,
+    aggregates: { by_instance: {}, by_host: {}, by_model: {}, by_endpoint: {}, queued: 0, processing: 0, errored: 0 },
+    endpoints,
   });
+}
 
-  it('prefers event endpoints over a REST fetch', async () => {
+function setConnected(connected: boolean) {
+  eventStream.isConnected = connected;
+}
+
+describe('RoutingFlow endpoints', () => {
+  it('uses the event endpoints when the socket is connected', async () => {
     eventStream.endpoints = [endpoint('e9', 'stream')];
     await renderPage();
 
     await waitFor(() => expect(nodeIds()).toContain('endpoint:e9'));
-    expect(solarClient.getEndpoints).not.toHaveBeenCalled();
+    expect(solarClient.getRoutingState).not.toHaveBeenCalled();
+  });
+
+  it('polls the routing snapshot for endpoints when the socket is down', async () => {
+    setConnected(false);
+    vi.useFakeTimers();
+    await renderPage();
+    await act(async () => void vi.advanceTimersByTime(10000));
+    await act(() => Promise.resolve());
+    vi.useRealTimers();
+
+    expect(solarClient.getRoutingState).toHaveBeenCalled();
+    await waitFor(() => expect(nodeIds()).toContain('endpoint:e1'));
+  });
+
+  it('supplies the active requests from the routed snapshot when the socket is down', async () => {
+    spyGetRoutingState(
+      [endpoint('e1', 'prod')],
+      [
+        { request_id: 'r1', model: 'chat', host_id: 'h1', instance_id: 'i1', status: 'processing' },
+        { request_id: 'r2', model: 'chat', status: 'queued' },
+      ],
+    );
+    setConnected(false);
+    vi.useFakeTimers();
+    await renderPage();
+    await act(async () => void vi.advanceTimersByTime(10000));
+    await act(() => Promise.resolve());
+    vi.useRealTimers();
+
+    expect(solarClient.getRoutingState).toHaveBeenCalled();
+    await waitFor(() =>
+      expect(within(screen.getByTestId('request-ticker')).getAllByText('chat').length).toBeGreaterThan(0),
+    );
   });
 });
 
@@ -360,7 +411,17 @@ describe('RoutingFlow at fleet scale', () => {
 
   it('keeps a busy host out of the rollup', async () => {
     instancesHook.hosts = fleet();
-    // host49 sorts last, so it is only drawn because it is working.
+    // host49 sorts last, so it is only drawn because it is under load. In the
+    // snapshot architecture load is the server's call, not the client Map's.
+    routingEvents.aggregates = {
+      by_instance: { 'h49:h49-i0': 2 },
+      by_host: { h49: 2 },
+      by_model: { 'model-0': 2 },
+      by_endpoint: {},
+      queued: 0,
+      processing: 2,
+      errored: 0,
+    };
     routingEvents.requests = new Map([
       ['r1', liveRequest({ model: 'model-0', host_id: 'h49', instance_id: 'h49-i0' })],
     ]);
@@ -378,5 +439,52 @@ describe('RoutingFlow at fleet scale', () => {
 
     expect(screen.getByText('Loading routing flow...')).toBeInTheDocument();
     expect(screen.queryByTestId('react-flow')).not.toBeInTheDocument();
+  });
+});
+
+describe('RoutingFlow ticker backfill', () => {
+  function spyRecentEvents(items: unknown[]) {
+    vi.spyOn(solarClient, 'getRecentGatewayEvents').mockResolvedValue({
+      from: '2026-08-13T11:00:00Z',
+      to: '2026-08-13T12:00:00Z',
+      types: ['request_error'],
+      items: items as never[],
+    });
+  }
+
+  it('backfills recent terminal events after a connected snapshot so the ticker is not empty', async () => {
+    spyRecentEvents([
+      { type: 'request_error', timestamp: '2026-08-13T12:00:00Z', data: { request_id: 'f1', model: 'chat' } },
+    ]);
+    await renderPage();
+    await waitFor(() => expect(nodeIds()).toContain('model:chat'));
+
+    act(() => routingEvents.snapshotListener?.({}));
+
+    await waitFor(() => expect(solarClient.getRecentGatewayEvents).toHaveBeenCalled());
+    expect(within(screen.getByTestId('request-ticker')).getAllByText('chat', { exact: false }).length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  it('backfills terminal history from the fallback snapshot while the socket is down', async () => {
+    spyGetRoutingState(
+      [endpoint('e1', 'prod')],
+      [{ request_id: 'live', model: 'chat', host_id: 'h1', instance_id: 'i1', status: 'processing' }],
+    );
+    spyRecentEvents([
+      { type: 'request_error', timestamp: '2026-08-13T12:00:00Z', data: { request_id: 'f1', model: 'chat' } },
+    ]);
+    setConnected(false);
+    vi.useFakeTimers();
+    await renderPage();
+    await act(async () => void vi.advanceTimersByTime(10000));
+    await act(() => Promise.resolve());
+    vi.useRealTimers();
+
+    expect(solarClient.getRoutingState).toHaveBeenCalled();
+    await waitFor(() => expect(solarClient.getRecentGatewayEvents).toHaveBeenCalled());
+    const ticker = screen.getByTestId('request-ticker');
+    expect(within(ticker).getAllByText('chat', { exact: false }).length).toBeGreaterThan(0);
   });
 });

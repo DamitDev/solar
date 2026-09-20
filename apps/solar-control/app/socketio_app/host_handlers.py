@@ -31,7 +31,7 @@ from app.models.socketio import (
     LogPayload,
     WSRegistration,
 )
-from app.redis_state import host_store
+from app.redis_state import host_store, instance_states_store
 from app.redis_state.connection import redis_client
 from app.redis_state.hosts import PULLS_MAP
 from app.services.host_status import build_host_status_payload
@@ -350,6 +350,9 @@ async def host_instance_state(sid: str, data: dict[str, Any]):
         timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
         data=data.get("data", data),
     )
+    await instance_states_store.set(
+        host_id, payload.instance_id or "", payload.model_dump()
+    )
     await sio.emit("instance_state", payload.model_dump(), namespace="/webui")
 
 
@@ -429,6 +432,10 @@ async def host_instance_state_batch(sid: str, data: dict[str, Any]):
         for entry in entries
     ]
     await asyncio.gather(
+        *[
+            instance_states_store.set(p["host_id"], p.get("instance_id") or "", p)
+            for p in payloads
+        ],
         *[sio.emit("instance_state", p, namespace="/webui") for p in payloads],
         return_exceptions=True,
     )
