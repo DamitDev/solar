@@ -142,6 +142,52 @@ describe('useEventStream snapshot consumer', () => {
     expect(result.current.endpoints).toEqual([{ id: 'ep2', name: 'Other' }]);
     expect(result.current.requests.get('req-running')).toBeUndefined();
   });
+
+  it('resumes deltas when connect fires after the snapshot was applied', () => {
+    const { result } = renderHook(() => useEventStream());
+    act(() => {
+      triggerConnect();
+    });
+    act(() => {
+      emit('routing_snapshot', snapshotPayload());
+    });
+    // The server pushes the snapshot during its own connect handling, so the
+    // client's `connect` event can fire afterwards. Re-gating there would
+    // drop every delta for the rest of the session.
+    act(() => {
+      triggerConnect();
+    });
+    act(() => {
+      emit('request_start', { request_id: 'live', timestamp: new Date().toISOString() });
+    });
+    expect(result.current.requests.get('live')?.status).toBe('pending');
+  });
+
+  it('re-gates deltas on disconnect until the next snapshot lands', () => {
+    const { result } = renderHook(() => useEventStream());
+    act(() => {
+      triggerConnect();
+    });
+    act(() => {
+      emit('routing_snapshot', snapshotPayload());
+    });
+    act(() => {
+      emit('disconnect', 'transport close');
+    });
+    // Stale base after the drop: deltas must not apply onto it.
+    act(() => {
+      emit('request_start', { request_id: 'stale', timestamp: new Date().toISOString() });
+    });
+    expect(result.current.requests.get('stale')).toBeUndefined();
+    // The fresh snapshot on the reconnected session disarms the gate.
+    act(() => {
+      emit('routing_snapshot', snapshotPayload());
+    });
+    act(() => {
+      emit('request_start', { request_id: 'fresh', timestamp: new Date().toISOString() });
+    });
+    expect(result.current.requests.get('fresh')?.status).toBe('pending');
+  });
 });
 
 describe('useEventStream handler registry', () => {
