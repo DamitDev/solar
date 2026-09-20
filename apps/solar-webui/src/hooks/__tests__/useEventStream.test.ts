@@ -63,7 +63,7 @@ describe('useEventStream snapshot consumer', () => {
     vi.clearAllMocks();
   });
 
-  it('resets the routing maps on connect and gates deltas until the snapshot lands', () => {
+  it('gates deltas until the snapshot lands', () => {
     const { result } = renderHook(() => useEventStream());
     // Deltas after connect but before snapshot must be dropped.
     act(() => {
@@ -113,6 +113,34 @@ describe('useEventStream snapshot consumer', () => {
     });
     expect(result.current.requests.get('fresh')?.status).toBe('processing');
     expect(result.current.requests.get('fresh')?.host_id).toBe('h2');
+  });
+
+  it('does not wipe applied snapshot state when connect fires again', () => {
+    const { result } = renderHook(() => useEventStream());
+    act(() => {
+      triggerConnect();
+    });
+    act(() => {
+      emit('routing_snapshot', snapshotPayload());
+    });
+    expect(result.current.endpoints).toEqual([{ id: 'ep1', name: 'Default' }]);
+
+    // The server pushes the snapshot during its own connect handling, so the
+    // client's `connect` event can fire afterwards (first load, reconnects).
+    // It must not wipe the applied state — the next snapshot wholesale-
+    // replaces it instead.
+    act(() => {
+      triggerConnect();
+    });
+    expect(result.current.endpoints).toEqual([{ id: 'ep1', name: 'Default' }]);
+    expect(result.current.requests.get('req-running')).toBeDefined();
+
+    // A subsequent snapshot wholesale-replaces the state.
+    act(() => {
+      emit('routing_snapshot', snapshotPayload({ endpoints: [{ id: 'ep2', name: 'Other' }], active_requests: [] }));
+    });
+    expect(result.current.endpoints).toEqual([{ id: 'ep2', name: 'Other' }]);
+    expect(result.current.requests.get('req-running')).toBeUndefined();
   });
 });
 
