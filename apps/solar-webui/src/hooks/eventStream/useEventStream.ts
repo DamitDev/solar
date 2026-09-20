@@ -223,8 +223,11 @@ export function useEventStream(handlers: EventHandlers = {}) {
   const gatewayFilterRef = useRef(gatewayFilter);
   // While true, request_*/instance_state deltas are gated until the
   // authoritative routing_snapshot arrives (a delta that races the connect can
-  // otherwise land on a stale base and be lost or double-applied).
-  const awaitingSnapshotRef = useRef(false);
+  // otherwise land on a stale base and be lost or double-applied). Armed until
+  // the first snapshot lands and re-armed on disconnect; the snapshot itself
+  // disarms it. `connect` must not touch it — the server can deliver the
+  // snapshot before this client's connect event fires.
+  const awaitingSnapshotRef = useRef(true);
   // Consumers that react to a freshly-applied authoritative snapshot (e.g. the
   // Routing page backs the ticker with recent terminal events after one lands).
   const snapshotListenersRef = useRef<Set<(snapshot: RoutingState) => void>>(new Set());
@@ -390,16 +393,18 @@ export function useEventStream(handlers: EventHandlers = {}) {
       webuiSocket.on('connect', () => {
         console.log('EventStream: Connected');
         setIsConnected(true);
-        // Gate deltas until the authoritative snapshot lands. No state wipe
-        // here: the snapshot wholesale-replaces requests, instance states,
-        // endpoints, and aggregates — and the server can deliver it before
-        // this `connect` event fires, so a wipe racing it would destroy it.
-        awaitingSnapshotRef.current = true;
+        // No wipe or re-gating here: the server can deliver the snapshot
+        // before this `connect` event fires, and the snapshot
+        // wholesale-replaces requests, instance states, endpoints, and
+        // aggregates itself.
       });
 
       webuiSocket.on('disconnect', (reason) => {
         console.log('EventStream: Disconnected', reason);
         setIsConnected(false);
+        // From here until the fresh snapshot lands on the next connection the
+        // local state is a stale base — gate the deltas again.
+        awaitingSnapshotRef.current = true;
       });
 
       webuiSocket.on('connect_error', (err) => {
