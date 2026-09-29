@@ -19,6 +19,16 @@ updates:
       deps:
         patterns:
           - "*"
+    # sqlalchemy 2.1 (2026-09-28) changed the default driver for unqualified
+    # postgresql:// URLs from psycopg2 to psycopg (v3); the repo only ships
+    # psycopg2-binary, so sync engines fail with "No module named 'psycopg'".
+    # Both uv workspace members pin sqlalchemy EXACTLY, so a partial bump also
+    # breaks `uv sync` workspace resolution for every sibling. The psycopg 3
+    # migration (add psycopg[binary], verify sync + alembic paths) is deliberate
+    # manual work, not a dependabot merge.
+    ignore:
+      - dependency-name: "sqlalchemy"
+        update-types: ["version-update:semver-major"]
 
   # data-repository (uv workspace member, Docker: requirements.txt)
   - package-ecosystem: "pip"
@@ -39,6 +49,12 @@ updates:
       deps:
         patterns:
           - "*"
+    # Same sqlalchemy fence as solar-control above: exact-pin siblings must
+    # move together, and the psycopg 3 driver migration is deliberate manual
+    # work (see the comment on the solar-control block).
+    ignore:
+      - dependency-name: "sqlalchemy"
+        update-types: ["version-update:semver-major"]
 
   # solar-host (standalone uv project, PyPI package)
   - package-ecosystem: "pip"
