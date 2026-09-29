@@ -1289,6 +1289,7 @@ class OpenAIGateway:
 
         event_type = event_data.get("type", "unknown")
         data = dict(event_data.get("data", {}))
+
         request_id = data.get("request_id")
         if request_id:
             try:
@@ -1309,7 +1310,6 @@ class OpenAIGateway:
             logger.error("Logging error: %s", e)
 
         try:
-            data = dict(event_data.get("data", {}))
             if endpoint_id is not None:
                 data["endpoint_id"] = endpoint_id
             await broadcast_to_webui(event_type, data)

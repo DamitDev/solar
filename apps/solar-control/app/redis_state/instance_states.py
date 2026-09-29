@@ -1,9 +1,8 @@
 """Per-instance runtime state stored in Redis.
 
-Persists the latest runtime state each host reports per ``host:instance`` at
-the relay choke points so instance load bars do not freeze when the WebUI
-reconnects after sleeping or a socket drop. Entries carry a TTL so a host
-that stops reporting expires its recorded state instead of going stale.
+Persists the latest runtime state each host reports per ``host:instance``.
+Entries carry a TTL so a host that stops reporting expires its recorded state
+instead of going stale.
 """
 
 import json
