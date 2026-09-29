@@ -52,8 +52,7 @@ const nodeTypes = {
 const canvasWidth = (state: ReactFlowState) => state.width;
 const canvasHeight = (state: ReactFlowState) => state.height;
 
-/** Fresh empty aggregates so a render can never alias a shared, mutable one. */
-function emptyAggregates(): RoutingStateAggregates {
+function createEmptyAggregates(): RoutingStateAggregates {
   return {
     by_instance: {},
     by_host: {},
@@ -161,7 +160,7 @@ function RoutingFlowCanvas() {
     () => (isConnected ? wsAggregates : (fallback?.aggregates ?? null)),
     [isConnected, wsAggregates, fallback],
   );
-  const graphAggregates = useMemo(() => aggregates ?? emptyAggregates(), [aggregates]);
+  const graphAggregates = useMemo(() => aggregates ?? createEmptyAggregates(), [aggregates]);
 
   const fallbackStates = useMemo(() => snapshotInstanceStates(fallback), [fallback]);
 
