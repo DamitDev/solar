@@ -19,7 +19,7 @@ import aiohttp
 
 from app.config import settings
 from app.database.hosts import host_db
-from app.models import HostStatus, RegistryEntry
+from app.models import HostStatus, RegistryEntry, WSMessageType
 from app.models.virtual_model import VirtualModelContract
 from app.redis_state import health_store, host_store, registry_store, routing_store
 from app.services.model_access import filter_aliases_for_patterns
@@ -1323,7 +1323,7 @@ class OpenAIGateway:
         request_id = data.get("request_id")
         if not request_id:
             return
-        if event_type == "request_start":
+        if event_type == WSMessageType.REQUEST_START:
             await routing_store.create_request(
                 request_id,
                 model=data.get("model", ""),
@@ -1331,7 +1331,10 @@ class OpenAIGateway:
                 client_ip=data.get("client_ip", ""),
                 timestamp=data.get("timestamp", ""),
             )
-        elif event_type in ("request_routed", "request_reroute"):
+        elif event_type in (
+            WSMessageType.REQUEST_ROUTED,
+            WSMessageType.REQUEST_REROUTE,
+        ):
             await routing_store.update_request(
                 request_id,
                 host_id=data.get("host_id"),
@@ -1340,7 +1343,10 @@ class OpenAIGateway:
                 resolved_model=data.get("resolved_model"),
                 attempt=data.get("attempt"),
             )
-        elif event_type in ("request_success", "request_error"):
+        elif event_type in (
+            WSMessageType.REQUEST_SUCCESS,
+            WSMessageType.REQUEST_ERROR,
+        ):
             await routing_store.delete_request(request_id)
 
     def _ts(self) -> str:
@@ -1367,7 +1373,7 @@ class OpenAIGateway:
         }
         base_data.update(self._clamp_cached_tokens(usage_fields))
         await self._broadcast_routing_event(
-            {"type": "request_success", "data": base_data},
+            {"type": WSMessageType.REQUEST_SUCCESS, "data": base_data},
             endpoint_id=endpoint_id,
             api_key_id=api_key_id,
             api_key_name=api_key_name,
@@ -1398,7 +1404,7 @@ class OpenAIGateway:
         if client_ip:
             data["client_ip"] = client_ip
         await self._broadcast_routing_event(
-            {"type": "request_error", "data": data},
+            {"type": WSMessageType.REQUEST_ERROR, "data": data},
             endpoint_id=endpoint_id,
             api_key_id=api_key_id,
             api_key_name=api_key_name,
@@ -1414,7 +1420,7 @@ class OpenAIGateway:
     ) -> None:
         await self._broadcast_routing_event(
             {
-                "type": "request_reroute",
+                "type": WSMessageType.REQUEST_REROUTE,
                 "data": {
                     "request_id": request_id,
                     "model": model,
@@ -1531,7 +1537,7 @@ class OpenAIGateway:
 
         await self._broadcast_routing_event(
             {
-                "type": "request_start",
+                "type": WSMessageType.REQUEST_START,
                 "data": {
                     "request_id": request_id,
                     "model": model,
@@ -1629,7 +1635,7 @@ class OpenAIGateway:
                     try:
                         await self._broadcast_routing_event(
                             {
-                                "type": "request_routed",
+                                "type": WSMessageType.REQUEST_ROUTED,
                                 "data": {
                                     "request_id": request_id,
                                     "model": model,
@@ -1792,7 +1798,7 @@ class OpenAIGateway:
 
         await self._broadcast_routing_event(
             {
-                "type": "request_start",
+                "type": WSMessageType.REQUEST_START,
                 "data": {
                     "request_id": request_id,
                     "model": model,
@@ -1850,7 +1856,7 @@ class OpenAIGateway:
                 try:
                     await self._broadcast_routing_event(
                         {
-                            "type": "request_routed",
+                            "type": WSMessageType.REQUEST_ROUTED,
                             "data": {
                                 "request_id": request_id,
                                 "model": model,
