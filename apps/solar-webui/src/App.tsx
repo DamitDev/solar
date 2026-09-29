@@ -11,7 +11,7 @@ import { StoragePage } from './components/StoragePage';
 import { ArtifactUpload } from './components/ArtifactUpload';
 import { Navigation } from './components/Navigation';
 import { ResourcesPage } from './components/ResourcesPage';
-import { RoutingEventsProvider } from './context/RoutingEventsContext';
+import { RoutingEventsProvider } from './context/RoutingEventsProvider';
 
 function Layout() {
   return (

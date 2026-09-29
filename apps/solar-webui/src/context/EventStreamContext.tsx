@@ -5,7 +5,7 @@
  * ensuring a single WebSocket connection is shared across all components.
  */
 
-import { createContext, useContext, ReactNode } from 'react';
+import { createContext, useContext } from 'react';
 import {
   useEventStream,
   HostStatusData,
@@ -56,18 +56,7 @@ interface EventStreamContextValue {
   registerRoutingSnapshotHandler: (listener: (snapshot: RoutingState) => void) => () => void;
 }
 
-const EventStreamContext = createContext<EventStreamContextValue | null>(null);
-
-interface EventStreamProviderProps {
-  children: ReactNode;
-  handlers?: EventHandlers;
-}
-
-export function EventStreamProvider({ children, handlers }: EventStreamProviderProps) {
-  const eventStream = useEventStream(handlers);
-
-  return <EventStreamContext.Provider value={eventStream}>{children}</EventStreamContext.Provider>;
-}
+export const EventStreamContext = createContext<EventStreamContextValue | null>(null);
 
 export function useEventStreamContext(): EventStreamContextValue {
   const context = useContext(EventStreamContext);
