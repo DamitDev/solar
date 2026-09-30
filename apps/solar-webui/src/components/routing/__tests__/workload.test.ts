@@ -384,6 +384,13 @@ describe('phaseLabel', () => {
     expect(phaseLabel({ ...base, state })).toBe('64 tok/s');
   });
 
+  it('does not report a dead throughput for an idle instance', () => {
+    // Hosts keep the last engine stats window's decode_tps in the state they
+    // report when the queue drains; the label must show the phase, not tok/s.
+    const state = { busy: false, active_slots: 0, phase: 'idle', decode_tps: 457.23 } as InstanceStateData;
+    expect(phaseLabel({ ...base, state })).toBe('idle');
+  });
+
   it('falls back to the raw phase, then to busy', () => {
     expect(phaseLabel({ ...base, state: { busy: true, active_slots: 1, phase: 'loading' } as InstanceStateData })).toBe(
       'loading',

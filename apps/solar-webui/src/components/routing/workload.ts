@@ -250,7 +250,12 @@ export function phaseLabel(cell: InstanceCell): string | null {
   if (state.phase === 'prefill' && state.prefill_progress != null) {
     return `prefill ${Math.round(state.prefill_progress * 100)}%`;
   }
-  if (state.decode_tps != null) return `${state.decode_tps.toFixed(0)} tok/s`;
+  // decode_tps is a live measurement, meaningful only while the instance is
+  // decoding. Hosts keep the last value in the state they report after the
+  // queue drains (the engine's final stats window), and the routing snapshot
+  // serves that state verbatim on (re)connect -- so an idle instance must
+  // fall through to its phase instead of showing a dead throughput number.
+  if (state.busy && state.decode_tps != null) return `${state.decode_tps.toFixed(0)} tok/s`;
   if (state.phase) return state.phase;
   return state.busy ? 'busy' : null;
 }

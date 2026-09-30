@@ -240,7 +240,9 @@ function hostPhase(data: HostNodeData): string | null {
   if (state.phase === 'prefill' && state.prefill_progress != null) {
     return `prefill ${Math.round(state.prefill_progress * 100)}%`;
   }
-  if (state.decode_tps != null) return `${state.decode_tps.toFixed(0)} tok/s`;
+  // Only a busy instance's throughput is live; hosts keep the last decode_tps
+  // in the state they report after the queue drains (see phaseLabel).
+  if (state.busy && state.decode_tps != null) return `${state.decode_tps.toFixed(0)} tok/s`;
   if (state.phase) return state.phase;
   return state.busy ? 'busy' : null;
 }
