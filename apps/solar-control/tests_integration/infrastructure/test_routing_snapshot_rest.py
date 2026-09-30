@@ -10,6 +10,8 @@ host rows come from the live stack's Postgres.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 from fixtures.helpers import wait_for
 
@@ -63,7 +65,7 @@ async def test_routing_state_rest_mirrors_seeded_stores(
                 "host_id": "host-a",
                 "host_name": "host A",
                 "instance_id": "inst-1",
-                "timestamp": "2026-09-02T10:00:00+00:00",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "data": {"load": 0.5},
             },
         )
