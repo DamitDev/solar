@@ -28,6 +28,8 @@ import { FlowGraph, ModelNodeData, aliasOfRequest, buildFlowGraph, traceRequest,
 import { Bounds, LayoutResult, atLeast, boundsOf, layoutGraph } from './routing/layout';
 import { EndpointNode, GatewayNode, HostNode, ModelNode, OverflowNode } from './routing/nodes';
 import {
+  INSTANCE_STATE_STALE_MS,
+  isCurrentState,
   snapshotInstanceStates,
   snapshotRequests,
   summarizeFlow,
@@ -164,10 +166,23 @@ function RoutingFlowCanvas() {
 
   const fallbackStates = useMemo(() => snapshotInstanceStates(fallback), [fallback]);
 
+  // Instance states age out client-side (isCurrentState), and when the fleet
+  // is idle no event would otherwise trigger the re-render that drops them --
+  // so re-evaluate on a slow clock instead of waiting for traffic.
+  const [, tickClock] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => tickClock((n) => n + 1), Math.min(INSTANCE_STATE_STALE_MS / 6, 15_000));
+    return () => clearInterval(id);
+  }, []);
+
   const getState = useCallback(
     (hostId: string, instanceId: string): InstanceStateData | null | undefined => {
-      if (isConnected) return getInstanceState(hostId, instanceId);
-      return fallbackStates.get(`${hostId}:${instanceId}`) ?? null;
+      if (isConnected) {
+        const state = getInstanceState(hostId, instanceId);
+        return isCurrentState(state) ? state : null;
+      }
+      const state = fallbackStates.get(`${hostId}:${instanceId}`) ?? null;
+      return isCurrentState(state) ? state : null;
     },
     [isConnected, getInstanceState, fallbackStates],
   );

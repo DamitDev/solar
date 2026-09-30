@@ -21,6 +21,21 @@ import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStr
 /** Statuses that mean a request is still occupying capacity. */
 const ACTIVE_STATUSES: ReadonlySet<RequestState['status']> = new Set(['pending', 'routed', 'processing']);
 
+/**
+ * How long a state the fleet stopped reporting keeps rendering as current.
+ * Hosts push changes only, so a mid-generation state whose drain transition
+ * was lost (control restart, socket drop) never gets corrected by an event;
+ * the routing view must age it out on its own. Generous next to the server's
+ * instance_state_stale_after_s (60 s): the server cut applies when a snapshot
+ * is built, this one ages out states the view already holds.
+ */
+export const INSTANCE_STATE_STALE_MS = 90_000;
+
+export function isCurrentState(state: InstanceStateData | null | undefined, now: number = Date.now()): boolean {
+  if (!state?.received_at) return true;
+  return now - state.received_at <= INSTANCE_STATE_STALE_MS;
+}
+
 export function isActiveRequest(request: RequestState): boolean {
   return ACTIVE_STATUSES.has(request.status) && !request.removing;
 }
@@ -229,8 +244,9 @@ export function snapshotRequests(snapshot: RoutingState | null): Map<string, Req
 /** Maps a server routing snapshot's instance states onto the `host:instance` Map. */
 export function snapshotInstanceStates(snapshot: RoutingState | null): Map<string, InstanceStateData> {
   if (!snapshot) return new Map();
+  const receivedAt = Date.now();
   return (snapshot.instance_states ?? []).reduce((acc, s) => {
-    acc.set(`${s.host_id}:${s.instance_id}`, s.data);
+    acc.set(`${s.host_id}:${s.instance_id}`, { ...s.data, received_at: receivedAt });
     return acc;
   }, new Map<string, InstanceStateData>());
 }

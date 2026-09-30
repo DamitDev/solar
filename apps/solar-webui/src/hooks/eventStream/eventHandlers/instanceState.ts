@@ -32,7 +32,7 @@ export const handleInstanceState: RegisteredHandler = (event, ctx) => {
     const key = `${event.host_id}:${event.instance_id}`;
     ctx.setInstanceStates((prev) => {
       const newMap = new Map(prev);
-      newMap.set(key, event.data);
+      newMap.set(key, { ...event.data, received_at: Date.now() });
       return newMap;
     });
     h.onInstanceState?.(event.host_id, event.instance_id, event.data);
@@ -59,7 +59,7 @@ export const handleRoutingSnapshot: RegisteredHandler = (event, ctx) => {
     }, new Map());
     ctx.setRequests(() => requestMap);
     const states: Map<string, InstanceStateData> = (snap.instance_states ?? []).reduce((acc, s) => {
-      acc.set(`${s.host_id}:${s.instance_id}`, s.data);
+      acc.set(`${s.host_id}:${s.instance_id}`, { ...s.data, received_at: Date.now() });
       return acc;
     }, new Map());
     ctx.setInstanceStates(() => states);

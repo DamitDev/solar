@@ -109,6 +109,13 @@ class Settings(BaseSettings):
     # short enough that the pulls hash does not grow without bound.
     pull_progress_terminal_grace_s: float = 300.0
 
+    # Routing snapshot: how old a reported instance runtime state may be and
+    # still count as current. Hosts refresh busy states on every ~10 s engine
+    # stats tick, so 60 s is six missed ticks; beyond that the state is not
+    # refreshed by a live reporter and the snapshot must not serve it (the
+    # 300 s Redis TTL is only the hard expiry, not a freshness guarantee).
+    instance_state_stale_after_s: float = 60.0
+
     # Cursor proxy (/cursor/v1, S-059)
     # Self-HTTP target: solar-control's own /v1 gateway on the pod port.
     cursor_upstream_base_url: str = "http://127.0.0.1:8015/v1"

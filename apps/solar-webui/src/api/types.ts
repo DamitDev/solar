@@ -482,6 +482,9 @@ export interface InstanceStateData {
   decode_ms_per_token?: number | null;
   checkpoint_index?: number | null;
   checkpoint_total?: number | null;
+  /** Client-side receipt stamp (Date.now()); states the fleet stopped
+   *  reporting are not current and must not render as such. */
+  received_at?: number;
 }
 
 export interface InstanceStateEvent {

@@ -31,13 +31,17 @@ def _host(*, host_id: str = "host-1", name: str = "host-one", **kw) -> Host:
 
 
 def _istate_entry(
-    *, host_id: str = "host-1", instance_id: str = "inst-1", data: dict | None = None
+    *,
+    host_id: str = "host-1",
+    instance_id: str = "inst-1",
+    data: dict | None = None,
+    timestamp: str | None = None,
 ) -> dict:
     return {
         "host_id": host_id,
         "host_name": "host-one",
         "instance_id": instance_id,
-        "timestamp": "2026-09-02T10:00:00+00:00",
+        "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
         "data": data or {"load": 0.6},
     }
 
@@ -127,6 +131,32 @@ async def test_instance_states_carry_data_and_timestamp():
     assert state.host_id == "host-1"
     assert state.instance_id == "inst-1"
     assert state.data["load"] == 0.6
+
+
+@_cm
+async def test_stale_instance_states_are_not_served():
+    """A state older than instance_state_stale_after_s is not current.
+
+    Hosts push changes only; when a drain transition is lost the store would
+    otherwise serve a mid-generation state as current until the TTL expires.
+    """
+    stale = _istate_entry(
+        instance_id="inst-stale",
+        timestamp="2026-09-02T10:00:00+00:00",
+        data={"busy": True, "phase": "generating", "decode_tps": 457.23},
+    )
+    fresh = _istate_entry(instance_id="inst-fresh")
+    entries = [stale, fresh]
+    overrides = {
+        "app.services.routing_snapshot_builder.instance_states_store.get_all": AsyncMock(
+            return_value=entries
+        )
+    }
+    with _patched(**overrides):
+        snap = await build_routing_snapshot()
+
+    served = {e.instance_id for e in snap.instance_states}
+    assert served == {"inst-fresh"}
 
 
 @_cm

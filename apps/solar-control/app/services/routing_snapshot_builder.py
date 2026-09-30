@@ -15,6 +15,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from app.config import settings
 from app.database.endpoints import endpoint_db
 from app.database.hosts import host_db
 from app.models.host import Host
@@ -75,10 +76,35 @@ async def _build_hosts() -> list[RoutingHost]:
     return built
 
 
+def _is_current(e: dict[str, Any], now: datetime) -> bool:
+    """Whether a store entry was reported recently enough to count as current.
+
+    Hosts push state changes only, so a mid-generation state whose drain
+    transition was lost (control replica restart, socket drop) would otherwise
+    be served as current until the Redis TTL expires. A live reporter refreshes
+    busy states every ~10 s; beyond the freshness window the state is not
+    refreshed by anyone and must not be served.
+    """
+    raw = e.get("timestamp")
+    if not raw:
+        return True
+    try:
+        reported = datetime.fromisoformat(raw)
+    except (ValueError, TypeError):
+        return True
+    if reported.tzinfo is None:
+        reported = reported.replace(tzinfo=timezone.utc)
+    age = (now - reported).total_seconds()
+    return age <= settings.instance_state_stale_after_s
+
+
 async def _build_instance_states() -> list[InstanceStateEntry]:
     """Compose the latest per-instance runtime state as a list of entries."""
     result: list[InstanceStateEntry] = []
+    now = datetime.now(timezone.utc)
     for e in await instance_states_store.get_all():
+        if not _is_current(e, now):
+            continue
         result.append(
             InstanceStateEntry(
                 host_id=e.get("host_id", ""),

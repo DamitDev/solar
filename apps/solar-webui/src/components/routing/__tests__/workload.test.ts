@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
-  InstanceCell,
   buildCells,
+  INSTANCE_STATE_STALE_MS,
+  isCurrentState,
   isActiveRequest,
   loadFraction,
   phaseLabel,
   summarizeFlow,
   terminalRequests,
   tickerRequests,
+  type InstanceCell,
 } from '../workload';
 import { GatewayEventDTO, HostWithInstances, Instance, RoutingStateAggregates } from '@/api/types';
 import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
@@ -356,6 +358,21 @@ describe('loadFraction', () => {
   it('takes whichever of slots or in-flight is higher', () => {
     const slots = { busy: true, active_slots: 4 } as InstanceStateData;
     expect(loadFraction(cell({ inFlight: 1, state: slots }))).toBe(1);
+  });
+});
+
+describe('isCurrentState', () => {
+  it('ages out states the fleet stopped reporting', () => {
+    const now = Date.now();
+    expect(isCurrentState({ busy: true, active_slots: 1, received_at: now - 1000 }, now)).toBe(true);
+    expect(
+      isCurrentState({ busy: true, active_slots: 1, received_at: now - INSTANCE_STATE_STALE_MS - 1000 }, now),
+    ).toBe(false);
+  });
+
+  it('trusts states without a receipt stamp (snapshot-seeded)', () => {
+    expect(isCurrentState({ busy: true, active_slots: 1 })).toBe(true);
+    expect(isCurrentState(null)).toBe(true);
   });
 });
 
