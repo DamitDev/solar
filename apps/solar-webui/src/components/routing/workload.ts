@@ -6,11 +6,35 @@
  * it both untestable and prone to overlap.
  */
 
-import { HostStatus, HostWithInstances, Instance, InstanceStatus, getModelCategory } from '@/api/types';
-import { InstanceStateData, RequestState } from '@/hooks/useEventStream';
+import {
+  HostStatus,
+  HostWithInstances,
+  Instance,
+  InstanceStatus,
+  GatewayEventDTO,
+  getModelCategory,
+  RoutingState,
+  RoutingStateAggregates,
+} from '@/api/types';
+import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
 
 /** Statuses that mean a request is still occupying capacity. */
 const ACTIVE_STATUSES: ReadonlySet<RequestState['status']> = new Set(['pending', 'routed', 'processing']);
+
+/**
+ * How long a state the fleet stopped reporting keeps rendering as current.
+ * Hosts push changes only, so a mid-generation state whose drain transition
+ * was lost (control restart, socket drop) never gets corrected by an event;
+ * the routing view must age it out on its own. Generous next to the server's
+ * instance_state_stale_after_s (60 s): the server cut applies when a snapshot
+ * is built, this one ages out states the view already holds.
+ */
+export const INSTANCE_STATE_STALE_MS = 90_000;
+
+export function isCurrentState(state: InstanceStateData | null | undefined, now: number = Date.now()): boolean {
+  if (!state?.received_at) return true;
+  return now - state.received_at <= INSTANCE_STATE_STALE_MS;
+}
 
 export function isActiveRequest(request: RequestState): boolean {
   return ACTIVE_STATUSES.has(request.status) && !request.removing;
@@ -41,25 +65,16 @@ export function modelOf(instance: Instance): string {
   return config?.model || config?.model_id || '';
 }
 
-/** How many unfinished requests each instance is currently holding. */
-export function countInFlightByInstance(requests: Iterable<RequestState>): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const request of requests) {
-    if (!isActiveRequest(request) || !request.instance_id) continue;
-    const key = cellKey(request.host_id ?? '', request.instance_id);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return counts;
-}
-
 export function cellKey(hostId: string, instanceId: string): string {
   return `${hostId}:${instanceId}`;
 }
 
 interface BuildOptions {
   hosts: HostWithInstances[];
-  requests: Iterable<RequestState>;
   getInstanceState: (hostId: string, instanceId: string) => InstanceStateData | null | undefined;
+  /** Server-computed "host:instance" -> in-flight counts, authoritative for the
+   * cell load bars. */
+  aggregates: RoutingStateAggregates;
   /** Substring match over instance alias, model, and host name. */
   search?: string;
   /** Drop instances that are not running. */
@@ -75,12 +90,12 @@ export const collator = new Intl.Collator(undefined, { numeric: true, sensitivit
  */
 export function buildCells({
   hosts,
-  requests,
   getInstanceState,
+  aggregates,
   search = '',
   runningOnly = false,
 }: BuildOptions): InstanceCell[] {
-  const inFlight = countInFlightByInstance(requests);
+  const inFlight = new Map(Object.entries(aggregates.by_instance));
   const terms = search.toLowerCase().split(/\s+/).filter(Boolean);
   const cells: InstanceCell[] = [];
 
@@ -128,19 +143,10 @@ export interface FlowTotals {
 /** The always-same-size header numbers, independent of fleet size. */
 export function summarizeFlow(
   hosts: HostWithInstances[],
-  requests: Iterable<RequestState>,
   endpointCount: number,
+  aggregates: RoutingStateAggregates,
 ): FlowTotals {
-  let pending = 0;
-  let processing = 0;
-  let errored = 0;
-  for (const request of requests) {
-    if (request.removing) continue;
-    if (request.status === 'pending') pending += 1;
-    else if (request.status === 'processing' || request.status === 'routed') processing += 1;
-    else if (request.status === 'error') errored += 1;
-  }
-
+  const { queued, processing, errored } = aggregates;
   let instancesRunning = 0;
   let instancesTotal = 0;
   for (const host of hosts) {
@@ -152,7 +158,7 @@ export function summarizeFlow(
 
   return {
     endpoints: endpointCount,
-    pending,
+    pending: queued,
     processing,
     errored,
     hostsOnline: hosts.filter((h) => h.status === 'online').length,
@@ -164,13 +170,85 @@ export function summarizeFlow(
 
 /**
  * Newest first, capped: under load the request map turns over faster than
- * anyone can read, so an unbounded list is just a scroll bar.
+ * anyone can read, so an unbounded list is just a scroll bar. The trailing
+ * terminal-history entries (from `terminalRequests`) are passed in the same
+ * iterable the caller builds, so the finished-and-failed rows show next to the
+ * snapshot's live active requests.
  */
 export function tickerRequests(requests: Iterable<RequestState>, limit = 40): RequestState[] {
   return [...requests]
     .filter((r) => isActiveRequest(r) || r.status === 'error')
     .sort((a, b) => (b.timestamp ?? '').localeCompare(a.timestamp ?? ''))
     .slice(0, limit);
+}
+
+/**
+ * Maps recent gateway terminal events onto the ticker's request shape.
+ *
+ * The authoritative snapshot only carries in-flight requests, so right after a
+ * (re)connect the ticker would be blank until the first new event flows. Recent
+ * `request_error` events backfill that terminal history so recent failures show
+ * immediately. Only terminal error events are kept; active work comes from the
+ * snapshot's active-request aggregates via `tickerRequests`.
+ */
+export function terminalRequests(events: GatewayEventDTO[], limit = 40): RequestState[] {
+  const terminal: RequestState[] = [];
+  for (const event of events) {
+    if (event.type !== 'request_error') continue;
+    const data = (event.data ?? {}) as Record<string, unknown>;
+    const timestamp = (typeof data.timestamp === 'string' ? data.timestamp : event.timestamp) ?? '';
+    const requestId = typeof data.request_id === 'string' ? data.request_id : undefined;
+    if (!requestId) continue;
+    terminal.push({
+      request_id: requestId,
+      model: typeof data.model === 'string' ? data.model : undefined,
+      resolved_model: typeof data.resolved_model === 'string' ? data.resolved_model : undefined,
+      host_id: typeof data.host_id === 'string' ? data.host_id : undefined,
+      host_name: typeof data.host_name === 'string' ? data.host_name : undefined,
+      instance_id: typeof data.instance_id === 'string' ? data.instance_id : undefined,
+      error_message: typeof data.error_message === 'string' ? data.error_message : undefined,
+      duration: typeof data.duration === 'number' ? data.duration : undefined,
+      status: 'error',
+      timestamp,
+    });
+    if (terminal.length >= limit) break;
+  }
+  return terminal;
+}
+
+/**
+ * Maps a server routing snapshot's active requests onto the client request Map.
+ *
+ * The REST fallback reuses the exact same mapping the WS `routing_snapshot`
+ * handler applies, so a disconnected client sees the same view it
+ * would over a healthy socket. `queued` becomes `pending` (not yet routed);
+ * `processing` is kept as-is.
+ */
+export function snapshotRequests(snapshot: RoutingState | null): Map<string, RequestState> {
+  if (!snapshot) return new Map();
+  return (snapshot.active_requests ?? []).reduce((acc, r) => {
+    acc.set(r.request_id, {
+      request_id: r.request_id,
+      model: r.model ?? undefined,
+      resolved_model: r.resolved_model ?? undefined,
+      host_id: r.host_id ?? undefined,
+      host_name: r.host_name ?? undefined,
+      instance_id: r.instance_id ?? undefined,
+      timestamp: r.timestamp ?? new Date().toISOString(),
+      status: r.status === 'queued' ? 'pending' : 'processing',
+    });
+    return acc;
+  }, new Map<string, RequestState>());
+}
+
+/** Maps a server routing snapshot's instance states onto the `host:instance` Map. */
+export function snapshotInstanceStates(snapshot: RoutingState | null): Map<string, InstanceStateData> {
+  if (!snapshot) return new Map();
+  const receivedAt = Date.now();
+  return (snapshot.instance_states ?? []).reduce((acc, s) => {
+    acc.set(`${s.host_id}:${s.instance_id}`, { ...s.data, received_at: receivedAt });
+    return acc;
+  }, new Map<string, InstanceStateData>());
 }
 
 /** Fraction of the instance's slots in use, for the cell's load bar. */
@@ -188,7 +266,12 @@ export function phaseLabel(cell: InstanceCell): string | null {
   if (state.phase === 'prefill' && state.prefill_progress != null) {
     return `prefill ${Math.round(state.prefill_progress * 100)}%`;
   }
-  if (state.decode_tps != null) return `${state.decode_tps.toFixed(0)} tok/s`;
+  // decode_tps is a live measurement, meaningful only while the instance is
+  // decoding. Hosts keep the last value in the state they report after the
+  // queue drains (the engine's final stats window), and the routing snapshot
+  // serves that state verbatim on (re)connect -- so an idle instance must
+  // fall through to its phase instead of showing a dead throughput number.
+  if (state.busy && state.decode_tps != null) return `${state.decode_tps.toFixed(0)} tok/s`;
   if (state.phase) return state.phase;
   return state.busy ? 'busy' : null;
 }

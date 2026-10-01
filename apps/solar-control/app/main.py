@@ -13,6 +13,10 @@ from fastapi.responses import JSONResponse
 
 from app.auth import auth_middleware
 from app.config import settings
+from app.routes.cursor import router as cursor_router
+from app.routes.management import router as management_router
+from app.routes.openai import router as openai_router
+from app.socketio_app import sio
 
 
 def _get_version() -> str:
@@ -159,10 +163,6 @@ async def _model_not_found_handler(request: Request, exc: HTTPException):
 
 
 # Routes
-from app.routes.cursor import router as cursor_router
-from app.routes.management import router as management_router
-from app.routes.openai import router as openai_router
-
 app.include_router(openai_router)
 app.include_router(cursor_router)
 app.include_router(management_router)
@@ -243,8 +243,6 @@ async def root():
 
 
 # Mount Socket.IO on top of FastAPI
-from app.socketio_app import sio
-
 sio_asgi_app = socketio.ASGIApp(sio, other_asgi_app=app)
 
 if __name__ == "__main__":

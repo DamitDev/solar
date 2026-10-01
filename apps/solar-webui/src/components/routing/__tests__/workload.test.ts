@@ -1,17 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
-  InstanceCell,
   buildCells,
-  cellKey,
-  countInFlightByInstance,
+  INSTANCE_STATE_STALE_MS,
+  isCurrentState,
   isActiveRequest,
   loadFraction,
   phaseLabel,
   summarizeFlow,
+  terminalRequests,
   tickerRequests,
+  type InstanceCell,
 } from '../workload';
-import { HostWithInstances, Instance } from '@/api/types';
-import { InstanceStateData, RequestState } from '@/hooks/useEventStream';
+import { GatewayEventDTO, HostWithInstances, Instance, RoutingStateAggregates } from '@/api/types';
+import { InstanceStateData, RequestState } from '@/hooks/eventStream/useEventStream';
 
 function instance(id: string, alias: string, model = 'qwen3.6:35b', status: Instance['status'] = 'running') {
   return {
@@ -46,6 +47,17 @@ function request(overrides: Partial<RequestState> = {}): RequestState {
 
 const noState = () => null;
 
+const emptyAggregates = (over: Partial<RoutingStateAggregates> = {}): RoutingStateAggregates => ({
+  by_instance: {},
+  by_host: {},
+  by_model: {},
+  by_endpoint: {},
+  queued: 0,
+  processing: 0,
+  errored: 0,
+  ...over,
+});
+
 describe('isActiveRequest', () => {
   it.each([
     ['pending', true],
@@ -62,34 +74,6 @@ describe('isActiveRequest', () => {
   });
 });
 
-describe('countInFlightByInstance', () => {
-  it('counts only unfinished requests, per instance', () => {
-    const counts = countInFlightByInstance([
-      request({ host_id: 'h1', instance_id: 'i1' }),
-      request({ host_id: 'h1', instance_id: 'i1' }),
-      request({ host_id: 'h1', instance_id: 'i2' }),
-      request({ host_id: 'h1', instance_id: 'i1', status: 'success' }),
-    ]);
-
-    expect(counts.get(cellKey('h1', 'i1'))).toBe(2);
-    expect(counts.get(cellKey('h1', 'i2'))).toBe(1);
-  });
-
-  it('keeps same-named instances on different hosts apart', () => {
-    const counts = countInFlightByInstance([
-      request({ host_id: 'h1', instance_id: 'i1' }),
-      request({ host_id: 'h2', instance_id: 'i1' }),
-    ]);
-
-    expect(counts.get(cellKey('h1', 'i1'))).toBe(1);
-    expect(counts.get(cellKey('h2', 'i1'))).toBe(1);
-  });
-
-  it('skips requests that have not been routed yet', () => {
-    expect(countInFlightByInstance([request({ status: 'pending' })]).size).toBe(0);
-  });
-});
-
 describe('buildCells', () => {
   const hosts = [
     host('h2', 'beta', [instance('i3', 'solver-v4:9b', 'solver-v4:9b')]),
@@ -97,7 +81,7 @@ describe('buildCells', () => {
   ];
 
   it('sorts by alias then host, regardless of API order', () => {
-    const cells = buildCells({ hosts, requests: [], getInstanceState: noState });
+    const cells = buildCells({ hosts, getInstanceState: noState, aggregates: emptyAggregates() });
 
     expect(cells.map((c) => [c.alias, c.hostName])).toEqual([
       ['qwen-a', 'alpha'],
@@ -109,18 +93,18 @@ describe('buildCells', () => {
   it('keeps the alias and the underlying model apart', () => {
     const cells = buildCells({
       hosts: [host('h1', 'alpha', [instance('i1', 'fast-chat', 'qwen3.6:35b')])],
-      requests: [],
       getInstanceState: noState,
+      aggregates: emptyAggregates(),
     });
 
     expect(cells[0]).toMatchObject({ alias: 'fast-chat', model: 'qwen3.6:35b' });
   });
 
-  it('attaches in-flight counts to the instance holding the request', () => {
+  it('attaches in-flight counts from the aggregates to the instance', () => {
     const cells = buildCells({
       hosts,
-      requests: [request({ host_id: 'h1', instance_id: 'i1' }), request({ host_id: 'h1', instance_id: 'i1' })],
       getInstanceState: noState,
+      aggregates: emptyAggregates({ by_instance: { 'h1:i1': 2 } }),
     });
 
     expect(cells.find((c) => c.instanceId === 'i1')!.inFlight).toBe(2);
@@ -130,8 +114,8 @@ describe('buildCells', () => {
   it('carries live instance state through', () => {
     const cells = buildCells({
       hosts: [host('h1', 'alpha', [instance('i1', 'a')])],
-      requests: [],
       getInstanceState: () => ({ busy: true, active_slots: 2 }) as InstanceStateData,
+      aggregates: emptyAggregates(),
     });
 
     expect(cells[0].state).toMatchObject({ busy: true, active_slots: 2 });
@@ -140,8 +124,8 @@ describe('buildCells', () => {
   it('can hide everything that is not running', () => {
     const cells = buildCells({
       hosts: [host('h1', 'alpha', [instance('i1', 'a'), instance('i2', 'b', 'm', 'stopped')])],
-      requests: [],
       getInstanceState: noState,
+      aggregates: emptyAggregates(),
       runningOnly: true,
     });
 
@@ -150,7 +134,7 @@ describe('buildCells', () => {
 
   it('searches across alias, model and host name', () => {
     const search = (q: string) =>
-      buildCells({ hosts, requests: [], getInstanceState: noState, search: q }).map((c) => c.alias);
+      buildCells({ hosts, getInstanceState: noState, aggregates: emptyAggregates(), search: q }).map((c) => c.alias);
 
     expect(search('qwen')).toEqual(['qwen-a']);
     expect(search('beta')).toEqual(['solver-v4:9b']);
@@ -158,14 +142,76 @@ describe('buildCells', () => {
   });
 
   it('handles a host reporting no instances', () => {
-    expect(buildCells({ hosts: [host('h1', 'a', [])], requests: [], getInstanceState: noState })).toEqual([]);
+    expect(
+      buildCells({ hosts: [host('h1', 'a', [])], getInstanceState: noState, aggregates: emptyAggregates() }),
+    ).toEqual([]);
   });
 
   it('falls back to the instance id when config carries no name', () => {
     const bare = { id: 'i7', status: 'running', retry_count: 0, created_at: '', config: {} } as unknown as Instance;
-    const cells = buildCells({ hosts: [host('h1', 'alpha', [bare])], requests: [], getInstanceState: noState });
+    const cells = buildCells({
+      hosts: [host('h1', 'alpha', [bare])],
+      getInstanceState: noState,
+      aggregates: emptyAggregates(),
+    });
 
     expect(cells[0].alias).toBe('i7');
+  });
+});
+
+describe('buildCells snapshot aggregates', () => {
+  const hosts = [
+    host('h1', 'alpha', [instance('i1', 'chat', 'qwen3.6:35b'), instance('i2', 'embed', 'iris:110m')]),
+    host('h2', 'beta', [instance('i3', 'chat', 'qwen3.6:35b')]),
+  ];
+  const aggregates: RoutingStateAggregates = {
+    by_instance: { 'h1:i1': 2, 'h1:i2': 0, 'h2:i3': 5 },
+    by_host: { h1: 2, h2: 5 },
+    by_model: { chat: 7, embed: 0 },
+    by_endpoint: {},
+    queued: 1,
+    processing: 6,
+    errored: 0,
+  };
+
+  it('reads per-cell in-flight load from the aggregates, not the request Map', () => {
+    // The request Map is deliberately empty/stale here; the aggregates win.
+    const cells = buildCells({ hosts, getInstanceState: noState, aggregates });
+
+    expect(cells.find((c) => c.instanceId === 'i1')!.inFlight).toBe(2);
+    expect(cells.find((c) => c.instanceId === 'i3')!.inFlight).toBe(5);
+  });
+});
+
+describe('summarizeFlow snapshot aggregates', () => {
+  const hosts = [host('h1', 'alpha', [instance('i1', 'a')], 'online')];
+
+  it('uses the server totals instead of tallying the client Map', () => {
+    const totals = summarizeFlow(hosts, 2, {
+      by_instance: {},
+      by_host: {},
+      by_model: {},
+      by_endpoint: {},
+      queued: 3,
+      processing: 4,
+      errored: 1,
+    });
+
+    expect(totals).toMatchObject({ pending: 3, processing: 4, errored: 1, endpoints: 2 });
+  });
+
+  it('still counts hosts and instances fleet-wide alongside aggregate totals', () => {
+    const totals = summarizeFlow(hosts, 0, {
+      by_instance: {},
+      by_host: {},
+      by_model: {},
+      by_endpoint: {},
+      queued: 0,
+      processing: 0,
+      errored: 0,
+    });
+
+    expect(totals).toMatchObject({ hostsOnline: 1, hostsTotal: 1, instancesRunning: 1, instancesTotal: 1 });
   });
 });
 
@@ -176,23 +222,29 @@ describe('summarizeFlow', () => {
   ];
 
   it('separates pending from processing and errored', () => {
-    const totals = summarizeFlow(
-      hosts,
-      [
-        request({ status: 'pending' }),
-        request({ status: 'processing' }),
-        request({ status: 'routed' }),
-        request({ status: 'error' }),
-        request({ status: 'success' }),
-      ],
-      3,
-    );
+    const totals = summarizeFlow(hosts, 3, {
+      by_instance: {},
+      by_host: {},
+      by_model: {},
+      by_endpoint: {},
+      queued: 1,
+      processing: 2,
+      errored: 1,
+    });
 
     expect(totals).toMatchObject({ pending: 1, processing: 2, errored: 1, endpoints: 3 });
   });
 
   it('counts hosts and instances against their totals', () => {
-    const totals = summarizeFlow(hosts, [], 0);
+    const totals = summarizeFlow(hosts, 0, {
+      by_instance: {},
+      by_host: {},
+      by_model: {},
+      by_endpoint: {},
+      queued: 0,
+      processing: 0,
+      errored: 0,
+    });
 
     expect(totals).toMatchObject({
       hostsOnline: 1,
@@ -200,10 +252,6 @@ describe('summarizeFlow', () => {
       instancesRunning: 2,
       instancesTotal: 3,
     });
-  });
-
-  it('ignores requests that are fading out', () => {
-    expect(summarizeFlow(hosts, [request({ status: 'processing', removing: true })], 0).processing).toBe(0);
   });
 });
 
@@ -225,6 +273,52 @@ describe('tickerRequests', () => {
     );
 
     expect(tickerRequests(many, 10)).toHaveLength(10);
+  });
+});
+
+describe('terminalRequests', () => {
+  const errorEvent = (over: Record<string, unknown>): GatewayEventDTO =>
+    ({
+      type: 'request_error',
+      data: { request_id: 'r1', ...over },
+      timestamp: '2026-08-13T12:00:00Z',
+    }) as GatewayEventDTO;
+
+  it('maps request_error events onto terminal ticker rows', () => {
+    const rows = terminalRequests([
+      errorEvent({ error_message: 'boom', host_id: 'h1', host_name: 'alpha', instance_id: 'i1' }),
+    ]);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      request_id: 'r1',
+      status: 'error',
+      error_message: 'boom',
+      host_id: 'h1',
+      host_name: 'alpha',
+      timestamp: '2026-08-13T12:00:00Z',
+    });
+  });
+
+  it('ignores non-terminal events', () => {
+    const rows = terminalRequests([
+      { type: 'request_reroute', data: { request_id: 'r2' }, timestamp: '2026-08-13T12:00:00Z' },
+    ]);
+
+    expect(rows).toHaveLength(0);
+  });
+
+  it('skips entries without a request id and honors the limit', () => {
+    const rows = terminalRequests(
+      [
+        { type: 'request_error', data: {} } as GatewayEventDTO,
+        errorEvent({ request_id: 'a' }),
+        errorEvent({ request_id: 'b', timestamp: '2026-08-13T11:00:00Z' }),
+      ],
+      1,
+    );
+
+    expect(rows.map((r) => r.request_id)).toEqual(['a']);
   });
 });
 
@@ -267,6 +361,21 @@ describe('loadFraction', () => {
   });
 });
 
+describe('isCurrentState', () => {
+  it('ages out states the fleet stopped reporting', () => {
+    const now = Date.now();
+    expect(isCurrentState({ busy: true, active_slots: 1, received_at: now - 1000 }, now)).toBe(true);
+    expect(
+      isCurrentState({ busy: true, active_slots: 1, received_at: now - INSTANCE_STATE_STALE_MS - 1000 }, now),
+    ).toBe(false);
+  });
+
+  it('trusts states without a receipt stamp (snapshot-seeded)', () => {
+    expect(isCurrentState({ busy: true, active_slots: 1 })).toBe(true);
+    expect(isCurrentState(null)).toBe(true);
+  });
+});
+
 describe('phaseLabel', () => {
   const base: InstanceCell = {
     key: 'h:i',
@@ -290,6 +399,13 @@ describe('phaseLabel', () => {
   it('reports decode as tokens per second', () => {
     const state = { busy: true, active_slots: 1, phase: 'decode', decode_tps: 63.7 } as InstanceStateData;
     expect(phaseLabel({ ...base, state })).toBe('64 tok/s');
+  });
+
+  it('does not report a dead throughput for an idle instance', () => {
+    // Hosts keep the last engine stats window's decode_tps in the state they
+    // report when the queue drains; the label must show the phase, not tok/s.
+    const state = { busy: false, active_slots: 0, phase: 'idle', decode_tps: 457.23 } as InstanceStateData;
+    expect(phaseLabel({ ...base, state })).toBe('idle');
   });
 
   it('falls back to the raw phase, then to busy', () => {

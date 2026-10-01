@@ -18,6 +18,8 @@ from sqlalchemy import Text, and_, select
 from sqlalchemy import func as sa_func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.models import WSMessageType
+
 from .connection import get_session_factory
 from .tables import ApiEndpointRow, GatewayEventRow, GatewayRequestRow
 
@@ -352,7 +354,7 @@ class GatewayLogger:
 
         summary = None
         async with self._lock:
-            if etype == "request_start":
+            if etype == WSMessageType.REQUEST_START:
                 ep = data.get("endpoint")
                 self._inflight[request_id] = RequestInProgress(
                     request_id=request_id,
@@ -372,7 +374,7 @@ class GatewayLogger:
                     created_at=time.monotonic(),
                 )
 
-            elif etype == "request_routed":
+            elif etype == WSMessageType.REQUEST_ROUTED:
                 rip = self._inflight.get(request_id)
                 if not rip:
                     ep = data.get("endpoint")
@@ -397,7 +399,7 @@ class GatewayLogger:
                 rip.instance_url = data.get("instance_url") or rip.instance_url
                 rip.client_ip = data.get("client_ip") or rip.client_ip
 
-            elif etype in ("request_success", "request_error"):
+            elif etype in (WSMessageType.REQUEST_SUCCESS, WSMessageType.REQUEST_ERROR):
                 rip = self._inflight.pop(request_id, None)
                 if not rip:
                     ep = data.get("endpoint")
@@ -414,7 +416,7 @@ class GatewayLogger:
 
                 status = (
                     "success"
-                    if etype == "request_success"
+                    if etype == WSMessageType.REQUEST_SUCCESS
                     else self._classify_error_status(data.get("error_message"))
                 )
                 duration = data.get("duration")
@@ -777,7 +779,7 @@ class GatewayLogger:
             ev_conditions = [
                 E.timestamp >= start,
                 E.timestamp <= end,
-                E.event_type == "request_reroute",
+                E.event_type == WSMessageType.REQUEST_REROUTE,
             ]
             if endpoint_id:
                 ev_conditions.append(E.endpoint_id == endpoint_id)

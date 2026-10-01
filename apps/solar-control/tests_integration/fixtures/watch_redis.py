@@ -11,6 +11,8 @@ import subprocess
 import sys
 import time
 
+import redis
+
 out = sys.argv[1]
 
 port = None
@@ -40,8 +42,6 @@ for _ in range(120):
 if not port:
     print("no redis container found", file=sys.stderr)
     sys.exit(1)
-
-import redis
 
 r = redis.Redis(host="127.0.0.1", port=int(port), socket_timeout=5)
 with open(out, "a") as f:

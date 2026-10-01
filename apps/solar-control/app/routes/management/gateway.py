@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 from app.database.logs import gateway_logger
+from app.models import WSMessageType
 
 router = APIRouter(prefix="/gateway", tags=["gateway"])
 
@@ -142,7 +143,7 @@ async def list_requests(
 async def recent_events(
     from_ts: str | None = Query(None, alias="from"),
     to_ts: str | None = Query(None, alias="to"),
-    types: str = "request_error,request_reroute",
+    types: str = f"{WSMessageType.REQUEST_ERROR},{WSMessageType.REQUEST_REROUTE}",
     endpoint_id: str | None = None,
     limit: int = 1000,
 ) -> dict[str, Any]:

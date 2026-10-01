@@ -18,7 +18,7 @@ from app.gateway import (
     _STREAM_USAGE_ENDPOINTS,
     OpenAIGateway,
 )
-from app.models import Host, HostStatus, RegistryEntry
+from app.models import Host, HostStatus, RegistryEntry, WSMessageType
 from app.models.virtual_model import VirtualModelContract, VirtualModelResponse
 
 ALIAS = "deepseek-v4-flash:284b"
@@ -750,7 +750,7 @@ class TestCachedTokensFlow:
         logger = GatewayLogger()
         summary = await logger.log_event(
             {
-                "type": "request_success",
+                "type": WSMessageType.REQUEST_SUCCESS,
                 "data": {
                     "request_id": "req-cached-1",
                     "prompt_tokens": 341,
