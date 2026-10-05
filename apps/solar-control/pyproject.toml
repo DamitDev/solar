@@ -7,7 +7,7 @@ name = "solar-control"
 version = "0.0.0-dev"
 description = "Stateless coordinator for solar-host instances with multi-tenant OpenAI-compatible API gateway"
 dependencies = [
-    "fastapi==0.141.1",
+    "fastapi==0.142.2",
     "uvicorn[standard]==0.54.0",
     "pydantic==2.13.5",
     "pydantic-settings==2.15.0",
@@ -16,7 +16,7 @@ dependencies = [
     "python-multipart==0.0.32",
     "asyncpg==0.31.0",
     "psycopg2-binary==2.9.13",
-    "sqlalchemy[asyncio]==2.0.54",
+    "sqlalchemy[asyncio]==2.1.2",
     "alembic==1.20.0",
     "python-socketio[asyncio_server]==5.17.0",
     "redis[hiredis]==8.1.0",
@@ -36,7 +36,7 @@ dev = [
     "black>=26.5.1",
     # Pinned: ruff 0.16 changed the default rule set and flags the codebase's
     # existing style (248 errors). Bumping this is a deliberate lint cleanup PR.
-    "ruff==0.16.9",
+    "ruff==0.16.10",
 ]
 
 [tool.setuptools.packages.find]
