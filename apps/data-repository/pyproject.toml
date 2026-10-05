@@ -7,7 +7,7 @@ name = "data-repository"
 version = "0.0.0.dev0"
 description = "API for managing model and dataset registry metadata"
 dependencies = [
-    "fastapi==0.141.1",
+    "fastapi==0.142.2",
     "uvicorn[standard]==0.54.0",
     "pydantic==2.13.5",
     "pydantic-settings==2.15.0",
@@ -15,7 +15,7 @@ dependencies = [
     "sqlalchemy==2.0.54",
     "alembic==1.20.0",
     "psycopg2-binary==2.9.13",
-    "python-dotenv==1.2.3",
+    "python-dotenv==1.2.4",
     "harbor-oci-client==0.1.0",
 ]
 
@@ -24,7 +24,7 @@ dev = [
     "black>=26.5.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
-    "ruff==0.16.9",
+    "ruff==0.16.10",
 ]
 
 [tool.setuptools.packages.find]
