@@ -132,8 +132,9 @@ def test_extra_env_is_passed_through(venv) -> None:
     assert env["SGLANG_DSV4_COMPRESS_STATE_DTYPE"] == "bf16"
 
 
-def test_other_runners_contribute_no_environment(venv, monkeypatch) -> None:
-    """The base hook stays empty so existing backends are untouched."""
+def test_base_hook_carries_no_environment_beyond_the_api_key(venv, monkeypatch) -> None:
+    """The base hook stays empty; the API key (IT Sec #97) rides per backend
+    on top of the base — llamacpp carries LLAMA_API_KEY."""
     from solar_host.backends.llamacpp import LlamaCppRunner
 
     instance = SimpleNamespace(config=None, port=8080, id="inst-1")

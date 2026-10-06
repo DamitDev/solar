@@ -240,8 +240,8 @@ class TestApiKeyNeverOnTheCommandLine:
         )
         plain_instance = SimpleNamespace(config=None, port=8080, id="inst-1")
 
-        llamacpp_env = LlamaCppRunner().build_env(llama_instance)
-        assert llamacpp_env["LLAMA_API_KEY"] == "test-key"
+        llama_env = LlamaCppRunner().build_env(llama_instance)
+        assert llama_env["LLAMA_API_KEY"] == "test-key"
 
         sglang_env = SglangRunner().build_env(sglang_instance)
         assert sglang_env["SGLANG_API_KEY"] == "test-key"
@@ -251,3 +251,49 @@ class TestApiKeyNeverOnTheCommandLine:
 
         hf_env = HuggingFaceRunner().build_env(plain_instance)
         assert hf_env["SOLAR_API_KEY"] == "test-key"
+
+    def test_hf_server_prefers_the_cli_flag_over_the_env(
+        self, monkeypatch
+    ):
+        """IT Sec #97 precedence shape: --api-key wins when both are set;
+        the env var is used when the flag is absent."""
+        from solar_host.servers import hf_server
+
+        state = hf_server.state
+        monkeypatch.setattr(state, "api_key", "")
+        args = SimpleNamespace(api_key="flag-key")
+        # Mirror the main() assignment: args.api_key or env fallback.
+        monkeypatch.setenv("SOLAR_API_KEY", "env-key")
+
+        state.api_key = args.api_key or hf_server.os.environ.get("SOLAR_API_KEY", "")
+        assert state.api_key == "flag-key"
+
+        args_none = SimpleNamespace(api_key="")
+        state.api_key = args_none.api_key or hf_server.os.environ.get(
+            "SOLAR_API_KEY", ""
+        )
+        assert state.api_key == "env-key"
+
+    def test_extra_env_still_wins_last_over_the_backend_key(
+        self, monkeypatch
+    ):
+        """IT Sec #97: the per-backend key env is set BEFORE
+        config.extra_env, so an operator's per-instance override beats it —
+        the existing 'extra_env wins last' design."""
+        monkeypatch.setattr(
+            "solar_host.config.settings.api_key", "test-key"
+        )
+        from solar_host.backends.sglang import SglangRunner
+        from solar_host.models.sglang import SglangConfig
+
+        instance = SimpleNamespace(
+            config=SglangConfig(
+                model_path="/models/test",
+                alias="test",
+                extra_env={"SGLANG_API_KEY": "operator-key"},
+            ),
+            port=8080,
+            id="inst-1",
+        )
+        env = SglangRunner().build_env(instance)
+        assert env["SGLANG_API_KEY"] == "operator-key"

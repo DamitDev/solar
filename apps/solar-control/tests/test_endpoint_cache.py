@@ -20,7 +20,11 @@ from unittest.mock import patch
 
 import pytest
 
-from app.auth import ENDPOINT_CACHE_PREFIX, _resolve_endpoint
+from app.auth import (
+    ENDPOINT_CACHE_PREFIX,
+    _hashed_cache_name,
+    _resolve_endpoint,
+)
 from app.database.api_keys import ApiKey
 from app.database.endpoints import ApiEndpoint
 
@@ -149,6 +153,24 @@ def _expected_hashed_name(raw_key: str) -> str:
     secret = "solar:endpoint-cache:default"
     digest = hmac.new(secret.encode(), raw_key.encode(), hashlib.sha256).hexdigest()
     return f"{ENDPOINT_CACHE_PREFIX}{digest}"
+
+
+@pytest.mark.anyio
+async def test_hashed_name_honors_the_endpoint_cache_secret():
+    """The helper must read ENDPOINT_CACHE_SECRET — changing the setting
+    changes the derived cache name (unset falls back to the constant)."""
+    raw_key = "sk-my-secret-live-key-123456"
+
+    with patch("app.auth.settings") as mock_settings:
+        mock_settings.endpoint_cache_secret = "custom-secret-for-testing"
+        custom = _hashed_cache_name(raw_key)
+
+    with patch("app.auth.settings") as mock_settings_default:
+        mock_settings_default.endpoint_cache_secret = ""
+        default = _hashed_cache_name(raw_key)
+
+    assert custom != default
+    assert custom == f"{ENDPOINT_CACHE_PREFIX}{hmac.new(b'custom-secret-for-testing', raw_key.encode(), hashlib.sha256).hexdigest()}"
 
 
 def _key_row(id_: str, name: str):

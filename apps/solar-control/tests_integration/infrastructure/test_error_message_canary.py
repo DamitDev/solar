@@ -130,7 +130,9 @@ async def test_upstream_error_persists_into_error_message(
         json={"model": MODEL_ALIAS, "messages": [{"role": "user", "content": CANARY}]},
         headers={"X-API-Key": stack.secrets["management"]},
     )
-    assert resp.status_code >= 400, resp.text
+    # The gateway converts the upstream 4xx into an OpenAI-shaped 404 via
+    # _raise_model_not_found (routes/openai.py) after emitting the error.
+    assert resp.status_code == 404, resp.text
 
     await init_redis(stack.db_env["redis"])
     try:
@@ -139,6 +141,13 @@ async def test_upstream_error_persists_into_error_message(
         body = resp.json()
         items = body.get("items", body)
         messages = _error_messages(items)
-        assert messages, "error_message must carry the upstream error"
+        upstream_messages = [m for m in messages if m.startswith("Request failed: ")]
+        assert upstream_messages, "error_message must carry the upstream error"
+        # IT Sec #97 trim: the echoed upstream body is capped at
+        # _MAX_UPSTREAM_ERROR_CHARS (200); the persisted message carries the
+        # status prefix plus at most that many chars.
+        assert all(
+            len(m) <= len("Request failed: 400 - ") + 200 for m in upstream_messages
+        ), f"uncapped upstream error persisted: {upstream_messages[:1]}"
     finally:
         await close_redis()
