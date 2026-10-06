@@ -11,16 +11,16 @@ valid JSON with ISO-8601 timestamps, and that reads deserialize back to a
 working ApiEndpoint.
 """
 
-import json
 import hashlib
 import hmac
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from app.auth import ENDPOINT_CACHE_PREFIX, _hashed_cache_name, _resolve_endpoint
+from app.auth import ENDPOINT_CACHE_PREFIX, _resolve_endpoint
 from app.database.api_keys import ApiKey
 from app.database.endpoints import ApiEndpoint
 

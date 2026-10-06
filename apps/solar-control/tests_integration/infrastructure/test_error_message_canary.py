@@ -17,8 +17,6 @@ authoritative record — the same pattern as the #985/#996 line of work.
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 from fixtures.constants import (
     BACKEND_CLASSIFICATION,
