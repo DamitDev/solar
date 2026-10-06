@@ -28,6 +28,11 @@ from app.services.virtual_model_contract import contract_violation
 
 logger = logging.getLogger(__name__)
 
+# Cap persisted upstream error text (IT Sec #97): the upstream body can
+# carry prompt fragments echoed by the model into gateway_requests and the
+# WebUI broadcast. Matches the retryable path's existing error_text[:200].
+_MAX_UPSTREAM_ERROR_CHARS = 200
+
 
 class VirtualModelUnavailableError(ValueError):
     """A virtual model's targets cannot serve the request (all dead/violating).
@@ -1717,9 +1722,7 @@ class OpenAIGateway:
                             else:
                                 error_text = await response.text()
                                 duration = time.time() - start_time
-                                msg = (
-                                    f"Request failed: {response.status} - {error_text}"
-                                )
+                                msg = f"Request failed: {response.status} - {error_text[:_MAX_UPSTREAM_ERROR_CHARS]}"
                                 await self._emit_error(
                                     request_id,
                                     model,
@@ -1983,7 +1986,7 @@ class OpenAIGateway:
                         else:
                             error_text = await response.text()
                             duration = time.time() - start_time
-                            msg = f"Request failed: {response.status} - {error_text}"
+                            msg = f"Request failed: {response.status} - {error_text[:_MAX_UPSTREAM_ERROR_CHARS]}"
                             await self._emit_error(
                                 request_id,
                                 model,
