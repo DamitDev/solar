@@ -12,12 +12,15 @@ working ApiEndpoint.
 """
 
 import json
+import hashlib
+import hmac
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from app.auth import ENDPOINT_CACHE_PREFIX, _resolve_endpoint
+from app.auth import ENDPOINT_CACHE_PREFIX, _hashed_cache_name, _resolve_endpoint
 from app.database.api_keys import ApiKey
 from app.database.endpoints import ApiEndpoint
 
@@ -75,7 +78,7 @@ async def test_cache_write_is_json_serializable_with_datetime_fields():
 
     # The write must not throw — and must be JSON-serializable.
     assert result is not None
-    stored = fake.stored.get(f"{ENDPOINT_CACHE_PREFIX}sk-cache-probe")
+    stored = fake.stored.get(_expected_hashed_name("sk-cache-probe"))
     assert stored is not None, "cache entry was written"
     payload = json.loads(stored)  # raises if not valid JSON
     assert payload["endpoint"]["name"] == "cache-probe"
@@ -99,7 +102,7 @@ async def test_cache_read_roundtrips_through_endpoint_model():
         updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
     )
     # Pre-populate the cache the same way _resolve_endpoint writes it.
-    fake.stored[f"{ENDPOINT_CACHE_PREFIX}sk-hit"] = json.dumps(
+    fake.stored[_expected_hashed_name("sk-hit")] = json.dumps(
         {
             "endpoint": ep.model_dump(mode="json"),
             "api_key_id": row.id,
@@ -125,7 +128,7 @@ async def test_cache_read_tolerates_pre_attribution_entries():
     with a None name instead of crashing."""
     fake = _FakeRedis()
     ep = _endpoint()
-    fake.stored[f"{ENDPOINT_CACHE_PREFIX}sk-old"] = json.dumps(
+    fake.stored[_expected_hashed_name("sk-old")] = json.dumps(
         {"endpoint": ep.model_dump(mode="json"), "api_key_id": "id-old"}
     )
 
@@ -137,3 +140,108 @@ async def test_cache_read_tolerates_pre_attribution_entries():
     assert got_id == "id-old"
     assert got_name is None
     assert endpoint.name == "cache-probe"
+
+
+# ── IT Sec #97: no raw key material in Redis key names ─────────
+
+
+def _expected_hashed_name(raw_key: str) -> str:
+    secret = "solar:endpoint-cache:default"
+    digest = hmac.new(secret.encode(), raw_key.encode(), hashlib.sha256).hexdigest()
+    return f"{ENDPOINT_CACHE_PREFIX}{digest}"
+
+
+def _key_row(id_: str, name: str):
+    """resolve_by_api_key returns (endpoint, ApiKey) — mock the ApiKey half."""
+    return SimpleNamespace(id=id_, name=name)
+
+
+@pytest.mark.anyio
+async def test_cache_key_name_exposes_no_raw_key_material():
+    """The Redis key name must never contain the raw API key (IT Sec #97)."""
+    fake = _FakeRedis()
+    raw_key = "sk-my-secret-live-key-123456"
+
+    async def _resolve(_key):
+        return _endpoint(), _key_row("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "cache-probe")
+
+    with (
+        patch("app.auth.endpoint_db.resolve_by_api_key", side_effect=_resolve),
+        patch("app.redis_state.connection.redis_client", return_value=fake),
+    ):
+        await _resolve_endpoint(raw_key)
+
+    assert fake.stored, "cache write must have happened"
+    for stored_name in fake.stored:
+        assert stored_name.startswith(ENDPOINT_CACHE_PREFIX)
+        assert raw_key not in stored_name
+
+
+@pytest.mark.anyio
+async def test_cache_write_goes_under_the_hashed_name():
+    """The write lands under the deterministic hashed name, not the raw key."""
+    fake = _FakeRedis()
+    raw_key = "sk-my-secret-live-key-123456"
+
+    async def _resolve(_key):
+        return _endpoint(), _key_row("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "cache-probe")
+
+    with (
+        patch("app.auth.endpoint_db.resolve_by_api_key", side_effect=_resolve),
+        patch("app.redis_state.connection.redis_client", return_value=fake),
+    ):
+        await _resolve_endpoint(raw_key)
+
+    assert fake.stored.get(_expected_hashed_name(raw_key)) is not None
+
+
+@pytest.mark.anyio
+async def test_lookup_by_hashed_name_round_trips():
+    """A second resolve reads the hashed entry back to the same triple."""
+    fake = _FakeRedis()
+    raw_key = "sk-my-secret-live-key-123456"
+    row = _key_row("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "cache-probe")
+
+    async def _resolve(_key):
+        return _endpoint(), row
+
+    with (
+        patch("app.auth.endpoint_db.resolve_by_api_key", side_effect=_resolve),
+        patch("app.redis_state.connection.redis_client", return_value=fake),
+    ):
+        first = await _resolve_endpoint(raw_key)
+        second = await _resolve_endpoint(raw_key)
+
+    endpoint, got_id, got_name = second
+    assert first is not None
+    assert got_id == row.id
+    assert got_name == row.name
+    assert endpoint.name == "cache-probe"
+
+
+@pytest.mark.anyio
+async def test_distinct_keys_map_to_distinct_cache_names():
+    """Two different keys never collide onto one hashed cache entry."""
+    fake = _FakeRedis()
+    raw_a = "sk-key-alpha"
+    raw_b = "sk-key-beta"
+
+    async def _resolve_a(_key):
+        return _endpoint(), _key_row("id-alpha", "alpha")
+
+    async def _resolve_b(_key):
+        return _endpoint(), _key_row("id-beta", "beta")
+
+    with patch("app.redis_state.connection.redis_client", return_value=fake):
+        with patch(
+            "app.auth.endpoint_db.resolve_by_api_key", side_effect=_resolve_a
+        ):
+            await _resolve_endpoint(raw_a)
+        with patch(
+            "app.auth.endpoint_db.resolve_by_api_key", side_effect=_resolve_b
+        ):
+            await _resolve_endpoint(raw_b)
+
+    assert fake.stored.get(_expected_hashed_name(raw_a)) is not None
+    assert fake.stored.get(_expected_hashed_name(raw_b)) is not None
+    assert len(fake.stored) == 2
