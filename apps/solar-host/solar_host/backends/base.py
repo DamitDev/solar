@@ -4,7 +4,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
 
-from solar_host.config import settings
 from solar_host.models.base import InstancePhase, InstanceUsageSnapshot
 
 
