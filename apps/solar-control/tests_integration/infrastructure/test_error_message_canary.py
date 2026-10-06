@@ -88,9 +88,9 @@ async def test_canary_in_model_name_persists_into_error_message(
         body = resp.json()
         items = body.get("items", body)
         messages = _error_messages(items)
-        assert any(canary_model in message for message in messages), (
-            f"canary model name not found in error messages: {messages[:3]}"
-        )
+        assert any(
+            canary_model in message for message in messages
+        ), f"canary model name not found in error messages: {messages[:3]}"
     finally:
         await close_redis()
 

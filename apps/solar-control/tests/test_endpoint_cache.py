@@ -170,7 +170,10 @@ async def test_hashed_name_honors_the_endpoint_cache_secret():
         default = _hashed_cache_name(raw_key)
 
     assert custom != default
-    assert custom == f"{ENDPOINT_CACHE_PREFIX}{hmac.new(b'custom-secret-for-testing', raw_key.encode(), hashlib.sha256).hexdigest()}"
+    assert (
+        custom
+        == f"{ENDPOINT_CACHE_PREFIX}{hmac.new(b'custom-secret-for-testing', raw_key.encode(), hashlib.sha256).hexdigest()}"
+    )
 
 
 def _key_row(id_: str, name: str):
@@ -185,7 +188,9 @@ async def test_cache_key_name_exposes_no_raw_key_material():
     raw_key = "sk-my-secret-live-key-123456"
 
     async def _resolve(_key):
-        return _endpoint(), _key_row("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "cache-probe")
+        return _endpoint(), _key_row(
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "cache-probe"
+        )
 
     with (
         patch("app.auth.endpoint_db.resolve_by_api_key", side_effect=_resolve),
@@ -206,7 +211,9 @@ async def test_cache_write_goes_under_the_hashed_name():
     raw_key = "sk-my-secret-live-key-123456"
 
     async def _resolve(_key):
-        return _endpoint(), _key_row("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "cache-probe")
+        return _endpoint(), _key_row(
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "cache-probe"
+        )
 
     with (
         patch("app.auth.endpoint_db.resolve_by_api_key", side_effect=_resolve),
@@ -255,13 +262,9 @@ async def test_distinct_keys_map_to_distinct_cache_names():
         return _endpoint(), _key_row("id-beta", "beta")
 
     with patch("app.redis_state.connection.redis_client", return_value=fake):
-        with patch(
-            "app.auth.endpoint_db.resolve_by_api_key", side_effect=_resolve_a
-        ):
+        with patch("app.auth.endpoint_db.resolve_by_api_key", side_effect=_resolve_a):
             await _resolve_endpoint(raw_a)
-        with patch(
-            "app.auth.endpoint_db.resolve_by_api_key", side_effect=_resolve_b
-        ):
+        with patch("app.auth.endpoint_db.resolve_by_api_key", side_effect=_resolve_b):
             await _resolve_endpoint(raw_b)
 
     assert fake.stored.get(_expected_hashed_name(raw_a)) is not None

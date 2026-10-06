@@ -187,9 +187,7 @@ class TestApiKeyNeverOnTheCommandLine:
         assert "--api-key" not in command
         assert "test-key" not in command
 
-    def test_huggingface_command_carries_no_api_key_material(
-        self, monkeypatch
-    ):
+    def test_huggingface_command_carries_no_api_key_material(self, monkeypatch):
         from solar_host.backends.huggingface import HuggingFaceRunner
         from solar_host.models.huggingface import HuggingFaceCausalConfig
 
@@ -207,14 +205,10 @@ class TestApiKeyNeverOnTheCommandLine:
         assert "--api-key" not in cmd
         assert "test-key" not in cmd
 
-    def test_env_var_carries_the_host_key_per_backend(
-        self, monkeypatch
-    ):
+    def test_env_var_carries_the_host_key_per_backend(self, monkeypatch):
         """One env name per backend: build_env delivers the host key via the
         environment, mirroring the CUDA_VISIBLE_DEVICES path."""
-        monkeypatch.setattr(
-            "solar_host.config.settings.api_key", "test-key"
-        )
+        monkeypatch.setattr("solar_host.config.settings.api_key", "test-key")
         from solar_host.backends.huggingface import HuggingFaceRunner
         from solar_host.backends.llamacpp import LlamaCppRunner
         from solar_host.backends.sglang import SglangRunner
@@ -252,37 +246,24 @@ class TestApiKeyNeverOnTheCommandLine:
         hf_env = HuggingFaceRunner().build_env(plain_instance)
         assert hf_env["SOLAR_API_KEY"] == "test-key"
 
-    def test_hf_server_prefers_the_cli_flag_over_the_env(
-        self, monkeypatch
-    ):
+    def test_hf_server_prefers_the_cli_flag_over_the_env(self):
         """IT Sec #97 precedence shape: --api-key wins when both are set;
-        the env var is used when the flag is absent."""
-        from solar_host.servers import hf_server
+        the env var is used when the flag is absent.
 
-        state = hf_server.state
-        monkeypatch.setattr(state, "api_key", "")
-        args = SimpleNamespace(api_key="flag-key")
-        # Mirror the main() assignment: args.api_key or env fallback.
-        monkeypatch.setenv("SOLAR_API_KEY", "env-key")
+        The helper is torch-free so this exercises the real code path
+        without pulling the huggingface extra.
+        """
+        from solar_host.servers.api_key import resolve_api_key
 
-        state.api_key = args.api_key or hf_server.os.environ.get("SOLAR_API_KEY", "")
-        assert state.api_key == "flag-key"
+        assert resolve_api_key("flag-key", "env-key") == "flag-key"
+        assert resolve_api_key("", "env-key") == "env-key"
+        assert resolve_api_key("", "") == ""
 
-        args_none = SimpleNamespace(api_key="")
-        state.api_key = args_none.api_key or hf_server.os.environ.get(
-            "SOLAR_API_KEY", ""
-        )
-        assert state.api_key == "env-key"
-
-    def test_extra_env_still_wins_last_over_the_backend_key(
-        self, monkeypatch
-    ):
+    def test_extra_env_still_wins_last_over_the_backend_key(self, monkeypatch):
         """IT Sec #97: the per-backend key env is set BEFORE
         config.extra_env, so an operator's per-instance override beats it —
         the existing 'extra_env wins last' design."""
-        monkeypatch.setattr(
-            "solar_host.config.settings.api_key", "test-key"
-        )
+        monkeypatch.setattr("solar_host.config.settings.api_key", "test-key")
         from solar_host.backends.sglang import SglangRunner
         from solar_host.models.sglang import SglangConfig
 

@@ -39,6 +39,8 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
+from solar_host.servers.api_key import resolve_api_key
+
 if TYPE_CHECKING:
     from transformers import (
         PreTrainedModel,
@@ -1092,7 +1094,7 @@ def main():
         labels = [label.strip() for label in args.labels.split(",")]
 
     # Set API key
-    state.api_key = args.api_key or os.environ.get("SOLAR_API_KEY", "")
+    state.api_key = resolve_api_key(args.api_key, os.environ.get("SOLAR_API_KEY", ""))
 
     # Load model
     state.load_model(
