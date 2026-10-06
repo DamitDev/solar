@@ -132,12 +132,16 @@ def test_extra_env_is_passed_through(venv) -> None:
     assert env["SGLANG_DSV4_COMPRESS_STATE_DTYPE"] == "bf16"
 
 
-def test_other_runners_contribute_no_environment() -> None:
+def test_other_runners_contribute_no_environment(venv, monkeypatch) -> None:
     """The base hook stays empty so existing backends are untouched."""
     from solar_host.backends.llamacpp import LlamaCppRunner
 
     instance = SimpleNamespace(config=None, port=8080, id="inst-1")
-    assert LlamaCppRunner().build_env(instance) == {}
+    # The base contributes no environment; the API key (IT Sec #97) rides
+    # per backend on top of the base — llamacpp carries LLAMA_API_KEY.
+    monkeypatch.setattr("solar_host.config.settings.api_key", "test-key")
+    env = LlamaCppRunner().build_env(instance)
+    assert env["LLAMA_API_KEY"] == "test-key"
 
 
 # ── S-058: CUDA_VISIBLE_DEVICES enforcement ─────────────────────

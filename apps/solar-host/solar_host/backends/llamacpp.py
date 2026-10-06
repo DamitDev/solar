@@ -108,8 +108,6 @@ class LlamaCppRunner(BackendRunner):
             config.host,
             "--port",
             str(instance.port),
-            "--api-key",
-            settings.api_key,
             "--no-warmup",
         ]
 
@@ -253,6 +251,13 @@ class LlamaCppRunner(BackendRunner):
             return args
 
         return []
+
+    def build_env(self, instance: Any) -> dict[str, str]:
+        """Deliver the host key via LLAMA_API_KEY (IT Sec #97: never argv)."""
+        env = super().build_env(instance)
+        if settings.api_key:
+            env["LLAMA_API_KEY"] = settings.api_key
+        return env
 
     def get_health_endpoint(self) -> str:
         return "/health"

@@ -43,7 +43,8 @@ def test_host_managed_flags_come_from_the_host_not_the_config() -> None:
     assert flag_value(command, "--served-model-name") == "test"
     assert flag_value(command, "--host") == "0.0.0.0"
     assert flag_value(command, "--port") == "8080"
-    assert flag_value(command, "--api-key") == "test-key"
+    # IT Sec #97: the key travels via the environment, never argv.
+    assert "--api-key" not in command
 
 
 def test_a_colon_alias_is_served_verbatim() -> None:

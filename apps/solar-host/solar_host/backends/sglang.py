@@ -320,7 +320,8 @@ class SglangRunner(BackendRunner):
         if not instance.port:
             return None
         base = f"http://127.0.0.1:{instance.port}"
-        # The spawned SGLang process runs with --api-key (the host's key);
+        # The spawned SGLang process reads the host's key from the
+        # SOLAR_API_KEY environment variable (IT Sec #97: never argv);
         # without the header both info endpoints answer 401.
         headers = (
             {"Authorization": f"Bearer {settings.api_key}"} if settings.api_key else {}
@@ -391,8 +392,6 @@ class SglangRunner(BackendRunner):
             config.host,
             "--port",
             str(instance.port),
-            "--api-key",
-            settings.api_key,
         ]
 
         for field, flag in _VALUE_FLAGS:
@@ -463,6 +462,9 @@ class SglangRunner(BackendRunner):
                 logger.warning(
                     "Cannot create SGLang prompt cache dir %s: %s", cache_dir, exc
                 )
+
+        if settings.api_key:
+            env["SGLANG_API_KEY"] = settings.api_key
 
         if config.extra_env:
             env.update(config.extra_env)

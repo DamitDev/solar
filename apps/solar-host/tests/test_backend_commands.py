@@ -159,3 +159,95 @@ class TestMetricsEndpoints:
 
         assert _Concrete().get_metrics_path() is None
         assert _Concrete().parse_metrics("llamacpp:prompt_tokens_total 1\n") is None
+
+
+class TestApiKeyNeverOnTheCommandLine:
+    """IT Sec #97: the API key must reach the backend through the process
+    environment, never the argument list — `ps` reads argv in the clear.
+
+    Per-binary env names: llama.cpp reads LLAMA_API_KEY natively
+    (arg.cpp .set_env), vLLM reads VLLM_API_KEY (vllm/envs.py), SGLang
+    reads SGLANG_API_KEY (cookbook key_env convention). hf_server.py is
+    solar's own code and reads SOLAR_API_KEY with the --api-key flag as an
+    optional override.
+    """
+
+    def test_llamacpp_command_carries_no_api_key_material(self):
+        command = _llamacpp_command()
+        assert "--api-key" not in command
+        assert "test-key" not in command
+
+    def test_sglang_command_carries_no_api_key_material(self):
+        command = _sglang_command()
+        assert "--api-key" not in command
+        assert "test-key" not in command
+
+    def test_vllm_command_carries_no_api_key_material(self):
+        command = _vllm_command()
+        assert "--api-key" not in command
+        assert "test-key" not in command
+
+    def test_huggingface_command_carries_no_api_key_material(
+        self, monkeypatch
+    ):
+        from solar_host.backends.huggingface import HuggingFaceRunner
+        from solar_host.models.huggingface import HuggingFaceCausalConfig
+
+        monkeypatch.setattr(
+            "solar_host.backends.huggingface.HuggingFaceRunner.check_dependencies",
+            lambda self: None,
+        )
+        config = HuggingFaceCausalConfig(
+            model_id="/models/test",
+            alias="test",
+        )
+        cmd = HuggingFaceRunner().build_command(
+            SimpleNamespace(config=config, port=8080)
+        )
+        assert "--api-key" not in cmd
+        assert "test-key" not in cmd
+
+    def test_env_var_carries_the_host_key_per_backend(
+        self, monkeypatch
+    ):
+        """One env name per backend: build_env delivers the host key via the
+        environment, mirroring the CUDA_VISIBLE_DEVICES path."""
+        monkeypatch.setattr(
+            "solar_host.config.settings.api_key", "test-key"
+        )
+        from solar_host.backends.huggingface import HuggingFaceRunner
+        from solar_host.backends.llamacpp import LlamaCppRunner
+        from solar_host.backends.sglang import SglangRunner
+        from solar_host.backends.vllm import VllmRunner
+        from solar_host.models.llamacpp import LlamaCppConfig
+        from solar_host.models.sglang import SglangConfig
+        from solar_host.models.vllm import VllmConfig
+
+        llama_instance = SimpleNamespace(
+            config=LlamaCppConfig(model="/models/test.gguf", alias="test"),
+            port=8080,
+            id="inst-1",
+        )
+        sglang_instance = SimpleNamespace(
+            config=SglangConfig(model_path="/models/test", alias="test"),
+            port=8080,
+            id="inst-1",
+        )
+        vllm_instance = SimpleNamespace(
+            config=VllmConfig(model_path="/models/test", alias="test"),
+            port=8080,
+            id="inst-1",
+        )
+        plain_instance = SimpleNamespace(config=None, port=8080, id="inst-1")
+
+        llamacpp_env = LlamaCppRunner().build_env(llama_instance)
+        assert llamacpp_env["LLAMA_API_KEY"] == "test-key"
+
+        sglang_env = SglangRunner().build_env(sglang_instance)
+        assert sglang_env["SGLANG_API_KEY"] == "test-key"
+
+        vllm_env = VllmRunner().build_env(vllm_instance)
+        assert vllm_env["VLLM_API_KEY"] == "test-key"
+
+        hf_env = HuggingFaceRunner().build_env(plain_instance)
+        assert hf_env["SOLAR_API_KEY"] == "test-key"
