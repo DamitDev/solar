@@ -1,18 +1,22 @@
 """infrastructure: canary probe for the error_message leak surface (IT Sec #97).
 
-Fires a canary-carrying request whose error path persists the canary into
-the gateway request log, then asserts what ``error_message`` carries. Two
-paths prove the surface:
+Fires a canary-carrying request whose error path persists into the gateway
+request log, then asserts what ``error_message`` carries. Two paths prove
+the surface:
 
 1. A request for a nonexistent model — the gateway's model-not-found error
-   carries the model name (user-controlled input) verbatim.
+   carries the model name (user-controlled input) verbatim. Accepted,
+   documented surface: the caller's own model name, capped at 200
+   characters (``_MAX_UPSTREAM_ERROR_CHARS``).
 2. A request routed to a real instance whose upstream 4xx body echoes the
-   request payload — the upstream echo path
-   (``app/gateway.py``'s ``Request failed: {status} - {error_text}``).
+   request payload — the prompt ``CANARY`` must not appear in any persisted
+   ``error_message``. The request itself takes the model-not-found branch
+   (the prompt never reaches ``error_message``), so this assertion is a
+   sanity guard; the cap itself is covered by
+   ``tests/test_error_message_cap.py``.
 
-Documents the leak surface; the trim is driven by these assertions. The
-gateway request registry (``gateway_requests`` / ``gateway_events``) is the
-authoritative record — the same pattern as the #985/#996 line of work.
+The gateway request registry (``gateway_requests`` / ``gateway_events``) is
+the authoritative record — the same pattern as the #985/#996 line of work.
 """
 
 from __future__ import annotations
@@ -173,5 +177,11 @@ async def test_upstream_error_persists_into_error_message(
         assert (
             expected in messages
         ), f"expected model-not-found error not persisted: {messages[:3]}"
+        # The request takes the model-not-found branch, so the prompt never
+        # reaches error_message. Sanity guard only: the cap itself is
+        # covered by tests/test_error_message_cap.py.
+        assert all(
+            CANARY not in message for message in messages
+        ), f"canary leaked into a persisted error_message: {messages[:3]}"
     finally:
         await close_redis()

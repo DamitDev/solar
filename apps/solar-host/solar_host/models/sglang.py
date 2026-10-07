@@ -14,12 +14,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 # Flags solar-host owns: the port comes from the host's allocator, the API key
 # from host settings, and the served name from the alias the gateway routes on.
-# Overriding them through extra_args would break routing or auth.
+# Overriding them through extra_args would break routing or auth. --config is
+# reserved as well: SGLang errors out if it is given twice, and an operator
+# config could otherwise override the host's key file.
 RESERVED_SGLANG_ARGS: frozenset[str] = frozenset(
     {
         "--host",
         "--port",
         "--api-key",
+        "--config",
         "--model-path",
         "--served-model-name",
         "--enable-metrics",

@@ -42,15 +42,34 @@ def _hashed_cache_name(api_key: str) -> str:
     replica or hashed lookups miss and fall back to Postgres.
     """
     secret = settings.endpoint_cache_secret or "solar:endpoint-cache:default"
+    if not settings.endpoint_cache_secret:
+        _warn_empty_secret_once()
     digest = hmac.new(secret.encode(), api_key.encode(), hashlib.sha256).hexdigest()
     return f"{ENDPOINT_CACHE_PREFIX}{digest}"
 
 
-# ── IT Sec #97 marker: cache-key hashing ──
-
 # Tracked fire-and-forget tasks so the event loop does not garbage-collect
 # a live task mid-await (collectable async tasks are dropped silently).
 _TOUCH_TASKS: set[asyncio.Task] = set()
+_WARNED_EMPTY_SECRET = False
+
+
+def _warn_empty_secret_once() -> None:
+    """Log one warning when ``ENDPOINT_CACHE_SECRET`` is unset (IT Sec #97).
+
+    The unset-secret fallback is obfuscation, not crypto; deployments must
+    set the secret identically on every replica. Warned once per process so
+    a misconfigured deployment logs the finding without spamming it on
+    every cached lookup.
+    """
+    global _WARNED_EMPTY_SECRET
+    if _WARNED_EMPTY_SECRET:
+        return
+    _WARNED_EMPTY_SECRET = True
+    logger.warning(
+        "ENDPOINT_CACHE_SECRET is not set; endpoint-cache key names fall back "
+        "to an obfuscated constant, which is not cryptography (IT Sec #97)"
+    )
 
 
 def _task_done(t: asyncio.Task) -> None:

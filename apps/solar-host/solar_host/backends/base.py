@@ -172,6 +172,17 @@ class BackendRunner(ABC):
             context: The instance's parsing context.
         """
 
+    def on_process_ready(self, instance_id: str) -> None:
+        """Called when the backend logs its ready line (starting -> running).
+
+        Override for per-ready work that must not wait: SGLang deletes the
+        key config file here, because the backend parsed the config once at
+        startup and the file carries the key in the clear.
+
+        Args:
+            instance_id: The instance ID.
+        """
+
     def get_supported_endpoints_for_type(self, backend_type: str) -> list[str]:
         """Get supported endpoints based on specific backend type.
 

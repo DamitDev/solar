@@ -1,11 +1,50 @@
 """Tests for SGLang command construction."""
 
+import asyncio
+import os
+import stat
+import sys
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from solar_host.backends.sglang import SglangRunner
+from solar_host.backends.sglang import SglangRunner, write_key_config
+from solar_host.config import config_manager
+from solar_host.models.base import Instance, InstanceStatus
 from solar_host.models.sglang import SglangConfig
+from solar_host.process_manager import ProcessManager
+
+
+class _SleepingSglangRunner(SglangRunner):
+    """SGLang runner whose command never reports readiness.
+
+    The command is a real subprocess that sleeps, so a start parks until
+    the readiness timeout fires with a live process — the timeout path
+    then runs against a real key config file. ``build_command`` mirrors
+    the production sequence: ``write_key_config`` writes the file and the
+    command carries its path.
+    """
+
+    def build_command(self, instance) -> list[str]:
+        key_config = write_key_config(instance.id)
+        cmd = [sys.executable, "-u", "-c", "import time; time.sleep(60)"]
+        if key_config is not None:
+            cmd += ["--config", str(key_config)]
+        return cmd
+
+
+def _make_instance(
+    instance_id: str = "inst-1", status=InstanceStatus.STOPPED
+) -> Instance:
+    instance = Instance(
+        id=instance_id,
+        config=SglangConfig(model_path="/models/test", alias="test"),
+        status=status,
+    )
+    config_manager.add_instance(instance)
+    return instance
 
 
 @pytest.fixture(autouse=True)
@@ -208,6 +247,144 @@ def test_extra_args_reject_host_managed_flags() -> None:
             model_path="/models/test", alias="test", extra_args=["--api-key=leaked"]
         )
 
+    with pytest.raises(ValueError, match="managed by solar-host"):
+        SglangConfig(
+            model_path="/models/test", alias="test", extra_args=["--config=x.yaml"]
+        )
+
+
+class TestKeyConfigFile:
+    """IT Sec #97: the key reaches SGLang through a 0600 YAML config file.
+
+    SGLang never reads SGLANG_API_KEY, so the file is the only argv-free
+    delivery path; ``--config`` merges the file's values into an in-memory
+    argument list, so ``ps`` only shows the path.
+    """
+
+    def test_the_command_carries_the_config_path_and_no_key_material(
+        self, _sglang_available
+    ) -> None:
+        command = build_command()
+
+        config_path = flag_value(command, "--config")
+        assert config_path.endswith("sglang-inst-1.yaml")
+        assert "test-key" not in command
+        assert "--api-key" not in command
+
+    def test_the_file_has_0600_mode_in_a_0700_dir_and_yaml_loads_to_the_key(
+        self, _sglang_available, monkeypatch
+    ) -> None:
+        import yaml
+
+        from solar_host.backends.sglang import key_config_path
+
+        command = build_command()
+        path = Path(flag_value(command, "--config"))
+        assert path == key_config_path("inst-1")
+
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert path.parent.stat().st_mode & 0o777 == 0o700
+        assert path.parent.name.startswith("solar-host-")
+
+        loaded = yaml.safe_load(path.read_text())
+        assert loaded == {"api-key": "test-key"}
+
+    def test_on_process_ready_and_stopped_delete_the_file(
+        self, _sglang_available, monkeypatch
+    ) -> None:
+        from solar_host.backends.sglang import key_config_path
+
+        build_command()
+        path = key_config_path("inst-1")
+        assert path.exists()
+
+        runner = SglangRunner()
+        runner.on_process_ready("inst-1")
+        assert not path.exists()
+
+        # Rebuild the file and go through the stop path.
+        SglangRunner().build_command(
+            SimpleNamespace(
+                config=SglangConfig(model_path="/models/test", alias="test"),
+                port=8080,
+                id="inst-1",
+            )
+        )
+        assert key_config_path("inst-1").exists()
+        runner.on_process_stopped("inst-1", {})
+        assert not key_config_path("inst-1").exists()
+
+    def test_the_boot_sweep_removes_leftovers(self, monkeypatch) -> None:
+        from solar_host.backends.sglang import key_config_path, sweep_key_configs
+
+        stale = key_config_path("inst-gone")
+        stale.write_text("api-key: leaked\n")
+        unrelated = stale.parent / "unrelated.yaml"
+        unrelated.write_text("api-key: leaked\n")
+
+        sweep_key_configs()
+
+        assert not stale.exists()
+        assert unrelated.exists()
+
+    def test_nothing_is_written_when_api_key_is_empty(
+        self, _sglang_available, monkeypatch
+    ) -> None:
+        monkeypatch.setattr("solar_host.config.settings.api_key", "")
+
+        command = build_command()
+
+        assert "--config" not in command
+
+    def test_a_second_write_replaces_the_leftover(self, _sglang_available) -> None:
+        from solar_host.backends.sglang import key_config_path
+
+        build_command()
+        build_command()
+
+        import yaml
+
+        loaded = yaml.safe_load(key_config_path("inst-1").read_text())
+        assert loaded == {"api-key": "test-key"}
+
+    def test_a_symlink_at_the_dir_path_raises(self, _sglang_available) -> None:
+        from solar_host.backends.sglang import key_config_dir
+
+        key_config_dir().rmdir()  # drop the real dir
+        # Rebuild the path directly — key_config_dir() would re-create it.
+        path = Path(tempfile.gettempdir()) / f"solar-host-{os.getuid()}"
+        path.symlink_to(_sglang_available.parent / "elsewhere")
+
+        with pytest.raises(RuntimeError, match="not a directory"):
+            key_config_dir()
+
+    def test_a_0755_dir_is_tightened_to_0700(self, _sglang_available) -> None:
+        import os
+
+        from solar_host.backends.sglang import key_config_dir
+
+        key_config_dir().rmdir()
+        path = key_config_dir()
+        os.chmod(path, 0o755)
+        assert stat.S_IMODE(os.lstat(path).st_mode) == 0o755
+
+        resolved = key_config_dir()
+
+        assert resolved == path
+        assert stat.S_IMODE(os.lstat(path).st_mode) == 0o700
+
+    def test_a_dir_owned_by_another_uid_raises(
+        self, _sglang_available, monkeypatch
+    ) -> None:
+        import os
+
+        from solar_host.backends.sglang import key_config_dir
+
+        monkeypatch.setattr(os, "getuid", lambda: 12345)
+
+        with pytest.raises(RuntimeError, match="owned by uid"):
+            key_config_dir()
+
 
 def test_storage_extra_config_is_stored_as_canonical_json() -> None:
     config = SglangConfig(
@@ -234,3 +411,84 @@ def test_storage_extra_config_rejects_invalid_json() -> None:
 def test_a_config_needs_a_model_path_or_source() -> None:
     with pytest.raises(ValueError, match="model_path"):
         SglangConfig(alias="test")
+
+
+class TestLifecycleKeyConfigCleanup:
+    """IT Sec #97 follow-up: the key config file must not outlive a failed
+    or deleted start.
+
+    Both tests drive the real ProcessManager lifecycle against a real
+    subprocess (never a fake process object) so the assertion covers the
+    exact production cleanup path, monkeypatching only
+    ``get_runner_for_config`` and the ready-timeout clock.
+    """
+
+    @pytest.mark.anyio
+    async def test_a_readiness_timeout_removes_the_key_file(
+        self, _sglang_available, monkeypatch
+    ) -> None:
+        """A timed-out start of an SGLang instance leaves no key config file.
+
+        The instance is set up with a tiny ``instance_ready_timeout_s`` so
+        the spawn parks and the timeout fires while the process is still
+        alive — the same condition the production timeout branch handles.
+        """
+        from solar_host.backends.sglang import key_config_path
+
+        monkeypatch.setattr("solar_host.config.settings.instance_ready_timeout_s", 0.5)
+        monkeypatch.setattr("solar_host.config.settings.max_retries", 0)
+        _make_instance("inst-1")
+        runner = _SleepingSglangRunner()
+        monkeypatch.setattr(
+            "solar_host.process_manager.get_runner_for_config", lambda cfg: runner
+        )
+
+        manager = ProcessManager()
+        result = await manager.start_instance("inst-1")
+
+        assert result is False
+        instance = config_manager.get_instance("inst-1")
+        assert instance is not None
+        assert instance.status == InstanceStatus.FAILED
+        assert "readiness" in (instance.error_message or "")
+        assert "inst-1" not in manager.processes
+        # The key config file must not outlive the timed-out start.
+        assert not key_config_path("inst-1").exists()
+
+    @pytest.mark.anyio
+    async def test_deleting_while_starting_removes_the_key_file(
+        self, _sglang_available, monkeypatch
+    ) -> None:
+        """Deleting an instance that is starting removes its key config file.
+
+        The delete path skips the full stop hook
+        (``call_runner_on_stop=False``) so other runners keep their "no
+        stop hook on delete" semantics — but ``remove_key_config`` is
+        called directly before the purge, so the file goes regardless.
+        """
+        from solar_host.backends.sglang import key_config_path
+
+        monkeypatch.setattr("solar_host.config.settings.max_retries", 0)
+        _make_instance("inst-1")
+        runner = _SleepingSglangRunner()
+        monkeypatch.setattr(
+            "solar_host.process_manager.get_runner_for_config", lambda cfg: runner
+        )
+
+        manager = ProcessManager()
+        task = asyncio.create_task(manager._try_start_instance("inst-1", attempt=0))
+
+        # Mid-flight: the spawn has happened and build_command wrote the key
+        # config file, but the backend has not reported readiness yet.
+        await asyncio.sleep(0.3)
+        assert config_manager.get_instance("inst-1").status == InstanceStatus.STARTING
+        assert key_config_path("inst-1").exists()
+
+        deleted = manager.delete_instance("inst-1")
+        assert deleted is True
+
+        assert not key_config_path("inst-1").exists()
+        assert config_manager.get_instance("inst-1") is None
+
+        result = await task
+        assert result is False

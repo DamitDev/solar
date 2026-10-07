@@ -189,4 +189,24 @@ describe('EventsPanel', () => {
     expect(within(occurrences).getByText('model-a')).toBeInTheDocument();
     expect(within(occurrences).getByText('model-b')).toBeInTheDocument();
   });
+
+  it('renders an already-capped error_message verbatim with no extra content', async () => {
+    // The gateway caps error_message at 200 chars before persisting and
+    // broadcasting (IT Sec #97); the panel must not truncate further,
+    // pad it, or append anything. The panel's own title parsing splits
+    // "Request failed: 400 - <body>" into a title and a status pill, so
+    // the assertion targets the body span verbatim.
+    const body = 'x'.padEnd(180, 'y');
+    respondWith([upstreamError(`Request failed: 400 - ${body}`, '2026-08-13T11:00:00Z')]);
+
+    const { container } = render(<EventsPanel {...RANGE} endpointId={null} live={false} />);
+
+    await waitFor(() => {
+      const spans = Array.from(container.querySelectorAll('span'));
+      const title = spans.find((s) => s.textContent === body);
+      expect(title).toBeDefined();
+      expect(title?.textContent).toBe(body);
+      expect(title?.textContent?.length).toBe(180);
+    });
+  });
 });

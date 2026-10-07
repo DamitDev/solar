@@ -1919,6 +1919,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "python-multipart" },
     { name = "python-socketio", extra = ["asyncio-client"] },
+    { name = "pyyaml" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1963,6 +1964,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.1.1" },
     { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "python-socketio", extras = ["asyncio-client"] },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "solar-host", extras = ["nvidia", "huggingface"], marker = "extra == 'all'" },
     { name = "torch", marker = "extra == 'huggingface'", specifier = ">=2.14.1" },
     { name = "transformers", marker = "extra == 'huggingface'", specifier = ">=5.18.0" },

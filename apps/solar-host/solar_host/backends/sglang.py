@@ -11,11 +11,15 @@ import logging
 import os
 import re
 import shutil
+import stat
+import tempfile
 import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from solar_host.backends.base import BackendRunner, RuntimeStateUpdate
 from solar_host.backends.prom import parse_prometheus
@@ -137,6 +141,97 @@ def detach_instance_prompt_cache(alias: str, instance_id: str) -> Path | None:
     if cache_dir is None:
         return None
     return _detach_dir(cache_dir)
+
+
+def key_config_dir() -> Path:
+    """Directory for the per-instance SGLang key config files.
+
+    Lives under the system temp dir, outside the host's model and config
+    tree: a key file must never end up in a served model directory or a
+    host-config backup. Created with mode 0700 and validated with
+    ``lstat`` (which does not follow symlinks): the path must be a real
+    directory owned by the host's own uid, and is re-chmod-ed to 0700 when
+    it already exists with looser permissions, so a dir left behind by an
+    earlier release or another actor is tightened on first use.
+    """
+    path = Path(tempfile.gettempdir()) / f"solar-host-{os.getuid()}"
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    st = os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise RuntimeError(
+            f"SGLang key config dir {path} is not a directory "
+            f"owned by uid {os.getuid()}"
+        )
+    path.chmod(0o700)
+    return path
+
+
+def key_config_path(instance_id: str) -> Path:
+    """Key config file for *instance_id*: ``sglang-<instance_id>.yaml``."""
+    return key_config_dir() / f"sglang-{instance_id}.yaml"
+
+
+def write_key_config(instance_id: str) -> Path | None:
+    """Write the host API key as a 0600 SGLang config file; None when unset.
+
+    SGLang merges the file's values into an in-memory argument list
+    (``ConfigArgumentMerger`` turns each key into ``--<key>``), so ``ps``
+    only ever shows the ``--config`` path. The ``api-key`` spelling matters:
+    it is the flag SGLang's own ``--api-key`` maps to. The file is opened
+    ``O_CREAT | O_EXCL`` after unlinking any leftover, so a concurrent
+    reader can never observe a half-written or foreign-key file.
+    """
+    api_key = settings.api_key
+    if not api_key:
+        return None
+    path = key_config_path(instance_id)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("Cannot remove stale SGLang key config %s: %s", path, exc)
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    try:
+        os.write(fd, yaml.safe_dump({"api-key": api_key}).encode())
+    finally:
+        os.close(fd)
+    return path
+
+
+def remove_key_config(instance_id: str) -> None:
+    """Delete the instance's key config file; best-effort, never raises."""
+    try:
+        key_config_path(instance_id).unlink()
+    except FileNotFoundError:
+        pass
+    except (OSError, RuntimeError) as exc:
+        logger.warning(
+            "Cannot remove SGLang key config for instance %s: %s", instance_id, exc
+        )
+
+
+def sweep_key_configs() -> None:
+    """Delete every ``sglang-*.yaml`` in the key config dir (boot pass).
+
+    A crash between ``write_key_config`` and the ready-line delete can leave
+    a key file behind; the boot sweep owns those leftovers.
+    """
+    try:
+        leftovers = list(key_config_dir().glob("sglang-*.yaml"))
+    except (OSError, RuntimeError) as exc:
+        logger.warning("Cannot scan SGLang key config dir: %s", exc)
+        return
+    for leftover in leftovers:
+        try:
+            leftover.unlink()
+        except (OSError, RuntimeError) as exc:
+            logger.warning(
+                "Cannot remove stale SGLang key config %s: %s", leftover, exc
+            )
 
 
 def purge_in_background(trash_dirs: list[Path]) -> None:
@@ -320,9 +415,10 @@ class SglangRunner(BackendRunner):
         if not instance.port:
             return None
         base = f"http://127.0.0.1:{instance.port}"
-        # The spawned SGLang process reads the host's key from the
-        # SOLAR_API_KEY environment variable (IT Sec #97: never argv);
-        # without the header both info endpoints answer 401.
+        # The spawned SGLang process reads the host's key from the 0600 YAML
+        # config file the host passes via --config (IT Sec #97: never argv,
+        # never a plain-text environment variable); without the header both
+        # info endpoints answer 401.
         headers = (
             {"Authorization": f"Bearer {settings.api_key}"} if settings.api_key else {}
         )
@@ -423,6 +519,15 @@ class SglangRunner(BackendRunner):
         # token counts via deltas. Host-managed; see RESERVED_SGLANG_ARGS.
         cmd.append("--enable-metrics")
 
+        # IT Sec #97: the key travels through a 0600 YAML config file instead
+        # of argv (ps reads argv in the clear); SGLang's ConfigArgumentMerger
+        # merges the file's values into an in-memory argument list, so ps
+        # only shows the --config path. Deleted again once the ready line
+        # proves the backend parsed its config.
+        key_config = write_key_config(instance.id)
+        if key_config is not None:
+            cmd += ["--config", str(key_config)]
+
         # Last, so a raw override beats the typed flag above it.
         if config.extra_args:
             cmd += list(config.extra_args)
@@ -463,13 +568,23 @@ class SglangRunner(BackendRunner):
                     "Cannot create SGLang prompt cache dir %s: %s", cache_dir, exc
                 )
 
-        if settings.api_key:
-            env["SGLANG_API_KEY"] = settings.api_key
-
         if config.extra_env:
             env.update(config.extra_env)
 
         return env
+
+    def on_process_ready(self, instance_id: str) -> None:
+        """Delete the key config once the backend is serving (IT Sec #97).
+
+        SGLang parses the config file exactly once at startup, so the file
+        is dead weight from the ready line on — and it carries the key in
+        the clear, so the sooner it is gone the smaller the window.
+        """
+        remove_key_config(instance_id)
+
+    def on_process_stopped(self, instance_id: str, context: dict[str, Any]) -> None:
+        """Delete the key config on stop, crash or a failed start (IT Sec #97)."""
+        remove_key_config(instance_id)
 
     def get_health_endpoint(self) -> str:
         return "/health"

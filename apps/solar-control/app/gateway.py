@@ -28,9 +28,11 @@ from app.services.virtual_model_contract import contract_violation
 
 logger = logging.getLogger(__name__)
 
-# Cap persisted upstream error text (IT Sec #97): the upstream body can
-# carry prompt fragments echoed by the model into gateway_requests and the
-# WebUI broadcast. Matches the retryable path's existing error_text[:200].
+# Cap on the persisted and broadcast error_message record (IT Sec #97): the
+# upstream body can carry prompt fragments echoed by the model into
+# gateway_requests and the WebUI broadcast. Applied in _emit_error so every
+# terminal path is covered — including str(e) and Failed to connect ... —
+# while the raised error keeps the full upstream text.
 _MAX_UPSTREAM_ERROR_CHARS = 200
 
 
@@ -1399,7 +1401,7 @@ class OpenAIGateway:
         data: dict[str, Any] = {
             "request_id": request_id,
             "model": model,
-            "error_message": error_message,
+            "error_message": error_message[:_MAX_UPSTREAM_ERROR_CHARS],
             "duration": duration,
             "timestamp": self._ts(),
         }
@@ -1722,7 +1724,9 @@ class OpenAIGateway:
                             else:
                                 error_text = await response.text()
                                 duration = time.time() - start_time
-                                msg = f"Request failed: {response.status} - {error_text[:_MAX_UPSTREAM_ERROR_CHARS]}"
+                                msg = (
+                                    f"Request failed: {response.status} - {error_text}"
+                                )
                                 await self._emit_error(
                                     request_id,
                                     model,
@@ -1986,7 +1990,7 @@ class OpenAIGateway:
                         else:
                             error_text = await response.text()
                             duration = time.time() - start_time
-                            msg = f"Request failed: {response.status} - {error_text[:_MAX_UPSTREAM_ERROR_CHARS]}"
+                            msg = f"Request failed: {response.status} - {error_text}"
                             await self._emit_error(
                                 request_id,
                                 model,

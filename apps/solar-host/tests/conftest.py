@@ -10,7 +10,7 @@ from solar_host.process_manager import process_manager
 
 
 @pytest.fixture(autouse=True)
-def _hermetic_settings(monkeypatch):
+def _hermetic_settings(monkeypatch, tmp_path):
     """Reset every Settings field to its declared default.
 
     ``config.py`` skips ``.env`` under pytest, but exported variables still
@@ -27,6 +27,12 @@ def _hermetic_settings(monkeypatch):
         monkeypatch.setattr(
             settings, name, field.get_default(call_default_factory=True)
         )
+    # SGLang key config files (IT Sec #97) live under tempfile.gettempdir();
+    # point it at tmp_path so no test writes to or sweeps the real
+    # /tmp/solar-host-<uid>.
+    test_tmp = tmp_path / "tmp"
+    test_tmp.mkdir(exist_ok=True)
+    monkeypatch.setattr("tempfile.tempdir", str(test_tmp))
 
 
 _PER_INSTANCE_STATE = (
