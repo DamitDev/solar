@@ -12,6 +12,7 @@ build/
 
 # ── Node / pnpm ─────────────────────────────────────────────────────
 node_modules/
+.pnpm-store/
 *.tsbuildinfo
 
 # ── Environment & local state ───────────────────────────────────────

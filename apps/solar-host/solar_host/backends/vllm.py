@@ -213,8 +213,6 @@ class VllmRunner(BackendRunner):
             config.host,
             "--port",
             str(instance.port),
-            "--api-key",
-            settings.api_key,
         ]
 
         for field, flag in _VALUE_FLAGS:
@@ -268,6 +266,9 @@ class VllmRunner(BackendRunner):
             # CPython reads an empty value as unset, and build_env can only
             # add variables, so empty is how the removal is expressed.
             env["PYTHONHOME"] = ""
+
+        if settings.api_key:
+            env["VLLM_API_KEY"] = settings.api_key
 
         if config.extra_env:
             env.update(config.extra_env)

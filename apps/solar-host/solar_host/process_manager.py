@@ -24,6 +24,7 @@ from solar_host.backends.sglang import (
     SglangRunner,
     detach_instance_prompt_cache,
     purge_in_background,
+    remove_key_config,
 )
 from solar_host.backends.vllm import VllmRunner
 from solar_host.config import config_manager, parse_instance_config, settings
@@ -409,6 +410,16 @@ class ProcessManager:
                             instance_id, self.instance_contexts.get(instance_id, {})
                         )
 
+                        # IT Sec #97: per-ready cleanup (SGLang deletes its
+                        # key config file). Wrapped so a cleanup failure can
+                        # never block the promotion itself.
+                        try:
+                            runner.on_process_ready(instance_id)
+                        except Exception:
+                            logger.exception(
+                                "on_process_ready failed for instance %s", instance_id
+                            )
+
                     self._push_instances_update()
                     self._schedule_context_probe(instance_id)
 
@@ -432,6 +443,14 @@ class ProcessManager:
                         break
 
                     decoded_line = line.decode("utf-8", errors="replace").rstrip()
+
+                    # IT Sec #97: SGLang logs server_args=<resolved_dict()> at
+                    # startup, which carries the key in plain text. Redact
+                    # before the file write, the buffer append, the pushed
+                    # event and the parsers, so every backend and every
+                    # consumer sees the same scrubbed line.
+                    if settings.api_key:
+                        decoded_line = decoded_line.replace(settings.api_key, "***")
 
                     # Write to file
                     f.write(decoded_line + "\n")
@@ -887,6 +906,21 @@ class ProcessManager:
                     # distinguishes a readiness timeout from a failed start.
                     self.last_exit_codes[instance_id] = exit_code
 
+                # IT Sec #97: a timed-out spawn leaves the key config file
+                # behind — remove it the same way the stop path does, so the
+                # window closes on the timeout itself rather than the boot
+                # sweep.
+                runner = self.instance_runners.get(instance_id)
+                if runner is not None:
+                    try:
+                        runner.on_process_stopped(
+                            instance_id, self.instance_contexts.get(instance_id, {})
+                        )
+                    except Exception:
+                        logger.exception(
+                            "on_process_stopped failed for instance %s", instance_id
+                        )
+
                 instance = config_manager.get_instance(instance_id)
                 if instance is None:
                     return False
@@ -922,6 +956,16 @@ class ProcessManager:
 
         except Exception as e:  # noqa: BLE001
             self.ready_events.pop(instance_id, None)
+            # IT Sec #97: a spawn failure after build_command leaves the key
+            # config file behind — remove it the same way the stop path does.
+            runner = self.instance_runners.get(instance_id)
+            if runner is not None:
+                try:
+                    runner.on_process_stopped(instance_id, {})
+                except Exception:
+                    logger.exception(
+                        "on_process_stopped failed for instance %s", instance_id
+                    )
             instance = config_manager.get_instance(instance_id)
             if instance:
                 instance.status = InstanceStatus.FAILED
@@ -1251,6 +1295,13 @@ class ProcessManager:
         if log_thread and log_thread.is_alive():
             log_thread.join(timeout=3)
 
+        # IT Sec #97: the delete path deliberately skips the full stop hook
+        # (call_runner_on_stop=False) so other runners keep their "no stop
+        # hook on delete" semantics — but the SGLang key config file must
+        # still go. remove_key_config is best-effort and never raises.
+        # Guarded so non-SGLang deletes do not re-create /tmp/solar-host-<uid>.
+        if getattr(instance.config, "backend_type", None) == "sglang":
+            remove_key_config(instance_id)
         self._purge_instance_resources(instance_id, call_runner_on_stop=False)
         # Sole cleanup for delete-while-running: the process and the record
         # are gone by now, so the log thread's _handle_child_exit returns

@@ -8,6 +8,8 @@ Two authentication modes:
 """
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 from typing import Any
@@ -21,15 +23,53 @@ from app.database.endpoints import endpoint_db
 logger = logging.getLogger(__name__)
 
 ENDPOINT_CACHE_PREFIX = "solar:endpoint_cache:"
+
+
 ENDPOINT_CACHE_TTL = 300  # 5 minutes
 # Throttle window for last_used_at stamps: 60s means at most one DB update
 # per key per minute, even under heavy load.
 TOUCH_PREFIX = "solar:last_touch:"
 TOUCH_TTL = 60
 
+
+def _hashed_cache_name(api_key: str) -> str:
+    """Deterministic, non-reversible Redis key name for an API key.
+
+    HMAC-SHA256 keyed on ``ENDPOINT_CACHE_SECRET``: a raw key must never
+    appear in a Redis key name — KEYS/SCAN reads key names back in the
+    clear (IT Sec #97). The unset-secret fallback is obfuscation, not
+    crypto; deployment sets ``ENDPOINT_CACHE_SECRET`` identically on every
+    replica or hashed lookups miss and fall back to Postgres.
+    """
+    secret = settings.endpoint_cache_secret or "solar:endpoint-cache:default"
+    if not settings.endpoint_cache_secret:
+        _warn_empty_secret_once()
+    digest = hmac.new(secret.encode(), api_key.encode(), hashlib.sha256).hexdigest()
+    return f"{ENDPOINT_CACHE_PREFIX}{digest}"
+
+
 # Tracked fire-and-forget tasks so the event loop does not garbage-collect
 # a live task mid-await (collectable async tasks are dropped silently).
 _TOUCH_TASKS: set[asyncio.Task] = set()
+_WARNED_EMPTY_SECRET = False
+
+
+def _warn_empty_secret_once() -> None:
+    """Log one warning when ``ENDPOINT_CACHE_SECRET`` is unset (IT Sec #97).
+
+    The unset-secret fallback is obfuscation, not crypto; deployments must
+    set the secret identically on every replica. Warned once per process so
+    a misconfigured deployment logs the finding without spamming it on
+    every cached lookup.
+    """
+    global _WARNED_EMPTY_SECRET
+    if _WARNED_EMPTY_SECRET:
+        return
+    _WARNED_EMPTY_SECRET = True
+    logger.warning(
+        "ENDPOINT_CACHE_SECRET is not set; endpoint-cache key names fall back "
+        "to an obfuscated constant, which is not cryptography (IT Sec #97)"
+    )
 
 
 def _task_done(t: asyncio.Task) -> None:
@@ -84,17 +124,20 @@ async def _resolve_endpoint(
     """Resolve a raw key to an (endpoint, api_key_id, api_key_name) triple.
 
     The cache entry is ``{"endpoint": {...}, "api_key_id": "...",
-    "api_key_name": "..."}`` keyed by the same
-    ``solar:endpoint_cache:{api_key}`` as before the endpoint/key split, so
-    a rolling deploy keeps a single cache namespace. ``api_key_name`` reads
+    "api_key_name": "..."}`` keyed under
+    ``solar:endpoint_cache:{HMAC(api_key)}`` — a hashed name keeps live
+    credentials out of Redis KEYS/SCAN (IT Sec #97). ``api_key_name`` reads
     with a tolerant ``.get()`` because entries written by pre-attribution
-    replicas lack it.
+    replicas lack it. Entries written under the pre-hash raw-key naming
+    expire after ``ENDPOINT_CACHE_TTL`` (5 min): a rolling deploy falls
+    back to Postgres for the cold window and repopulates under the hashed
+    name, no migration needed.
     """
     try:
         from app.redis_state.connection import redis_client
 
         r = redis_client()
-        cached = await r.get(f"{ENDPOINT_CACHE_PREFIX}{api_key}")
+        cached = await r.get(_hashed_cache_name(api_key))
         if cached:
             data = json.loads(cached)
             from app.database.endpoints import ApiEndpoint
@@ -115,7 +158,7 @@ async def _resolve_endpoint(
 
             r = redis_client()
             await r.set(
-                f"{ENDPOINT_CACHE_PREFIX}{api_key}",
+                _hashed_cache_name(api_key),
                 json.dumps(
                     {
                         "endpoint": endpoint.model_dump(mode="json"),

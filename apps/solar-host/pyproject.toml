@@ -27,6 +27,7 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "python-multipart>=0.0.32",
     "python-socketio[asyncio_client]",
+    "pyyaml>=6.0",
     "Pebble>=5.2.2",
     "psutil>=7.2.2",
     "harbor-oci-client>=0.1.0",

@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://solar:solar@localhost:5432/solar_gateway"
     redis_url: str = "redis://localhost:6379/0"
 
+    # HMAC key for hashing API keys inside endpoint-cache Redis key names
+    # (IT Sec #97). Must be identical on every replica, or hashed lookups
+    # miss and fall back to Postgres.
+    endpoint_cache_secret: str = ""
+
     data_repository_url: str = ""
     data_repository_api_key: str = ""
     data_repository_timeout_s: float = 10.0

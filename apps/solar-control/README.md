@@ -50,11 +50,13 @@ HOST=0.0.0.0
 PORT=8000
 DATABASE_URL=postgresql://solar:solar@localhost:5432/solar_gateway
 REDIS_URL=redis://localhost:6379/0
+ENDPOINT_CACHE_SECRET=
 ```
 
 - **MANAGEMENT_API_KEY** - Required for WebUI and management API (host approval, endpoints, gateway stats). Sent as `X-API-Key` or `Authorization: Bearer <key>` (or via Socket.IO `auth` for the `/webui` namespace).
 - **DATABASE_URL** - PostgreSQL connection string. Stores hosts, API endpoints, and gateway request logs.
 - **REDIS_URL** - Required. Used for host connection state (sid-to-host, instances, pending hosts), endpoint API key cache, and routing state. Enables stateless operation and multiple replicas.
+- **ENDPOINT_CACHE_SECRET** - HMAC key for hashing API keys inside the endpoint-cache Redis key names (IT Sec #97). Must be identical on every replica, or hashed lookups miss and fall back to Postgres. Unset falls back to a constant — set a real secret in every environment.
 
 Gateway API keys are managed through the multi-tenant endpoint system (see `/api/endpoints`).
 

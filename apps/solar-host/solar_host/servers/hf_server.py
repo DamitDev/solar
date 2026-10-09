@@ -24,6 +24,7 @@ import base64
 import io
 import json
 import logging
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -37,6 +38,8 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
+
+from solar_host.servers.api_key import resolve_api_key
 
 if TYPE_CHECKING:
     from transformers import (
@@ -1055,7 +1058,11 @@ def parse_args():
     parser.add_argument("--alias", required=True, help="Model alias")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, required=True, help="Port to bind to")
-    parser.add_argument("--api-key", default="", help="API key for authentication")
+    parser.add_argument(
+        "--api-key",
+        default="",
+        help="API key for authentication (deprecated: prefer the SOLAR_API_KEY env var)",
+    )
     parser.add_argument("--device", default="auto", help="Device: auto, cuda, mps, cpu")
     parser.add_argument(
         "--dtype", default="auto", help="Data type: auto, float16, bfloat16, float32"
@@ -1087,7 +1094,7 @@ def main():
         labels = [label.strip() for label in args.labels.split(",")]
 
     # Set API key
-    state.api_key = args.api_key
+    state.api_key = resolve_api_key(args.api_key, os.environ.get("SOLAR_API_KEY", ""))
 
     # Load model
     state.load_model(

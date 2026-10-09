@@ -95,8 +95,6 @@ class HuggingFaceRunner(BackendRunner):
             config.host,
             "--port",
             str(instance.port),
-            "--api-key",
-            settings.api_key,
             "--device",
             config.device,
             "--dtype",
@@ -120,6 +118,13 @@ class HuggingFaceRunner(BackendRunner):
             cmd.append("--normalize-embeddings")
 
         return cmd
+
+    def build_env(self, instance: Any) -> dict[str, str]:
+        """Deliver the host key via SOLAR_API_KEY (IT Sec #97: never argv)."""
+        env = super().build_env(instance)
+        if settings.api_key:
+            env["SOLAR_API_KEY"] = settings.api_key
+        return env
 
     def get_health_endpoint(self) -> str:
         return "/health"
