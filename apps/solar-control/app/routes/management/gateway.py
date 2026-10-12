@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 from app.database.logs import gateway_logger
+from app.gateway import gateway
 from app.models import WSMessageType
 
 router = APIRouter(prefix="/gateway", tags=["gateway"])
@@ -47,6 +48,20 @@ async def get_stats(
         "to": end.isoformat(),
         **stats,
     }
+
+
+@router.get("/attribution")
+async def get_attribution() -> dict[str, Any]:
+    """Per-instance negative-cache attribution counters (#100).
+
+    Live in-memory state: the three mechanisms that produce NULL
+    ``cached_tokens`` rows, countable on the relay. The counters cover
+    only requests that reached the host-fill path (``_fill_usage_gaps``);
+    non-fill requests are not counted here -- see the gateway stats
+    endpoint for request totals. Counters reset on gateway restart;
+    persistence is out of scope.
+    """
+    return {"attribution": gateway.attribution()}
 
 
 MAX_TIMESERIES_SERIES = 8

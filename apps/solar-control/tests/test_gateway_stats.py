@@ -12,6 +12,9 @@ from unittest.mock import patch
 import pytest
 
 from app.database.logs import GatewayLogger
+from app.gateway import OpenAIGateway
+from app.models import RegistryEntry
+from app.routes.management.gateway import get_attribution
 
 START = datetime(2026, 8, 17, tzinfo=timezone.utc)
 END = datetime(2026, 8, 18, tzinfo=timezone.utc)
@@ -293,3 +296,73 @@ async def test_everything_cached_reports_a_full_rate():
 
     assert stats["cache_hit_rate"] == pytest.approx(1.0)
     assert stats["rerouted_requests"] == 1
+
+
+@pytest.mark.anyio
+async def test_attribution_endpoint_exposes_per_instance_counters():
+    """The /api/gateway/attribution route reads the gateway's in-memory
+    attribution counters, so a NULL rate is diagnosable from outside."""
+    from app.gateway import gateway as gateway_singleton
+
+    seeded = {"host-1/inst-1": {"upstream_split": 2, "host_fill_success": 1, "skip": 3}}
+
+    with patch.object(gateway_singleton, "_attribution", seeded):
+        payload = await get_attribution()
+
+    assert payload["attribution"]["host-1/inst-1"] == {
+        "upstream_split": 2,
+        "host_fill_success": 1,
+        "skip": 3,
+    }
+
+
+def _entry() -> RegistryEntry:
+    return RegistryEntry(
+        host_id="host-1",
+        instance_id="inst-1",
+        url="http://test-host:3500",
+        api_key="instance-api-key",
+        model_alias="m",
+        backend_type="sglang",
+    )
+
+
+@pytest.mark.anyio
+async def test_concurrent_fills_do_not_double_arm_the_backoff():
+    """Two concurrent coroutines for the same key must not both pass the
+    miss-check with misses==0: the per-key lock serializes check -> fetch ->
+    arm, so the second coroutine sees the armed window and skips."""
+    import asyncio
+
+    class _FakeClock:
+        def __init__(self) -> None:
+            self.now = 1000.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    gateway = OpenAIGateway()
+    clock = _FakeClock()
+    entry = _entry()
+    fetches: list = []
+
+    async def _fetch(host_id, instance_id, within_s=None):
+        fetches.append(clock.now)
+        await asyncio.sleep(0)  # yield: the window check races the arm
+        return {}
+
+    with (
+        patch("app.gateway.time.monotonic", clock),
+        patch.object(gateway, "_fetch_last_generation_metrics", _fetch),
+    ):
+        await asyncio.gather(
+            gateway._fill_usage_gaps(
+                {"prompt_tokens": 500, "completion_tokens": 100}, entry
+            ),
+            gateway._fill_usage_gaps(
+                {"prompt_tokens": 500, "completion_tokens": 100}, entry
+            ),
+        )
+
+    assert len(fetches) == 1
+    assert gateway._attribution[entry.host_id + "/" + entry.instance_id]["skip"] == 1

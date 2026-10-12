@@ -77,6 +77,20 @@ describe('mergeRealtimeStats', () => {
     expect(stats.cache_hit_rate).toBe(0);
   });
 
+  it('treats a NULL cached row as unmeasured, not a Miss-by-design', () => {
+    // A NULL cached_tokens means the backend's split was not attributed (the
+    // relay's negative-cache skip or a race-derived loss) -- the row lands in
+    // the uncached band by the subtraction, but never in the measured
+    // denominator, so the Hit rate is not deflated by unmeasured traffic.
+    const stats = mergeRealtimeStats(
+      baseline({ token_in_measured_total: 700, token_cached_total: 300, cache_hit_rate: 300 / 700 }),
+      [live({ request_id: 'req-null', prompt_tokens: 200, cached_tokens: null })],
+    );
+    expect(stats.token_uncached_total).toBe(5200 - 300);
+    expect(stats.token_in_measured_total).toBe(700);
+    expect(stats.token_cached_total).toBe(300);
+  });
+
   it('counts statuses and rerouted attempts like the old merge', () => {
     const stats = mergeRealtimeStats(baseline({ completed: 5, missed: 1, error: 1, rerouted_requests: 2 }), [
       live({ request_id: 'req-ok' }),

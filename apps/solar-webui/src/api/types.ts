@@ -631,7 +631,7 @@ export interface GatewayRequestSummary {
   error_message?: string;
   prompt_tokens?: number;
   /** Prompt-cache hit portion of prompt_tokens; null/absent = not cache-aware. */
-  cached_tokens?: number;
+  cached_tokens?: number | null;
   completion_tokens?: number;
   total_tokens?: number;
   decode_tps?: number;
