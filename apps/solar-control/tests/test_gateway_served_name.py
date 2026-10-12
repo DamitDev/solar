@@ -1218,15 +1218,13 @@ class TestNegativeCacheEscalation:
 
     def _entry(self) -> RegistryEntry:
         return RegistryEntry(
-            **{
-                "host_id": "host-1",
-                "instance_id": "inst-1",
-                "url": "http://test-host:3500",
-                "api_key": "instance-api-key",
-                "model_alias": ALIAS,
-                "backend_type": "sglang",
-                "served_model_name": SERVED,
-            }
+            host_id="host-1",
+            instance_id="inst-1",
+            url="http://test-host:3500",
+            api_key="instance-api-key",
+            model_alias=ALIAS,
+            backend_type="sglang",
+            served_model_name=SERVED,
         )
 
     @pytest.mark.anyio
@@ -1244,8 +1242,9 @@ class TestNegativeCacheEscalation:
             fetches.append(clock.now)
             return {}  # split-less: the derivation lost the race
 
-        with patch("app.gateway.time.monotonic", clock), patch.object(
-            gateway, "_fetch_last_generation_metrics", _fetch
+        with (
+            patch("app.gateway.time.monotonic", clock),
+            patch.object(gateway, "_fetch_last_generation_metrics", _fetch),
         ):
             await gateway._fill_usage_gaps(dict(usage_fields), entry)  # miss: arm 4s
             clock.now += 1  # inside the base interval: the round-trip is skipped
@@ -1271,8 +1270,9 @@ class TestNegativeCacheEscalation:
             fetches.append(clock.now)
             return {}  # split-less: the backoff doubles each consecutive miss
 
-        with patch("app.gateway.time.monotonic", clock), patch.object(
-            gateway, "_fetch_last_generation_metrics", _fetch
+        with (
+            patch("app.gateway.time.monotonic", clock),
+            patch.object(gateway, "_fetch_last_generation_metrics", _fetch),
         ):
             for _ in range(61):  # 61 requests at 1s spacing
                 await gateway._fill_usage_gaps(dict(usage_fields), entry)
@@ -1300,8 +1300,9 @@ class TestNegativeCacheEscalation:
             fetches.append(clock.now)
             return answers.pop(0)
 
-        with patch("app.gateway.time.monotonic", clock), patch.object(
-            gateway, "_fetch_last_generation_metrics", _fetch
+        with (
+            patch("app.gateway.time.monotonic", clock),
+            patch.object(gateway, "_fetch_last_generation_metrics", _fetch),
         ):
             # call 1 at t=1000: fetch, split-less -> miss 1, the base window
             # arms (deadline 1004).
@@ -1339,10 +1340,13 @@ class TestNegativeCacheEscalation:
         async def _fetch(host_id, instance_id, within_s=None):
             return answers.pop(0)
 
-        with patch("app.gateway.time.monotonic", clock), patch.object(
-            gateway, "_fetch_last_generation_metrics", _fetch
+        with (
+            patch("app.gateway.time.monotonic", clock),
+            patch.object(gateway, "_fetch_last_generation_metrics", _fetch),
         ):
-            await gateway._fill_usage_gaps(dict(usage_fields), entry)  # miss: skip armed
+            await gateway._fill_usage_gaps(
+                dict(usage_fields), entry
+            )  # miss: skip armed
             clock.now += 1  # inside the base window
             skipped = await gateway._fill_usage_gaps(dict(usage_fields), entry)
             key = "host-1/inst-1"
