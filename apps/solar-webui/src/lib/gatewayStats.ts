@@ -8,6 +8,11 @@ import { GatewayRequestSummary, GatewayStats } from '@/api/types';
  * - the cache-hit rate divides by the measured denominator, which is the sum
  *   of prompt tokens over cache-aware rows only (the server excludes NULL
  *   `cached_tokens` rows), so non-cache-aware requests never dilute it.
+ * - A NULL cached row still lands in the uncached band by the subtraction
+ *   above: it means the backend's split was not attributed (a race-derived
+ *   loss or the relay's negative-cache skip), not a Miss-by-design. The rate
+ *   is computed over the measured denominator, so unmeasured traffic deflates
+ *   the Miss band's share but never the Hit rate itself. (#100)
  *
  * The baseline's `token_in_measured_total` comes straight from the API and is
  * grown by each new cache-aware request's prompt tokens. Reverse-deriving it
