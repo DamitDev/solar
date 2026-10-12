@@ -109,6 +109,14 @@ class OpenAIGateway:
         # so concurrent coroutines cannot double-arm the backoff window.
         self._arm_locks: dict[str, asyncio.Lock] = {}
 
+    def attribution(self) -> dict[str, dict[str, int]]:
+        """Snapshot of the per-instance negative-cache attribution counters.
+
+        Keys are ``{host_id}/{instance_id}``. Returns a copy so callers
+        cannot mutate the live counters; counters reset on gateway restart.
+        """
+        return {key: dict(counters) for key, counters in self._attribution.items()}
+
     async def _ensure_session(self) -> None:
         if self.session is not None and not self.session.closed:
             return
@@ -1981,14 +1989,14 @@ class OpenAIGateway:
                                 # Fallback for backends that ignore
                                 # stream_options: bound the attribution window
                                 # so a stale generation from another request
-                                # cannot be billed to this one.
-                                usage_fields = (
-                                    await self._fetch_last_generation_metrics(
-                                        instance.host_id,
-                                        instance.instance_id,
-                                        within_s=5,
-                                    )
-                                ) or {}
+                                # cannot be billed to this one. Routing the
+                                # fetch through _fill_usage_gaps also arms
+                                # the negative-cache backoff and counts the
+                                # attempt, so a split-less backend is not
+                                # re-probed on every streamed request.
+                                usage_fields = await self._fill_usage_gaps(
+                                    captured_usage, instance, within_s=5
+                                )
                             await self._emit_success(
                                 request_id,
                                 model,

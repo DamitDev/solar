@@ -58,11 +58,7 @@ async def get_attribution() -> dict[str, Any]:
     ``cached_tokens`` rows, countable on the relay. Counters reset on
     gateway restart; persistence is out of scope.
     """
-    return {
-        "attribution": {
-            key: dict(counters) for key, counters in gateway._attribution.items()
-        }
-    }
+    return {"attribution": gateway.attribution()}
 
 
 MAX_TIMESERIES_SERIES = 8
