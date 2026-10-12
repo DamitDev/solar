@@ -105,6 +105,9 @@ class OpenAIGateway:
         # Per-instance attribution counters (#100): the three mechanisms that
         # produce NULL cached_tokens rows, countable on the relay.
         self._attribution: dict[str, dict[str, int]] = {}
+        # Serializes the miss-check -> fetch -> arm sequence per instance key
+        # so concurrent coroutines cannot double-arm the backoff window.
+        self._arm_locks: dict[str, asyncio.Lock] = {}
 
     async def _ensure_session(self) -> None:
         if self.session is not None and not self.session.closed:
@@ -605,31 +608,38 @@ class OpenAIGateway:
         )
         if "cached_tokens" in usage_fields:
             self._attribution[key]["upstream_split"] += 1
-        if only_cached_missing:
-            misses = self._no_cached_misses.get(key, 0)
-            if misses and time.monotonic() < self._no_cached_until.get(key, 0.0):
-                self._attribution[key]["skip"] += 1
-                return usage_fields
-        if only_cached_missing and (
-            within_s is None or within_s < _CACHED_FILL_WINDOW_S
-        ):
-            # Counts are already attributed upstream; only the split is
-            # borrowed, so the strict concurrency window does not apply.
-            within_s = _CACHED_FILL_WINDOW_S
-        host_metrics = await self._fetch_last_generation_metrics(
-            instance.host_id, instance.instance_id, within_s=within_s
-        )
-        if host_metrics is None:
-            return usage_fields
-        if "cached_tokens" not in host_metrics:
-            self._no_cached_misses[key] = self._no_cached_misses.get(key, 0) + 1
-            self._no_cached_until[key] = time.monotonic() + min(
-                _NEGATIVE_BACKOFF_BASE_S * 2 ** (self._no_cached_misses[key] - 1),
-                _NEGATIVE_CACHE_TTL_S,
+        # The miss-check read and the arm below are separated by the fetch
+        # await, so two concurrent coroutines for the same key can both pass
+        # the check with misses==0 and both arm the window (8s instead of
+        # 4s). The per-key lock serializes check -> fetch -> arm, so the
+        # second coroutine sees the armed window and skips instead.
+        lock = self._arm_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            if only_cached_missing:
+                misses = self._no_cached_misses.get(key, 0)
+                if misses and time.monotonic() < self._no_cached_until.get(key, 0.0):
+                    self._attribution[key]["skip"] += 1
+                    return usage_fields
+            if only_cached_missing and (
+                within_s is None or within_s < _CACHED_FILL_WINDOW_S
+            ):
+                # Counts are already attributed upstream; only the split is
+                # borrowed, so the strict concurrency window does not apply.
+                within_s = _CACHED_FILL_WINDOW_S
+            host_metrics = await self._fetch_last_generation_metrics(
+                instance.host_id, instance.instance_id, within_s=within_s
             )
-        else:
-            self._no_cached_misses[key] = 0
-            self._attribution[key]["host_fill_success"] += 1
+            if host_metrics is None:
+                return usage_fields
+            if "cached_tokens" not in host_metrics:
+                self._no_cached_misses[key] = self._no_cached_misses.get(key, 0) + 1
+                self._no_cached_until[key] = time.monotonic() + min(
+                    _NEGATIVE_BACKOFF_BASE_S * 2 ** (self._no_cached_misses[key] - 1),
+                    _NEGATIVE_CACHE_TTL_S,
+                )
+            else:
+                self._no_cached_misses[key] = 0
+                self._attribution[key]["host_fill_success"] += 1
         return {**host_metrics, **usage_fields}
 
     async def _fetch_last_generation_metrics(
