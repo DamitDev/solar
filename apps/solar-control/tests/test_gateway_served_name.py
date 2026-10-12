@@ -15,6 +15,7 @@ import pytest
 from app.database.logs import GatewayLogger
 from app.gateway import (
     _CACHED_FILL_WINDOW_S,
+    _NEGATIVE_BACKOFF_BASE_S,
     _STREAM_USAGE_ENDPOINTS,
     OpenAIGateway,
 )
@@ -1198,3 +1199,156 @@ class TestCachedTokensFlow:
                 assert "cached_tokens" not in emitted["data"]
             else:
                 assert emitted["data"]["cached_tokens"] == expected
+
+
+class _FakeClock:
+    """A controllable ``time.monotonic`` for the backoff tests."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TestNegativeCacheEscalation:
+    """The escalating re-probe backoff (#100): a race-derived loss suppresses
+    fills only for the base interval, not the full 60s TTL, and the
+    per-source attribution counters make a NULL rate diagnosable."""
+
+    def _entry(self) -> RegistryEntry:
+        return RegistryEntry(
+            **{
+                "host_id": "host-1",
+                "instance_id": "inst-1",
+                "url": "http://test-host:3500",
+                "api_key": "instance-api-key",
+                "model_alias": ALIAS,
+                "backend_type": "sglang",
+                "served_model_name": SERVED,
+            }
+        )
+
+    @pytest.mark.anyio
+    async def test_first_split_less_answer_skips_but_a_later_one_retries(self):
+        """The re-probe: a race-derived loss suppresses fills only for the
+        base interval -- the next request gets a fresh attempt instead of
+        being blanket-skipped for the whole 60s TTL."""
+        gateway = OpenAIGateway()
+        clock = _FakeClock()
+        entry = self._entry()
+        usage_fields = {"prompt_tokens": 500, "completion_tokens": 100}
+        fetches: list = []
+
+        async def _fetch(host_id, instance_id, within_s=None):
+            fetches.append(clock.now)
+            return {}  # split-less: the derivation lost the race
+
+        with patch("app.gateway.time.monotonic", clock), patch.object(
+            gateway, "_fetch_last_generation_metrics", _fetch
+        ):
+            await gateway._fill_usage_gaps(dict(usage_fields), entry)  # miss: arm 4s
+            clock.now += 1  # inside the base interval: the round-trip is skipped
+            await gateway._fill_usage_gaps(dict(usage_fields), entry)
+            clock.now += _NEGATIVE_BACKOFF_BASE_S + 1  # past the base interval
+            # After the base interval elapses the fill is retried.
+            await gateway._fill_usage_gaps(dict(usage_fields), entry)
+
+        assert len(fetches) == 2
+
+    @pytest.mark.anyio
+    async def test_backoff_grows_with_consecutive_misses_and_caps_at_the_ttl(self):
+        """Consecutive split-less misses double the skip window (4, 8, 16, 32,
+        then capped at the 60s TTL) -- a genuinely split-less build pays at
+        most one round-trip per window, not per request."""
+        gateway = OpenAIGateway()
+        clock = _FakeClock()
+        entry = self._entry()
+        usage_fields = {"prompt_tokens": 500, "completion_tokens": 100}
+        fetches: list = []
+
+        async def _fetch(host_id, instance_id, within_s=None):
+            fetches.append(clock.now)
+            return {}  # split-less: the backoff doubles each consecutive miss
+
+        with patch("app.gateway.time.monotonic", clock), patch.object(
+            gateway, "_fetch_last_generation_metrics", _fetch
+        ):
+            for _ in range(61):  # 61 requests at 1s spacing
+                await gateway._fill_usage_gaps(dict(usage_fields), entry)
+                clock.now += 1
+
+        assert len(fetches) == 5  # t=0, 4, 12, 28, 60 (the capped window)
+
+    @pytest.mark.anyio
+    async def test_a_split_hit_resets_the_backoff(self):
+        """A successful fill proves the build can emit, so the next split-less
+        answer arms only the base window again."""
+        gateway = OpenAIGateway()
+        clock = _FakeClock()
+        entry = self._entry()
+        usage_fields = {"prompt_tokens": 500, "completion_tokens": 100}
+        fetches: list = []
+        answers = [
+            {},  # call 1: split-less, the base window arms (4s)
+            {"prompt_tokens": 999, "completion_tokens": 111, "cached_tokens": 300},
+            {},  # call 3: the hit reset the backoff, so the base window re-arms
+            {},  # call 5: the base 4s window expired -> retried
+        ]
+
+        async def _fetch(host_id, instance_id, within_s=None):
+            fetches.append(clock.now)
+            return answers.pop(0)
+
+        with patch("app.gateway.time.monotonic", clock), patch.object(
+            gateway, "_fetch_last_generation_metrics", _fetch
+        ):
+            # call 1 at t=1000: fetch, split-less -> miss 1, the base window
+            # arms (deadline 1004).
+            await gateway._fill_usage_gaps(dict(usage_fields), entry)
+            clock.now += 1
+            # call 2 at t=1001: inside the base window -> skipped.
+            await gateway._fill_usage_gaps(dict(usage_fields), entry)
+            clock.now += 10
+            # call 3 at t=1011: past the base window -> fetch, the HIT resets
+            # the miss count to 0.
+            await gateway._fill_usage_gaps(dict(usage_fields), entry)
+            clock.now += 1
+            # call 4 at t=1012: the reset means the next split-less answer
+            # arms only the base window again, so this call is skipped.
+            await gateway._fill_usage_gaps(dict(usage_fields), entry)
+            clock.now += 5
+            # call 5 at t=1017: the base 4s window expired -> retried.
+            await gateway._fill_usage_gaps(dict(usage_fields), entry)
+
+            assert len(fetches) == 4
+
+    @pytest.mark.anyio
+    async def test_attribution_counters_count_each_mechanism(self):
+        """The three mechanisms that produce NULL rows are countable:
+        upstream split, host fill success, negative-cache skip."""
+        gateway = OpenAIGateway()
+        clock = _FakeClock()
+        entry = self._entry()
+        usage_fields = {"prompt_tokens": 500, "completion_tokens": 100}
+        answers = [
+            {},  # split-less: the derivation lost the race, arm the base window
+            {"prompt_tokens": 999, "completion_tokens": 111, "cached_tokens": 300},
+        ]
+
+        async def _fetch(host_id, instance_id, within_s=None):
+            return answers.pop(0)
+
+        with patch("app.gateway.time.monotonic", clock), patch.object(
+            gateway, "_fetch_last_generation_metrics", _fetch
+        ):
+            await gateway._fill_usage_gaps(dict(usage_fields), entry)  # miss: skip armed
+            clock.now += 1  # inside the base window
+            skipped = await gateway._fill_usage_gaps(dict(usage_fields), entry)
+            key = "host-1/inst-1"
+            assert gateway._attribution[key]["skip"] == 1
+            assert "cached_tokens" not in skipped
+            clock.now += _NEGATIVE_BACKOFF_BASE_S + 1  # past the window
+            filled = await gateway._fill_usage_gaps(dict(usage_fields), entry)  # hit
+            assert gateway._attribution[key]["host_fill_success"] == 1
+            assert filled["cached_tokens"] == 300

@@ -62,11 +62,15 @@ def _task_done_callback(task: asyncio.Task) -> None:
 
 _RETRYABLE_STATUSES = frozenset({502, 503, 504})
 
-# How long to remember that a cache-aware backend answered usage without a
-# cached split. Old llama.cpp/SGLang builds do not emit
-# prompt_tokens_details; without this, every chat request pays an extra
-# host round-trip that can never fill the gap.
+# How long the backoff may keep a cache-aware backend skipped after it
+# answered usage without a cached split. Old llama.cpp/SGLang builds do not
+# emit prompt_tokens_details; without the backoff, every chat request pays
+# an extra host round-trip that can never fill the gap. The skip window
+# ESCALATES with consecutive split-less misses (doubled each time, capped
+# here), so a one-off concurrency race costs a single re-probe instead of a
+# 60s suppression of fills. (#100)
 _NEGATIVE_CACHE_TTL_S = 60
+_NEGATIVE_BACKOFF_BASE_S = 4
 
 # How old a host last-generation record may be when only the cached split is
 # missing. The strict 5s attribution window exists so a STALE generation's
@@ -92,8 +96,15 @@ class OpenAIGateway:
         self._bg_tasks: list[asyncio.Task[None]] = []
         self._pending_tasks: set[asyncio.Task] = set()
         self._stop_event: asyncio.Event | None = None
-        # instance_key -> monotonic deadline; see _fill_usage_gaps.
+        # instance_key -> split-less miss count; the effective skip window is
+        # _NEGATIVE_BACKOFF_BASE_S doubled per miss, capped at
+        # _NEGATIVE_CACHE_TTL_S. See _fill_usage_gaps.
+        self._no_cached_misses: dict[str, int] = {}
+        # instance_key -> monotonic deadline at which the backoff window ends.
         self._no_cached_until: dict[str, float] = {}
+        # Per-instance attribution counters (#100): the three mechanisms that
+        # produce NULL cached_tokens rows, countable on the relay.
+        self._attribution: dict[str, dict[str, int]] = {}
 
     async def _ensure_session(self) -> None:
         if self.session is not None and not self.session.closed:
@@ -571,13 +582,15 @@ class OpenAIGateway:
         round-trip.
 
         When the only gap is the cached split and a recent host answer also
-        lacked one, the instance is remembered as split-less and the
-        round-trip is skipped until the negative cache expires -- old
-        backends that never emit ``prompt_tokens_details`` would otherwise
-        cost an HTTP call on every request. A failed fetch (``None``) never
-        arms that cache: a transient blip or an out-of-window record is not
-        proof that the backend lacks a split, so the next request gets a
-        fresh chance to fill.
+        lacked one, the instance's backoff escalates and the round-trip is
+        skipped until the backoff window elapses -- old backends that never
+        emit ``prompt_tokens_details`` would otherwise cost an HTTP call on
+        every request, while a one-off concurrency race costs a single
+        re-probe instead of a 60s suppression. A failed fetch (``None``)
+        never arms that cache: a transient blip or an out-of-window record is
+        not proof that the backend lacks a split, so the next request gets a
+        fresh chance to fill. A successful fill resets the backoff to the
+        base window.
         """
         if not self._usage_need_host_fallback(usage_fields, instance):
             return usage_fields
@@ -587,11 +600,16 @@ class OpenAIGateway:
             and "completion_tokens" in usage_fields
             and "cached_tokens" not in usage_fields
         )
-        if (
-            only_cached_missing
-            and self._no_cached_until.get(key, 0.0) > time.monotonic()
-        ):
-            return usage_fields
+        self._attribution.setdefault(
+            key, {"upstream_split": 0, "host_fill_success": 0, "skip": 0}
+        )
+        if "cached_tokens" in usage_fields:
+            self._attribution[key]["upstream_split"] += 1
+        if only_cached_missing:
+            misses = self._no_cached_misses.get(key, 0)
+            if misses and time.monotonic() < self._no_cached_until.get(key, 0.0):
+                self._attribution[key]["skip"] += 1
+                return usage_fields
         if only_cached_missing and (
             within_s is None or within_s < _CACHED_FILL_WINDOW_S
         ):
@@ -604,7 +622,14 @@ class OpenAIGateway:
         if host_metrics is None:
             return usage_fields
         if "cached_tokens" not in host_metrics:
-            self._no_cached_until[key] = time.monotonic() + _NEGATIVE_CACHE_TTL_S
+            self._no_cached_misses[key] = self._no_cached_misses.get(key, 0) + 1
+            self._no_cached_until[key] = time.monotonic() + min(
+                _NEGATIVE_BACKOFF_BASE_S * 2 ** (self._no_cached_misses[key] - 1),
+                _NEGATIVE_CACHE_TTL_S,
+            )
+        else:
+            self._no_cached_misses[key] = 0
+            self._attribution[key]["host_fill_success"] += 1
         return {**host_metrics, **usage_fields}
 
     async def _fetch_last_generation_metrics(
