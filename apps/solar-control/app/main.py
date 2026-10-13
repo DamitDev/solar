@@ -177,7 +177,7 @@ async def health_check():
 
 @app.get("/metrics")
 async def metrics():
-    """Prometheus pool-health metrics (public, scrape-time gauges)."""
+    """Prometheus pool-health metrics (management key required, scrape-time gauges)."""
     from app.database.pool_metrics import render_metrics
 
     return Response(render_metrics(), media_type="text/plain; version=0.0.4")

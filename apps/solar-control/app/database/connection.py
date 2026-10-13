@@ -2,6 +2,7 @@
 
 import asyncio
 import functools
+import logging
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -9,6 +10,8 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+
+logger = logging.getLogger(__name__)
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -21,6 +24,11 @@ _isolated_tasks: set[asyncio.Task] = set()
 
 def _task_done(task: asyncio.Task) -> None:
     _isolated_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.debug("Isolated DB operation failed: %r", exc)
 
 
 async def run_isolated(coro):
@@ -96,8 +104,10 @@ async def init_db(
     return _engine
 
 
-async def close_db() -> None:
+async def close_db(drain_timeout: float = 5.0) -> None:
     global _engine, _session_factory
+    if _isolated_tasks:
+        await asyncio.wait(set(_isolated_tasks), timeout=drain_timeout)
     if _engine:
         await _engine.dispose()
         _engine = None
