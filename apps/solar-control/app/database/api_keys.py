@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select, update
 
-from .connection import get_session_factory
+from .connection import get_session_factory, isolated_db_op
 from .tables import ApiKeyRow
 
 
@@ -52,6 +52,7 @@ class ApiKeyDB:
             updated_at=row.updated_at,
         )
 
+    @isolated_db_op
     async def create(
         self,
         endpoint_id: str,
@@ -79,11 +80,13 @@ class ApiKeyDB:
             await session.commit()
         return ak
 
+    @isolated_db_op
     async def get(self, key_id: str) -> ApiKey | None:
         async with self._session() as session:
             row = await session.get(ApiKeyRow, key_id)
             return self._row_to_key(row) if row else None
 
+    @isolated_db_op
     async def get_by_key(self, key: str) -> ApiKey | None:
         async with self._session() as session:
             result = await session.execute(
@@ -92,6 +95,7 @@ class ApiKeyDB:
             row = result.scalar_one_or_none()
             return self._row_to_key(row) if row else None
 
+    @isolated_db_op
     async def list_for_endpoint(self, endpoint_id: str) -> list[ApiKey]:
         async with self._session() as session:
             result = await session.execute(
@@ -101,6 +105,7 @@ class ApiKeyDB:
             )
             return [self._row_to_key(row) for row in result.scalars()]
 
+    @isolated_db_op
     async def list_all(self) -> list[ApiKey]:
         async with self._session() as session:
             result = await session.execute(
@@ -108,6 +113,7 @@ class ApiKeyDB:
             )
             return [self._row_to_key(row) for row in result.scalars()]
 
+    @isolated_db_op
     async def update(
         self,
         key_id: str,
@@ -143,6 +149,7 @@ class ApiKeyDB:
             await session.commit()
             return self._row_to_key(row) if row else None
 
+    @isolated_db_op
     async def rotate(self, key_id: str) -> ApiKey | None:
         """Replace the key material; every other field is left untouched."""
         new_key = f"sk-{secrets.token_urlsafe(32)}"
@@ -157,6 +164,7 @@ class ApiKeyDB:
             await session.commit()
             return self._row_to_key(row) if row else None
 
+    @isolated_db_op
     async def delete(self, key_id: str) -> bool:
         async with self._session() as session:
             result = await session.execute(
@@ -165,6 +173,7 @@ class ApiKeyDB:
             await session.commit()
             return result.rowcount == 1
 
+    @isolated_db_op
     async def touch_last_used(self, key_id: str) -> None:
         """Stamp ``last_used_at`` without bumping ``updated_at``."""
         async with self._session() as session:

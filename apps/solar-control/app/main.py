@@ -9,7 +9,7 @@ from typing import Any
 import socketio
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from app.auth import auth_middleware
 from app.config import settings
@@ -43,16 +43,18 @@ logging.getLogger("uvicorn.access").setLevel(getattr(logging, log_level, logging
 async def lifespan(app: FastAPI):
     from app.database import close_db, init_db
     from app.database.logs import gateway_logger
+    from app.database.pool_metrics import install_pool_metrics
     from app.gateway import gateway
     from app.redis_state import close_redis, init_redis
 
     logger.info("Starting Solar Control v%s ...", __version__)
 
-    await init_db(
+    engine = await init_db(
         settings.database_url,
         pool_size=settings.db_pool_size,
         max_overflow=settings.db_max_overflow,
     )
+    install_pool_metrics(engine)
     logger.info("PostgreSQL connected (pool_size=%d)", settings.db_pool_size)
 
     # Initialize Redis
@@ -173,17 +175,28 @@ async def health_check():
     return {"status": "healthy", "service": "solar-control", "version": __version__}
 
 
+@app.get("/metrics")
+async def metrics():
+    """Prometheus pool-health metrics (management key required, scrape-time gauges)."""
+    from app.database.pool_metrics import render_metrics
+
+    return Response(render_metrics(), media_type="text/plain; version=0.0.4")
+
+
 @app.get("/ready")
 async def readiness_check():
     """Readiness probe - checks DB and Redis connectivity."""
     try:
         from sqlalchemy import text
 
-        from app.database.connection import get_session_factory
+        from app.database.connection import get_session_factory, run_isolated
         from app.redis_state.connection import redis_client
 
-        async with get_session_factory()() as session:
-            await session.execute(text("SELECT 1"))
+        async def _check_db() -> None:
+            async with get_session_factory()() as session:
+                await session.execute(text("SELECT 1"))
+
+        await run_isolated(_check_db())
         r = redis_client()
         await r.ping()
         return {"status": "ready"}

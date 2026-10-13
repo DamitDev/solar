@@ -214,6 +214,15 @@ async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyp
             headers=_CORS_HEADERS,
         )
 
+    if path == "/metrics":
+        if api_key != settings.management_api_key:
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content=_UNAUTHORIZED_RESPONSE,
+                headers=_CORS_HEADERS,
+            )
+        return await call_next(request)
+
     if path.startswith(("/v1/", "/cursor/v1/")):
         resolved = await _resolve_endpoint(api_key)
         if resolved:

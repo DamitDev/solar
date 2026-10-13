@@ -12,7 +12,7 @@ from app.models.virtual_model import (
     VirtualModelUpdate,
 )
 
-from .connection import get_session_factory
+from .connection import get_session_factory, isolated_db_op
 from .tables import VirtualModelRow
 
 
@@ -34,6 +34,7 @@ class VirtualModelDB:
             updated_at=row.updated_at.isoformat() if row.updated_at else None,
         )
 
+    @isolated_db_op
     async def list_all(self) -> list[VirtualModelResponse]:
         async with self._session() as session:
             result = await session.execute(
@@ -48,11 +49,13 @@ class VirtualModelDB:
         )
         return result.scalar_one_or_none()
 
+    @isolated_db_op
     async def get_by_name(self, name: str) -> VirtualModelResponse | None:
         async with self._session() as session:
             row = await self._get_row(session, name)
             return self._row_to_response(row) if row else None
 
+    @isolated_db_op
     async def create(self, data: VirtualModelCreate) -> VirtualModelResponse:
         """Insert a new virtual model. Raises ValueError when the name exists."""
         now = datetime.now(timezone.utc)
@@ -74,6 +77,7 @@ class VirtualModelDB:
             await session.refresh(row)
             return self._row_to_response(row)
 
+    @isolated_db_op
     async def update(
         self, name: str, data: VirtualModelUpdate
     ) -> VirtualModelResponse | None:
@@ -93,6 +97,7 @@ class VirtualModelDB:
             await session.refresh(row)
             return self._row_to_response(row)
 
+    @isolated_db_op
     async def delete(self, name: str) -> bool:
         """Delete by name. Returns False when the name does not exist."""
         async with self._session() as session:

@@ -7,7 +7,7 @@ from sqlalchemy import delete, select, update
 
 from app.models import DrainState, Host, HostStatus, MemoryInfo
 
-from .connection import get_session_factory
+from .connection import get_session_factory, isolated_db_op
 from .tables import HostRow
 
 
@@ -75,6 +75,7 @@ class HostDB:
             "created_at": host.created_at,
         }
 
+    @isolated_db_op
     async def add_host(self, host: Host) -> Host:
         async with self._session() as session:
             existing = await session.get(HostRow, host.id)
@@ -90,17 +91,20 @@ class HostDB:
             await session.commit()
         return host
 
+    @isolated_db_op
     async def remove_host(self, host_id: str) -> bool:
         async with self._session() as session:
             result = await session.execute(delete(HostRow).where(HostRow.id == host_id))
             await session.commit()
             return result.rowcount == 1
 
+    @isolated_db_op
     async def get_host(self, host_id: str) -> Host | None:
         async with self._session() as session:
             row = await session.get(HostRow, host_id)
             return self._row_to_host(row) if row else None
 
+    @isolated_db_op
     async def get_host_by_api_key(self, api_key: str) -> Host | None:
         async with self._session() as session:
             result = await session.execute(
@@ -109,6 +113,7 @@ class HostDB:
             row = result.scalar_one_or_none()
             return self._row_to_host(row) if row else None
 
+    @isolated_db_op
     async def get_all_hosts(self, *, role: str | None = None) -> list[Host]:
         async with self._session() as session:
             stmt = select(HostRow).order_by(HostRow.created_at)
@@ -117,6 +122,7 @@ class HostDB:
             result = await session.execute(stmt)
             return [self._row_to_host(row) for row in result.scalars()]
 
+    @isolated_db_op
     async def update_host_status(
         self,
         host_id: str,
@@ -137,6 +143,7 @@ class HostDB:
             await session.commit()
             return result.rowcount == 1
 
+    @isolated_db_op
     async def update_host_memory(
         self,
         host_id: str,
@@ -171,6 +178,7 @@ class HostDB:
             await session.commit()
             return result.rowcount == 1
 
+    @isolated_db_op
     async def update_host_gpu_type(self, host_id: str, gpu_type: str) -> bool:
         async with self._session() as session:
             result = await session.execute(
@@ -179,6 +187,7 @@ class HostDB:
             await session.commit()
             return result.rowcount == 1
 
+    @isolated_db_op
     async def update_host_roles(self, host_id: str, roles: list[str]) -> bool:
         async with self._session() as session:
             result = await session.execute(
@@ -187,6 +196,7 @@ class HostDB:
             await session.commit()
             return result.rowcount == 1
 
+    @isolated_db_op
     async def set_drain_state(
         self, host_id: str, drain_state: DrainState | None
     ) -> Host | None:
@@ -214,6 +224,7 @@ class HostDB:
             await session.refresh(row)
             return self._row_to_host(row)
 
+    @isolated_db_op
     async def list_draining_hosts(self) -> list[Host]:
         """List hosts with a drain state set, oldest request first."""
         async with self._session() as session:
@@ -224,6 +235,7 @@ class HostDB:
             )
             return [self._row_to_host(row) for row in result.scalars()]
 
+    @isolated_db_op
     async def update_host_supported_backends(
         self, host_id: str, supported_backends: list[str]
     ) -> bool:
@@ -236,6 +248,7 @@ class HostDB:
             await session.commit()
             return result.rowcount == 1
 
+    @isolated_db_op
     async def update_host_registration(
         self,
         host_id: str,
