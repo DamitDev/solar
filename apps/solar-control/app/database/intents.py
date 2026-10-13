@@ -15,7 +15,7 @@ from app.models.intent import (
 )
 
 from ..validation import derive_gpu_count
-from .connection import get_session_factory
+from .connection import get_session_factory, isolated_db_op
 from .tables import IntentRow
 
 
@@ -108,6 +108,7 @@ class IntentDB:
             "last_error": None,
         }
 
+    @isolated_db_op
     async def create_intent(
         self,
         *,
@@ -145,6 +146,7 @@ class IntentDB:
             await session.refresh(row)
             return self._row_to_response(row)
 
+    @isolated_db_op
     async def update_intent(
         self,
         intent_id: str,
@@ -219,6 +221,7 @@ class IntentDB:
             await session.refresh(row)
             return self._row_to_response(row)
 
+    @isolated_db_op
     async def get_intent(self, intent_id: str) -> IntentResponse | None:
         """Get a single intent by ID (excluding soft-deleted)."""
         async with self._session() as session:
@@ -227,6 +230,7 @@ class IntentDB:
                 return None
             return self._row_to_response(row)
 
+    @isolated_db_op
     async def get_intent_by_alias(self, alias: str) -> IntentResponse | None:
         """Get an active (non-deleted) intent by alias."""
         async with self._session() as session:
@@ -239,6 +243,7 @@ class IntentDB:
             row = result.scalar_one_or_none()
             return self._row_to_response(row) if row else None
 
+    @isolated_db_op
     async def list_intents(
         self,
         *,
@@ -265,6 +270,7 @@ class IntentDB:
             result = await session.execute(stmt)
             return [self._row_to_response(row) for row in result.scalars()]
 
+    @isolated_db_op
     async def soft_delete_intent(
         self, intent_id: str, *, orphan: bool = False
     ) -> IntentResponse | None:
@@ -295,6 +301,7 @@ class IntentDB:
             await session.refresh(row)
             return self._row_to_response(row)
 
+    @isolated_db_op
     async def list_active_for_reconciliation(self) -> list[IntentResponse]:
         """List all non-deleted intents, ordered by priority for reconciliation.
 
@@ -318,6 +325,7 @@ class IntentDB:
             result = await session.execute(stmt)
             return [self._row_to_response(row) for row in result.scalars()]
 
+    @isolated_db_op
     async def check_alias_conflict(
         self, alias: str, *, exclude_id: str | None = None
     ) -> bool:
@@ -333,6 +341,7 @@ class IntentDB:
                 return False
             return not (exclude_id and str(row.id) == exclude_id)
 
+    @isolated_db_op
     async def update_status(
         self,
         intent_id: str,

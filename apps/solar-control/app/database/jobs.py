@@ -7,7 +7,7 @@ from sqlalchemy import delete, select, update
 
 from app.models.job import Job, JobStatus
 
-from .connection import get_session_factory
+from .connection import get_session_factory, isolated_db_op
 from .tables import JobRow
 
 # How long to retain terminal (completed/failed/cancelled) jobs in the
@@ -60,6 +60,7 @@ class JobDB:
             "completed_at": job.completed_at,
         }
 
+    @isolated_db_op
     async def add_job(self, job: Job) -> Job:
         """Insert a new job record."""
         async with self._session() as session:
@@ -67,12 +68,14 @@ class JobDB:
             await session.commit()
         return job
 
+    @isolated_db_op
     async def get_job(self, job_id: str) -> Job | None:
         """Get a job by ID."""
         async with self._session() as session:
             row = await session.get(JobRow, job_id)
             return self._row_to_job(row) if row else None
 
+    @isolated_db_op
     async def get_jobs_by_host(self, host_id: str) -> list[Job]:
         """Get all jobs for a given host."""
         async with self._session() as session:
@@ -83,6 +86,7 @@ class JobDB:
             )
             return [self._row_to_job(row) for row in result.scalars()]
 
+    @isolated_db_op
     async def get_jobs_by_status(self, status: JobStatus) -> list[Job]:
         """Get all jobs with a given status."""
         async with self._session() as session:
@@ -93,6 +97,7 @@ class JobDB:
             )
             return [self._row_to_job(row) for row in result.scalars()]
 
+    @isolated_db_op
     async def get_all_jobs(self, *, limit: int = 100, offset: int = 0) -> list[Job]:
         """Get all jobs with pagination."""
         async with self._session() as session:
@@ -104,6 +109,7 @@ class JobDB:
             )
             return [self._row_to_job(row) for row in result.scalars()]
 
+    @isolated_db_op
     async def update_job_status(
         self,
         job_id: str,
@@ -131,6 +137,7 @@ class JobDB:
             await session.commit()
             return result.rowcount > 0
 
+    @isolated_db_op
     async def update_job_host(self, job_id: str, host_id: str) -> bool:
         """Update the host assigned to a job."""
         async with self._session() as session:
@@ -142,6 +149,7 @@ class JobDB:
             await session.commit()
             return result.rowcount > 0
 
+    @isolated_db_op
     async def update_job_step(
         self,
         job_id: str,
@@ -163,6 +171,7 @@ class JobDB:
             await session.commit()
             return result.rowcount > 0
 
+    @isolated_db_op
     async def get_active_by_host(
         self,
         host_id: str,
@@ -209,6 +218,7 @@ class JobDB:
             )
             return [self._row_to_job(row) for row in result.scalars()]
 
+    @isolated_db_op
     async def remove_job(self, job_id: str) -> bool:
         """Delete a job record."""
         async with self._session() as session:

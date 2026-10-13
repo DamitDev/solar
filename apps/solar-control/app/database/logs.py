@@ -20,7 +20,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.models import WSMessageType
 
-from .connection import get_session_factory
+from .connection import get_session_factory, isolated_db_op
 from .tables import ApiEndpointRow, GatewayEventRow, GatewayRequestRow
 
 logger = logging.getLogger(__name__)
@@ -572,6 +572,7 @@ class GatewayLogger:
             "decode_ms_per_token": row.decode_ms_per_token,
         }
 
+    @isolated_db_op
     async def read_requests_page(
         self,
         start: datetime,
@@ -621,6 +622,7 @@ class GatewayLogger:
 
         return [self._row_to_dict(row) for row in rows], total
 
+    @isolated_db_op
     async def read_stats(
         self,
         start: datetime,
@@ -854,6 +856,7 @@ class GatewayLogger:
             return R.host_id
         return None
 
+    @isolated_db_op
     async def read_timeseries(
         self,
         start: datetime,
@@ -1011,6 +1014,7 @@ class GatewayLogger:
 
         return points, series
 
+    @isolated_db_op
     async def read_events(
         self,
         start: datetime,

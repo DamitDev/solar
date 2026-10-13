@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select, update
 
 from .api_keys import ApiKey
-from .connection import get_session_factory
+from .connection import get_session_factory, isolated_db_op
 from .tables import ApiEndpointRow, ApiKeyRow, GatewayRequestRow
 
 
@@ -50,6 +50,7 @@ class EndpointDB:
             updated_at=row.updated_at,
         )
 
+    @isolated_db_op
     async def create_endpoint(
         self,
         name: str,
@@ -79,11 +80,13 @@ class EndpointDB:
             await session.commit()
         return ep
 
+    @isolated_db_op
     async def get_endpoint(self, endpoint_id: str) -> ApiEndpoint | None:
         async with self._session() as session:
             row = await session.get(ApiEndpointRow, endpoint_id)
             return self._row_to_endpoint(row) if row else None
 
+    @isolated_db_op
     async def resolve_by_api_key(
         self, api_key: str
     ) -> tuple[ApiEndpoint, ApiKey] | None:
@@ -116,6 +119,7 @@ class EndpointDB:
                 ),
             )
 
+    @isolated_db_op
     async def get_all_endpoints(self) -> list[ApiEndpoint]:
         async with self._session() as session:
             result = await session.execute(
@@ -123,6 +127,7 @@ class EndpointDB:
             )
             return [self._row_to_endpoint(row) for row in result.scalars()]
 
+    @isolated_db_op
     async def update_endpoint(
         self,
         endpoint_id: str,
@@ -158,6 +163,7 @@ class EndpointDB:
             await session.commit()
             return self._row_to_endpoint(row) if row else None
 
+    @isolated_db_op
     async def delete_endpoint(self, endpoint_id: str) -> bool:
         async with self._session() as session:
             result = await session.execute(
@@ -166,6 +172,7 @@ class EndpointDB:
             await session.commit()
             return result.rowcount == 1
 
+    @isolated_db_op
     async def get_usage_stats(
         self, endpoint_id: str, *, hours: int = 24
     ) -> dict[str, Any]:

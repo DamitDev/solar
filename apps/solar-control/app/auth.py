@@ -199,7 +199,15 @@ async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyp
         return await call_next(request)
 
     path = request.url.path
-    public_paths = ["/health", "/ready", "/", "/docs", "/redoc", "/openapi.json"]
+    public_paths = [
+        "/health",
+        "/ready",
+        "/metrics",
+        "/",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+    ]
     if path in public_paths:
         return await call_next(request)
 
