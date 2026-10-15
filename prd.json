@@ -1,0 +1,194 @@
+{
+  "project": "Solar Status Page",
+  "branchName": "ralph/status-page-foundation",
+  "description": "LLM Model Status SPA foundation - a Svelte 5 SPA served by solar-control at /status, with a read-only aggregation endpoint backed by Redis-cached state (app scaffold, serving modes, build embedding, repo/CI wiring only; page features and data model come later).",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Aggregation endpoint GET /api/status in solar-control",
+      "description": "As a status page consumer, I need a read-only GET /api/status endpoint that aggregates host/instance/model state from Redis-cached state and DB host rows, so the SPA has a single fast data source without slow live host fan-out.",
+      "acceptanceCriteria": [
+        "GET /api/status returns JSON aggregating host/instance/model state from Redis-cached state (app/services/host_status.py single-source payload builder) + DB host rows",
+        "No live fan-out to hosts (do not call GET /api/models/availability's live per-host fetch path)",
+        "Read-only route registered under /api (app/routes/management)",
+        "Payload schema defined and recorded when page requirements are specified",
+        "solar-control unit tests with mocked Redis stores pass",
+        "make lint-solar-control and make test-solar-control pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Serve built SPA at /status via app.frontend()",
+      "description": "As a user, I want solar-control to serve the built SPA at /status when a dist/ build is present, so the production path is same-origin with the control API.",
+      "acceptanceCriteria": [
+        "Register FastAPI app.frontend() via an APIRouter included with prefix /status: router.frontend(\"/\", directory=dist, fallback=\"auto\")",
+        "fallback=\"auto\" serves index.html for client-side-routed navigations while missing assets still 404",
+        "Regular path operations take precedence: /api and /v1 remain safe",
+        "Registered with check_dir=False and a configurable dist path so solar-control starts and tests fine without a build (404 at /status in dev mode)",
+        "solar-control unit tests cover serving-with-build and 404-without-build cases"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Configurable CORS on solar-control for dev mode",
+      "description": "As a developer, I want a configurable CORS policy on solar-control, so the dev SPA can call the control API cross-origin while production stays same-origin and unaffected.",
+      "acceptanceCriteria": [
+        "CORS allow-listed origins via env (CORS_ORIGINS, default empty = CORS disabled)",
+        "Same-origin production path unaffected when CORS_ORIGINS is unset",
+        "Dev Vite origin can be added locally via env",
+        "Unit tests cover enabled and disabled CORS",
+        "make lint-solar-control and make test-solar-control pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Scaffold apps/solar-status (Svelte 5 + Vite + TS)",
+      "description": "As a developer, I want a new standalone Svelte 5 + Vite + TypeScript app at apps/solar-status, so the status SPA follows the one-app-one-toolchain convention instead of extending solar-webui (React).",
+      "acceptanceCriteria": [
+        "apps/solar-status scaffolded with Svelte 5 + Vite + TypeScript",
+        "apps/solar-status added to pnpm-workspace.yaml members (exact path, like apps/solar-webui)",
+        "Conditional Vite base: / for the dev server, /status/ for the production build; verified via import.meta.env.BASE_URL",
+        "pnpm install and pnpm --filter solar-status build succeed",
+        "No Svelte code added to apps/solar-control (app/ stays purely Python)"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Mode-agnostic typed data layer with API base resolution",
+      "description": "As the SPA, I need a typed fetch client that resolves the API base URL once at startup, so a single code path works both in dev (absolute VITE_API_BASE) and embedded (relative ../api) modes.",
+      "acceptanceCriteria": [
+        "Typed fetch client; endpoint paths appended to the resolved base (e.g. ${apiBase}/status)",
+        "Base resolved once at startup against the mount point: mount = new URL(import.meta.env.BASE_URL, location.origin); apiBase = new URL(import.meta.env.VITE_API_BASE ?? \"../api\", mount)",
+        "Resolution independent of the active client-side route; no <base> tag needed",
+        "Unit tests cover: absolute base ignores mount anchor; relative base resolves against mount for any route depth",
+        "vitest suite passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Tailwind styling and test tooling in solar-status",
+      "description": "As a developer, I want Tailwind and a component test setup in apps/solar-status, so styling stays consistent with solar-webui and UI code is testable.",
+      "acceptanceCriteria": [
+        "Tailwind configured for styling consistency with solar-webui",
+        "vitest + @testing-library/svelte configured with at least one smoke test",
+        "package.json test/lint scripts work standalone",
+        "pnpm --filter solar-status test and lint pass"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Dev serving mode: Vite dev server without proxy",
+      "description": "As a developer, I want to run the SPA on its own dev server calling solar-control directly, so I can develop the status page without building the SPA or touching the embedded mode.",
+      "acceptanceCriteria": [
+        "Vite dev server on its own port (5174), app served at /, no proxying",
+        ".env.development sets VITE_API_BASE=http://localhost:8000",
+        "With make dev-control running and the dev origin in CORS_ORIGINS, the page at http://localhost:5174/ loads data from the control API",
+        "solar-control runs without any SPA build in this mode"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Makefile targets for solar-status",
+      "description": "As a developer, I want standard Makefile targets for the new app, so local workflow and CI share the same entry points.",
+      "acceptanceCriteria": [
+        "Makefile targets: dev-status, test-solar-status, lint-solar-status (names match CI matrix app names)",
+        "Targets wired into the aggregate test and lint targets",
+        "make test and make lint include solar-status",
+        "make dev-status starts the Vite dev server per US-007"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "CI dispatcher and quality gates for solar-status",
+      "description": "As a maintainer, I want CI isolation for the new app plus explicit coupling to the shared API contract, so Svelte failures don't block solar-control PRs but schema changes still run the SPA's tests.",
+      "acceptanceCriteria": [
+        "ci.yaml dispatcher case for apps/solar-status/* and ALL=1 list entry",
+        "solar-control status route/schema paths (app/routes/management status files, app/services/host_status.py) additionally trigger the solar-status gates",
+        "quality-gates.yaml: new install branch for solar-status (pnpm + Node 24, mirroring the solar-webui branch)",
+        "CI runs green on a sample change in each mapped path"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Document apps/solar-status in AGENTS.md",
+      "description": "As a contributor, I want the new app documented per repo conventions, so agents and humans know the structure and commands.",
+      "acceptanceCriteria": [
+        "AGENTS.md: apps/solar-status added to the Structure and Commands (Parancsok) sections",
+        "User-facing README for the app in Hungarian per conventions",
+        "AGENTS.md code/comment language convention respected"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Embed SPA build into solar-control Docker image",
+      "description": "As an operator, I want the built SPA embedded in the solar-control Docker image, so the production deployment serves /status with no new runtime component.",
+      "acceptanceCriteria": [
+        "solar-control Dockerfile gains a Node build stage that builds the SPA (repo-root build context for lockfile access, like solar-webui) and copies dist/ into the runtime image",
+        ".github/release-manifest.json: solar-control context set to \".\" if required; no new component for the SPA",
+        "Image builds successfully; /status serves the SPA in the container",
+        "Image size and .dockerignore implications checked",
+        "Fixed Docker image names (aiops/*) unchanged"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "End-to-end verification of both serving modes",
+      "description": "As a reviewer, I want both serving modes verified end-to-end, so the foundation is proven before page features are added.",
+      "acceptanceCriteria": [
+        "make lint-solar-status and make test-solar-status pass; full make test lint pass",
+        "Mode 1 (dev): make dev-control + make dev-status, page at http://localhost:5174/ renders and calls control on the absolute VITE_API_BASE (CORS allow-list includes dev origin)",
+        "Mode 2 (embedded): build the SPA, run make dev-control alone, page at http://localhost:8000/status serves the built assets and works",
+        "solar-control unit tests for the new endpoints (mocked Redis stores) pass"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Auth gate decision and optional API-key protection",
+      "description": "As an operator, I want an optional API-key gate on the status page, so the page does not leak infrastructure details when exposed.",
+      "acceptanceCriteria": [
+        "Decision confirmed: public read-only page vs API-key gate",
+        "If gated: optional key via env, mirroring SOLAR_WEBUI_AUTH_KEY behavior",
+        "Default configuration unchanged for local/dev use"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": "Decision to confirm before implementation (see plan's 'Decisions to confirm' section). Feature decisions (payload schema, realtime updates, page contents) are intentionally out of scope for this foundation."
+    }
+  ]
+}
