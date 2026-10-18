@@ -76,36 +76,34 @@ Notes:
 
 Next up (by priority): US-003 — Add configurable CORS policy to solar-control.
 
-## 2026-10-18 — US-003: Add configurable CORS policy to solar-control
+## 2026-10-18 — US-003: REVERTED — CORS stays open, not configurable
+
+Decision (owner request):
+
+- CORS will NOT be configurable. solar-control keeps the wide-open policy it
+  had before this story: `CORSMiddleware` with `allow_origins=["*"]`,
+  `allow_credentials=True`, `allow_methods=["*"]`, `allow_headers=["*"]`
+  (app/main.py). Any origin may call the API cross-origin, including the
+  dev-mode status SPA — no allow-list or env knob needed.
+- US-003 marked cancelled in prd.json (not `passes: true` — the story is
+  dropped by decision, not implemented).
+- Comment added above the CORS block in app/main.py so future contributors
+  and agents don't tighten it without a new decision.
 
 Done:
 
-- Added `cors_origins: str = ""` to `Settings` (app/config.py): comma-separated
-  origin allow-list from the `CORS_ORIGINS` env var, plus a
-  `cors_origin_list` property (whitespace-tolerant CSV parse).
-- app/main.py: replaced the hardcoded `allow_origins=["*"]` CORS block with
-  `configure_cors()` — installs `CORSMiddleware` (credentials/methods/headers
-  wide, origins = the allow-list) only when the parsed list is non-empty.
-  Unset/empty `CORS_ORIGINS` installs no middleware: cross-origin requests
-  get no Access-Control headers and the same-origin production path is
-  unaffected.
-- Dev Vite origin can now be allow-listed locally, e.g.
-  `CORS_ORIGINS=http://localhost:5174` (US-006 dependency).
-- Added `tests/test_cors.py` (hermetic pattern like test_status_frontend.py):
-  CSV parsing; disabled state (empty and whitespace-only values) emits no
-  ACAO header; listed origin gets its origin echoed; unlisted origin gets no
-  ACAO; OPTIONS preflight succeeds for a listed origin with requested
-  headers reflected.
-- Left untouched (out of scope): auth.py's manual `Access-Control-*` headers
-  on 401 responses and the Socket.IO `cors_allowed_origins="*"` — the story
-  governs the HTTP CORS middleware; the others are pre-existing behavior.
-- Behavior change note: CORS was previously wide open for everyone; it is
-  now opt-in per the acceptance criteria. solar-webui dev is unaffected (its
-  Vite/Express proxy is same-origin from the browser's perspective).
+- `git revert` of commit f96ed9d ("feat(control): configurable CORS
+  allow-list via CORS_ORIGINS"): removes the `CORS_ORIGINS` setting and
+  `cors_origin_list` property from app/config.py, restores the unconditional
+  open CORS block in app/main.py, deletes tests/test_cors.py.
+- Untouched: auth.py's manual `Access-Control-*` headers on 401 responses
+  and the Socket.IO `cors_allowed_origins="*"` — both keep their pre-existing
+  behavior, consistent with the open policy.
 
 Verification:
 
-- `make lint-solar-control test-solar-control` → ruff + black clean, 1155
-  tests passed (6 new).
+- `make lint-solar-control test-solar-control` → ruff + black clean, 1149
+  tests passed (back to the US-002 baseline; the 6 CORS tests are gone with
+  the revert).
 
 Next up (by priority): US-004 — Scaffold apps/solar-status (Svelte 5 + Vite + TS).

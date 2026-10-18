@@ -45,8 +45,9 @@
         "make lint-solar-control test-solar-control passes"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "Open decision to confirm: whether the status page/API is public read-only or gated by an optional key via env (mirroring SOLAR_WEBUI_AUTH_KEY). Foundation ships without a gate."
+      "passes": false,
+      "cancelled": true,
+      "notes": "CANCELLED by decision: CORS does not need to be configurable. solar-control keeps its open policy (allow_origins=[\"*\"]) for any origin, exactly as before this story; the configurable CORS_ORIGINS implementation was reverted. The dev-mode SPA can call the API cross-origin with no extra setup. Separate open decision still standing: whether the status page/API is public read-only or gated by an optional key via env (mirroring SOLAR_WEBUI_AUTH_KEY). Foundation ships without a gate."
     },
     {
       "id": "US-004",

@@ -123,26 +123,16 @@ app = FastAPI(
     swagger_ui_parameters={"persistAuthorization": True},
 )
 
-
-def configure_cors(target: FastAPI) -> None:
-    """Install the CORS middleware from the CORS_ORIGINS allow-list.
-
-    Unset or empty CORS_ORIGINS installs nothing: the production deployment
-    is same-origin and cross-origin browser calls get no Access-Control
-    headers. The dev-mode status SPA opts in locally via the env var.
-    """
-    origins = settings.cors_origin_list
-    if origins:
-        target.add_middleware(
-            CORSMiddleware,
-            allow_origins=origins,
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
-
-
-configure_cors(app)
+# CORS: intentionally open to any origin. No allow-list or env knob is
+# needed — cross-origin browser access (e.g. the dev-mode status SPA) is
+# always permitted. Do not tighten this without a new decision.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Authentication middleware
 app.middleware("http")(auth_middleware)
