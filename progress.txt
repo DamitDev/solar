@@ -163,3 +163,42 @@ Notes:
 
 Next up (by priority): US-005 — Implement mode-agnostic data layer with API
 base resolution.
+
+## 2026-10-18 — US-005: Implement mode-agnostic data layer with API base resolution
+
+Done:
+
+- New `src/lib/api/base.ts` (re-exported through `#lib`):
+  - `resolveApiBase(apiEnvBase, mountBase, origin)`: pure implementation of the
+    agreed formula `new URL(VITE_API_BASE ?? '../api', new URL(BASE_URL, location.origin))`.
+    Absolute `VITE_API_BASE` wins (dev mode, anchor ignored); otherwise `../api`
+    is resolved against the `BASE_URL` mount anchor, so the result is
+    independent of the active client-side route and no <base> tag is needed.
+    Works with or without a trailing slash on the mount base (`/status` vs
+    `/status/`).
+  - `apiBase`: module-level constant — the base is resolved once at startup.
+  - `apiUrl(endpointPath, base = apiBase)`: appends endpoint paths to the
+    resolved base (`${apiBase}/status` pattern); tolerates a leading slash on
+    the endpoint and a trailing slash on the base (relative `new URL`
+    resolution needs the trailing slash, otherwise the last segment is popped).
+- New `src/lib/api/client.ts`: `fetchJson<T>(endpointPath, init?)` typed fetch
+  client on top of `apiUrl`; throws `ApiError` (carrying `status`) for non-ok
+  responses without parsing the body (the 501 placeholder has no body).
+- Tests `src/lib/api/base.test.ts` + `src/lib/api/client.test.ts`: base
+  resolution for both modes (dev absolute-wins, embedded ../api → same-origin
+  /api, trailing-slash variants, route-depth independence via
+  history.replaceState + startup-constant stability), endpoint appending, and
+  fetchJson happy path + error path. jsdom fetch stubbed with plain objects —
+  no Response global dependency.
+- The status page component itself is untouched — page features are out of
+  scope; the data layer is ready to be consumed.
+
+Verification:
+
+- `pnpm --filter solar-status test` → 13 passed (12 new).
+- `pnpm --filter solar-status check` → 0 errors (svelte-check).
+- `pnpm --filter solar-status lint` → prettier + eslint clean.
+- `pnpm --filter solar-status build` → dist/ written (base `/status` unchanged).
+
+Next up (by priority): US-006 — Dev server serving mode (SPA separately from
+solar-control).

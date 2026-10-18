@@ -78,7 +78,7 @@
         "pnpm --filter solar-status test passes"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "Browser resolves fetch()/EventSource() against document.baseURI, hence the SPA-side resolution against the mount point."
     },
     {
