@@ -12,7 +12,7 @@
         "make lint-solar-control test-solar-control passes"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "Payload schema, aggregation logic, and realtime behavior are deferred feature decisions; this story only reserves the route."
     },
     {

@@ -1,0 +1,31 @@
+# Progress log
+
+## 2026-10-18 — US-001: Reserve GET /api/status with a 501 placeholder in solar-control
+
+Done:
+
+- Added `apps/solar-control/app/routes/management/status.py`: APIRouter with
+  prefix `/status` (tags: `["status"]`), GET handler returning a bare
+  `Response(status_code=501)` — no body, no response_model, so no schema
+  commitment.
+- Registered the router in `app/routes/management/__init__.py` under the `/api`
+  router (import list + `include_router`, alphabetical order).
+- Added `apps/solar-control/tests/test_status_route.py`: GET /api/status
+  requires the management key (401 without it) and returns 501 with an empty
+  body for an authorized caller. Uses the same TestClient pattern as
+  `test_routing_rest.py`.
+- Route is behind the standard `/api/*` auth middleware like all other
+  management routes; no auth changes made.
+
+Verification:
+
+- `make lint-solar-control test-solar-control` → ruff + black clean, 1143
+  tests passed.
+
+Notes:
+
+- The route intentionally stays management-key gated for now; making the
+  status page/API public read-only is an open decision recorded in the PRD.
+- Payload schema and aggregation logic deferred by design.
+
+Next up (by priority): US-002 — Serve built SPA at /status from solar-control.
