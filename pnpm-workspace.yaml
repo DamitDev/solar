@@ -1,5 +1,6 @@
 packages:
   - apps/solar-webui
+  - apps/solar-status
 
 # pnpm 11.11 ignores onlyBuiltDependencies on fresh stores (esbuild's
 # postinstall is skipped and the install fails in CI/containers). Allow-all
