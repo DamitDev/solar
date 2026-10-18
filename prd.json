@@ -45,7 +45,7 @@
         "make lint-solar-control test-solar-control passes"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Open decision to confirm: whether the status page/API is public read-only or gated by an optional key via env (mirroring SOLAR_WEBUI_AUTH_KEY). Foundation ships without a gate."
     },
     {

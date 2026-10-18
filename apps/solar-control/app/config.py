@@ -143,5 +143,17 @@ class Settings(BaseSettings):
         Path(__file__).resolve().parent.parent / ".." / "solar-status" / "dist"
     )
 
+    # Comma-separated CORS origin allow-list (CORS_ORIGINS env var) for
+    # cross-origin browser clients such as the dev-mode status SPA. Empty
+    # (the default) disables CORS entirely: production serving is same-origin.
+    cors_origins: str = ""
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        """Parsed CORS_ORIGINS allow-list (whitespace-tolerant CSV)."""
+        return [
+            origin.strip() for origin in self.cors_origins.split(",") if origin.strip()
+        ]
+
 
 settings = Settings()
