@@ -107,3 +107,59 @@ Verification:
   the revert).
 
 Next up (by priority): US-004 — Scaffold apps/solar-status (Svelte 5 + Vite + TS).
+
+## 2026-10-18 — US-004: Scaffold apps/solar-status (Svelte 5 + Vite + TS)
+
+Starting point: the SvelteKit 3 app was already scaffolded by the owner
+(`sv create`, commits "feat: add solar-status app" / "feat: add static adapter")
+and was already a pnpm workspace member. Delta analysis against the acceptance
+criteria found four gaps; all closed:
+
+- Conditional base: vite.config.ts moved to the function form; production
+  builds (`vite build`) set SvelteKit `paths.base = '/status'` (kit's
+  equivalent of the Vite base — SvelteKit 3 keeps its config inline in the
+  `sveltekit()` plugin options, there is no svelte.config.js), the dev server
+  runs at '/'. Built shell confirms `base: "/status"` and `/status/_app/...`
+  asset URLs, so `import.meta.env.BASE_URL` will anchor US-005's API-base
+  resolution.
+- dist/ output: adapter-static now writes `pages: 'dist', assets: 'dist'`
+  (was the default `build/`) matching solar-control's `STATUS_DIST_DIR`
+  default (`apps/solar-status/dist`) and the Docker path planned in US-009.
+  `.gitignore` now ignores `/dist`; stale `build/` removed.
+- index.html exists again: adapter `fallback: 'index.html'` + root
+  `+layout.ts` `ssr = false` (pure SPA mode). The previous scaffold fallback
+  (`200.html`) produced no index.html, which would have broken the FastAPI
+  `fallback='auto'` serving contract from US-002.
+- vitest + @testing-library/svelte: replaced the scaffold's browser-mode
+  tests (vitest-browser-svelte + @vitest/browser-playwright + Playwright
+  e2e demo) with a single jsdom vitest project, `svelteTesting()` plugin,
+  `src/test/setup.ts` (jest-dom + cleanup, mirroring solar-webui). Smoke test
+  `src/routes/+page.svelte.spec.ts` renders the page and asserts the heading.
+  Removed scaffold demo cruft (routes/demo, DemoLinks, vitest-examples,
+  playwright.config.ts) and the test:e2e script; test = `vitest run`.
+- +page.svelte is now a minimal Tailwind-styled foundation page (Nord-ish
+  dark zinc palette; full theming parity with solar-webui is feature work).
+
+Verification:
+
+- `pnpm --filter solar-status build` → dist/ with index.html + /status/_app
+  assets.
+- `pnpm --filter solar-status test` → 1 passed; `check` (svelte-check) →
+  0 errors; `lint` (prettier + eslint) → clean (`/dist/` added to
+  .prettierignore).
+- Sanity check of the cross-boundary contract: TestClient run against the
+  real dist via `APIRouter().frontend('/', directory=dist, fallback='auto')`
+  mounted at /status: /status → 307 → /status/, /status/ and client-side
+  navigation → 200 index.html, immutable assets → 200. solar-control's
+  tests/test_status_frontend.py still green (6 passed).
+
+Notes:
+
+- pnpm on PATH (mise, 10.19.0) wants store v10 while the workspace was
+  installed with store v11; used ~/.local/bin/pnpm (12.4.1, store v11) for
+  all pnpm operations — lockfile updated by that version.
+- Dev server port 5174 + VITE_API_BASE (US-006) and Makefile targets
+  (US-007) are intentionally not part of this story.
+
+Next up (by priority): US-005 — Implement mode-agnostic data layer with API
+base resolution.

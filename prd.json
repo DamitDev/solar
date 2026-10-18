@@ -62,7 +62,7 @@
         "pnpm --filter solar-status build produces dist/"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "No Svelte exists anywhere in the repo today - this is a new toolchain, not a React extension."
     },
     {
