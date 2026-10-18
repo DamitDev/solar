@@ -206,6 +206,11 @@ async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyp
     if path.startswith("/socket.io"):
         return await call_next(request)
 
+    # Embedded status SPA: public read-only page; the foundation ships
+    # without a gate (key-gating is a deferred decision).
+    if path == "/status" or path.startswith("/status/"):
+        return await call_next(request)
+
     api_key = _extract_api_key(request)
     if not api_key:
         return JSONResponse(

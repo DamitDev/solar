@@ -29,3 +29,49 @@ Notes:
 - Payload schema and aggregation logic deferred by design.
 
 Next up (by priority): US-002 — Serve built SPA at /status from solar-control.
+
+## 2026-10-18 — US-002: Serve built SPA at /status from solar-control
+
+Done:
+
+- Added `STATUS_DIST_DIR` setting to `app/config.py` (pydantic `Path`), default
+  resolved relative to the solar-control package: `../solar-status/dist`
+  (sibling SPA checkout). Env var override works via pydantic-settings, which
+  the Docker image will use later (`/app/status-ui`).
+- Added `app/routes/frontend.py` with `create_frontend_router()`: calls
+  `router.frontend("/", directory=..., fallback="auto")` (FastAPI 0.141
+  built-in) only when `settings.status_dist_dir.is_dir()`. Without a SPA
+  build the router has no routes → `/status` 404s and control starts/tests
+  fine without Node. `check_dir` left at its default — never disabled, since
+  a disabled check would 500 at request time; the existence guard makes the
+  startup check moot.
+- Registered in `app/main.py` via `app.include_router(create_frontend_router(),
+  prefix="/status")`. Frontend routes are low-priority in FastAPI 0.141, so
+  regular path operations (/api, /v1, /health, ...) always take precedence.
+  No hand-written SPA catch-all.
+- `app/auth.py`: `/status` (and `/status/*`) now pass through the auth
+  middleware without a key — the foundation ships without a gate (open
+  decision recorded in the PRD notes for US-003). /api, /v1, /cursor/v1
+  gating unchanged.
+- Added `tests/test_status_frontend.py`: dist present → index.html served,
+  client-side route falls back to index.html on navigation (Accept:
+  text/html), existing asset served, missing asset 404s; dist absent →
+  /status 404s; regular route (/status/healthz) beats the frontend mount;
+  status page is public while /api/ping stays management-key gated. Tests
+  build a hermetic FastAPI app with monkeypatched `settings.status_dist_dir`
+  (tmp_path dist fixtures) instead of relying on the real app import state.
+
+Verification:
+
+- `make lint-solar-control test-solar-control` → ruff + black clean, 1149
+  tests passed (6 new).
+
+Notes:
+
+- fallback="auto" semantics (verified from FastAPI source): missing paths
+  serve index.html only for navigation requests (Accept: text/html), missing
+  assets still 404 — matches the acceptance criteria.
+- GET /status redirects (307) to /status/ (directory index behavior); the
+  SPA's Vite base must be "/status/" with a trailing slash (US-004).
+
+Next up (by priority): US-003 — Add configurable CORS policy to solar-control.

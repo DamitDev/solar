@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -134,6 +135,13 @@ class Settings(BaseSettings):
     cursor_reasoning_cache_max_rows: int = 100_000
     cursor_display_reasoning: bool = True
     cursor_collapsible_reasoning: bool = True
+
+    # Built solar-status SPA served at /status. The default points at the
+    # sibling SPA checkout next to this package (apps/solar-status/dist);
+    # the Docker image overrides it to the baked-in copy via env var.
+    status_dist_dir: Path = (
+        Path(__file__).resolve().parent.parent / ".." / "solar-status" / "dist"
+    )
 
 
 settings = Settings()

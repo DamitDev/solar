@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response
 from app.auth import auth_middleware
 from app.config import settings
 from app.routes.cursor import router as cursor_router
+from app.routes.frontend import create_frontend_router
 from app.routes.management import router as management_router
 from app.routes.openai import router as openai_router
 from app.socketio_app import sio
@@ -168,6 +169,11 @@ async def _model_not_found_handler(request: Request, exc: HTTPException):
 app.include_router(openai_router)
 app.include_router(cursor_router)
 app.include_router(management_router)
+
+# Embedded status SPA (only registers routes when the built dist/ exists).
+# Frontend routes are low-priority: regular path operations (/api, /v1, ...)
+# always take precedence.
+app.include_router(create_frontend_router(), prefix="/status")
 
 
 @app.get("/health")

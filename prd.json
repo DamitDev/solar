@@ -30,7 +30,7 @@
         "make lint-solar-control test-solar-control passes"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "Uses FastAPI's built-in app.frontend() (available since 0.141.x, which solar-control pins). Docker sets STATUS_DIST_DIR=/app/status-ui explicitly (see US-009)."
     },
     {
