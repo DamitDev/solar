@@ -304,3 +304,36 @@ Verification:
   needed `LD_PRELOAD=<nix libstdc++>` for greenlet.
 
 Next up (by priority): US-007 — Add Makefile targets for solar-status.
+
+## 2026-10-19 — US-007: Add Makefile targets for solar-status
+
+Done:
+
+- `test-solar-status`: `pnpm --filter solar-status test` (vitest).
+- `lint-solar-status`: `pnpm --filter solar-status lint && pnpm --filter
+  solar-status check` (prettier + eslint + svelte-check — the app's type
+  gate, analogous to ruff+black for the Python apps). Deliberately not
+  bundled into the test target, mirroring how the Python gates split
+  pytest vs lint.
+- Both added to `.PHONY`; target names follow the apps/<name> convention
+  required by the CI quality-gate matrix (CI wiring itself is US-008).
+- `dev-status` already existed (added in US-006 for that story's
+  verification path).
+- Aggregates: `make test` now ends with solar-status lint + test, `make
+  lint` ends with solar-status lint (after the existing solar-webui
+  entries, matching the inline-chaining style of the aggregate targets).
+
+Verification:
+
+- `make lint-solar-status test-solar-status` → prettier/eslint clean,
+  svelte-check 0 errors, 18 vitest tests passed.
+- `make lint` → all ruff/black gates pass, webui + status lint clean.
+- `make test` → 1149 + 261 + 806 + 141 Python tests passed, webui lint
+  clean (pre-existing eslint warning, non-failing), solar-status lint +
+  18 tests passed.
+- Local-env note (not a repo change): PATH pnpm is mise 10.19.0 (store
+  v10) while the workspace lockfile is store v11 — ran make with
+  `PATH="$HOME/.local/bin:$PATH"` so pnpm 12.4.1 resolves first.
+
+Next up (by priority): US-008 — Wire solar-status into CI (dispatcher +
+quality gates).

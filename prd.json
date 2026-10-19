@@ -108,7 +108,7 @@
         "make lint and make test pass on a clean checkout"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
