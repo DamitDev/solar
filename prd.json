@@ -151,7 +151,7 @@
         "No contradictions with existing conventions (workspace membership, target naming)"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

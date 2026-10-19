@@ -441,3 +441,36 @@ layer invalidation whenever webui's manifest changes.
 - Full image rebuild + compose runtime check: /health 200, /status/ 200,
   hashed asset 200, /api/status with management key 501. Image unchanged
   otherwise (252 MB).
+
+## 2026-10-19 — US-010: Update AGENTS.md and add user-facing docs
+
+Done:
+
+- AGENTS.md: `apps/solar-status` added to the Struktúra list (SvelteKit
+  (Svelte 5) status page SPA, pnpm workspace tag), `make dev-status` added to
+  the commands block (http://localhost:5174), the aggregate `make test`/`make
+  lint` comments now say "webui/status lint", and the `test-<app>`/`lint-<app>`
+  app-name list includes `solar-status`.
+- apps/solar-status/README.md: replaced the `sv` scaffold boilerplate with a
+  Hungarian, user-facing README per repo conventions. Covers: what the app is
+  (SPA foundation, single workspace tag, one-code-path data layer, the 501
+  `/api/status` contract endpoint), both serving modes (dev server on 5174
+  with direct cross-origin calls vs. embedded `/status` mount via
+  `STATUS_DIST_DIR` incl. the 307 `/status` → `/status/` redirect note), the
+  mandatory `VITE_API_BASE_URL` (dev/production values, fail-fast, override
+  via shell env/Docker build arg), the `__BASE_PATH__` mount anchor and the
+  base-resolution formula, and the make/pnpm command surface
+  (dev-status, test-solar-status, lint-solar-status, pnpm dev/test/build/check).
+- Convention cross-check (3rd acceptance criterion): pnpm-workspace.yaml lists
+  `apps/solar-status`, Makefile target names match the CI matrix app names
+  (test-solar-status / lint-solar-status / dev-status) — README and AGENTS.md
+  use exactly those names, no contradictions.
+
+Verification:
+
+- prettier --write on the README (table alignment), then
+  `make lint-solar-status test-solar-status` → prettier/eslint clean,
+  svelte-check 0 errors, 18 vitest tests passed.
+- Docs-only change; no code paths touched.
+
+Next up (by priority): US-011 — Verify both serving modes end to end.
