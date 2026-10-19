@@ -1,4 +1,4 @@
-.PHONY: install dev-control dev-host dev-data-repository dev-webui test lint format integration test-solar-control test-data-repository test-solar-host test-supernova-steps test-solar-webui lint-solar-control lint-data-repository lint-solar-host lint-supernova-steps lint-solar-webui
+.PHONY: install dev-control dev-host dev-data-repository dev-webui dev-status test lint format integration test-solar-control test-data-repository test-solar-host test-supernova-steps test-solar-webui lint-solar-control lint-data-repository lint-solar-host lint-supernova-steps lint-solar-webui
 
 install:
 	pnpm install && uv sync && cd apps/solar-host && uv sync && cd ../supernova-steps && uv sync
@@ -14,6 +14,9 @@ dev-data-repository:
 
 dev-webui:
 	pnpm --filter solar-webui dev
+
+dev-status:
+	pnpm --filter solar-status dev
 
 # ── Per-app targets (used by CI quality gates) ──────────────────────
 # Target names must match the CI matrix app names (apps/<name>).

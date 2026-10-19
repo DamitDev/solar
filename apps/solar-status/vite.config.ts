@@ -9,6 +9,9 @@ export default defineConfig(({ command }) => {
   const statusMount = '/status';
 
   return {
+    server: {
+      port: 5174
+    },
     define: {
       __BASE_PATH__: JSON.stringify(embedded ? statusMount : '/')
     },

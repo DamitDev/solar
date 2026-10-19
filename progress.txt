@@ -258,3 +258,49 @@ Verification:
 
 - pnpm --filter solar-status test → 14 passed (fail-fast test added);
   check → 0 errors; lint → clean; build → dist/ written.
+
+## 2026-10-19 — US-006: Dev server serving mode (SPA separately from solar-control)
+
+Done:
+
+- vite.config.ts: dev server pinned to port 5174 (`server.port`), still no
+  proxying — the SPA calls solar-control directly.
+- .env.development: `VITE_API_BASE_URL=http://localhost:8000/api`. **Contract
+  correction** (PRD + STATUS-PAGE-PLAN updated): the plan originally said
+  `http://localhost:8000`, but the SPA appends endpoint paths to the base
+  (`${apiBase}/status`), so a bare origin would call `/status` (the SPA mount,
+  404 without dist) instead of the reserved `/api/status` route. The dev base
+  must be the API root, exactly like the embedded `../api`.
+- +page.svelte now exercises the data layer: on mount it calls
+  `fetchApi('status')` (the 501 placeholder) and displays the resolved API
+  base, the requested URL, and the outcome (HTTP <n> from `ApiError`, or an
+  unreachable state). No page features — plumbing proof only.
+- Page tests: stubbed-fetch test asserting exactly one call to
+  `<origin>/api/status` and the HTTP 501 state render, plus an
+  unreachable-API test (imports in the page use relative paths — `#lib/*`
+  subpath imports don't resolve under svelte-check).
+- Makefile: added `dev-status` target (required by this story's verification
+  path; `test-solar-status`/`lint-solar-status` and aggregate wiring remain
+  US-007).
+- CORS: nothing to implement — solar-control keeps the open policy
+  (US-003 cancelled); preflight from http://localhost:5174 is answered with
+  `access-control-allow-origin: http://localhost:5174`.
+
+Verification:
+
+- pnpm --filter solar-status test → 18 passed; check → 0 errors; lint →
+  clean; build → dist/ with `/status/_app` assets (embedded mode intact).
+- Runtime (HTTP-level; no browser/dev-browser skill available in this
+  environment): solar-control on :8000 + `make dev-status` on :5174 —
+  GET / → 200 SPA shell; GET /api/status on :5174 → 404 (no proxying);
+  dev-transformed base.ts module contains the baked
+  `"http://localhost:8000/api"`; OPTIONS preflight to /api/status with the
+  dev Origin → 200 + dev origin echoed; GET /api/status from the dev origin
+  → 401 with `access-control-allow-origin: *` (fresh local DB has no
+  management key registered, so the authorized 501 path stays covered by
+  solar-control's unit tests).
+- Local-env workarounds (not repo changes): compose postgres/redis don't
+  publish host ports → ran throwaway host-published containers; NixOS host
+  needed `LD_PRELOAD=<nix libstdc++>` for greenlet.
+
+Next up (by priority): US-007 — Add Makefile targets for solar-status.

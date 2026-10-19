@@ -35,10 +35,12 @@ image for the SPA itself; solar-control remains the only runtime dependency.
 **1. Development — SPA served separately.** `make dev-status` starts the Vite
 dev server on its own port (e.g. 5174, alongside solar-control on 8000),
 serving the app at its root (`/`) — **no proxying**. The SPA is passed an
-**absolute** API base URL (`VITE_API_BASE_URL=http://localhost:8000`) and calls
+**absolute** API base URL (`VITE_API_BASE_URL=http://localhost:8000/api`) and calls
 the control API directly. This cross-origin browser call requires CORS on
 solar-control (see Phase 1.3). solar-control runs **without** any SPA build
-in this mode.
+in this mode. Note: the base must be the API **root** (including `/api`),
+because the SPA appends endpoint paths (`${apiBase}/status`) to reach the
+`/api/status` contract endpoint.
 
 **2. solar-control run alone — SPA served by control.** When a built `dist/`
 is present (notably inside the Docker image), solar-control serves it at
@@ -141,7 +143,7 @@ Rationale for a standalone app (vs. inside `apps/solar-control`):
    `@testing-library/svelte` for tests.
 4. **Dev server** (serving mode 1): Vite dev server on its own port, app
    served at `/`, **no proxy** — the SPA calls solar-control directly on the
-   absolute `VITE_API_BASE_URL` (default `http://localhost:8000` in
+   absolute `VITE_API_BASE_URL` (default `http://localhost:8000/api` in
    `.env.development`); CORS on control must include the dev origin
    (Phase 1.3).
 
