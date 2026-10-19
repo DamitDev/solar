@@ -122,7 +122,7 @@
         "CI runs green on a change touching both solar-control status paths and apps/solar-status"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Path-based dispatch alone would not couple the two sides of the /api/status contract."
     },
     {

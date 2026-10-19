@@ -337,3 +337,36 @@ Verification:
 
 Next up (by priority): US-008 — Wire solar-status into CI (dispatcher +
 quality gates).
+
+## 2026-10-19 — US-008: Wire solar-status into CI (dispatcher + quality gates)
+
+Done:
+
+- ci.yaml dispatcher: new case for `apps/solar-status/*` → solar-status;
+  `ALL=1` list now includes solar-status (root workspace-file changes run the
+  SPA gates too).
+- Contract coupling: `apps/solar-control/app/routes/management/status.py` and
+  `apps/solar-control/app/services/host_status.py` map to BOTH solar-control
+  and solar-status. The more specific case pattern sits before the generic
+  `apps/solar-control/*` one, so a status-path change runs both apps' gates
+  while any other control change stays control-only.
+- quality-gates.yaml: `pnpm/action-setup` + `actions/setup-node` (Node 24)
+  step conditions extended to solar-status, mirroring the solar-webui branch;
+  dedicated `pnpm install --frozen-lockfile` install case added.
+
+Verification:
+
+- Dispatcher simulation with the actual embedded script (jq shim; only the
+  git-diff CHANGED input replaced): SPA-only → solar-status; status.py /
+  host_status.py → solar-control + solar-status; unrelated control file →
+  solar-control only; both contract sides → deduped pair; Makefile → all six
+  apps incl. solar-status; no match → empty.
+- Both workflow YAMLs parse clean; pnpm/setup-node conditions and install
+  cases confirmed.
+- Both dispatched legs green: `make test-solar-status lint-solar-status`
+  (18 vitest tests, svelte-check 0 errors, prettier/eslint clean) and
+  `make lint-solar-control test-solar-control` (ruff + black clean, 1149
+  tests passed).
+
+Next up (by priority): US-009 — Embed SPA build into solar-control Docker
+image.

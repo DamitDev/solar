@@ -20,9 +20,9 @@ jobs:
       - uses: astral-sh/setup-uv@v4
 
       - uses: pnpm/action-setup@v4
-        if: inputs.app == 'solar-webui'
+        if: inputs.app == 'solar-webui' || inputs.app == 'solar-status'
       - uses: actions/setup-node@v4
-        if: inputs.app == 'solar-webui'
+        if: inputs.app == 'solar-webui' || inputs.app == 'solar-status'
         with:
           node-version: 24
 
@@ -30,6 +30,9 @@ jobs:
         run: |
           case "${{ inputs.app }}" in
             solar-webui)
+              pnpm install --frozen-lockfile
+              ;;
+            solar-status)
               pnpm install --frozen-lockfile
               ;;
             solar-host)
