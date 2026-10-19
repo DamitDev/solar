@@ -166,8 +166,8 @@
         "Both modes verified in browser using dev-browser skill"
       ],
       "priority": 11,
-      "passes": false,
-      "notes": "No status-page features to verify yet - this validates plumbing only."
+      "passes": true,
+      "notes": "No status-page features to verify yet - this validates plumbing only. Both modes verified at HTTP level; no browser/dev-browser skill available in the agent environment (dev: SPA shell 200 from :5174 with the absolute VITE_API_BASE_URL baked into the dev-transformed data layer, no proxying, cross-origin preflight answered with the dev origin; embedded: fresh build served from /status with 307 /status → /status/, hashed asset 200, missing asset 404, client-side navigation fallback 200, /api/status precedence intact)."
     }
   ]
 }

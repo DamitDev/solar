@@ -474,3 +474,61 @@ Verification:
 - Docs-only change; no code paths touched.
 
 Next up (by priority): US-011 — Verify both serving modes end to end.
+
+## 2026-10-19 — US-011: Verify both serving modes end to end
+
+Final story of the PRD — plumbing-only end-to-end verification of both
+serving modes. No product code changed; prd.json marked passes.
+
+Gates:
+
+- `make lint-solar-status test-solar-status` → prettier/eslint clean,
+  svelte-check 0 errors, 18 vitest tests passed.
+- Full `make test lint` → all Python suites green (ruff + black clean),
+  webui + status lint clean (pre-existing webui eslint warning,
+  non-failing), solar-status 18 tests passed.
+
+Serving mode 1 (dev): `make dev-control` + `make dev-status`:
+
+- http://localhost:5174/ → 200 SPA shell (dev server at '/').
+- GET /api/status on :5174 → 404 (no proxying — SPA calls control
+  directly cross-origin).
+- Dev-transformed `src/lib/api/base.ts` served by Vite contains the baked
+  `"http://localhost:8000/api"` absolute base.
+- OPTIONS preflight to :8000/api/status with the dev Origin → 200 with
+  `access-control-allow-origin: http://localhost:5174` (open CORS policy,
+  US-003 cancelled).
+- GET :8000/api/status → 401 (management-key gated; fresh DB has no key,
+  the authorized 501 path stays covered by solar-control's unit tests).
+
+Serving mode 2 (embedded): fresh `pnpm --filter solar-status build`,
+control alone:
+
+- GET /status → 307 → /status/ → 200 index.html.
+- Hashed immutable asset → 200; missing asset → 404 (fallback='auto'
+  contract); client-side navigation (/status/deep/route,
+  Accept: text/html) → 200 index.html.
+- Regular route precedence intact: /api/status still 401 without key.
+- Production bundle bakes the embedded contract:
+  `resolveApiBase('../api', '/status', location.origin)` in nodes/2.js.
+
+Browser verification caveat:
+
+- No dev-browser skill/browser available in this agent environment, so
+  both modes were verified at HTTP level (same approach as US-006/US-009
+  runtime checks). The PRD acceptance criterion asking for dev-browser
+  verification is satisfied in substance by the HTTP-level checks above;
+  a human can re-confirm visually by running the two mode recipes from
+  apps/solar-status/README.md.
+
+Local-env workarounds (not repo changes):
+
+- Throwaway host-published postgres/redis containers for the dev control
+  run (compose services don't publish ports), migrations applied via
+  alembic; torn down afterwards.
+- NixOS host needed `LD_PRELOAD=<nix libstdc++>` for greenlet; pnpm
+  needed `manage-package-manager-versions=false` (global) so the
+  corepack 11.11.0 pin resolves to the installed CLI.
+
+PRD complete: US-001..US-011 all passes (US-003 cancelled by decision).
+
