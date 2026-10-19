@@ -30,7 +30,9 @@ services:
       - solar-network
 
   solar-control:
-    build: .
+    build:
+      context: ../..
+      dockerfile: apps/solar-control/Dockerfile
     container_name: solar-control
     depends_on:
       postgres:

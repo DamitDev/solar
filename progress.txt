@@ -370,3 +370,58 @@ Verification:
 
 Next up (by priority): US-009 — Embed SPA build into solar-control Docker
 image.
+
+## 2026-10-19 — US-009: Embed SPA build into solar-control Docker image
+
+Done:
+
+- `apps/solar-control/Dockerfile` rewritten as a multi-stage build:
+  - Stage 1 (deps, node:24-alpine): workspace install
+    (`pnpm install --frozen-lockfile`) with root `package.json`,
+    `pnpm-workspace.yaml`, `pnpm-lock.yaml` and both JS member package.jsons
+    (solar-webui + solar-status) copied — mirrors solar-webui's image.
+  - Stage 2 (builder): solar-status source + node_modules from deps,
+    `pnpm --filter solar-status build` → dist/.
+  - Stage 3 (runtime, python:3.12-slim): unchanged solar-control runtime,
+    plus `COPY --from=builder /app/apps/solar-status/dist /app/status-ui`
+    (chowned to appuser by the existing step) and
+    `ENV STATUS_DIST_DIR=/app/status-ui`, which activates the embedded
+    frontend mount automatically.
+- Build context moved to the repo root (`.`): the Node stages need the
+  workspace lockfile. All runtime-stage COPY paths switched to
+  `apps/solar-control/...`. `.github/release-manifest.json`: solar-control
+  `context: "."` (image name unchanged); no new component for the SPA.
+- `apps/solar-control/docker-compose.yml`: `build: .` → root context +
+  explicit dockerfile path, so local compose builds keep working. The
+  untracked local `docker-compose.replicas.yml` got the same treatment
+  (not part of this commit).
+- Root `package.json`: restored `"packageManager": "pnpm@11.11.0"` (the
+  solar-status scaffold commit 5f642d1 had dropped the version). Corepack
+  hard-fails on the bare field ("No version specified for pnpm"), which
+  broke every corepack-based image build — verified empirically with
+  node:24-alpine before/after. With the pin restored, pnpm 11.11.0 +
+  current lockfile installs clean (esbuild postinstall honored via
+  dangerouslyAllowAllBuilds).
+- `.dockerignore` hardened with `**/` patterns (node_modules, .venv,
+  __pycache__, *.egg-info, caches, dist, tsbuildinfo): with solar-control
+  now building from the root context, root-level-only ignores would have
+  leaked nested build artifacts into the build context. `.env.*` stays
+  root-scoped — apps/solar-status/.env.production must reach the builder
+  (verified: the baked bundle contains `../api`).
+
+Verification:
+
+- `docker build -f apps/solar-control/Dockerfile -t solar-control:us009 .`
+  from the repo root → clean build (3 stages).
+- Image inspection: STATUS_DIST_DIR=/app/status-ui; /app/status-ui holds
+  index.html + _app assets, owned by appuser; bundle bakes `../api` API
+  base and `/status` asset base; SPA dist adds only ~1 MB (image 252 MB).
+- Runtime (compose: postgres + redis + solar-control, PORT=8100):
+  /health → 200; /status → 307 → /status/ → 200 index.html;
+  /status/_app/immutable/entry/start.*.js → 200;
+  /api/status without key → 401; with the container's MANAGEMENT_API_KEY
+  → 501 placeholder. Migrations ran on a fresh DB via entrypoint.
+- `make lint-solar-status test-solar-status` → svelte-check/prettier/eslint
+  clean, 18 vitest tests passed.
+
+Next up (by priority): US-010 — Update AGENTS.md and add user-facing docs.

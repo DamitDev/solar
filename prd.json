@@ -138,7 +138,7 @@
         "Built image serves http://localhost:8000/status"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "Docker image name for solar-control stays unchanged (aiops/* names are fixed)."
     },
     {
