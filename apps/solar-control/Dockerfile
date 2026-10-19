@@ -3,7 +3,6 @@ FROM node:24-alpine AS deps
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@11.11.0 --activate
 COPY pnpm-lock.yaml package.json pnpm-workspace.yaml ./
-COPY apps/solar-webui/package.json apps/solar-webui/
 COPY apps/solar-status/package.json apps/solar-status/
 # No --filter: unfiltered installs correctly honor onlyBuiltDependencies
 # (esbuild postinstall) on fresh stores.

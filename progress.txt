@@ -425,3 +425,19 @@ Verification:
   clean, 18 vitest tests passed.
 
 Next up (by priority): US-010 — Update AGENTS.md and add user-facing docs.
+
+## 2026-10-19 — US-009 follow-up: deps stage installs solar-status only
+
+Review finding: stage 1 of the control image copied solar-webui's
+package.json alongside solar-status's, so the workspace install pulled
+webui's whole dependency tree too — wasted build time/cache and a spurious
+layer invalidation whenever webui's manifest changes.
+
+- Removed the solar-webui COPY from the deps stage. Verified pnpm 11.11.0
+  tolerates the missing webui importer under --frozen-lockfile (silently
+  skips it — the mirror image of the earlier repro where solar-status's
+  manifest was absent): install succeeds, solar-status node_modules
+  complete (vite, svelte-kit, ...), no apps/solar-webui dir in the stage.
+- Full image rebuild + compose runtime check: /health 200, /status/ 200,
+  hashed asset 200, /api/status with management key 501. Image unchanged
+  otherwise (252 MB).
