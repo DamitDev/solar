@@ -6,12 +6,16 @@ import { svelteTesting } from '@testing-library/svelte/vite';
 
 export default defineConfig(({ command }) => {
   const embedded = command === 'build';
+  const statusMount = '/status';
 
   return {
+    define: {
+      __BASE_PATH__: JSON.stringify(embedded ? statusMount : '/')
+    },
     plugins: [
       tailwindcss(),
       sveltekit({
-        paths: { base: embedded ? '/status' : '' },
+        paths: { base: embedded ? statusMount : '' },
         compilerOptions: {
           // Force runes mode for the project, except for libraries. Can be removed in svelte 6.
           runes: ({ filename }) =>
@@ -28,7 +32,8 @@ export default defineConfig(({ command }) => {
     test: {
       expect: { requireAssertions: true },
       environment: 'jsdom',
-      setupFiles: ['src/test/setup.ts']
+      setupFiles: ['src/test/setup.ts'],
+      env: { VITE_API_BASE_URL: '../api' }
     }
   };
 });

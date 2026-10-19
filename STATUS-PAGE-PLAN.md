@@ -44,20 +44,23 @@ in this mode.
 is present (notably inside the Docker image), solar-control serves it at
 `/status` via `app.frontend()`. This is the production path; it also works
 locally after a manual `pnpm --filter solar-status build`. The SPA is passed a
-**relative** API base URL (`../api`), which resolves against the page's own
-mount point to the same-origin `/api`.
+**relative** API base URL (`../api`, from `.env.production`), which resolves
+against the page's own mount point to the same-origin `/api`.
 
 **The SPA is mode-agnostic.** It has a single code path: it receives a base
 URL string and appends endpoint paths (`${apiBase}/status`). Only the
 injected value differs:
 
-- **API base**: absolute URL in dev (`VITE_API_BASE_URL`), relative `../api` in
-  the embedded build (default for the production build).
+- **API base**: mandatory build-time env var `VITE_API_BASE_URL` — absolute URL
+  in dev (`.env.development`), relative `../api` in the embedded build
+  (`.env.production`); no baked-in code fallback, startup fails fast when it
+  is missing. Overridable per build (e.g. Docker build arg).
 - **Asset base**: conditional Vite `base` — `/` for the dev server,
   `/status/` for the production build (embedded under control's `/status`).
-  Vite exposes this as the built-in `import.meta.env.BASE_URL` — the SPA
-  refers to it as `BASE_PATH` — and uses it as the anchor for resolving the
-  relative API base (see viability section).
+  The mount point is injected as a build-time `__BASE_PATH__` define
+  (mirroring `paths.base`) and anchors the relative API base (see viability
+  section; Vite's built-in `import.meta.env.BASE_URL` is `'./'` in this
+  toolchain and not the mount point).
 
 ### Relative API base (`../api`) viability
 
@@ -79,10 +82,11 @@ the embedded build, `/` in dev) — the SPA knows its mount point at runtime and
 resolves the injected relative base once at startup:
 
 ```ts
-const mount = new URL(import.meta.env.BASE_URL, location.origin);
-const apiBase = new URL(import.meta.env.VITE_API_BASE_URL ?? "../api", mount);
-// embedded: http://host/api  (any route depth)
-// dev: http://localhost:8000 (absolute base ignores the mount anchor)
+// vite.config.ts injects the mount point: define: { __BASE_PATH__: JSON.stringify(embedded ? '/status' : '/') }
+const mount = new URL(__BASE_PATH__, location.origin);
+const apiBase = new URL(import.meta.env.VITE_API_BASE_URL, mount); // mandatory, fails fast when missing
+// embedded (.env.production: ../api): http://host/api  (any route depth)
+// dev (.env.development: absolute base ignores the mount anchor)
 ```
 
 With this anchor, resolution is independent of the active client-side route

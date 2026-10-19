@@ -70,11 +70,12 @@
       "title": "Implement mode-agnostic data layer with API base resolution",
       "description": "As a developer, I need a single code path in the SPA that works with both an absolute API base (dev) and a relative one (embedded), so only the injected base URL string differs between serving modes.",
       "acceptanceCriteria": [
-        "Typed fetch client resolves the API base once at startup: new URL(import.meta.env.VITE_API_BASE_URL ?? '../api', new URL(import.meta.env.BASE_URL, location.origin))",
-        "Vite BASE_URL is used as the mount-point anchor so relative resolution is independent of the active client-side route; no <base> tag needed",
+        "Typed fetch client resolves the API base once at startup: new URL(VITE_API_BASE_URL, new URL(mountPoint, location.origin)) - no baked-in code fallback",
+        "VITE_API_BASE_URL is mandatory in every build and startup fails fast when it is missing: .env.development sets the absolute dev base, .env.production sets ../api; overridable per build (e.g. Docker build arg)",
+        "The mount point comes from a build-time __BASE_PATH__ define mirroring SvelteKit paths.base, anchoring relative resolution independently of the active client-side route; no <base> tag needed (Vite's built-in BASE_URL is './' in this toolchain and not the mount point)",
         "Endpoint paths are appended to the resolved base (${apiBase}/status pattern)",
         "Dev: absolute VITE_API_BASE_URL ignores the mount anchor; embedded: ../api resolves to same-origin /api at any route depth",
-        "Unit tests cover base resolution for both modes",
+        "Unit tests cover base resolution for both modes and the fail-fast behavior",
         "pnpm --filter solar-status test passes"
       ],
       "priority": 5,

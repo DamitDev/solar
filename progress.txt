@@ -222,3 +222,39 @@ Verification:
 
 - `pnpm --filter solar-status test` → 13 passed; `check` → 0 errors;
   `lint` → clean; `build` → dist/ written.
+
+## 2026-10-19 — US-005 follow-up: no baked-in API base — build-time mandatory env
+
+Owner decision: no baked-in values. Implemented the build-time mandatory
+variant (runtime injection rejected for now — would need a config endpoint
+and async bootstrap; can be revisited if a real deployment need appears).
+
+Done:
+
+- Removed the '../api' code fallback from `resolveApiBase`. VITE_API_BASE_URL
+  is now mandatory in every mode; startup throws (fail fast) when missing.
+  Empty string counts as missing.
+- `.env.development` (VITE_API_BASE_URL=http://localhost:8000) and
+  `.env.production` (VITE_API_BASE_URL=../api) committed; `.gitignore`
+  un-ignores both (Vite convention: only *.local env files are ignored).
+  Values remain overridable per build (verified: shell env / Docker build
+  arg substitutes into the bundle).
+- vitest gets VITE_API_BASE_URL='../api' via test.env in vite.config.ts.
+- Mount-point anchor fix discovered during verification: SvelteKit 3 does NOT
+  propagate paths.base into import.meta.env.BASE_URL — it compiles to './',
+  so the anchor was accidentally origin-root (correct only for one-level
+  mounts). $app/paths no longer exports base in kit 3 (public types dropped
+  it). Fix: build-time define __BASE_PATH__ in vite.config.ts (mirroring
+  paths.base: '/status' embedded, '/' dev), declared in src/globals.d.ts.
+- Verified in the clean production bundle: the module compiles to
+  i('../api','/status',location.origin) — both values baked from build
+  config, none from source. Data layer is tree-shaken out until a route
+  imports it (page wiring is US-006+); verified via a temporary page import,
+  reverted afterwards.
+- prd.json US-005 criteria and STATUS-PAGE-PLAN.md updated to the final
+  formula and naming.
+
+Verification:
+
+- pnpm --filter solar-status test → 14 passed (fail-fast test added);
+  check → 0 errors; lint → clean; build → dist/ written.

@@ -14,17 +14,17 @@ describe('resolveApiBase', () => {
     );
   });
 
-  it('resolves the ../api default against the mount anchor (embedded mode)', () => {
-    expect(resolveApiBase(undefined, '/status', 'http://control.example').href).toBe(
+  it('resolves a configured relative API base against the mount anchor (embedded mode)', () => {
+    expect(resolveApiBase('../api', '/status', 'http://control.example').href).toBe(
       'http://control.example/api'
     );
   });
 
-  it('resolves the ../api default with or without a trailing slash on the mount base', () => {
-    expect(resolveApiBase(undefined, '/status/', 'http://control.example').href).toBe(
+  it('resolves a relative API base with or without a trailing slash on the mount base', () => {
+    expect(resolveApiBase('../api', '/status/', 'http://control.example').href).toBe(
       'http://control.example/api'
     );
-    expect(resolveApiBase(undefined, '/status', 'http://control.example').href).toBe(
+    expect(resolveApiBase('../api', '/status', 'http://control.example').href).toBe(
       'http://control.example/api'
     );
   });
@@ -32,7 +32,16 @@ describe('resolveApiBase', () => {
   it('anchors the mount point at location.origin, not at the active client-side route', () => {
     history.replaceState(null, '', '/status/deeply/nested/route');
 
-    expect(resolveApiBase(undefined, '/status', location.origin).pathname).toBe('/api');
+    expect(resolveApiBase('../api', '/status', location.origin).pathname).toBe('/api');
+  });
+
+  it('fails fast when the API base is not configured', () => {
+    expect(() => resolveApiBase(undefined, '/status', 'http://control.example')).toThrow(
+      /VITE_API_BASE_URL/
+    );
+    expect(() => resolveApiBase('', '/status', 'http://control.example')).toThrow(
+      /VITE_API_BASE_URL/
+    );
   });
 });
 
