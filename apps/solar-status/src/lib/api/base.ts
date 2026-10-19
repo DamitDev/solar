@@ -4,9 +4,7 @@ export function resolveApiBase(
   origin: string
 ): URL {
   if (!apiBaseUrl) {
-    throw new Error(
-      'VITE_API_BASE_URL is not configured. Set it as an environment variable.'
-    );
+    throw new Error('VITE_API_BASE_URL is not configured. Set it as an environment variable.');
   }
   const mountPoint = new URL(basePath, origin);
   return new URL(apiBaseUrl, mountPoint);
@@ -22,7 +20,7 @@ export const apiBase: URL = resolveApiBase(
   location.origin
 );
 
-export function apiUrl(endpointPath: string, base: URL = apiBase): URL {
+export function createApiUrl(endpointPath: string, base: URL = apiBase): URL {
   const root = `${base}`.replace(/\/+$/, '');
   return new URL(endpointPath.replace(/^\/+/, ''), `${root}/`);
 }

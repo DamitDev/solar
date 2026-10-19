@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { apiBase, apiUrl, resolveApiBase } from './base';
+import { apiBase, createApiUrl, resolveApiBase } from './base';
 
 describe('resolveApiBase', () => {
   it('resolves an absolute VITE_API_BASE_URL directly, ignoring the mount anchor (dev mode)', () => {
@@ -55,19 +55,19 @@ describe('apiBase', () => {
 
 describe('apiUrl', () => {
   it('appends endpoint paths to the resolved base', () => {
-    expect(apiUrl('status', new URL('http://control.example/api')).href).toBe(
+    expect(createApiUrl('status', new URL('http://control.example/api')).href).toBe(
       'http://control.example/api/status'
     );
   });
 
   it('keeps endpoint paths on the API origin for an absolute root base (dev mode)', () => {
-    expect(apiUrl('status', new URL('http://localhost:8000')).href).toBe(
+    expect(createApiUrl('status', new URL('http://localhost:8000')).href).toBe(
       'http://localhost:8000/status'
     );
   });
 
   it('tolerates a leading slash on the endpoint path and a trailing slash on the base', () => {
-    expect(apiUrl('/status', new URL('http://control.example/api/')).href).toBe(
+    expect(createApiUrl('/status', new URL('http://control.example/api/')).href).toBe(
       'http://control.example/api/status'
     );
   });
