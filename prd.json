@@ -70,10 +70,10 @@
       "title": "Implement mode-agnostic data layer with API base resolution",
       "description": "As a developer, I need a single code path in the SPA that works with both an absolute API base (dev) and a relative one (embedded), so only the injected base URL string differs between serving modes.",
       "acceptanceCriteria": [
-        "Typed fetch client resolves the API base once at startup: new URL(import.meta.env.VITE_API_BASE ?? '../api', new URL(import.meta.env.BASE_URL, location.origin))",
+        "Typed fetch client resolves the API base once at startup: new URL(import.meta.env.VITE_API_BASE_URL ?? '../api', new URL(import.meta.env.BASE_URL, location.origin))",
         "Vite BASE_URL is used as the mount-point anchor so relative resolution is independent of the active client-side route; no <base> tag needed",
         "Endpoint paths are appended to the resolved base (${apiBase}/status pattern)",
-        "Dev: absolute VITE_API_BASE ignores the mount anchor; embedded: ../api resolves to same-origin /api at any route depth",
+        "Dev: absolute VITE_API_BASE_URL ignores the mount anchor; embedded: ../api resolves to same-origin /api at any route depth",
         "Unit tests cover base resolution for both modes",
         "pnpm --filter solar-status test passes"
       ],
@@ -87,7 +87,7 @@
       "description": "As a developer, I want to run the SPA on its own Vite dev server alongside solar-control, so I can develop without building the SPA or running it from control.",
       "acceptanceCriteria": [
         "Vite dev server runs on its own port (5174) serving the app at '/' - no proxying",
-        ".env.development sets VITE_API_BASE=http://localhost:8000",
+        ".env.development sets VITE_API_BASE_URL=http://localhost:8000",
         "SPA at http://localhost:5174/ calls solar-control directly cross-origin (CORS allow-list must include the dev origin)",
         "solar-control runs without any SPA build in this mode",
         "Verified in browser: make dev-control + make dev-status, open http://localhost:5174/ (dev-browser skill)"
@@ -160,7 +160,7 @@
       "acceptanceCriteria": [
         "make lint-solar-status test-solar-status passes",
         "Full make test lint passes",
-        "Serving mode 1 (dev): make dev-control + make dev-status, http://localhost:5174/ loads and calls control on the absolute VITE_API_BASE",
+        "Serving mode 1 (dev): make dev-control + make dev-status, http://localhost:5174/ loads and calls control on the absolute VITE_API_BASE_URL",
         "Serving mode 2 (embedded): build the SPA, run make dev-control alone, http://localhost:8000/status serves the built assets",
         "Both modes verified in browser using dev-browser skill"
       ],

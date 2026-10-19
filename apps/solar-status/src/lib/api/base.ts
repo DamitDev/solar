@@ -1,17 +1,20 @@
 const MOUNT_RELATIVE_API_PATH = '../api';
 
 export function resolveApiBase(
-  apiEnvBase: string | undefined,
-  mountBase: string,
+  apiBaseUrl: string | undefined,
+  basePath: string,
   origin: string
 ): URL {
-  const mountPoint = new URL(mountBase, origin);
-  return new URL(apiEnvBase ?? MOUNT_RELATIVE_API_PATH, mountPoint);
+  const mountPoint = new URL(basePath, origin);
+  return new URL(apiBaseUrl ?? MOUNT_RELATIVE_API_PATH, mountPoint);
 }
 
+// Vite exposes the mount point only as its built-in BASE_URL; the app knows it as BASE_PATH.
+const basePath: string = import.meta.env.BASE_URL;
+
 export const apiBase: URL = resolveApiBase(
-  import.meta.env.VITE_API_BASE,
-  import.meta.env.BASE_URL,
+  import.meta.env.VITE_API_BASE_URL,
+  basePath,
   location.origin
 );
 

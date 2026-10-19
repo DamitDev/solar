@@ -2,13 +2,13 @@ import { describe, expect, it } from 'vitest';
 import { apiBase, apiUrl, resolveApiBase } from './base';
 
 describe('resolveApiBase', () => {
-  it('resolves an absolute VITE_API_BASE directly, ignoring the mount anchor (dev mode)', () => {
+  it('resolves an absolute VITE_API_BASE_URL directly, ignoring the mount anchor (dev mode)', () => {
     expect(resolveApiBase('http://localhost:8000', '/', 'http://localhost:5174').href).toBe(
       'http://localhost:8000/'
     );
   });
 
-  it('ignores the mount anchor for an absolute VITE_API_BASE even when embedded', () => {
+  it('ignores the mount anchor for an absolute VITE_API_BASE_URL even when embedded', () => {
     expect(resolveApiBase('http://localhost:8000', '/status', 'http://control.example').href).toBe(
       'http://localhost:8000/'
     );

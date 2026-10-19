@@ -35,7 +35,7 @@ image for the SPA itself; solar-control remains the only runtime dependency.
 **1. Development — SPA served separately.** `make dev-status` starts the Vite
 dev server on its own port (e.g. 5174, alongside solar-control on 8000),
 serving the app at its root (`/`) — **no proxying**. The SPA is passed an
-**absolute** API base URL (`VITE_API_BASE=http://localhost:8000`) and calls
+**absolute** API base URL (`VITE_API_BASE_URL=http://localhost:8000`) and calls
 the control API directly. This cross-origin browser call requires CORS on
 solar-control (see Phase 1.3). solar-control runs **without** any SPA build
 in this mode.
@@ -51,12 +51,13 @@ mount point to the same-origin `/api`.
 URL string and appends endpoint paths (`${apiBase}/status`). Only the
 injected value differs:
 
-- **API base**: absolute URL in dev (`VITE_API_BASE`), relative `../api` in
+- **API base**: absolute URL in dev (`VITE_API_BASE_URL`), relative `../api` in
   the embedded build (default for the production build).
 - **Asset base**: conditional Vite `base` — `/` for the dev server,
   `/status/` for the production build (embedded under control's `/status`).
-  Vite exposes this as `import.meta.env.BASE_URL`, which the SPA also uses as
-  the anchor for resolving the relative API base (see viability section).
+  Vite exposes this as the built-in `import.meta.env.BASE_URL` — the SPA
+  refers to it as `BASE_PATH` — and uses it as the anchor for resolving the
+  relative API base (see viability section).
 
 ### Relative API base (`../api`) viability
 
@@ -79,7 +80,7 @@ resolves the injected relative base once at startup:
 
 ```ts
 const mount = new URL(import.meta.env.BASE_URL, location.origin);
-const apiBase = new URL(import.meta.env.VITE_API_BASE ?? "../api", mount);
+const apiBase = new URL(import.meta.env.VITE_API_BASE_URL ?? "../api", mount);
 // embedded: http://host/api  (any route depth)
 // dev: http://localhost:8000 (absolute base ignores the mount anchor)
 ```
@@ -136,7 +137,7 @@ Rationale for a standalone app (vs. inside `apps/solar-control`):
    `@testing-library/svelte` for tests.
 4. **Dev server** (serving mode 1): Vite dev server on its own port, app
    served at `/`, **no proxy** — the SPA calls solar-control directly on the
-   absolute `VITE_API_BASE` (default `http://localhost:8000` in
+   absolute `VITE_API_BASE_URL` (default `http://localhost:8000` in
    `.env.development`); CORS on control must include the dev origin
    (Phase 1.3).
 
@@ -168,7 +169,7 @@ Standard new-app checklist from AGENTS.md:
   new endpoints (mock Redis stores); full `make test lint`.
 - Serving mode 1 (dev): `make dev-control` + `make dev-status`, open
   `http://localhost:5174/` — the SPA calls control directly on the absolute
-  `VITE_API_BASE` (CORS allow-list must include the dev origin).
+  `VITE_API_BASE_URL` (CORS allow-list must include the dev origin).
 - Serving mode 2 (embedded): build the SPA, run `make dev-control` alone, open
   `http://localhost:8000/status` — control serves the built assets directly.
 

@@ -202,3 +202,23 @@ Verification:
 
 Next up (by priority): US-006 — Dev server serving mode (SPA separately from
 solar-control).
+
+## 2026-10-19 — US-005 follow-up: env var naming (VITE_API_BASE_URL / BASE_PATH)
+
+Owner-requested rename of the data-layer naming:
+
+- `VITE_API_BASE` → `VITE_API_BASE_URL` — the actual env var name changed
+  (code + test titles + prd.json criteria for US-005/006/011 +
+  STATUS-PAGE-PLAN.md). US-006 will set `VITE_API_BASE_URL=http://localhost:8000`
+  in .env.development.
+- `BASE_PATH` — the mount-point concept is now named `basePath` in the
+  resolveApiBase signature and in the module-level startup alias. The Vite
+  built-in env key itself remains `import.meta.env.BASE_URL` (it is Vite's
+  identifier, populated from paths.base and not renamable); base.ts carries a
+  one-line comment documenting that mapping, and STATUS-PAGE-PLAN.md mentions
+  the alias where the asset base is introduced.
+
+Verification:
+
+- `pnpm --filter solar-status test` → 13 passed; `check` → 0 errors;
+  `lint` → clean; `build` → dist/ written.
