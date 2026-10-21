@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { fetchJson } from '../lib/api/client';
   import ComponentRow from '../lib/components/ComponentRow.svelte';
   import MessageItem from '../lib/components/MessageItem.svelte';
@@ -7,23 +8,37 @@
   type Load =
     { kind: 'loading' } | { kind: 'ready'; summary: StatusSummary } | { kind: 'unreachable' };
 
+  // "Current" availability must not go stale on a long-open tab.
+  const REFRESH_INTERVAL_MS = 60_000;
+
   let load = $state<Load>({ kind: 'loading' });
+  let cancelled = false;
+  let timer: ReturnType<typeof setInterval> | undefined;
+
+  async function refresh(): Promise<void> {
+    try {
+      const summary = await fetchJson<StatusSummary>('status');
+      if (!cancelled) load = { kind: 'ready', summary };
+    } catch {
+      if (!cancelled) load = { kind: 'unreachable' };
+    }
+  }
+
+  function refreshWhenVisible(): void {
+    if (document.visibilityState === 'visible') void refresh();
+  }
 
   $effect(() => {
-    let cancelled = false;
+    void refresh();
+  });
 
-    fetchJson<StatusSummary>('status').then(
-      (summary) => {
-        if (!cancelled) load = { kind: 'ready', summary };
-      },
-      () => {
-        if (!cancelled) load = { kind: 'unreachable' };
-      }
-    );
+  timer = setInterval(() => void refresh(), REFRESH_INTERVAL_MS);
+  document.addEventListener('visibilitychange', refreshWhenVisible);
 
-    return () => {
-      cancelled = true;
-    };
+  onDestroy(() => {
+    cancelled = true;
+    clearInterval(timer);
+    document.removeEventListener('visibilitychange', refreshWhenVisible);
   });
 </script>
 

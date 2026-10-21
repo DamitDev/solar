@@ -6,7 +6,10 @@ from pydantic import BaseModel, Field
 
 from app.models.status_message import StatusMessageResponse
 
-Availability = Literal["operational", "degraded", "down"]
+# ``unknown`` is the honest answer when the live state or the history of a
+# component could not be read: an unreadable source must never look like a
+# confident "down".
+Availability = Literal["operational", "degraded", "down", "unknown"]
 
 
 class UptimePoint(BaseModel):

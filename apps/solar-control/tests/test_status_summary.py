@@ -107,7 +107,7 @@ class _FakeSession:
 
 
 @pytest.mark.asyncio
-async def test_availability_buckets_collapses_ticks_and_returns_sparse_map():
+async def test_availability_buckets_collapses_per_instance_tick_and_returns_sparse_map():
     session = _FakeSession([SimpleNamespace(bucket=float(_epoch(0)), total=10, up=7)])
     with patch(
         "app.database.state_history.get_session_factory",
@@ -123,10 +123,14 @@ async def test_availability_buckets_collapses_ticks_and_returns_sparse_map():
             dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
         )
     )
-    # Rows collapse per tick (bool_or) before bucketing, never joining
-    # gateway request logs.
+    # Rows collapse per instance per tick (bool_or over sampled_at AND
+    # instance_id) before bucketing, never joining gateway request logs: one of
+    # two replicas down must stay a partial day instead of a full one.
     assert "bool_or" in sql
-    assert "GROUP BY instance_state_history.sampled_at" in sql
+    assert (
+        "GROUP BY instance_state_history.sampled_at, "
+        "instance_state_history.instance_id" in sql
+    )
     assert "alias IN ('core', 'wind')" in sql
     assert "gateway_requests" not in sql
 

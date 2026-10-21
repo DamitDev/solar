@@ -1,9 +1,10 @@
 # Solar Status
 
-A Solar rendszer állapotoldala: önálló single-page alkalmazás SvelteKit (Svelte 5) +
-TypeScript + Tailwind CSS alapon, a pnpm workspace tagje. Jelenleg az alapokat adja:
-adatréteg, két serving mód, teszt-/lint-keretrendszer — az oldal tényleges funkciói
-külön tervezés szerint bővülnek.
+A Solar rendszer nyilvános állapotoldala: önálló single-page alkalmazás SvelteKit (Svelte 5) +
+TypeScript + Tailwind CSS alapon, a pnpm workspace tagje. A solar-control `GET /api/status`
+végpontjának összegzését jeleníti meg: virtuális modellek, aliasok és nem kezelt instance-ok
+aktuális elérhetőségét, 90 napos uptime-történetét, valamint az aktív és közelgő
+állapotüzeneteket.
 
 ## Fontos tudnivalók
 
@@ -12,10 +13,14 @@ külön tervezés szerint bővülnek.
 - Minden API-hívás egyetlen kódpályán fut: a fetch kliens induláskor egyszer oldja
   fel az API base-t, a végponti útvonalakat pedig ehhez fűzi hozzá
   (`${apiBase}/status` minta).
-- A backend oldalon egyetlen végpont tartozik hozzá: a solar-control
-  `GET /api/status` útvonala, amely egy 501-es placeholder (a menedzsment kulccsal
-  védett `/api` router alatt). Az oldal jelenleg ezt hívja meg, és megjeleníti a
-  feloldott API base-t — csővezeték-próba, nem funkció.
+- A backend oldalon egyetlen, nyilvános (azonosítás nélküli) végpont tartozik hozzá: a
+  solar-control `GET /api/status` összegző útvonala. A válasz virtuális modellenként,
+  aliasonként és instance-onként adja az aktuális elérhetőséget (`operational`, `degraded`,
+  `down`, `unknown` — utóbbi, ha a forrás adata nem olvasható), a 90 napos napi
+  uptime-bontást és uptime százalékot, valamint a megjeleníthető állapotüzeneteket (aktív
+  incidens, karbantartás, előre meghirdetett tervezett karbantartás). Az oldal ezt hívja meg,
+  és 60 másodpercenként, illetve a fül újra láthatóvá válásakor frissíti. Minden más `/api`
+  útvonal továbbra is a menedzsment kulcsot igényli.
 
 ## Serving módok
 

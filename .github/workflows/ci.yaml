@@ -39,10 +39,10 @@ jobs:
           ALL=0
           for f in $CHANGED; do
             case "$f" in
-              # /api/status contract: solar-control's status route and the
-              # solar-status SPA are two sides of one interface — either side
-              # also runs the other's gates.
-              apps/solar-control/app/routes/management/status.py|apps/solar-control/app/services/host_status.py)
+              # /api/status contract: solar-control's status route, summary
+              # service and models plus the solar-status SPA are two sides of one
+              # interface — either side also runs the other's gates.
+              apps/solar-control/app/routes/management/status.py|apps/solar-control/app/services/status_summary.py|apps/solar-control/app/models/status.py)
                 APPS="$APPS solar-control solar-status";;
               apps/solar-control/*)   APPS="$APPS solar-control";;
               apps/solar-host/*)      APPS="$APPS solar-host";;

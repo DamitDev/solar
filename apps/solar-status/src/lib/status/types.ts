@@ -1,12 +1,16 @@
 // Mirrors the GET /api/status contract (solar-control app/models/status.py).
 
-export type Availability = 'operational' | 'degraded' | 'down';
+// 'unknown' means the backend could not read the live state or the history of
+// the component: never render it as a confident 'down'.
+export type Availability = 'operational' | 'degraded' | 'down' | 'unknown';
 
 export interface UptimePoint {
   ts: string;
   // Share of sampler ticks the component was up (0..1).
   uptime: number;
-  // 0 samples marks an outage gap, never interpolated from neighbours.
+  // 0 samples: no sampler ticks that day. Before the component's first
+  // sample that is pre-existence, after it an outage gap; never interpolated
+  // from neighbours.
   samples: number;
 }
 
@@ -55,10 +59,21 @@ export function formatUptime(pct: number | null): string {
   return pct === null ? 'No data' : `${pct.toFixed(2)}% uptime`;
 }
 
-export type BarTone = 'gap' | 'up' | 'partial' | 'down';
+export type BarTone = 'empty' | 'gap' | 'up' | 'partial' | 'down';
 
-export function barTone(point: UptimePoint): BarTone {
-  if (point.samples === 0) return 'gap';
+/**
+ * Tone for the bar at `index` in `history`.
+ *
+ * Days before the component's first sample predate its existence: they get the
+ * neutral 'empty' tone, because the backend excludes them from the uptime
+ * percentage. A day without samples after the first sample is a real outage gap
+ * and stays red.
+ */
+export function barTone(history: UptimePoint[], index: number): BarTone {
+  const point = history[index];
+  if (point.samples === 0) {
+    return history.slice(0, index).some((earlier) => earlier.samples > 0) ? 'gap' : 'empty';
+  }
   if (point.uptime >= 0.999) return 'up';
   if (point.uptime > 0) return 'partial';
   return 'down';

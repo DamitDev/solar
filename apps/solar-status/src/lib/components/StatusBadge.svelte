@@ -6,7 +6,9 @@
   const tones: Record<Availability, { label: string; dot: string; text: string }> = {
     operational: { label: 'Operational', dot: 'bg-emerald-500', text: 'text-emerald-400' },
     degraded: { label: 'Degraded', dot: 'bg-amber-500', text: 'text-amber-400' },
-    down: { label: 'Down', dot: 'bg-red-500', text: 'text-red-400' }
+    down: { label: 'Down', dot: 'bg-red-500', text: 'text-red-400' },
+    // A source the backend could not read: neutral, never outage-colored.
+    unknown: { label: 'Unknown', dot: 'bg-zinc-500', text: 'text-zinc-400' }
   };
 
   const tone = $derived(tones[availability]);

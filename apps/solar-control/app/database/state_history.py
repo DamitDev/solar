@@ -130,22 +130,25 @@ class StateHistoryDB:
     ) -> dict[int, tuple[int, int]]:
         """Per-bucket ``(ticks, ticks_up)`` over ``start <= sampled_at < end``.
 
-        One sampler tick shares a single ``sampled_at``, so rows are first
-        collapsed per tick: a tick counts as *up* when any matched row is
-        ``running`` (several aliases or replicas form one component). Ticks
-        are then counted per epoch-aligned bucket. Buckets without samples
-        are absent: the caller zero-fills them rather than interpolating.
+        One sampler tick writes one row per instance, so rows are first collapsed
+        per ``(sampled_at, instance_id)``: an instance counts as *up* for a tick
+        only when its own row is ``running``. The resulting instance-ticks are then
+        counted per epoch-aligned bucket, so a replica set with one of two
+        replicas down renders as a partial day instead of a full one. Buckets
+        without samples are absent: the caller zero-fills them rather than
+        interpolating.
         """
         table = InstanceStateHistoryRow
         ticks = select(
             table.sampled_at.label("sampled_at"),
+            table.instance_id.label("instance_id"),
             func.bool_or(table.state == STATE_RUNNING).label("up"),
         ).where(table.sampled_at >= start, table.sampled_at < end)
         if aliases is not None:
             ticks = ticks.where(table.alias.in_(aliases))
         if instance_id is not None:
             ticks = ticks.where(table.instance_id == instance_id)
-        ticks = ticks.group_by(table.sampled_at).subquery()
+        ticks = ticks.group_by(table.sampled_at, table.instance_id).subquery()
 
         # Inlined (an int, never user text) so the SELECT and GROUP BY
         # expressions are textually identical; bound parameters would render

@@ -63,40 +63,44 @@ def _day_epoch(days_ago: int) -> int:
     return today - days_ago * 86400
 
 
-def _patched(registry, *, vms=(), intents=(), buckets=None, components=(), messages=()):
+def _patched(
+    registry,
+    *,
+    failing=(),
+    vms=(),
+    intents=(),
+    buckets=None,
+    components=(),
+    messages=(),
+):
     async def availability_buckets(start, end, bucket_s, **kwargs):
         return buckets if buckets is not None else {}
 
-    return [
-        patch(
-            "app.services.status_summary.status_message_db.list_not_ended",
-            AsyncMock(return_value=list(messages)),
+    sources = {
+        "app.services.status_summary.status_message_db.list_not_ended": AsyncMock(
+            return_value=list(messages)
         ),
-        patch(
-            "app.services.status_summary.registry_store.get_registry",
-            AsyncMock(return_value=registry),
+        "app.services.status_summary.registry_store.get_registry": AsyncMock(
+            return_value=registry
         ),
-        patch(
-            "app.services.state_sampler.host_store.get_host_resource_snapshot",
-            AsyncMock(return_value=_fresh_snapshot()),
+        "app.services.state_sampler.host_store.get_host_resource_snapshot": AsyncMock(
+            return_value=_fresh_snapshot()
         ),
-        patch(
-            "app.services.status_summary.intent_db.list_intents",
-            AsyncMock(return_value=list(intents)),
+        "app.services.status_summary.intent_db.list_intents": AsyncMock(
+            return_value=list(intents)
         ),
-        patch(
-            "app.services.status_summary.virtual_model_db.list_all",
-            AsyncMock(return_value=list(vms)),
+        "app.services.status_summary.virtual_model_db.list_all": AsyncMock(
+            return_value=list(vms)
         ),
-        patch(
-            "app.services.status_summary.state_history_db.list_components",
-            AsyncMock(return_value=list(components)),
+        "app.services.status_summary.state_history_db.list_components": AsyncMock(
+            return_value=list(components)
         ),
-        patch(
-            "app.services.status_summary.state_history_db.availability_buckets",
-            availability_buckets,
-        ),
-    ]
+        "app.services.status_summary.state_history_db.availability_buckets": availability_buckets,
+    }
+    # A failing source raises like an unreachable Redis/Postgres would.
+    for target in failing:
+        sources[target] = AsyncMock(side_effect=RuntimeError("source unavailable"))
+    return [patch(target, mock) for target, mock in sources.items()]
 
 
 def _get(client, registry, **kwargs):
@@ -239,3 +243,50 @@ def test_no_messages_returns_empty_list(client: TestClient):
     body = _get(client, {}).json()
     assert body["messages"] == []
     assert "upcoming_messages" not in body
+
+
+def test_failing_registry_read_degrades_to_unknown_availability(client: TestClient):
+    """An unreachable Redis must not turn the status page into a 500."""
+    resp = _get(
+        client,
+        {},
+        failing=["app.services.status_summary.registry_store.get_registry"],
+        components=[("core", "i1")],
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["generated_at"] and body["window_days"] == 90
+
+    [core] = body["aliases"]
+    assert core["alias"] == "core"
+    # Live state is unreadable: never claim "down" for a source we cannot see.
+    assert core["availability"] == "unknown"
+    assert core["uptime_pct"] is None
+    assert all(point["samples"] == 0 for point in core["history"])
+
+    [instance] = body["instances"]
+    assert instance["availability"] == "unknown"
+
+
+def test_failing_history_read_degrades_to_unknown_availability(client: TestClient):
+    """An unreachable Postgres must not turn the public status page into a 500."""
+    registry = {"core": [_entry("h1", "i1", "core")]}
+    resp = _get(
+        client,
+        registry,
+        failing=[
+            "app.services.status_summary.state_history_db.list_components",
+            "app.services.status_summary.state_history_db.availability_buckets",
+        ],
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+
+    [core] = body["aliases"]
+    assert core["availability"] == "unknown"
+    assert core["uptime_pct"] is None
+    assert core["history"] == []
+    assert [instance["instance_id"] for instance in body["instances"]] == ["i1"]
+    assert body["instances"][0]["availability"] == "unknown"

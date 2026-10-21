@@ -4,6 +4,7 @@ import type { StatusMessage, StatusSummary, UptimePoint } from '../lib/status/ty
 import Page from './+page.svelte';
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -161,6 +162,60 @@ it('draws one bar per day and renders outage days as gaps, not interpolated', as
   expect(bars[3]).not.toHaveAttribute('title');
   expect(bars[3]).toHaveTextContent('2026-01-04: no data (outage)');
   expect(bars[3].querySelector('[role="tooltip"]')).not.toBeNull();
+  // A gap after the first sample is an outage: failure-colored.
+  expect(bars[3]).toHaveClass('bg-red-900');
+});
+
+it('renders days before the first sample as empty, never outage red', async () => {
+  stubSummary(
+    summary({
+      aliases: [
+        {
+          alias: 'young',
+          instances_running: 1,
+          instances_total: 1,
+          intent_phase: null,
+          availability: 'operational',
+          uptime_pct: 100,
+          history: [day(0, 0, 0), day(1, 0, 0), day(2, 1, 10), day(3, 1, 10)]
+        }
+      ]
+    })
+  );
+  render(Page);
+
+  const bars = await screen.findAllByTestId('uptime-day');
+  expect(bars.map((bar) => bar.dataset.tone)).toEqual(['empty', 'empty', 'up', 'up']);
+  expect(bars[0]).toHaveTextContent('2026-01-01: no data yet');
+  // Pre-existence days are neutral, not outage-colored.
+  expect(bars[0]).toHaveClass('bg-zinc-800');
+  expect(bars[0].className).not.toContain('bg-red-900');
+});
+
+it('renders an unknown availability neutrally instead of down', async () => {
+  stubSummary(
+    summary({
+      aliases: [
+        {
+          alias: 'core',
+          instances_running: 0,
+          instances_total: 0,
+          intent_phase: null,
+          availability: 'unknown',
+          uptime_pct: null,
+          history: []
+        }
+      ]
+    })
+  );
+  render(Page);
+
+  const [row] = await screen.findAllByTestId('component-row');
+  expect(row).toHaveTextContent('Unknown');
+  expect(row).not.toHaveTextContent('Down');
+  const badge = row.querySelector('[data-availability]');
+  expect(badge).toHaveAttribute('data-availability', 'unknown');
+  expect(badge?.className).not.toContain('red');
 });
 
 function message(overrides: Partial<StatusMessage> & Pick<StatusMessage, 'id' | 'type'>) {
@@ -271,4 +326,21 @@ it('still renders messages when no components are reported', async () => {
 
   expect(await screen.findByTestId('message-item')).toBeInTheDocument();
   expect(screen.getByText('No components are reported yet.')).toBeInTheDocument();
+});
+
+it('polls the summary and refreshes when the tab becomes visible', async () => {
+  vi.useFakeTimers();
+  const fetchMock = stubSummary(summary());
+  render(Page);
+
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+
+  // A long-open tab must not keep showing stale "current" availability.
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+
+  document.dispatchEvent(new Event('visibilitychange'));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetchMock).toHaveBeenCalledTimes(3);
 });

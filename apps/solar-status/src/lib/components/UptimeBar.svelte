@@ -7,8 +7,12 @@
     up: 'bg-emerald-500',
     partial: 'bg-amber-500',
     down: 'bg-red-500',
-    // Days without samples are outages: failure-colored, never filled in.
-    gap: 'bg-red-900'
+    // Days without samples after the first sample are outages:
+    // failure-colored, never filled in.
+    gap: 'bg-red-900',
+    // Days before the first sample predate the component: neutral, not an
+    // outage (the backend excludes them from the uptime percentage too).
+    empty: 'bg-zinc-800'
   };
 
   // Centre the tooltip under the bar, but anchor it to the container edge for the
@@ -21,21 +25,22 @@
     return 'left-1/2 -translate-x-1/2';
   }
 
-  function describe(point: UptimePoint): string {
+  function describe(point: UptimePoint, tone: BarTone): string {
     const day = point.ts.slice(0, 10);
-    return point.samples === 0
-      ? `${day}: no data (outage)`
-      : `${day}: ${(point.uptime * 100).toFixed(1)}% up`;
+    if (tone === 'empty') return `${day}: no data yet`;
+    if (tone === 'gap') return `${day}: no data (outage)`;
+    return `${day}: ${(point.uptime * 100).toFixed(1)}% up`;
   }
 </script>
 
 <div class="flex h-8 items-stretch gap-px" role="img" aria-label="Uptime, one bar per day">
   {#each history as point, i (point.ts)}
+    {@const tone = barTone(history, i)}
     <!-- The tooltip is positioned relative to the bar (not the cursor) and shows without delay. -->
     <div
-      class="group relative min-w-px flex-1 rounded-[1px] {colors[barTone(point)]}"
+      class="group relative min-w-px flex-1 rounded-[1px] {colors[tone]}"
       data-testid="uptime-day"
-      data-tone={barTone(point)}
+      data-tone={tone}
     >
       <span
         role="tooltip"
@@ -43,7 +48,7 @@
           i
         )}"
       >
-        {describe(point)}
+        {describe(point, tone)}
       </span>
     </div>
   {/each}
