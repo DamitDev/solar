@@ -21,6 +21,7 @@ from app.config import settings
 from app.database.intents import intent_db
 from app.database.logs import TIMESERIES_BUCKETS, fill_buckets, resolve_bucket
 from app.database.state_history import STATE_RUNNING, StateSample, state_history_db
+from app.database.status_messages import status_message_db
 from app.database.virtual_models import virtual_model_db
 from app.models.gateway import RegistryEntry
 from app.models.status import (
@@ -31,6 +32,7 @@ from app.models.status import (
     UptimePoint,
     VirtualModelStatus,
 )
+from app.models.status_message import StatusMessageResponse
 from app.models.virtual_model import VirtualModelResponse
 from app.redis_state import registry_store
 from app.services.state_sampler import state_sampler
@@ -43,6 +45,9 @@ BUCKET = "1d"
 _INTENT_LIMIT = 10_000
 # target_status values under which a target can actually serve requests.
 _SERVING_TARGET_STATUS = ("satisfied", "unverified")
+
+# The only message type shown ahead of its start_time.
+UPCOMING_TYPE = "planned maintenance"
 
 Buckets = dict[int, tuple[int, int]]
 
@@ -104,6 +109,27 @@ def uptime_series(
     counted = points[first:]
     pct = sum(p.uptime for p in counted) / len(counted) * 100
     return points, round(pct, 3)
+
+
+def partition_messages(
+    messages: list[StatusMessageResponse], now: datetime
+) -> tuple[list[StatusMessageResponse], list[StatusMessageResponse]]:
+    """Split messages into ``(active, upcoming)`` purely from their windows.
+
+    Active means ``start_time <= now < end_time`` (no end_time is open-ended).
+    Only planned maintenance is exposed ahead of its start as upcoming; every
+    other type is hidden until its window opens. Ended messages are dropped.
+    """
+    active: list[StatusMessageResponse] = []
+    upcoming: list[StatusMessageResponse] = []
+    for message in messages:
+        if message.end_time is not None and message.end_time <= now:
+            continue
+        if message.start_time <= now:
+            active.append(message)
+        elif message.type == UPCOMING_TYPE:
+            upcoming.append(message)
+    return active, upcoming
 
 
 class StatusSummaryService:
@@ -200,6 +226,10 @@ class StatusSummaryService:
             live, history, managed_aliases=set(intent_phase), start=start, end=now
         )
 
+        messages, upcoming_messages = partition_messages(
+            await status_message_db.list_not_ended(now), now
+        )
+
         return StatusSummary(
             generated_at=now.isoformat(),
             window_days=WINDOW_DAYS,
@@ -207,6 +237,8 @@ class StatusSummaryService:
             virtual_models=virtual_models,
             aliases=aliases,
             instances=instances,
+            messages=messages,
+            upcoming_messages=upcoming_messages,
         )
 
     async def _virtual_model(

@@ -82,7 +82,7 @@
         "make test-solar-control passes"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "plan.md states messages with a future start time are filtered from the public read, but also requires planned maintenance to be publishable in advance and the page to show upcoming maintenance. Reconciled as: only planned-maintenance messages surface ahead of their start_time (as upcoming); all other types are strictly window-filtered."
     },
     {

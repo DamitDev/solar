@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.models.status_message import (
     StatusMessageCreate,
@@ -46,6 +46,26 @@ class StatusMessageDB:
                 select(StatusMessageRow).order_by(
                     StatusMessageRow.start_time.desc(), StatusMessageRow.created_at
                 )
+            )
+            return [self._row_to_response(row) for row in result.scalars()]
+
+    @isolated_db_op
+    async def list_not_ended(self, now: datetime) -> list[StatusMessageResponse]:
+        """Messages whose window has not closed at ``now`` (open-ended included).
+
+        Includes ones that start in the future; the caller decides which of
+        those are exposed. Soonest start first.
+        """
+        async with self._session() as session:
+            result = await session.execute(
+                select(StatusMessageRow)
+                .where(
+                    or_(
+                        StatusMessageRow.end_time.is_(None),
+                        StatusMessageRow.end_time > now,
+                    )
+                )
+                .order_by(StatusMessageRow.start_time, StatusMessageRow.created_at)
             )
             return [self._row_to_response(row) for row in result.scalars()]
 

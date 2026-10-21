@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from app.config import settings
 from app.models.gateway import RegistryEntry
 from app.models.intent import IntentPhase
+from app.models.status_message import StatusMessageResponse
 from app.models.virtual_model import VirtualModelContract, VirtualModelResponse
 from app.services.status_summary import status_summary_service
 from app.services.virtual_model_cache import virtual_model_cache
@@ -62,11 +63,15 @@ def _day_epoch(days_ago: int) -> int:
     return today - days_ago * 86400
 
 
-def _patched(registry, *, vms=(), intents=(), buckets=None, components=()):
+def _patched(registry, *, vms=(), intents=(), buckets=None, components=(), messages=()):
     async def availability_buckets(start, end, bucket_s, **kwargs):
         return buckets if buckets is not None else {}
 
     return [
+        patch(
+            "app.services.status_summary.status_message_db.list_not_ended",
+            AsyncMock(return_value=list(messages)),
+        ),
         patch(
             "app.services.status_summary.registry_store.get_registry",
             AsyncMock(return_value=registry),
@@ -196,3 +201,38 @@ def test_requestless_outage_still_counts_as_downtime(client: TestClient):
     # Day -1 has no samples at all: it is downtime, so 2 of 3 days are up.
     assert core["history"][-2]["uptime"] == 0.0
     assert core["uptime_pct"] == pytest.approx(66.667, abs=0.001)
+
+
+def _message(
+    type_: str, start: datetime, end: datetime | None
+) -> StatusMessageResponse:
+    return StatusMessageResponse(
+        id="00000000-0000-0000-0000-000000000001",
+        body=f"{type_} body",
+        type=type_,
+        start_time=start,
+        end_time=end,
+    )
+
+
+def test_messages_are_public_and_split_into_active_and_upcoming(client: TestClient):
+    now = datetime.now(timezone.utc)
+    hour = timedelta(hours=1)
+    messages = [
+        _message("incident", now - hour, None),
+        _message("planned maintenance", now + hour, now + 2 * hour),
+        _message("maintenance", now + hour, now + 2 * hour),
+    ]
+
+    body = _get(client, {}, messages=messages).json()
+
+    assert [m["type"] for m in body["messages"]] == ["incident"]
+    assert [m["type"] for m in body["upcoming_messages"]] == ["planned maintenance"]
+    assert body["messages"][0]["body"] == "incident body"
+    assert body["messages"][0]["end_time"] is None
+
+
+def test_no_messages_returns_empty_lists(client: TestClient):
+    body = _get(client, {}).json()
+    assert body["messages"] == []
+    assert body["upcoming_messages"] == []

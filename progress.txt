@@ -70,3 +70,16 @@
 - Tests: tests/test_status_messages_routes.py (CRUD happy path, validation errors, every
   allowed type, 404s, auth required on all four methods).
 - make test-solar-control and make lint-solar-control pass.
+
+### US-005: Automatic message visibility window — done
+- GET /api/status now carries `messages` (active: start_time <= now < end_time, open-ended
+  end_time stays active) and `upcoming_messages` (planned maintenance whose start_time is in
+  the future). All other types stay hidden until their window opens; ended messages of every
+  type are dropped. No publish state: visibility derives only from start_time/end_time.
+- partition_messages() in services/status_summary.py is the single place that applies the
+  rules; StatusMessageDB.list_not_ended(now) pre-filters ended rows in SQL. Messages are read
+  live on every request (not cached) so windows open/close exactly on time.
+- Tests: tests/test_status_summary.py (start inclusive / end exclusive boundary, past end,
+  open-ended, future start per type, upcoming -> active transition),
+  tests/test_status_route.py (public response split into messages / upcoming_messages, empty).
+- make test-solar-control and make lint-solar-control pass.
