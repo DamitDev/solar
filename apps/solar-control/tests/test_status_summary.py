@@ -12,8 +12,8 @@ from app.models.status_message import StatusMessageResponse
 from app.services.status_summary import (
     WINDOW_DAYS,
     availability_of,
-    partition_messages,
     uptime_series,
+    visible_messages,
     window_start,
 )
 
@@ -146,49 +146,55 @@ def _msg(type_: str, start: datetime, end: datetime | None) -> StatusMessageResp
 
 
 @pytest.mark.parametrize("type_", ALL_TYPES)
-def test_message_active_inside_window(type_):
+def test_message_visible_inside_window(type_):
     msg = _msg(type_, NOW - HOUR, NOW + HOUR)
-    assert partition_messages([msg], NOW) == ([msg], [])
+    assert visible_messages([msg], NOW) == [msg]
 
 
 @pytest.mark.parametrize("type_", ALL_TYPES)
 def test_message_start_boundary_is_inclusive(type_):
     msg = _msg(type_, NOW, NOW + HOUR)
-    assert partition_messages([msg], NOW) == ([msg], [])
+    assert visible_messages([msg], NOW) == [msg]
 
 
 @pytest.mark.parametrize("type_", ALL_TYPES)
 def test_message_end_boundary_is_exclusive(type_):
     msg = _msg(type_, NOW - HOUR, NOW)
-    assert partition_messages([msg], NOW) == ([], [])
+    assert visible_messages([msg], NOW) == []
 
 
 @pytest.mark.parametrize("type_", ALL_TYPES)
 def test_message_past_end_is_filtered(type_):
     msg = _msg(type_, NOW - 2 * HOUR, NOW - HOUR)
-    assert partition_messages([msg], NOW) == ([], [])
+    assert visible_messages([msg], NOW) == []
 
 
 @pytest.mark.parametrize("type_", ALL_TYPES)
-def test_open_ended_message_stays_active(type_):
+def test_open_ended_message_stays_visible(type_):
     msg = _msg(type_, NOW - HOUR, None)
-    assert partition_messages([msg], NOW) == ([msg], [])
+    assert visible_messages([msg], NOW) == [msg]
 
 
 @pytest.mark.parametrize("type_", ALL_TYPES)
-def test_future_start_is_upcoming_only_for_planned_maintenance(type_):
+def test_future_start_is_visible_only_for_planned_maintenance(type_):
     msg = _msg(type_, NOW + HOUR, NOW + 2 * HOUR)
-    active, upcoming = partition_messages([msg], NOW)
-    assert active == []
-    assert upcoming == ([msg] if type_ == "planned maintenance" else [])
+    assert visible_messages([msg], NOW) == (
+        [msg] if type_ == "planned maintenance" else []
+    )
 
 
-def test_open_ended_future_planned_maintenance_is_upcoming():
+def test_open_ended_future_planned_maintenance_is_visible():
     msg = _msg("planned maintenance", NOW + HOUR, None)
-    assert partition_messages([msg], NOW) == ([], [msg])
+    assert visible_messages([msg], NOW) == [msg]
 
 
-def test_planned_maintenance_moves_from_upcoming_to_active_at_start():
-    msg = _msg("planned maintenance", NOW + HOUR, NOW + 2 * HOUR)
-    assert partition_messages([msg], NOW + HOUR - timedelta(seconds=1)) == ([], [msg])
-    assert partition_messages([msg], NOW + HOUR) == ([msg], [])
+def test_future_other_type_appears_exactly_at_start():
+    msg = _msg("incident", NOW + HOUR, None)
+    assert visible_messages([msg], NOW + HOUR - timedelta(seconds=1)) == []
+    assert visible_messages([msg], NOW + HOUR) == [msg]
+
+
+def test_visible_messages_keep_input_order():
+    first = _msg("incident", NOW - 2 * HOUR, None)
+    second = _msg("planned maintenance", NOW + HOUR, None)
+    assert visible_messages([first, second], NOW) == [first, second]

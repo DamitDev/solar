@@ -46,7 +46,7 @@ _INTENT_LIMIT = 10_000
 # target_status values under which a target can actually serve requests.
 _SERVING_TARGET_STATUS = ("satisfied", "unverified")
 
-# The only message type shown ahead of its start_time.
+# The only message type published ahead of its start_time.
 UPCOMING_TYPE = "planned maintenance"
 
 Buckets = dict[int, tuple[int, int]]
@@ -111,25 +111,23 @@ def uptime_series(
     return points, round(pct, 3)
 
 
-def partition_messages(
+def visible_messages(
     messages: list[StatusMessageResponse], now: datetime
-) -> tuple[list[StatusMessageResponse], list[StatusMessageResponse]]:
-    """Split messages into ``(active, upcoming)`` purely from their windows.
+) -> list[StatusMessageResponse]:
+    """Messages the public read exposes at ``now``, purely from their windows.
 
-    Active means ``start_time <= now < end_time`` (no end_time is open-ended).
-    Only planned maintenance is exposed ahead of its start as upcoming; every
-    other type is hidden until its window opens. Ended messages are dropped.
+    Ended messages (``end_time <= now``) are dropped for every type. A message
+    whose ``start_time`` is still in the future is hidden, except planned
+    maintenance, which is published ahead of time. Telling an upcoming message
+    from an active one is left to the client (``start_time`` vs
+    ``generated_at``).
     """
-    active: list[StatusMessageResponse] = []
-    upcoming: list[StatusMessageResponse] = []
-    for message in messages:
-        if message.end_time is not None and message.end_time <= now:
-            continue
-        if message.start_time <= now:
-            active.append(message)
-        elif message.type == UPCOMING_TYPE:
-            upcoming.append(message)
-    return active, upcoming
+    return [
+        message
+        for message in messages
+        if (message.end_time is None or message.end_time > now)
+        and (message.start_time <= now or message.type == UPCOMING_TYPE)
+    ]
 
 
 class StatusSummaryService:
@@ -226,9 +224,7 @@ class StatusSummaryService:
             live, history, managed_aliases=set(intent_phase), start=start, end=now
         )
 
-        messages, upcoming_messages = partition_messages(
-            await status_message_db.list_not_ended(now), now
-        )
+        messages = visible_messages(await status_message_db.list_not_ended(now), now)
 
         return StatusSummary(
             generated_at=now.isoformat(),
@@ -238,7 +234,6 @@ class StatusSummaryService:
             aliases=aliases,
             instances=instances,
             messages=messages,
-            upcoming_messages=upcoming_messages,
         )
 
     async def _virtual_model(

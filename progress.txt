@@ -72,14 +72,16 @@
 - make test-solar-control and make lint-solar-control pass.
 
 ### US-005: Automatic message visibility window — done
-- GET /api/status now carries `messages` (active: start_time <= now < end_time, open-ended
-  end_time stays active) and `upcoming_messages` (planned maintenance whose start_time is in
-  the future). All other types stay hidden until their window opens; ended messages of every
-  type are dropped. No publish state: visibility derives only from start_time/end_time.
-- partition_messages() in services/status_summary.py is the single place that applies the
+- GET /api/status carries a single `messages` list: messages with start_time <= now < end_time
+  (no end_time = open-ended), plus planned maintenance whose start_time is still ahead.
+  Every other type is hidden until its window opens; ended messages of every type are dropped.
+  No publish state: visibility derives only from start_time/end_time.
+- Upcoming vs active is NOT a server concept: each message carries type and start_time, so
+  the client compares start_time with the response's generated_at (US-007).
+- visible_messages() in services/status_summary.py is the single place that applies the
   rules; StatusMessageDB.list_not_ended(now) pre-filters ended rows in SQL. Messages are read
   live on every request (not cached) so windows open/close exactly on time.
 - Tests: tests/test_status_summary.py (start inclusive / end exclusive boundary, past end,
-  open-ended, future start per type, upcoming -> active transition),
-  tests/test_status_route.py (public response split into messages / upcoming_messages, empty).
+  open-ended, future start per type, order), tests/test_status_route.py (public response,
+  future maintenance hidden, planned maintenance published ahead, empty).
 - make test-solar-control and make lint-solar-control pass.

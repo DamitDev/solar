@@ -215,7 +215,7 @@ def _message(
     )
 
 
-def test_messages_are_public_and_split_into_active_and_upcoming(client: TestClient):
+def test_messages_are_public_and_window_filtered(client: TestClient):
     now = datetime.now(timezone.utc)
     hour = timedelta(hours=1)
     messages = [
@@ -226,13 +226,16 @@ def test_messages_are_public_and_split_into_active_and_upcoming(client: TestClie
 
     body = _get(client, {}, messages=messages).json()
 
-    assert [m["type"] for m in body["messages"]] == ["incident"]
-    assert [m["type"] for m in body["upcoming_messages"]] == ["planned maintenance"]
+    # Future maintenance is hidden; planned maintenance is published ahead of
+    # its start and the client tells it apart via start_time vs generated_at.
+    assert [m["type"] for m in body["messages"]] == ["incident", "planned maintenance"]
     assert body["messages"][0]["body"] == "incident body"
     assert body["messages"][0]["end_time"] is None
+    generated_at = datetime.fromisoformat(body["generated_at"])
+    assert datetime.fromisoformat(body["messages"][1]["start_time"]) > generated_at
 
 
-def test_no_messages_returns_empty_lists(client: TestClient):
+def test_no_messages_returns_empty_list(client: TestClient):
     body = _get(client, {}).json()
     assert body["messages"] == []
-    assert body["upcoming_messages"] == []
+    assert "upcoming_messages" not in body

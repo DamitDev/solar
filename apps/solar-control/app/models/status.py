@@ -62,7 +62,4 @@ class StatusSummary(BaseModel):
     virtual_models: list[VirtualModelStatus]
     aliases: list[AliasStatus]
     instances: list[InstanceStatus]
-    # Messages inside their start_time <= now < end_time window.
     messages: list[StatusMessageResponse] = Field(default_factory=list)
-    # Planned-maintenance messages published ahead of their start_time.
-    upcoming_messages: list[StatusMessageResponse] = Field(default_factory=list)

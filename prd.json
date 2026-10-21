@@ -76,14 +76,14 @@
       "acceptanceCriteria": [
         "Public, unauthenticated message read (included in the GET /api/status response) returns active messages (start_time <= now < end_time)",
         "Messages with a past end_time are filtered from the public read automatically for all types",
-        "Planned-maintenance messages with a future start_time are exposed as upcoming so a planned weekend maintenance can be published in advance; other types (incident, maintenance, resolution) follow the strict window and are filtered while their start_time is in the future",
+        "Planned-maintenance messages with a future start_time are included in the public messages (the client tells upcoming from active via start_time vs generated_at) so a planned weekend maintenance can be published in advance; other types (incident, maintenance, resolution) follow the strict window and are filtered while their start_time is in the future",
         "No manual publish/unpublish state: visibility is derived purely from start_time/end_time",
         "Unit tests cover the start/end boundary filtering for each message type",
         "make test-solar-control passes"
       ],
       "priority": 5,
       "passes": true,
-      "notes": "plan.md states messages with a future start time are filtered from the public read, but also requires planned maintenance to be publishable in advance and the page to show upcoming maintenance. Reconciled as: only planned-maintenance messages surface ahead of their start_time (as upcoming); all other types are strictly window-filtered."
+      "notes": "plan.md states messages with a future start time are filtered from the public read, but also requires planned maintenance to be publishable in advance and the page to show upcoming maintenance. Reconciled as: only planned-maintenance messages surface ahead of their start_time (in the same messages list); all other types are strictly window-filtered."
     },
     {
       "id": "US-006",
@@ -108,7 +108,7 @@
       "description": "As a visitor, I want to see active incidents and upcoming maintenance on the status page so I know about current problems and planned downtime.",
       "acceptanceCriteria": [
         "Messages section renders active messages from the public read: body, type and window (start/end)",
-        "Planned-maintenance messages ahead of their start_time render in an upcoming section",
+        "Planned-maintenance messages whose start_time is after the response's generated_at render in an upcoming section",
         "Type-styled badges distinguish incident / maintenance / planned maintenance / resolution",
         "Empty state shown when there are no messages",
         "Component tests cover the message rendering and empty state; pnpm --filter solar-status check passes; make test-solar-status passes"
