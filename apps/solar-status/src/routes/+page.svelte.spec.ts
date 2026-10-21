@@ -218,9 +218,7 @@ it('puts planned maintenance after generated_at in the upcoming section', async 
   expect(upcoming.getAllByTestId('message-item')).toHaveLength(1);
   expect(upcoming.getByTestId('message-item')).toHaveTextContent('body later');
 
-  const active = within(
-    screen.getByRole('heading', { name: 'Active messages' }).closest('section')!
-  );
+  const active = within(screen.getByRole('heading', { name: 'Messages' }).closest('section')!);
   expect(active.getAllByTestId('message-item').map((item) => item.textContent)).toEqual([
     expect.stringContaining('body now'),
     expect.stringContaining('body ongoing')

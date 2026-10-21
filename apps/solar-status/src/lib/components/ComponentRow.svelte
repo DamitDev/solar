@@ -16,7 +16,7 @@
   } = $props();
 </script>
 
-<li class="py-4" data-testid="component-row">
+<li class="border-b border-zinc-800 py-4" data-testid="component-row">
   <div class="flex flex-wrap items-center justify-between gap-2">
     <div class="flex flex-wrap items-baseline gap-x-3">
       <h3 class="font-medium">{name}</h3>

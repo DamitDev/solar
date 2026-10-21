@@ -28,7 +28,7 @@
 </script>
 
 <main class="min-h-screen bg-zinc-950 text-zinc-100">
-  <div class="mx-auto max-w-3xl px-4 py-10">
+  <div class="mx-auto max-w-5xl px-4 py-10">
     <h1 class="text-3xl font-bold tracking-tight">Solar status</h1>
 
     {#if load.kind === 'loading'}
@@ -76,7 +76,7 @@
       {#if summary.virtual_models.length > 0}
         <section class="mt-8" aria-labelledby="models-heading">
           <h2 id="models-heading" class="text-lg font-semibold">Models</h2>
-          <ul class="mt-2 divide-y divide-zinc-800">
+          <ul class="mt-2 grid gap-x-8 md:grid-cols-2">
             {#each summary.virtual_models as model (model.name)}
               <ComponentRow
                 name={model.name}
@@ -93,7 +93,7 @@
       {#if summary.aliases.length > 0}
         <section class="mt-8" aria-labelledby="aliases-heading">
           <h2 id="aliases-heading" class="text-lg font-semibold">Aliases</h2>
-          <ul class="mt-2 divide-y divide-zinc-800">
+          <ul class="mt-2 grid gap-x-8 md:grid-cols-2">
             {#each summary.aliases as alias (alias.alias)}
               <ComponentRow
                 name={alias.alias}
@@ -109,7 +109,7 @@
       {#if summary.instances.length > 0}
         <section class="mt-8" aria-labelledby="instances-heading">
           <h2 id="instances-heading" class="text-lg font-semibold">Instances</h2>
-          <ul class="mt-2 divide-y divide-zinc-800">
+          <ul class="mt-2 grid gap-x-8 md:grid-cols-2">
             {#each summary.instances as instance (instance.instance_id)}
               <ComponentRow
                 name={instance.instance_id}
