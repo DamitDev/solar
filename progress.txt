@@ -52,3 +52,21 @@
 - Tests: tests/test_status_route.py (public access, auth boundary, shape, gap-free series,
   requestless outage), tests/test_status_summary.py (uptime math, availability, bucket SQL).
 - make test-solar-control and make lint-solar-control pass.
+
+### US-004: Status messages table and management CRUD — done
+- StatusMessageRow (status_messages) in app/database/tables.py: id (uuid), body, type,
+  start_time, end_time (nullable = open-ended), created_at; index on (start_time, end_time).
+  Alembic migration 0013; upgrade/downgrade/upgrade verified on a throwaway Postgres 16.
+- app/models/status_message.py: Create/Update/Response models; type is a Literal of
+  incident | maintenance | planned maintenance | resolution; start_time > end_time rejected
+  (422); naive datetimes are treated as UTC.
+- app/database/status_messages.py: StatusMessageDB singleton (status_message_db) with
+  list_all, get, create, update (applies only set fields; explicit end_time null clears it),
+  delete.
+- Routes (routes/management/status_messages.py) under /api/status-messages: POST 201, GET,
+  PUT /{id} (partial; merged window re-validated against the stored row), DELETE. Auth comes
+  only from the middleware; path is outside /api/status so the public exemption stays exact.
+  Malformed ids are 404 without touching the DB.
+- Tests: tests/test_status_messages_routes.py (CRUD happy path, validation errors, every
+  allowed type, 404s, auth required on all four methods).
+- make test-solar-control and make lint-solar-control pass.

@@ -66,8 +66,8 @@
         "make test-solar-control passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": "Messages are always written by a maintainer - no programmatic message control."
+      "passes": true,
+      "notes": "Messages are always written by a maintainer - no programmatic message control. Table status_messages (migration 0013, verified up/down on Postgres 16), StatusMessageDB (status_message_db) in app/database/status_messages.py, routes in app/routes/management/status_messages.py under /api/status-messages (kept outside /api/status/* so the public-read exemption never covers them). type values: incident | maintenance | planned maintenance | resolution; PUT is a partial update, explicit end_time null makes the window open-ended."
     },
     {
       "id": "US-005",

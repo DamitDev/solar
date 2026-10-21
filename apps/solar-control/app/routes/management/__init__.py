@@ -16,6 +16,7 @@ from . import (
     resources,
     routing,
     status,
+    status_messages,
     storage,
     uploads,
     virtual_models,
@@ -39,3 +40,4 @@ router.include_router(pulls.router)
 router.include_router(virtual_models.router)
 router.include_router(routing.router)
 router.include_router(status.router)
+router.include_router(status_messages.router)

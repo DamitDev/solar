@@ -289,6 +289,28 @@ class InstanceStateHistoryRow(Base):
     )
 
 
+class StatusMessageRow(Base):
+    """A maintainer-written status message shown on the public status page."""
+
+    __tablename__ = "status_messages"
+    __table_args__ = (Index("idx_status_messages_window", "start_time", "end_time"),)
+
+    id: Mapped[str] = mapped_column(
+        PG_UUID(as_uuid=False), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    type: Mapped[str] = mapped_column(Text, nullable=False)
+    start_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    end_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class IntentRow(Base):
     """A declarative deployment intent (S-040)."""
 
