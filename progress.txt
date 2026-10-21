@@ -119,3 +119,18 @@
   window, upcoming vs active split, badge per type, empty state, messages without components).
 - Checks: vitest (27 pass), prettier --check, eslint, svelte-check all clean (run directly from
   node_modules/.bin; pnpm still aborts in this shell).
+
+### US-008: 5-year retention cleanup job — done
+- StateHistoryDB.delete_older_than(cutoff): one DELETE of rows with sampled_at < cutoff, returns
+  the row count; a row exactly on the cutoff is kept.
+- StateHistoryRetention (app/services/state_retention.py, state_history_retention singleton):
+  same background-loop pattern as the sampler (create_task in start(), stop() cancels and awaits,
+  Event-with-timeout sleep, Redis NX lock of 0.9 x interval so one replica runs per interval,
+  failing pass logged and loop continues). Started/stopped in the app/main.py lifespan.
+- Settings: state_history_retention_days (1826 = 5 years incl. one leap day) and
+  state_history_cleanup_interval_s (86400).
+- Tests: tests/test_state_retention.py (boundary: just-beyond/well-beyond deleted, on-edge and
+  just-inside kept; configurable window; strict "<" DELETE statement; lock held/acquired; loop
+  survives a failing tick and stops cleanly).
+- Checks: make test-solar-control (1277 pass) and make lint-solar-control (ruff + black) clean.
+- All user stories in prd.json now pass.

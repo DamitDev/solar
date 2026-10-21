@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import func, insert, literal_column, select
+from sqlalchemy import delete, func, insert, literal_column, select
 
 from .connection import get_session_factory, isolated_db_op
 from .tables import InstanceStateHistoryRow
@@ -87,6 +87,20 @@ class StateHistoryDB:
         async with self._session() as session:
             result = await session.execute(stmt)
             return [self._row_to_sample(row) for row in result.scalars()]
+
+    @isolated_db_op
+    async def delete_older_than(self, cutoff: datetime) -> int:
+        """Delete samples with ``sampled_at < cutoff``. Returns rows deleted.
+
+        A sample stamped exactly at *cutoff* is kept.
+        """
+        stmt = delete(InstanceStateHistoryRow).where(
+            InstanceStateHistoryRow.sampled_at < cutoff
+        )
+        async with self._session() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+            return int(result.rowcount or 0)
 
     @isolated_db_op
     async def list_components(

@@ -128,8 +128,8 @@
         "make test-solar-control passes"
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "StateHistoryRetention in app/services/state_retention.py (state_history_retention singleton), started/stopped in the lifespan. Settings.state_history_retention_days (1826 = 5 years incl. one leap day) and Settings.state_history_cleanup_interval_s (86400). StateHistoryDB.delete_older_than(cutoff) deletes sampled_at < cutoff (a row exactly on the edge is kept). A Redis NX lock (0.9 x interval) lets one replica run per interval."
     }
   ]
 }

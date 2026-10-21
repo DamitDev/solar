@@ -80,6 +80,12 @@ async def lifespan(app: FastAPI):
     await state_sampler.start()
     logger.info("State sampler started")
 
+    # Start state-history retention cleanup (daily)
+    from app.services.state_retention import state_history_retention
+
+    await state_history_retention.start()
+    logger.info("State history retention started")
+
     logger.info("Solar Control started successfully")
 
     yield
@@ -119,6 +125,11 @@ async def lifespan(app: FastAPI):
         await state_sampler.stop()
     except Exception as e:  # noqa: BLE001
         logger.error("Error stopping state sampler: %s", e)
+
+    try:
+        await state_history_retention.stop()
+    except Exception as e:  # noqa: BLE001
+        logger.error("Error stopping state history retention: %s", e)
 
     await close_redis()
     await close_db()

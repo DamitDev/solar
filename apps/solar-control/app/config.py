@@ -127,6 +127,12 @@ class Settings(BaseSettings):
     # replica samples per interval (Redis lock), so this is a fleet-wide rate.
     state_sample_interval_s: float = 30.0
 
+    # State-history retention: samples older than this many days are deleted
+    # by a background job that runs every ``state_history_cleanup_interval_s``.
+    # 1826 days = 5 years including one leap day.
+    state_history_retention_days: int = 1826
+    state_history_cleanup_interval_s: float = 86400.0
+
     # Public status summary: how long the 90-day uptime aggregation is reused
     # in-process. The endpoint is unauthenticated, so this bounds the history
     # query rate regardless of traffic; live availability is never cached.
