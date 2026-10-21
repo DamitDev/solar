@@ -15,7 +15,7 @@ function day(index: number, uptime: number, samples: number): UptimePoint {
 function summary(overrides: Partial<StatusSummary> = {}): StatusSummary {
   return {
     generated_at: '2026-01-04T12:00:00+00:00',
-    window_days: 4,
+    window_days: 90,
     bucket: '1d',
     virtual_models: [],
     aliases: [],
@@ -132,11 +132,37 @@ it('renders models, aliases and instances with status, phase and uptime', async 
   expect(alias).toHaveTextContent('Intent: degraded');
   expect(alias).toHaveTextContent('1/2 instances running');
   expect(alias).toHaveTextContent('99.12% uptime');
+  // The window label describes the summary's 90-day window, not the length of
+  // this component's (shorter) history.
+  expect(alias).toHaveTextContent('90 days ago');
 
   expect(within(instance).getByRole('heading', { level: 3 })).toHaveTextContent('inst-1');
   expect(instance).toHaveTextContent('Down');
   expect(instance).toHaveTextContent('No data');
   expect(within(instance).queryByText(/Intent:/)).not.toBeInTheDocument();
+});
+
+it('labels the uptime window from window_days, not the history length', async () => {
+  stubSummary(
+    summary({
+      aliases: [
+        {
+          alias: 'young',
+          instances_running: 1,
+          instances_total: 1,
+          intent_phase: null,
+          availability: 'operational',
+          uptime_pct: 100,
+          history: [day(0, 1, 10)]
+        }
+      ]
+    })
+  );
+  render(Page);
+
+  const [row] = await screen.findAllByTestId('component-row');
+  expect(row).toHaveTextContent('90 days ago');
+  expect(row).not.toHaveTextContent('1 days ago');
 });
 
 it('draws one bar per day and renders outage days as gaps, not interpolated', async () => {

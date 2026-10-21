@@ -279,7 +279,7 @@ class StatusSummaryService:
 
         virtual_models = [
             await self._virtual_model(
-                vm, registry or {}, running_by_alias, live is not None, start, now
+                vm, registry, running_by_alias, live is not None, start, now
             )
             for vm in await self._virtual_models()
         ]
@@ -299,7 +299,7 @@ class StatusSummaryService:
                     availability=_availability(
                         running,
                         total,
-                        known=live is not None and uptime is not None,
+                        known=live is not None,
                     ),
                     instances_running=running,
                     instances_total=total,
@@ -328,14 +328,17 @@ class StatusSummaryService:
     async def _virtual_model(
         self,
         vm: VirtualModelResponse,
-        registry: dict[str, list[RegistryEntry]],
+        registry: dict[str, list[RegistryEntry]] | None,
         running_by_alias: dict[str, int],
         live_ok: bool,
         start: datetime,
         end: datetime,
     ) -> VirtualModelStatus:
-        enriched = enrich_target_status(vm, registry)
-        target_status = enriched.target_status or {}
+        # An unreadable registry has no per-target verdicts: "missing" would
+        # contradict the "unknown" availability below.
+        target_status: dict[str, str] = {}
+        if registry is not None:
+            target_status = enrich_target_status(vm, registry).target_status or {}
         serving = sum(
             1
             for target in vm.targets
@@ -350,9 +353,7 @@ class StatusSummaryService:
             targets=list(vm.targets),
             target_status=target_status,
             availability=(
-                availability_of(serving, len(vm.targets))
-                if live_ok and uptime is not None
-                else "unknown"
+                availability_of(serving, len(vm.targets)) if live_ok else "unknown"
             ),
             uptime_pct=pct,
             history=points,
@@ -389,7 +390,7 @@ class StatusSummaryService:
                     alias=alias,
                     availability=(
                         ("operational" if running.get(instance_id) else "down")
-                        if live is not None and uptime is not None
+                        if live is not None
                         else "unknown"
                     ),
                     uptime_pct=pct,
@@ -400,7 +401,7 @@ class StatusSummaryService:
 
 
 def _availability(running: int, total: int, *, known: bool) -> Availability:
-    """``unknown`` when a source is missing, else the live verdict."""
+    """``unknown`` when the live source is missing, else the live verdict."""
     return availability_of(running, total) if known else "unknown"
 
 

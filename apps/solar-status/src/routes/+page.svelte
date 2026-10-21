@@ -98,6 +98,7 @@
                 detail={model.targets.length > 0
                   ? `Targets: ${model.targets.join(' → ')}`
                   : undefined}
+                windowDays={summary.window_days}
                 status={model}
               />
             {/each}
@@ -114,6 +115,7 @@
                 name={alias.alias}
                 detail={`${alias.instances_running}/${alias.instances_total} instances running`}
                 phase={alias.intent_phase}
+                windowDays={summary.window_days}
                 status={alias}
               />
             {/each}
@@ -129,6 +131,7 @@
               <ComponentRow
                 name={instance.instance_id}
                 detail={`Alias: ${instance.alias}`}
+                windowDays={summary.window_days}
                 status={instance}
               />
             {/each}

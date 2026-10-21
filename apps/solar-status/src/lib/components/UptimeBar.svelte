@@ -16,12 +16,14 @@
   };
 
   // Centre the tooltip under the bar, but anchor it to the container edge for the
-  // outermost bars so it is not clipped by the viewport.
+  // outermost bars so it is not clipped by the viewport. A short history halves
+  // the right-edge window so its final bar still anchors right.
   const EDGE_BARS = 4;
 
   function edge(index: number): string {
+    const rightEdge = Math.min(EDGE_BARS, Math.max(1, Math.floor(history.length / 2)));
+    if (index >= history.length - rightEdge) return 'right-0';
     if (index < EDGE_BARS) return 'left-0';
-    if (index >= history.length - EDGE_BARS) return 'right-0';
     return 'left-1/2 -translate-x-1/2';
   }
 

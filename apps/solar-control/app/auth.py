@@ -212,8 +212,10 @@ async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyp
         return await call_next(request)
 
     # Public status summary: the only /api route readable without the
-    # management key. Exact match, GET only; /api/status/* stays gated.
-    if path == "/api/status" and request.method in ("GET", "HEAD"):
+    # management key. Exact match on both slash forms, GET/HEAD only, so the
+    # trailing-slash form reaches FastAPI's redirect instead of a 401 here;
+    # /api/status/* stays gated.
+    if path in ("/api/status", "/api/status/") and request.method in ("GET", "HEAD"):
         return await call_next(request)
 
     api_key = _extract_api_key(request)

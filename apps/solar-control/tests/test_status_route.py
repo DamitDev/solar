@@ -86,6 +86,12 @@ def _patched(
         "app.services.state_sampler.host_store.get_host_resource_snapshot": AsyncMock(
             return_value=_fresh_snapshot()
         ),
+        "app.services.state_sampler.host_store.get_instance_cache_host_ids": AsyncMock(
+            return_value=[]
+        ),
+        "app.services.state_sampler.host_store.get_host_instances": AsyncMock(
+            return_value=[]
+        ),
         "app.services.status_summary.intent_db.list_intents": AsyncMock(
             return_value=list(intents)
         ),
@@ -103,12 +109,12 @@ def _patched(
     return [patch(target, mock) for target, mock in sources.items()]
 
 
-def _get(client, registry, **kwargs):
+def _get(client, registry, path="/api/status", **kwargs):
     patches = _patched(registry, **kwargs)
     for p in patches:
         p.start()
     try:
-        return client.get("/api/status")
+        return client.get(path)
     finally:
         for p in patches:
             p.stop()
@@ -117,6 +123,11 @@ def _get(client, registry, **kwargs):
 def test_status_is_public(client: TestClient):
     resp = _get(client, {})
     assert resp.status_code == 200
+
+
+def test_status_trailing_slash_is_public(client: TestClient):
+    """Both slash forms are public: the redirect must not hit a 401."""
+    assert _get(client, {}, path="/api/status/").status_code == 200
 
 
 def test_other_api_routes_still_require_management_key(client: TestClient):
@@ -252,6 +263,7 @@ def test_failing_registry_read_degrades_to_unknown_availability(client: TestClie
         {},
         failing=["app.services.status_summary.registry_store.get_registry"],
         components=[("core", "i1")],
+        vms=[_vm("team-chat", ["core", "ghost"])],
     )
 
     assert resp.status_code == 200
@@ -268,13 +280,20 @@ def test_failing_registry_read_degrades_to_unknown_availability(client: TestClie
     [instance] = body["instances"]
     assert instance["availability"] == "unknown"
 
+    # No per-target verdicts without a registry: "missing" would contradict the
+    # unknown availability.
+    [vm] = body["virtual_models"]
+    assert vm["availability"] == "unknown"
+    assert vm["target_status"] == {}
 
-def test_failing_history_read_degrades_to_unknown_availability(client: TestClient):
-    """An unreachable Postgres must not turn the public status page into a 500."""
+
+def test_failing_history_read_keeps_live_availability(client: TestClient):
+    """An unreachable Postgres empties the uptime, not the live verdict."""
     registry = {"core": [_entry("h1", "i1", "core")]}
     resp = _get(
         client,
         registry,
+        vms=[_vm("team-chat", ["core"])],
         failing=[
             "app.services.status_summary.state_history_db.list_components",
             "app.services.status_summary.state_history_db.availability_buckets",
@@ -284,9 +303,15 @@ def test_failing_history_read_degrades_to_unknown_availability(client: TestClien
     assert resp.status_code == 200
     body = resp.json()
 
+    # Current availability and 90-day uptime are independent outputs: the live
+    # state is readable, so only the history is missing.
     [core] = body["aliases"]
-    assert core["availability"] == "unknown"
+    assert core["availability"] == "operational"
     assert core["uptime_pct"] is None
     assert core["history"] == []
     assert [instance["instance_id"] for instance in body["instances"]] == ["i1"]
-    assert body["instances"][0]["availability"] == "unknown"
+    assert body["instances"][0]["availability"] == "operational"
+    [vm] = body["virtual_models"]
+    assert vm["availability"] == "operational"
+    assert vm["uptime_pct"] is None
+    assert vm["history"] == []

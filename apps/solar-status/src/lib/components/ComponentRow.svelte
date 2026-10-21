@@ -7,11 +7,13 @@
     name,
     detail,
     phase,
+    windowDays,
     status
   }: {
     name: string;
     detail?: string;
     phase?: string | null;
+    windowDays: number;
     status: ComponentStatus;
   } = $props();
 </script>
@@ -34,7 +36,7 @@
   <div class="mt-3">
     <UptimeBar history={status.history} />
     <div class="mt-1 flex justify-between text-xs text-zinc-500">
-      <span>{status.history.length} days ago</span>
+      <span>{windowDays} days ago</span>
       <span>{formatUptime(status.uptime_pct)}</span>
       <span>Today</span>
     </div>

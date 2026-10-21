@@ -27,12 +27,14 @@ def _snapshot(age_s: float) -> dict:
 
 
 class _Harness:
-    """Patches the sampler's registry, snapshot and history dependencies."""
+    """Patches the sampler's registry, snapshot, cache and history deps."""
 
-    def __init__(self, registry, snapshots):
+    def __init__(self, registry, snapshots, instances=None):
         self.registry = registry
         self.snapshots = snapshots
+        self.instances = instances or {}
         self.inserted: list = []
+        self.instance_reads: list[str] = []
 
     async def _insert(self, samples):
         self.inserted.extend(samples)
@@ -40,6 +42,13 @@ class _Harness:
 
     async def _snapshot(self, host_id):
         value = self.snapshots.get(host_id)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    async def _instances_for(self, host_id):
+        self.instance_reads.append(host_id)
+        value = self.instances.get(host_id, [])
         if isinstance(value, Exception):
             raise value
         return value
@@ -55,6 +64,14 @@ class _Harness:
                 self._snapshot,
             ),
             patch(
+                "app.services.state_sampler.host_store.get_instance_cache_host_ids",
+                AsyncMock(return_value=list(self.instances)),
+            ),
+            patch(
+                "app.services.state_sampler.host_store.get_host_instances",
+                self._instances_for,
+            ),
+            patch(
                 "app.services.state_sampler.state_history_db.insert_batch",
                 self._insert,
             ),
@@ -66,6 +83,10 @@ class _Harness:
     def __exit__(self, *exc):
         for p in self._patches:
             p.stop()
+
+
+def _cached(instance_id: str, alias: str, status: str) -> dict:
+    return {"id": instance_id, "alias": alias, "status": status, "port": 8000}
 
 
 @pytest.mark.asyncio
@@ -125,6 +146,81 @@ async def test_empty_registry_writes_nothing():
 
 
 @pytest.mark.asyncio
+async def test_stopped_instance_absent_from_registry_is_offline():
+    """A stop on a healthy host de-registers; the cache still knows it."""
+    registry = {"core": [_entry("h1", "i1", "core")]}
+    instances = {
+        "h1": [
+            _cached("i1", "core", "running"),
+            _cached("i2", "core", "stopped"),
+        ]
+    }
+    with _Harness(registry, {"h1": _snapshot(1)}, instances=instances) as h:
+        written = await StateSampler().sample_once()
+
+    assert written == 2
+    by_id = {s.instance_id: s for s in h.inserted}
+    assert by_id["i1"].state == "running"
+    # Without the cache row the transition day would keep its up ticks and
+    # report 100% uptime for an instance that stopped.
+    assert by_id["i2"].state == "offline"
+    assert (by_id["i2"].alias, by_id["i2"].host_id) == ("core", "h1")
+
+
+@pytest.mark.asyncio
+async def test_host_with_only_stopped_instances_is_sampled():
+    """The cache, not the registry, tells us the host exists."""
+    instances = {"h1": [_cached("i1", "core", "failed")]}
+    with _Harness({}, {}, instances=instances) as h:
+        written = await StateSampler().sample_once()
+
+    assert written == 1
+    assert [(s.instance_id, s.state) for s in h.inserted] == [("i1", "offline")]
+
+
+@pytest.mark.asyncio
+async def test_registry_instance_is_not_duplicated_from_the_instance_cache():
+    """A stale cached status never overrides the registry's own row."""
+    registry = {"core": [_entry("h1", "i1", "core")]}
+    instances = {"h1": [_cached("i1", "core", "stopped")]}
+    with _Harness(registry, {"h1": _snapshot(1)}, instances=instances) as h:
+        written = await StateSampler().sample_once()
+
+    assert written == 1
+    assert [(s.instance_id, s.state) for s in h.inserted] == [("i1", "running")]
+
+
+@pytest.mark.asyncio
+async def test_instance_cache_read_once_per_host_per_tick():
+    registry = {
+        "core": [_entry("h1", "i1", "core"), _entry("h1", "i2", "core")],
+    }
+    instances = {
+        "h1": [
+            _cached("i1", "core", "running"),
+            _cached("i2", "core", "running"),
+            _cached("i3", "core", "stopped"),
+        ]
+    }
+    with _Harness(registry, {"h1": _snapshot(1)}, instances=instances) as h:
+        await StateSampler().sample_once()
+
+    assert h.instance_reads == ["h1"]
+    assert [s.state for s in h.inserted] == ["running", "running", "offline"]
+
+
+@pytest.mark.asyncio
+async def test_unreadable_instance_cache_keeps_registry_rows():
+    registry = {"core": [_entry("h1", "i1", "core")]}
+    instances = {"h1": RuntimeError("redis down")}
+    with _Harness(registry, {"h1": _snapshot(1)}, instances=instances) as h:
+        written = await StateSampler().sample_once()
+
+    assert written == 1
+    assert [(s.instance_id, s.state) for s in h.inserted] == [("i1", "running")]
+
+
+@pytest.mark.asyncio
 async def test_snapshot_read_once_per_host():
     registry = {"core": [_entry("h1", "i1", "core"), _entry("h1", "i2", "core")]}
     reads: list[str] = []
@@ -145,6 +241,22 @@ async def test_snapshot_read_once_per_host():
     assert reads == ["h1"]
     assert [s.state for s in h.inserted] == ["running", "running"]
     assert len(h.inserted) == 2
+
+
+@pytest.mark.asyncio
+async def test_instance_cache_host_ids_come_from_the_instance_hash():
+    """The cache, not the registry, is the sampler's source of known hosts."""
+    from app.redis_state.hosts import HostConnectionStore
+
+    class _Redis:
+        async def hkeys(self, key):
+            assert key == "solar:hosts:instances"
+            return ["h1", "h2"]
+
+    with patch("app.redis_state.hosts.redis_client", return_value=_Redis()):
+        hosts = await HostConnectionStore().get_instance_cache_host_ids()
+
+    assert hosts == ["h1", "h2"]
 
 
 @pytest.mark.asyncio
