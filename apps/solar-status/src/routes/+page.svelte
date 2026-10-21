@@ -49,7 +49,7 @@
 
       {#if messages.active.length > 0}
         <section class="mt-8" aria-labelledby="messages-heading">
-          <h2 id="messages-heading" class="text-lg font-semibold">Active messages</h2>
+          <h2 id="messages-heading" class="text-lg font-semibold">Messages</h2>
           <ul class="mt-2 divide-y divide-zinc-800">
             {#each messages.active as message (message.id)}
               <MessageItem {message} />

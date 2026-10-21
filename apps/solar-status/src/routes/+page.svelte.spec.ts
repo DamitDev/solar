@@ -158,7 +158,9 @@ it('draws one bar per day and renders outage days as gaps, not interpolated', as
 
   const bars = await screen.findAllByTestId('uptime-day');
   expect(bars.map((bar) => bar.dataset.tone)).toEqual(['up', 'partial', 'down', 'gap']);
-  expect(bars[3]).toHaveAttribute('title', '2026-01-04: no data (outage)');
+  expect(bars[3]).not.toHaveAttribute('title');
+  expect(bars[3]).toHaveTextContent('2026-01-04: no data (outage)');
+  expect(bars[3].querySelector('[role="tooltip"]')).not.toBeNull();
 });
 
 function message(overrides: Partial<StatusMessage> & Pick<StatusMessage, 'id' | 'type'>) {
@@ -188,7 +190,7 @@ it('renders active messages with body, type and window', async () => {
   expect(items[0]).toHaveTextContent('2026-01-04 10:00 UTC – 2026-01-04 14:00 UTC');
   expect(items[1]).toHaveTextContent('Resolution');
   expect(items[1]).toHaveTextContent('From 2026-01-04 10:00 UTC');
-  expect(screen.getByRole('heading', { name: 'Active messages' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: 'Messages' })).toBeInTheDocument();
   expect(screen.queryByRole('heading', { name: 'Upcoming maintenance' })).not.toBeInTheDocument();
   expect(screen.queryByTestId('messages-empty')).not.toBeInTheDocument();
 });
