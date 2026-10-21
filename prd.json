@@ -15,8 +15,8 @@
         "make test-solar-control passes and make lint-solar-control passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Table instance_state_history (migration 0012) and StateHistoryDB (insert_batch, read_window) in app/database/state_history.py; migration verified up/down against a throwaway Postgres."
     },
     {
       "id": "US-002",

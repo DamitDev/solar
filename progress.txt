@@ -1,0 +1,14 @@
+# Progress
+
+## Status page (ralph/status-page)
+
+### US-001: State-history table and data access layer — done
+- Added InstanceStateHistoryRow (instance_state_history) to app/database/tables.py:
+  id, alias, instance_id, host_id (nullable), state, sampled_at (timestamptz).
+- Indexes: (alias, sampled_at), (instance_id, sampled_at) for windowed summary reads,
+  (sampled_at) for retention cleanup.
+- Alembic migration 0012; upgrade/downgrade/upgrade verified on a throwaway Postgres.
+- app/database/state_history.py: StateSample dataclass + StateHistoryDB singleton
+  (state_history_db) with insert_batch and read_window(start, end, alias=, instance_id=).
+- Tests: tests/test_state_history_db.py (fake session; pins columns, indexes, statements).
+- make test-solar-control and make lint-solar-control pass.
