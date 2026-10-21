@@ -85,3 +85,21 @@
   open-ended, future start per type, order), tests/test_status_route.py (public response,
   future maintenance hidden, planned maintenance published ahead, empty).
 - make test-solar-control and make lint-solar-control pass.
+
+### US-006: Status page: component status and 90-day uptime bars — done
+- +page.svelte replaced with the status page: fetches GET /api/status via fetchJson (no
+  credentials) and renders Models / Aliases / Instances sections (only non-empty ones).
+- Components: ComponentRow (name, detail, intent phase badge, status, uptime bar, uptime %),
+  StatusBadge (operational / degraded / down), UptimeBar (one bar per 1d bucket; a bucket with
+  0 samples is a failure-colored gap, never interpolated). Types in src/lib/status/types.ts
+  mirror app/models/status.py.
+- States: loading (role=status), API unreachable / HTTP error (role=alert), empty (no
+  components), "No data" when uptime_pct is null.
+- Tests: src/routes/+page.svelte.spec.ts (heading, loading, single public fetch, unreachable,
+  HTTP error, row rendering with phase/uptime, bar tones incl. gap).
+- Checks: vitest (22 pass), prettier --check, eslint, svelte-check all clean. pnpm itself
+  aborts in this shell (no-TTY node_modules purge prompt), so the tools were run directly.
+- Serving modes verified against a stub /api/status: vite dev (:5174, cross-origin to :8000)
+  and the built dist served under /status/ with same-origin ../api. Not run against a real
+  solar-control (no Redis available locally).
+- Messages are not rendered yet; that is the next frontend story.

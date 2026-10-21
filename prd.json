@@ -99,8 +99,8 @@
         "Verify both serving modes: make dev-status (cross-origin dev) and embedded mode (pnpm --filter solar-status build, then make dev-control and open /status)"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Page in src/routes/+page.svelte with ComponentRow / StatusBadge / UptimeBar in src/lib/components and the API contract types in src/lib/status/types.ts. Bar tones: up / partial / down / gap (zero-sample outage day, failure-colored, never interpolated). Both serving modes verified in the browser against a stub of GET /api/status (vite dev on :5174 cross-origin, and the built dist served at /status/ with same-origin ../api); a real solar-control was not started (no Redis locally). pnpm refuses to run in this shell (no-TTY modules purge prompt), so vitest/prettier/eslint/svelte-check were run directly from node_modules/.bin."
     },
     {
       "id": "US-007",

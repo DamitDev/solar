@@ -1,32 +1,22 @@
 <script lang="ts">
-  import { apiBase, createApiUrl } from '../lib/api/base';
-  import { ApiError, fetchApi } from '../lib/api/client';
+  import { fetchJson } from '../lib/api/client';
+  import ComponentRow from '../lib/components/ComponentRow.svelte';
+  import { hasComponents, type StatusSummary } from '../lib/status/types';
 
-  type Probe =
-    | { kind: 'pending' }
-    | { kind: 'responded'; status: number }
-    | { kind: 'unreachable'; reason: string };
+  type Load =
+    { kind: 'loading' } | { kind: 'ready'; summary: StatusSummary } | { kind: 'unreachable' };
 
-  let probe = $state<Probe>({ kind: 'pending' });
-
-  const statusUrl = createApiUrl('status');
+  let load = $state<Load>({ kind: 'loading' });
 
   $effect(() => {
     let cancelled = false;
 
-    fetchApi('status').then(
-      (response) => {
-        if (!cancelled) probe = { kind: 'responded', status: response.status };
+    fetchJson<StatusSummary>('status').then(
+      (summary) => {
+        if (!cancelled) load = { kind: 'ready', summary };
       },
-      (error: unknown) => {
-        if (cancelled) return;
-        probe =
-          error instanceof ApiError
-            ? { kind: 'responded', status: error.status }
-            : {
-                kind: 'unreachable',
-                reason: error instanceof Error ? error.message : String(error)
-              };
+      () => {
+        if (!cancelled) load = { kind: 'unreachable' };
       }
     );
 
@@ -36,19 +26,68 @@
   });
 </script>
 
-<main class="flex min-h-screen items-center justify-center bg-zinc-950 text-zinc-100">
-  <section class="text-center">
+<main class="min-h-screen bg-zinc-950 text-zinc-100">
+  <div class="mx-auto max-w-3xl px-4 py-10">
     <h1 class="text-3xl font-bold tracking-tight">Solar status</h1>
-    <p class="mt-2 text-zinc-400">Status page foundation</p>
-    <p class="mt-6 font-mono text-sm text-zinc-500">API base: {apiBase.href}</p>
-    {#if probe.kind === 'pending'}
-      <p class="mt-1 font-mono text-sm text-zinc-500">Calling {statusUrl.href}…</p>
-    {:else if probe.kind === 'responded'}
-      <p class="mt-1 font-mono text-sm text-zinc-500">
-        GET {statusUrl.pathname} → HTTP {probe.status}
+
+    {#if load.kind === 'loading'}
+      <p class="mt-8 text-zinc-400" role="status">Loading status…</p>
+    {:else if load.kind === 'unreachable'}
+      <p class="mt-8 rounded border border-red-900 bg-red-950/40 p-4 text-red-300" role="alert">
+        The status API is unreachable. Please try again later.
       </p>
+    {:else if !hasComponents(load.summary)}
+      <p class="mt-8 text-zinc-400">No components are reported yet.</p>
     {:else}
-      <p class="mt-1 font-mono text-sm text-red-400">API unreachable: {probe.reason}</p>
+      {@const summary = load.summary}
+
+      {#if summary.virtual_models.length > 0}
+        <section class="mt-8" aria-labelledby="models-heading">
+          <h2 id="models-heading" class="text-lg font-semibold">Models</h2>
+          <ul class="mt-2 divide-y divide-zinc-800">
+            {#each summary.virtual_models as model (model.name)}
+              <ComponentRow
+                name={model.name}
+                detail={model.targets.length > 0
+                  ? `Targets: ${model.targets.join(' → ')}`
+                  : undefined}
+                status={model}
+              />
+            {/each}
+          </ul>
+        </section>
+      {/if}
+
+      {#if summary.aliases.length > 0}
+        <section class="mt-8" aria-labelledby="aliases-heading">
+          <h2 id="aliases-heading" class="text-lg font-semibold">Aliases</h2>
+          <ul class="mt-2 divide-y divide-zinc-800">
+            {#each summary.aliases as alias (alias.alias)}
+              <ComponentRow
+                name={alias.alias}
+                detail={`${alias.instances_running}/${alias.instances_total} instances running`}
+                phase={alias.intent_phase}
+                status={alias}
+              />
+            {/each}
+          </ul>
+        </section>
+      {/if}
+
+      {#if summary.instances.length > 0}
+        <section class="mt-8" aria-labelledby="instances-heading">
+          <h2 id="instances-heading" class="text-lg font-semibold">Instances</h2>
+          <ul class="mt-2 divide-y divide-zinc-800">
+            {#each summary.instances as instance (instance.instance_id)}
+              <ComponentRow
+                name={instance.instance_id}
+                detail={`Alias: ${instance.alias}`}
+                status={instance}
+              />
+            {/each}
+          </ul>
+        </section>
+      {/if}
     {/if}
-  </section>
+  </div>
 </main>
