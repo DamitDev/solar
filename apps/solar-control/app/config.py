@@ -122,6 +122,11 @@ class Settings(BaseSettings):
     # 300 s Redis TTL is only the hard expiry, not a freshness guarantee).
     instance_state_stale_after_s: float = 60.0
 
+    # Instance-state sampler: how often every registered instance's state is
+    # written to the history table that backs the status page's uptime. One
+    # replica samples per interval (Redis lock), so this is a fleet-wide rate.
+    state_sample_interval_s: float = 30.0
+
     # Cursor proxy (/cursor/v1, S-059)
     # Self-HTTP target: solar-control's own /v1 gateway on the pod port.
     cursor_upstream_base_url: str = "http://127.0.0.1:8015/v1"

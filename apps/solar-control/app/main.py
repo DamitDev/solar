@@ -74,6 +74,12 @@ async def lifespan(app: FastAPI):
     await reconciler.start()
     logger.info("Reconciliation engine started")
 
+    # Start instance-state sampler (status page history)
+    from app.services.state_sampler import state_sampler
+
+    await state_sampler.start()
+    logger.info("State sampler started")
+
     logger.info("Solar Control started successfully")
 
     yield
@@ -108,6 +114,11 @@ async def lifespan(app: FastAPI):
         await reconciler.stop()
     except Exception as e:  # noqa: BLE001
         logger.error("Error stopping reconciler: %s", e)
+
+    try:
+        await state_sampler.stop()
+    except Exception as e:  # noqa: BLE001
+        logger.error("Error stopping state sampler: %s", e)
 
     await close_redis()
     await close_db()

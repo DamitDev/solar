@@ -12,3 +12,18 @@
   (state_history_db) with insert_batch and read_window(start, end, alias=, instance_id=).
 - Tests: tests/test_state_history_db.py (fake session; pins columns, indexes, statements).
 - make test-solar-control and make lint-solar-control pass.
+
+### US-002: Instance-state sampler background loop — done
+- app/services/state_sampler.py: StateSampler (start/stop via create_task + cancel/await,
+  sleep via asyncio.Event wait_for timeout) and state_sampler singleton; started and
+  stopped in the app/main.py lifespan next to the reconciler.
+- Each tick reads RegistryStore.get_registry and the host resource snapshot per host
+  (once per host per tick); one StateSample per registry entry, alias = registry key.
+  State: "running" when the snapshot age (entry_age_s) <= host_snapshot_max_age_s,
+  otherwise "offline" (missing/malformed/unreadable snapshot never raises).
+- Multi-replica: a Redis NX lock (solar:state_sampler:lock, 0.9 x interval) so only one
+  replica writes per interval; a failing tick is logged and the loop continues.
+- Settings.state_sample_interval_s (default 30s) in app/config.py.
+- Tests: tests/test_state_sampler.py (row per instance, state values, empty registry,
+  stale/missing snapshots, lock, loop survives errors and stops).
+- make test-solar-control and make lint-solar-control pass.

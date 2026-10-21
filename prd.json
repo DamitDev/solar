@@ -32,8 +32,8 @@
         "make test-solar-control passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "StateSampler in app/services/state_sampler.py (state_sampler singleton), started/stopped in the lifespan. Interval: Settings.state_sample_interval_s (30s). A Redis NX lock (0.9 x interval) lets one replica sample per interval. State is running when the host's WS resource snapshot is fresh (host_snapshot_max_age_s), else offline; instances absent from the registry get no row."
     },
     {
       "id": "US-003",
