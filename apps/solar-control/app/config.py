@@ -127,6 +127,11 @@ class Settings(BaseSettings):
     # replica samples per interval (Redis lock), so this is a fleet-wide rate.
     state_sample_interval_s: float = 30.0
 
+    # Public status summary: how long the 90-day uptime aggregation is reused
+    # in-process. The endpoint is unauthenticated, so this bounds the history
+    # query rate regardless of traffic; live availability is never cached.
+    status_history_cache_ttl_s: float = 60.0
+
     # Cursor proxy (/cursor/v1, S-059)
     # Self-HTTP target: solar-control's own /v1 gateway on the pod port.
     cursor_upstream_base_url: str = "http://127.0.0.1:8015/v1"

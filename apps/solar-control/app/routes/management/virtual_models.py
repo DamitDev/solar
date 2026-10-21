@@ -18,7 +18,7 @@ from app.models.virtual_model import (
 )
 from app.redis_state import registry_store
 from app.services.virtual_model_cache import virtual_model_cache
-from app.services.virtual_model_contract import contract_violation
+from app.services.virtual_model_contract import enrich_target_status
 from app.services.virtual_model_validation import (
     validate_virtual_model,
     validation_errors_to_detail,
@@ -31,41 +31,6 @@ router = APIRouter(prefix="/virtual-models", tags=["virtual-models"])
 
 async def _live_registry() -> dict[str, list]:
     return await registry_store.get_registry()
-
-
-def _enrich(
-    vm: VirtualModelResponse, registry: dict[str, list]
-) -> VirtualModelResponse:
-    """Fill in target_status for one virtual model against the live registry."""
-    status: dict[str, str] = {}
-    for target in vm.targets:
-        instances = registry.get(target)
-        if not instances:
-            status[target] = "missing"
-            continue
-        reasons = [
-            reason
-            for inst in instances
-            if (
-                reason := contract_violation(
-                    getattr(inst, "context_size", None),
-                    getattr(inst, "capabilities", None),
-                    vm.contract,
-                )
-            )
-            is not None
-        ]
-        if len(reasons) == len(instances):
-            status[target] = f"violating: {reasons[0]}"
-        elif vm.contract.context_size is not None and all(
-            getattr(inst, "context_size", None) is None for inst in instances
-        ):
-            # The contract cannot be verified against this target (host
-            # predates the context probe): serve-but-flag, never block.
-            status[target] = "unverified"
-        else:
-            status[target] = "satisfied"
-    return vm.model_copy(update={"target_status": status})
 
 
 async def _validated_create(data: VirtualModelCreate) -> list[str]:
@@ -84,7 +49,7 @@ async def list_virtual_models() -> list[VirtualModelResponse]:
         entries = await virtual_model_db.list_all()
         virtual_model_cache.set_all(entries)
     registry = await _live_registry()
-    return [_enrich(vm, registry) for vm in entries]
+    return [enrich_target_status(vm, registry) for vm in entries]
 
 
 @router.post("", response_model=VirtualModelResponse, status_code=201)

@@ -15,15 +15,18 @@ import logging
 from datetime import datetime, timezone
 
 from app.config import settings
-from app.database.state_history import StateSample, state_history_db
+from app.database.state_history import (
+    STATE_OFFLINE,
+    STATE_RUNNING,
+    StateSample,
+    state_history_db,
+)
+from app.models.gateway import RegistryEntry
 from app.redis_state import host_store, registry_store
 from app.redis_state.connection import redis_client
 from app.redis_state.freshness import entry_age_s
 
 logger = logging.getLogger(__name__)
-
-STATE_RUNNING = "running"
-STATE_OFFLINE = "offline"
 
 _LOCK_KEY = "solar:state_sampler:lock"
 # Fraction of the interval the tick lock is held. Below 1 so the replica that
@@ -96,11 +99,24 @@ class StateSampler:
 
     async def sample_once(self) -> int:
         """Write one row per registered instance. Returns rows written."""
-        registry = await registry_store.get_registry()
-        if not registry:
-            return 0
+        samples = await self.observe(datetime.now(timezone.utc))
+        return await state_history_db.insert_batch(samples)
 
-        sampled_at = datetime.now(timezone.utc)
+    async def observe(
+        self,
+        sampled_at: datetime,
+        registry: dict[str, list[RegistryEntry]] | None = None,
+    ) -> list[StateSample]:
+        """Current state of every registered instance, stamped *sampled_at*.
+
+        A caller that already holds the registry passes it to avoid a second
+        read.
+
+        Shared by the sampling tick and the live half of the status summary,
+        so "currently running" and "recorded as running" cannot disagree.
+        """
+        if registry is None:
+            registry = await registry_store.get_registry()
         host_fresh: dict[str, bool] = {}
         samples: list[StateSample] = []
         for alias, entries in registry.items():
@@ -122,7 +138,7 @@ class StateSampler:
                         sampled_at=sampled_at,
                     )
                 )
-        return await state_history_db.insert_batch(samples)
+        return samples
 
     @staticmethod
     async def _is_host_snapshot_fresh(host_id: str) -> bool:

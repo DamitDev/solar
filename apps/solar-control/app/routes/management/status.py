@@ -1,17 +1,19 @@
-"""Reserved status endpoint for the Solar Status SPA.
+"""Public status summary for the Solar Status SPA.
 
-GET /api/status — placeholder returning 501 Not Implemented. The payload
-schema, aggregation logic, and realtime behavior are deferred feature
-decisions; this only reserves the route so the SPA's API contract endpoint
-exists without solar-control implementing any status model yet.
+GET /api/status — current availability and 90-day uptime per virtual model,
+alias and non-managed instance. Public and unauthenticated (see the narrow
+exemption in ``app.auth``); every other /api route needs the management key.
 """
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter
+
+from app.models.status import StatusSummary
+from app.services.status_summary import status_summary_service
 
 router = APIRouter(prefix="/status", tags=["status"])
 
 
-@router.get("")
-async def get_status() -> Response:
-    """Return 501 Not Implemented until the status model is built."""
-    return Response(status_code=501)
+@router.get("", response_model=StatusSummary)
+async def get_status() -> StatusSummary:
+    """Return the status summary."""
+    return await status_summary_service.build()

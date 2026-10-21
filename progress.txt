@@ -27,3 +27,28 @@
 - Tests: tests/test_state_sampler.py (row per instance, state values, empty registry,
   stale/missing snapshots, lock, loop survives errors and stops).
 - make test-solar-control and make lint-solar-control pass.
+
+### US-003: Public status summary endpoint — done
+- GET /api/status (routes/management/status.py) returns StatusSummary (models/status.py):
+  virtual_models (ordered targets, target_status, availability), aliases (instance counts,
+  intent_phase), and instances of aliases no intent manages; each with uptime_pct and a
+  90-entry 1d history. Aggregation lives in services/status_summary.py.
+- Public via an exact-match GET/HEAD exemption in app/auth.py; /api/status/* and write
+  methods, and every other /api route, still need the management key.
+- Current availability is live (registry + host snapshot freshness via the new
+  StateSampler.observe, shared with the sampling tick). Virtual model: operational when all
+  targets serve (alias running and target_status satisfied/unverified), degraded when some,
+  down when none. Alias: running/total instances.
+- Uptime comes only from instance_state_history: StateHistoryDB.availability_buckets collapses
+  rows per sampler tick (bool_or running, so replicas/targets form one component) and counts
+  per epoch-aligned bucket; resolve_bucket/fill_buckets zero-fill days without samples (outage,
+  never interpolated). Percentage averages daily ratios from the first sampled day. SQL checked
+  against Postgres 16. list_components gives the alias/instance set seen in the window.
+- Public-endpoint load: history aggregations cached in-process for
+  Settings.status_history_cache_ttl_s (60s); live availability is never cached.
+- enrich_target_status moved from the virtual-models route to services/virtual_model_contract
+  so both routes share the target_status computation. STATE_RUNNING/STATE_OFFLINE now live in
+  database/state_history.py (re-used by the sampler).
+- Tests: tests/test_status_route.py (public access, auth boundary, shape, gap-free series,
+  requestless outage), tests/test_status_summary.py (uptime math, availability, bucket SQL).
+- make test-solar-control and make lint-solar-control pass.

@@ -6,7 +6,7 @@ contract. Used at save time (validate existing targets) and at routing
 time (skip targets that would silently violate the guarantee).
 """
 
-from app.models.virtual_model import VirtualModelContract
+from app.models.virtual_model import VirtualModelContract, VirtualModelResponse
 
 
 def contract_violation(
@@ -33,3 +33,38 @@ def contract_violation(
         if missing:
             return f"missing capabilities: {', '.join(missing)}"
     return None
+
+
+def enrich_target_status(
+    vm: VirtualModelResponse, registry: dict[str, list]
+) -> VirtualModelResponse:
+    """Fill in target_status for one virtual model against the live registry."""
+    status: dict[str, str] = {}
+    for target in vm.targets:
+        instances = registry.get(target)
+        if not instances:
+            status[target] = "missing"
+            continue
+        reasons = [
+            reason
+            for inst in instances
+            if (
+                reason := contract_violation(
+                    getattr(inst, "context_size", None),
+                    getattr(inst, "capabilities", None),
+                    vm.contract,
+                )
+            )
+            is not None
+        ]
+        if len(reasons) == len(instances):
+            status[target] = f"violating: {reasons[0]}"
+        elif vm.contract.context_size is not None and all(
+            getattr(inst, "context_size", None) is None for inst in instances
+        ):
+            # The contract cannot be verified against this target (host
+            # predates the context probe): serve-but-flag, never block.
+            status[target] = "unverified"
+        else:
+            status[target] = "satisfied"
+    return vm.model_copy(update={"target_status": status})

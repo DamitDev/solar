@@ -50,8 +50,8 @@
         "make test-solar-control passes and make lint-solar-control passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": "If model-name disclosure is ever a concern, the keyed-detail variant is the documented fallback shape; ship public by default."
+      "passes": true,
+      "notes": "If model-name disclosure is ever a concern, the keyed-detail variant is the documented fallback shape; ship public by default. Implemented in app/services/status_summary.py; uptime via StateHistoryDB.availability_buckets (per-tick bool_or, daily buckets, zero-filled gaps); intent phase on alias components; history aggregation cached for Settings.status_history_cache_ttl_s. Messages are added to the response by the visibility-window story."
     },
     {
       "id": "US-004",
