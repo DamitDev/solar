@@ -42,6 +42,7 @@ export interface StatusSummary {
   virtual_models: VirtualModelStatus[];
   aliases: AliasStatus[];
   instances: InstanceStatus[];
+  messages: StatusMessage[];
 }
 
 export function hasComponents(summary: StatusSummary): boolean {
@@ -61,4 +62,46 @@ export function barTone(point: UptimePoint): BarTone {
   if (point.uptime >= 0.999) return 'up';
   if (point.uptime > 0) return 'partial';
   return 'down';
+}
+
+export type MessageType = 'incident' | 'maintenance' | 'planned maintenance' | 'resolution';
+
+export interface StatusMessage {
+  id: string;
+  body: string;
+  type: MessageType;
+  start_time: string;
+  // Null means the window is open-ended.
+  end_time: string | null;
+  created_at?: string | null;
+}
+
+export function isUpcoming(message: StatusMessage, generatedAt: string): boolean {
+  return (
+    message.type === 'planned maintenance' &&
+    new Date(message.start_time).getTime() > new Date(generatedAt).getTime()
+  );
+}
+
+export function splitMessages(summary: StatusSummary): {
+  active: StatusMessage[];
+  upcoming: StatusMessage[];
+} {
+  const active: StatusMessage[] = [];
+  const upcoming: StatusMessage[] = [];
+  for (const message of summary.messages) {
+    (isUpcoming(message, summary.generated_at) ? upcoming : active).push(message);
+  }
+  return { active, upcoming };
+}
+
+function formatInstant(iso: string): string {
+  return `${new Date(iso).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+}
+
+export function formatWindow(message: StatusMessage): string {
+  const start = formatInstant(message.start_time);
+  return message.end_time === null
+    ? `From ${start}`
+    : `${start} – ${formatInstant(message.end_time)}`;
 }

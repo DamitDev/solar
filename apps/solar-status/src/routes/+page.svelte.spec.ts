@@ -1,6 +1,6 @@
 import { render, screen, within } from '@testing-library/svelte';
 import { afterEach, expect, it, vi } from 'vitest';
-import type { StatusSummary, UptimePoint } from '../lib/status/types';
+import type { StatusMessage, StatusSummary, UptimePoint } from '../lib/status/types';
 import Page from './+page.svelte';
 
 afterEach(() => {
@@ -19,6 +19,7 @@ function summary(overrides: Partial<StatusSummary> = {}): StatusSummary {
     virtual_models: [],
     aliases: [],
     instances: [],
+    messages: [],
     ...overrides
   };
 }
@@ -158,4 +159,116 @@ it('draws one bar per day and renders outage days as gaps, not interpolated', as
   const bars = await screen.findAllByTestId('uptime-day');
   expect(bars.map((bar) => bar.dataset.tone)).toEqual(['up', 'partial', 'down', 'gap']);
   expect(bars[3]).toHaveAttribute('title', '2026-01-04: no data (outage)');
+});
+
+function message(overrides: Partial<StatusMessage> & Pick<StatusMessage, 'id' | 'type'>) {
+  return {
+    body: `body ${overrides.id}`,
+    start_time: '2026-01-04T10:00:00+00:00',
+    end_time: '2026-01-04T14:00:00+00:00',
+    ...overrides
+  } satisfies StatusMessage;
+}
+
+it('renders active messages with body, type and window', async () => {
+  stubSummary(
+    summary({
+      messages: [
+        message({ id: 'a', type: 'incident', body: 'Core is slow' }),
+        message({ id: 'b', type: 'resolution', end_time: null })
+      ]
+    })
+  );
+  render(Page);
+
+  const items = await screen.findAllByTestId('message-item');
+  expect(items).toHaveLength(2);
+  expect(items[0]).toHaveTextContent('Incident');
+  expect(items[0]).toHaveTextContent('Core is slow');
+  expect(items[0]).toHaveTextContent('2026-01-04 10:00 UTC – 2026-01-04 14:00 UTC');
+  expect(items[1]).toHaveTextContent('Resolution');
+  expect(items[1]).toHaveTextContent('From 2026-01-04 10:00 UTC');
+  expect(screen.getByRole('heading', { name: 'Active messages' })).toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: 'Upcoming maintenance' })).not.toBeInTheDocument();
+  expect(screen.queryByTestId('messages-empty')).not.toBeInTheDocument();
+});
+
+it('puts planned maintenance after generated_at in the upcoming section', async () => {
+  stubSummary(
+    summary({
+      messages: [
+        message({ id: 'now', type: 'maintenance' }),
+        message({
+          id: 'later',
+          type: 'planned maintenance',
+          start_time: '2026-01-10T00:00:00+00:00',
+          end_time: '2026-01-10T06:00:00+00:00'
+        }),
+        message({ id: 'ongoing', type: 'planned maintenance' })
+      ]
+    })
+  );
+  render(Page);
+
+  const upcoming = within(
+    (await screen.findByRole('heading', { name: 'Upcoming maintenance' })).closest('section')!
+  );
+  expect(upcoming.getAllByTestId('message-item')).toHaveLength(1);
+  expect(upcoming.getByTestId('message-item')).toHaveTextContent('body later');
+
+  const active = within(
+    screen.getByRole('heading', { name: 'Active messages' }).closest('section')!
+  );
+  expect(active.getAllByTestId('message-item').map((item) => item.textContent)).toEqual([
+    expect.stringContaining('body now'),
+    expect.stringContaining('body ongoing')
+  ]);
+});
+
+it('styles each message type with its own badge', async () => {
+  stubSummary(
+    summary({
+      messages: [
+        message({ id: '1', type: 'incident' }),
+        message({ id: '2', type: 'maintenance' }),
+        message({ id: '3', type: 'planned maintenance' }),
+        message({ id: '4', type: 'resolution' })
+      ]
+    })
+  );
+  const { container } = render(Page);
+
+  await screen.findAllByTestId('message-item');
+  const badges = [...container.querySelectorAll<HTMLElement>('[data-message-type]')];
+  expect(badges.map((badge) => badge.dataset.messageType)).toEqual([
+    'incident',
+    'maintenance',
+    'planned maintenance',
+    'resolution'
+  ]);
+  expect(badges.map((badge) => badge.textContent?.trim())).toEqual([
+    'Incident',
+    'Maintenance',
+    'Planned maintenance',
+    'Resolution'
+  ]);
+  expect(new Set(badges.map((badge) => badge.className)).size).toBe(4);
+});
+
+it('shows an empty state when there are no messages', async () => {
+  stubSummary(summary());
+  render(Page);
+
+  expect(await screen.findByTestId('messages-empty')).toHaveTextContent(
+    'No active incidents or upcoming maintenance.'
+  );
+  expect(screen.queryByTestId('message-item')).not.toBeInTheDocument();
+});
+
+it('still renders messages when no components are reported', async () => {
+  stubSummary(summary({ messages: [message({ id: 'a', type: 'incident' })] }));
+  render(Page);
+
+  expect(await screen.findByTestId('message-item')).toBeInTheDocument();
+  expect(screen.getByText('No components are reported yet.')).toBeInTheDocument();
 });

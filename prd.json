@@ -114,8 +114,8 @@
         "Component tests cover the message rendering and empty state; pnpm --filter solar-status check passes; make test-solar-status passes"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "splitMessages/isUpcoming/formatWindow in src/lib/status/types.ts (upcoming = planned maintenance with start_time after generated_at; everything else is active). MessageItem + MessageBadge components; page renders Active messages and Upcoming maintenance sections above the components, plus the empty state 'No active incidents or upcoming maintenance.'. Windows are shown in UTC. Checks run directly from node_modules/.bin (vitest, prettier, eslint, svelte-check) because pnpm aborts in this shell."
     },
     {
       "id": "US-008",

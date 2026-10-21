@@ -103,3 +103,19 @@
   and the built dist served under /status/ with same-origin ../api. Not run against a real
   solar-control (no Redis available locally).
 - Messages are not rendered yet; that is the next frontend story.
+
+### US-007: Status page: active and upcoming messages — done
+- StatusSummary.messages / StatusMessage / MessageType added to src/lib/status/types.ts
+  (mirrors app/models/status_message.py). splitMessages(): planned maintenance whose
+  start_time is after the response's generated_at is upcoming, every other message is active
+  (server already applied the visibility window). formatWindow(): "start – end" / "From start",
+  rendered in UTC.
+- Components: MessageBadge (per-type colored badge: incident / maintenance / planned
+  maintenance / resolution), MessageItem (badge, window, body).
+- +page.svelte: "Active messages" and "Upcoming maintenance" sections above the component
+  lists; empty state "No active incidents or upcoming maintenance." when there are none.
+  Messages render even when no components are reported.
+- Tests: src/routes/+page.svelte.spec.ts (active rendering with body/type/window, open-ended
+  window, upcoming vs active split, badge per type, empty state, messages without components).
+- Checks: vitest (27 pass), prettier --check, eslint, svelte-check all clean (run directly from
+  node_modules/.bin; pnpm still aborts in this shell).

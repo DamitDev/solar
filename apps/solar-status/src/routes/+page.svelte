@@ -1,7 +1,8 @@
 <script lang="ts">
   import { fetchJson } from '../lib/api/client';
   import ComponentRow from '../lib/components/ComponentRow.svelte';
-  import { hasComponents, type StatusSummary } from '../lib/status/types';
+  import MessageItem from '../lib/components/MessageItem.svelte';
+  import { hasComponents, splitMessages, type StatusSummary } from '../lib/status/types';
 
   type Load =
     { kind: 'loading' } | { kind: 'ready'; summary: StatusSummary } | { kind: 'unreachable' };
@@ -36,10 +37,41 @@
       <p class="mt-8 rounded border border-red-900 bg-red-950/40 p-4 text-red-300" role="alert">
         The status API is unreachable. Please try again later.
       </p>
-    {:else if !hasComponents(load.summary)}
-      <p class="mt-8 text-zinc-400">No components are reported yet.</p>
     {:else}
       {@const summary = load.summary}
+      {@const messages = splitMessages(summary)}
+
+      {#if messages.active.length === 0 && messages.upcoming.length === 0}
+        <p class="mt-8 text-zinc-400" data-testid="messages-empty">
+          No active incidents or upcoming maintenance.
+        </p>
+      {/if}
+
+      {#if messages.active.length > 0}
+        <section class="mt-8" aria-labelledby="messages-heading">
+          <h2 id="messages-heading" class="text-lg font-semibold">Active messages</h2>
+          <ul class="mt-2 divide-y divide-zinc-800">
+            {#each messages.active as message (message.id)}
+              <MessageItem {message} />
+            {/each}
+          </ul>
+        </section>
+      {/if}
+
+      {#if messages.upcoming.length > 0}
+        <section class="mt-8" aria-labelledby="upcoming-heading">
+          <h2 id="upcoming-heading" class="text-lg font-semibold">Upcoming maintenance</h2>
+          <ul class="mt-2 divide-y divide-zinc-800">
+            {#each messages.upcoming as message (message.id)}
+              <MessageItem {message} />
+            {/each}
+          </ul>
+        </section>
+      {/if}
+
+      {#if !hasComponents(summary)}
+        <p class="mt-8 text-zinc-400">No components are reported yet.</p>
+      {/if}
 
       {#if summary.virtual_models.length > 0}
         <section class="mt-8" aria-labelledby="models-heading">
