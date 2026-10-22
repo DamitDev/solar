@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from app.database.status_messages import StatusMessageWindowError
 from app.models.status_message import StatusMessageResponse
 
 MANAGEMENT_KEY = {"X-API-Key": "change-me-management"}
@@ -101,10 +102,7 @@ class TestStatusMessageRoutes:
 
     def test_update_success(self):
         updated = _msg(body="Maintenance extended")
-        with (
-            patch(f"{DB}.get", new=AsyncMock(return_value=_msg())),
-            patch(f"{DB}.update", new=AsyncMock(return_value=updated)),
-        ):
+        with patch(f"{DB}.update", new=AsyncMock(return_value=updated)):
             response = _client().put(
                 f"/api/status-messages/{MESSAGE_ID}",
                 json={"body": "Maintenance extended"},
@@ -114,12 +112,9 @@ class TestStatusMessageRoutes:
         assert response.json()["body"] == "Maintenance extended"
 
     def test_update_can_clear_end_time(self):
-        with (
-            patch(f"{DB}.get", new=AsyncMock(return_value=_msg())),
-            patch(
-                f"{DB}.update", new=AsyncMock(return_value=_msg(end_time=None))
-            ) as update,
-        ):
+        with patch(
+            f"{DB}.update", new=AsyncMock(return_value=_msg(end_time=None))
+        ) as update:
             response = _client().put(
                 f"/api/status-messages/{MESSAGE_ID}",
                 json={"end_time": None},
@@ -129,7 +124,7 @@ class TestStatusMessageRoutes:
         assert "end_time" in update.await_args.args[1].model_fields_set
 
     def test_update_missing_404(self):
-        with patch(f"{DB}.get", new=AsyncMock(return_value=None)):
+        with patch(f"{DB}.update", new=AsyncMock(return_value=None)):
             response = _client().put(
                 f"/api/status-messages/{MESSAGE_ID}",
                 json={"body": "x"},
@@ -243,17 +238,23 @@ class TestStatusMessageValidation:
         assert response.status_code == 422
 
     def test_update_rejects_window_inverted_against_stored_value(self):
-        with (
-            patch(f"{DB}.get", new=AsyncMock(return_value=_msg())),
-            patch(f"{DB}.update", new=AsyncMock()) as update,
-        ):
+        """The database rejects the merged window; the route maps it to 422."""
+        with patch(
+            f"{DB}.update",
+            new=AsyncMock(
+                side_effect=StatusMessageWindowError(
+                    "start_time must not be after end_time"
+                )
+            ),
+        ) as update:
             response = _client().put(
                 f"/api/status-messages/{MESSAGE_ID}",
                 json={"end_time": (NOW - timedelta(hours=1)).isoformat()},
                 headers=MANAGEMENT_KEY,
             )
         assert response.status_code == 422
-        update.assert_not_awaited()
+        assert response.json()["detail"] == "start_time must not be after end_time"
+        update.assert_awaited_once()
 
 
 class TestStatusMessageAuth:

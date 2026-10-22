@@ -291,7 +291,13 @@ class StatusSummaryService:
 
         virtual_models = [
             await self._virtual_model(
-                vm, registry, running_by_alias, live is not None, start, now
+                vm,
+                registry,
+                running_by_alias,
+                total_by_alias,
+                live is not None,
+                start,
+                now,
             )
             for vm in await self._virtual_models()
         ]
@@ -342,6 +348,7 @@ class StatusSummaryService:
         vm: VirtualModelResponse,
         registry: dict[str, list[RegistryEntry]] | None,
         running_by_alias: dict[str, int],
+        total_by_alias: dict[str, int],
         live_ok: bool,
         start: datetime,
         end: datetime,
@@ -351,12 +358,24 @@ class StatusSummaryService:
         target_status: dict[str, str] = {}
         if registry is not None:
             target_status = enrich_target_status(vm, registry).target_status or {}
-        serving = sum(
-            1
-            for target in vm.targets
-            if running_by_alias.get(target, 0) > 0
-            and target_status.get(target) in _SERVING_TARGET_STATUS
-        )
+        # A target serves fully only when every one of its instances runs: one
+        # replica down must degrade the model, exactly as the alias row for the
+        # same target reports. A target with some instances up still serves
+        # partially, so it cannot leave the model "down".
+        fully_serving = 0
+        partially_serving = 0
+        for target in vm.targets:
+            if target_status.get(target) not in _SERVING_TARGET_STATUS:
+                continue
+            running = running_by_alias.get(target, 0)
+            total = total_by_alias.get(target, 0)
+            if total and running >= total:
+                fully_serving += 1
+            elif running:
+                partially_serving += 1
+        availability = availability_of(fully_serving, len(vm.targets))
+        if partially_serving and availability == "down":
+            availability = "degraded"
         uptime = await self._uptime(start, end, aliases=list(vm.targets))
         points, pct = uptime if uptime is not None else ([], None)
         return VirtualModelStatus(
@@ -364,9 +383,7 @@ class StatusSummaryService:
             description=vm.description,
             targets=list(vm.targets),
             target_status=target_status,
-            availability=(
-                availability_of(serving, len(vm.targets)) if live_ok else "unknown"
-            ),
+            availability=availability if live_ok else "unknown",
             uptime_pct=pct,
             history=points,
         )

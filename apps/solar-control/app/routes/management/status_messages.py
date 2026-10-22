@@ -11,7 +11,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
 
-from app.database.status_messages import status_message_db
+from app.database.status_messages import (
+    StatusMessageWindowError,
+    status_message_db,
+)
 from app.models.status_message import (
     StatusMessageCreate,
     StatusMessageResponse,
@@ -52,21 +55,16 @@ async def update_status_message(
     message_id: str, body: StatusMessageUpdate
 ) -> StatusMessageResponse:
     _require_uuid(message_id)
-    existing = await status_message_db.get(message_id)
-    if not existing:
-        raise _not_found(message_id)
-
-    # Re-validate the merged window: a partial update can invert it.
-    fields = body.model_fields_set
-    start_time = body.start_time or existing.start_time
-    end_time = body.end_time if "end_time" in fields else existing.end_time
-    if end_time is not None and start_time > end_time:
+    # The database merges the stored window under a row lock and rejects an
+    # inverted result inside the write's transaction, so a concurrent partial
+    # update cannot validate against a stale window.
+    try:
+        updated = await status_message_db.update(message_id, body)
+    except StatusMessageWindowError as exc:
         raise HTTPException(
             status_code=422, detail="start_time must not be after end_time"
-        )
-
-    updated = await status_message_db.update(message_id, body)
-    if not updated:  # pragma: no cover - raced delete
+        ) from exc
+    if not updated:
         raise _not_found(message_id)
     return updated
 

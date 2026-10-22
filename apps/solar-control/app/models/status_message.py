@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from typing import Literal, Self
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 MessageType = Literal["incident", "maintenance", "planned maintenance", "resolution"]
 
@@ -42,10 +42,15 @@ class StatusMessageUpdate(BaseModel):
     start_time: datetime | None = None
     end_time: datetime | None = None
 
+    @field_validator("start_time", "end_time")
+    @classmethod
+    def _to_utc(cls, value: datetime | None) -> datetime | None:
+        return _as_utc(value)
+
     @model_validator(mode="after")
     def _validate_window(self) -> Self:
-        self.start_time = _as_utc(self.start_time)
-        self.end_time = _as_utc(self.end_time)
+        # Normalising happens in the field validator: assigning here would mark
+        # both fields as set and turn a partial update into an explicit window.
         _check_window(self.start_time, self.end_time)
         return self
 

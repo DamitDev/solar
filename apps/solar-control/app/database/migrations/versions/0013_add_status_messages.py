@@ -31,35 +31,50 @@ def _table_exists(conn, table_name: str) -> bool:
     return bool(result.scalar())
 
 
+def _index_exists(conn, index_name: str) -> bool:
+    result = conn.execute(
+        sa.text(
+            "SELECT EXISTS ("
+            "  SELECT 1 FROM pg_indexes"
+            "  WHERE indexname = :name"
+            "  AND schemaname = current_schema()"
+            ")"
+        ),
+        {"name": index_name},
+    )
+    return bool(result.scalar())
+
+
 def upgrade() -> None:
     conn = op.get_bind()
-    if _table_exists(conn, "status_messages"):
-        return
-
-    op.create_table(
-        "status_messages",
-        sa.Column(
-            "id",
-            postgresql.UUID(as_uuid=False),
-            server_default=sa.func.gen_random_uuid(),
-            primary_key=True,
-        ),
-        sa.Column("body", sa.Text(), nullable=False),
-        sa.Column("type", sa.Text(), nullable=False),
-        sa.Column("start_time", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("end_time", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
-            nullable=False,
-        ),
-    )
-    op.create_index(
-        "idx_status_messages_window",
-        "status_messages",
-        ["start_time", "end_time"],
-    )
+    # The table can already exist (create_all or a partial run), but then its
+    # index is still missing: probe the index on its own.
+    if not _table_exists(conn, "status_messages"):
+        op.create_table(
+            "status_messages",
+            sa.Column(
+                "id",
+                postgresql.UUID(as_uuid=False),
+                server_default=sa.func.gen_random_uuid(),
+                primary_key=True,
+            ),
+            sa.Column("body", sa.Text(), nullable=False),
+            sa.Column("type", sa.Text(), nullable=False),
+            sa.Column("start_time", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("end_time", sa.DateTime(timezone=True), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.func.now(),
+                nullable=False,
+            ),
+        )
+    if not _index_exists(conn, "idx_status_messages_window"):
+        op.create_index(
+            "idx_status_messages_window",
+            "status_messages",
+            ["start_time", "end_time"],
+        )
 
 
 def downgrade() -> None:

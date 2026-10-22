@@ -72,10 +72,12 @@ def _patched(
     buckets=None,
     components=(),
     messages=(),
+    cached_instances=None,
 ):
     async def availability_buckets(start, end, bucket_s, **kwargs):
         return buckets if buckets is not None else {}
 
+    cached = cached_instances or {}
     sources = {
         "app.services.status_summary.status_message_db.list_not_ended": AsyncMock(
             return_value=list(messages)
@@ -87,10 +89,10 @@ def _patched(
             return_value=_fresh_snapshot()
         ),
         "app.services.state_sampler.host_store.get_instance_cache_host_ids": AsyncMock(
-            return_value=[]
+            return_value=list(cached)
         ),
         "app.services.state_sampler.host_store.get_host_instances": AsyncMock(
-            return_value=[]
+            side_effect=lambda host_id: cached.get(host_id, [])
         ),
         "app.services.status_summary.intent_db.list_intents": AsyncMock(
             return_value=list(intents)
@@ -185,6 +187,55 @@ def test_response_shape(client: TestClient):
         ("i4", "adhoc")
     ]
     assert body["instances"][0]["availability"] == "operational"
+
+
+def test_virtual_model_degrades_when_one_replica_is_down(client: TestClient):
+    """One of a target's two replicas down: the model must not claim
+    "operational" while the alias row for that same target is "degraded"."""
+    registry = {"core": [_entry("h1", "i1", "core")]}
+    cached = {
+        "h1": [{"id": "i1", "alias": "core", "status": "running"}],
+        "h2": [{"id": "i2", "alias": "core", "status": "stopped"}],
+    }
+
+    body = _get(
+        client,
+        registry,
+        vms=[_vm("team-chat", ["core"])],
+        cached_instances=cached,
+    ).json()
+
+    [core] = body["aliases"]
+    assert (core["instances_running"], core["instances_total"]) == (1, 2)
+    assert core["availability"] == "degraded"
+    [vm] = body["virtual_models"]
+    assert vm["target_status"] == {"core": "satisfied"}
+    assert vm["availability"] == "degraded"
+
+
+def test_virtual_model_operational_when_every_replica_runs(client: TestClient):
+    """All replicas of every target up: the model stays fully operational."""
+    registry = {
+        "core": [_entry("h1", "i1", "core"), _entry("h2", "i2", "core")],
+        "wind": [_entry("h1", "i3", "wind")],
+    }
+    cached = {
+        "h1": [
+            {"id": "i1", "alias": "core", "status": "running"},
+            {"id": "i3", "alias": "wind", "status": "running"},
+        ],
+        "h2": [{"id": "i2", "alias": "core", "status": "running"}],
+    }
+
+    body = _get(
+        client,
+        registry,
+        vms=[_vm("team-chat", ["core", "wind"])],
+        cached_instances=cached,
+    ).json()
+
+    [vm] = body["virtual_models"]
+    assert vm["availability"] == "operational"
 
 
 def test_history_is_gap_free_90_day_series(client: TestClient):

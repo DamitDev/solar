@@ -14,6 +14,10 @@ from .connection import get_session_factory, isolated_db_op
 from .tables import StatusMessageRow
 
 
+class StatusMessageWindowError(Exception):
+    """The merged window would put ``start_time`` after ``end_time``."""
+
+
 class StatusMessageDB:
     """Database-backed status message management."""
 
@@ -32,10 +36,13 @@ class StatusMessageDB:
         )
 
     @staticmethod
-    async def _get_row(session, message_id: str) -> StatusMessageRow | None:
-        result = await session.execute(
-            select(StatusMessageRow).where(StatusMessageRow.id == message_id)
-        )
+    async def _get_row(
+        session, message_id: str, *, for_update: bool = False
+    ) -> StatusMessageRow | None:
+        statement = select(StatusMessageRow).where(StatusMessageRow.id == message_id)
+        if for_update:
+            statement = statement.with_for_update()
+        result = await session.execute(statement)
         return result.scalar_one_or_none()
 
     @isolated_db_op
@@ -94,12 +101,25 @@ class StatusMessageDB:
     async def update(
         self, message_id: str, data: StatusMessageUpdate
     ) -> StatusMessageResponse | None:
-        """Apply the fields set on ``data``. Returns None when the id is unknown."""
+        """Apply the fields set on ``data`` in one locked transaction.
+
+        The row is read ``FOR UPDATE`` so the merged window is validated against
+        the values this transaction is about to overwrite: two concurrent partial
+        updates can no longer validate against a stale window and persist an
+        inverted start/end. Raises ``StatusMessageWindowError`` for an inverted
+        merged window, before anything is written. Returns None when the id is
+        unknown.
+        """
         async with self._session() as session:
-            row = await self._get_row(session, message_id)
+            row = await self._get_row(session, message_id, for_update=True)
             if not row:
                 return None
-            for field in data.model_fields_set:
+            fields = data.model_fields_set
+            start_time = data.start_time or row.start_time
+            end_time = data.end_time if "end_time" in fields else row.end_time
+            if end_time is not None and start_time > end_time:
+                raise StatusMessageWindowError("start_time must not be after end_time")
+            for field in fields:
                 value = getattr(data, field)
                 # Only end_time is nullable; null elsewhere means "unchanged".
                 if value is not None or field == "end_time":
