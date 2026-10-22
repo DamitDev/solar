@@ -240,10 +240,8 @@ class StatusSummaryService:
             return {}
         return {intent.alias: intent.status.phase.value for intent in intents}
 
-    async def _components(
-        self, start: datetime, end: datetime
-    ) -> list[tuple[str, str]] | None:
-        """Sampled ``(alias, instance_id)`` pairs, ``None`` when unreadable."""
+    async def _components(self, start: datetime, end: datetime) -> list[str] | None:
+        """Aliases sampled in the window, ``None`` when unreadable."""
         try:
             return await self._cached(
                 ("components", start),
@@ -302,8 +300,12 @@ class StatusSummaryService:
             for vm in await self._virtual_models()
         ]
 
+        # Every intent-managed alias is published even when neither the registry
+        # nor the history knows it: an intent whose instances all failed to
+        # start (or that is still pending) exists only in the intent table, and
+        # its reconciliation phase is the one signal the page must not lose.
         alias_names = sorted(
-            set(registry or {}) | {alias for alias, _ in history or []}
+            set(registry or {}) | set(history or []) | set(intent_phase)
         )
         aliases = []
         for name in alias_names:

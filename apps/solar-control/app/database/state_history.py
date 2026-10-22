@@ -103,20 +103,22 @@ class StateHistoryDB:
             return int(result.rowcount or 0)
 
     @isolated_db_op
-    async def list_components(
-        self, start: datetime, end: datetime
-    ) -> list[tuple[str, str]]:
-        """Distinct ``(alias, instance_id)`` pairs sampled in the window."""
+    async def list_components(self, start: datetime, end: datetime) -> list[str]:
+        """Distinct aliases sampled in the window, sorted.
+
+        Only the alias is selected: the one caller groups its rows per alias, so
+        the per-instance distinct work would be discarded.
+        """
         table = InstanceStateHistoryRow
         stmt = (
-            select(table.alias, table.instance_id)
+            select(table.alias)
             .where(table.sampled_at >= start, table.sampled_at < end)
             .distinct()
-            .order_by(table.alias, table.instance_id)
+            .order_by(table.alias)
         )
         async with self._session() as session:
             result = await session.execute(stmt)
-            return [(row.alias, row.instance_id) for row in result]
+            return list(result.scalars())
 
     @isolated_db_op
     async def availability_buckets(

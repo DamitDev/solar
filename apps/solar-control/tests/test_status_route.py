@@ -189,6 +189,28 @@ def test_response_shape(client: TestClient):
     assert body["instances"][0]["availability"] == "operational"
 
 
+def test_intent_alias_without_instances_or_history_is_published(client: TestClient):
+    """An intent whose instances never started still surfaces its phase."""
+    intents = [
+        SimpleNamespace(
+            alias="orphan", status=SimpleNamespace(phase=IntentPhase.FAILED)
+        )
+    ]
+
+    body = _get(client, {}, intents=intents).json()
+
+    # No registry entry and no sampled history: the intent alias itself is the
+    # only thing that says the group exists, so it must not be dropped.
+    [orphan] = body["aliases"]
+    assert orphan["alias"] == "orphan"
+    assert orphan["intent_phase"] == "failed"
+    # The live registry is readable and holds none of it, so the group is down
+    # rather than unknown; zero instances is already a defined availability.
+    assert (orphan["instances_running"], orphan["instances_total"]) == (0, 0)
+    assert orphan["availability"] == "down"
+    assert orphan["uptime_pct"] is None
+
+
 def test_virtual_model_degrades_when_one_replica_is_down(client: TestClient):
     """One of a target's two replicas down: the model must not claim
     "operational" while the alias row for that same target is "degraded"."""
@@ -278,7 +300,7 @@ def test_retired_instance_is_not_a_component(client: TestClient):
     body = _get(
         client,
         registry,
-        components=[("core", "i1"), ("core", "gone")],
+        components=["core"],
         buckets=buckets,
     ).json()
 
@@ -333,7 +355,7 @@ def test_failing_registry_read_degrades_to_unknown_availability(client: TestClie
         client,
         {},
         failing=["app.services.status_summary.registry_store.get_registry"],
-        components=[("core", "i1")],
+        components=["core"],
         vms=[_vm("team-chat", ["core", "ghost"])],
     )
 

@@ -140,6 +140,20 @@ async def test_read_window_filters_by_window_and_alias():
 
 
 @pytest.mark.asyncio
+async def test_list_components_selects_distinct_aliases_only():
+    """Only the alias is selected: no per-instance distinct work is needed."""
+    session = _FakeSession(["core", "wind"])
+    with _patched(session):
+        out = await StateHistoryDB().list_components(NOW - timedelta(days=90), NOW)
+
+    assert out == ["core", "wind"]
+    sql = _sql(session.statements[0])
+    assert "SELECT DISTINCT instance_state_history.alias" in sql
+    assert "instance_id" not in sql
+    assert "ORDER BY instance_state_history.alias" in sql
+
+
+@pytest.mark.asyncio
 async def test_read_window_filters_by_instance():
     session = _FakeSession()
     with _patched(session):
