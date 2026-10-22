@@ -213,9 +213,29 @@ def test_requestless_outage_still_counts_as_downtime(client: TestClient):
     body = _get(client, registry, buckets=buckets).json()
 
     [core] = body["aliases"]
-    # Day -1 has no samples at all: it is downtime, so 2 of 3 days are up.
+    # Day -1 has no samples at all: it is downtime. Today is still in
+    # progress, so the percentage is the two complete days, one of them up.
     assert core["history"][-2]["uptime"] == 0.0
-    assert core["uptime_pct"] == pytest.approx(66.667, abs=0.001)
+    assert core["uptime_pct"] == 50.0
+
+
+def test_retired_instance_is_not_a_component(client: TestClient):
+    """An instance only the history knows was decommissioned: no red row."""
+    registry = {"core": [_entry("h1", "i1", "core")]}
+    buckets = {_day_epoch(0): (10, 10)}
+
+    body = _get(
+        client,
+        registry,
+        components=[("core", "i1"), ("core", "gone")],
+        buckets=buckets,
+    ).json()
+
+    # "gone" is absent from both the registry and the host instance cache, so
+    # publishing it as a "down" component would be a lie.
+    assert [instance["instance_id"] for instance in body["instances"]] == ["i1"]
+    # The history still supplies the live instance's uptime series.
+    assert body["instances"][0]["history"][-1]["uptime"] == 1.0
 
 
 def _message(
@@ -277,8 +297,9 @@ def test_failing_registry_read_degrades_to_unknown_availability(client: TestClie
     assert core["uptime_pct"] is None
     assert all(point["samples"] == 0 for point in core["history"])
 
-    [instance] = body["instances"]
-    assert instance["availability"] == "unknown"
+    # No live observation, so no instance row at all: a history-only instance
+    # may be retired, and a red row for it would be a lie.
+    assert body["instances"] == []
 
     # No per-target verdicts without a registry: "missing" would contradict the
     # unknown availability.

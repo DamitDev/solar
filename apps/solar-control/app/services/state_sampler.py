@@ -176,12 +176,22 @@ class StateSampler:
                 instance_id = instance.get("id")
                 if not instance_id or (host_id, instance_id) in sampled:
                     continue
+                alias = instance.get("alias")
+                if not alias:
+                    # Without an alias the row cannot be attributed to a
+                    # component: a literal "unknown" would become a phantom one.
+                    logger.debug(
+                        "Skipping cached instance %s on host %s without an alias",
+                        instance_id,
+                        host_id,
+                    )
+                    continue
                 if instance.get("status") == "running":
                     # The registry may simply not have refreshed yet.
                     continue
                 samples.append(
                     StateSample(
-                        alias=instance.get("alias") or "unknown",
+                        alias=alias,
                         instance_id=instance_id,
                         host_id=host_id,
                         state=STATE_OFFLINE,

@@ -29,7 +29,8 @@ class ComponentStatus(BaseModel):
     availability: Availability
     # Percentage over the 90-day window, counted from the first day with
     # samples so a young component is not penalised for days before it
-    # existed. None when no samples exist at all.
+    # existed. The in-progress day is not counted. None when no complete
+    # day has samples.
     uptime_pct: float | None = None
     history: list[UptimePoint] = Field(default_factory=list)
 

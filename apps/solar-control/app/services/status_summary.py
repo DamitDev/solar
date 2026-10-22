@@ -82,7 +82,11 @@ def uptime_series(
     day without samples is an outage and is emitted as zero, never
     interpolated. The percentage averages the daily ratios from the first
     day that has samples, so gaps after it count as downtime while days
-    before the component existed do not.
+    before the component existed do not. Every complete day weighs the same,
+    so a zero-sample gap counts exactly like a fully down day; the
+    in-progress day is left out of the average (its bar still renders),
+    because a few ticks so far cannot speak for the whole day. ``None`` when
+    no complete day has samples.
     """
     bucket_s = TIMESERIES_BUCKETS[resolve_bucket(start, end, BUCKET)]
     aggregates: dict[int, dict[str, Any]] = {
@@ -113,7 +117,15 @@ def uptime_series(
     first = next((i for i, p in enumerate(points) if p.samples), None)
     if first is None:
         return points, None
-    counted = points[first:]
+    # The bucket containing ``end`` is still in progress: a few ticks so far
+    # would weigh as much as a complete day, so the percentage counts only
+    # complete days while the bars keep rendering the partial one.
+    current = datetime.fromtimestamp(
+        int(end.timestamp()) // bucket_s * bucket_s, tz=timezone.utc
+    ).isoformat()
+    counted = [p for p in points[first:] if p.ts != current]
+    if not counted:
+        return points, None
     pct = sum(p.uptime for p in counted) / len(counted) * 100
     return points, round(pct, 3)
 
@@ -310,7 +322,7 @@ class StatusSummaryService:
             )
 
         instances = await self._instances(
-            live, history, managed_aliases=set(intent_phase), start=start, end=now
+            live, managed_aliases=set(intent_phase), start=start, end=now
         )
 
         messages = await self._messages(now)
@@ -362,36 +374,34 @@ class StatusSummaryService:
     async def _instances(
         self,
         live: list[StateSample] | None,
-        history: list[tuple[str, str]] | None,
         *,
         managed_aliases: set[str],
         start: datetime,
         end: datetime,
     ) -> list[InstanceStatus]:
-        """Instances whose alias no intent manages, live or in the window."""
-        alias_of: dict[str, str] = {}
-        for alias, instance_id in history or []:
-            alias_of[instance_id] = alias
-        running: dict[str, bool] = {}
-        for sample in live or []:
-            alias_of[sample.instance_id] = sample.alias
-            running[sample.instance_id] = sample.state == STATE_RUNNING
+        """Instances the live observation knows and no intent manages.
 
+        The history only supplies each instance's uptime series: an instance that
+        survives there alone was deleted or decommissioned, gone from both the
+        registry and the host instance cache, so it must not linger as a "down"
+        row for the whole window.
+        """
+        live_by_id: dict[str, StateSample] = {
+            sample.instance_id: sample for sample in live or []
+        }
         result = []
-        for instance_id in sorted(alias_of):
-            alias = alias_of[instance_id]
-            if alias in managed_aliases:
+        for instance_id in sorted(live_by_id):
+            sample = live_by_id[instance_id]
+            if sample.alias in managed_aliases:
                 continue
             uptime = await self._uptime(start, end, instance_id=instance_id)
             points, pct = uptime if uptime is not None else ([], None)
             result.append(
                 InstanceStatus(
                     instance_id=instance_id,
-                    alias=alias,
+                    alias=sample.alias,
                     availability=(
-                        ("operational" if running.get(instance_id) else "down")
-                        if live is not None
-                        else "unknown"
+                        "operational" if sample.state == STATE_RUNNING else "down"
                     ),
                     uptime_pct=pct,
                     history=points,

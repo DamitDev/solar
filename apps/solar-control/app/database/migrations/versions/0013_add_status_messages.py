@@ -23,6 +23,7 @@ def _table_exists(conn, table_name: str) -> bool:
             "SELECT EXISTS ("
             "  SELECT 1 FROM information_schema.tables"
             "  WHERE table_name = :name"
+            "  AND table_schema = current_schema()"
             ")"
         ),
         {"name": table_name},

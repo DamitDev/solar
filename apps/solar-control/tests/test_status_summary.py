@@ -45,7 +45,10 @@ def test_partial_day_outage_lowers_that_day_only():
     buckets[_epoch(3)] = (100, 25)
     points, pct = uptime_series(window_start(NOW), NOW, buckets)
     assert points[-4].uptime == 0.25
-    assert pct == pytest.approx((89 + 0.25) / 90 * 100, abs=0.001)
+    # Today's bar still renders, but the in-progress day is not in the
+    # percentage: 89 complete days, 88 up plus the outage day at 25%.
+    assert points[-1].uptime == 1.0
+    assert pct == pytest.approx((88 + 0.25) / 89 * 100, abs=0.001)
 
 
 def test_missing_days_are_zero_filled_and_count_as_downtime():
@@ -54,7 +57,8 @@ def test_missing_days_are_zero_filled_and_count_as_downtime():
     # Days -2 and -1 have no samples: zeros, not interpolated neighbours.
     assert [p.uptime for p in points[-4:]] == [1.0, 0.0, 0.0, 1.0]
     assert [p.samples for p in points[-4:]] == [100, 0, 0, 100]
-    assert pct == 50.0
+    # Today is in progress; of the complete days, one is up and two are gaps.
+    assert pct == pytest.approx(100 / 3, abs=0.001)
 
 
 def test_days_before_first_sample_are_not_counted():
@@ -72,9 +76,27 @@ def test_no_samples_means_unknown_uptime():
 
 
 def test_all_down_samples_is_zero_uptime():
-    points, pct = uptime_series(window_start(NOW), NOW, {_epoch(0): (10, 0)})
+    buckets = {_epoch(1): (10, 0), _epoch(0): (10, 0)}
+    points, pct = uptime_series(window_start(NOW), NOW, buckets)
     assert points[-1].uptime == 0.0 and points[-1].samples == 10
     assert pct == 0.0
+
+
+def test_in_progress_day_is_not_counted_in_the_percentage():
+    """A few ticks since midnight must not outvote the complete days."""
+    buckets = {_epoch(d): (100, 100) for d in range(1, WINDOW_DAYS)}
+    buckets[_epoch(0)] = (3, 0)  # three down ticks so far today
+    points, pct = uptime_series(window_start(NOW), NOW, buckets)
+    # The bar still renders today's partial ratio...
+    assert points[-1].uptime == 0.0 and points[-1].samples == 3
+    # ...but the percentage is the 89 complete days, all up.
+    assert pct == 100.0
+
+
+def test_only_in_progress_day_means_unknown_percentage():
+    points, pct = uptime_series(window_start(NOW), NOW, {_epoch(0): (10, 10)})
+    assert points[-1].uptime == 1.0 and points[-1].samples == 10
+    assert pct is None
 
 
 @pytest.mark.parametrize(

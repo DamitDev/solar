@@ -179,6 +179,18 @@ async def test_host_with_only_stopped_instances_is_sampled():
 
 
 @pytest.mark.asyncio
+async def test_cached_instance_without_alias_writes_no_row():
+    """An alias-less cache entry cannot be attributed to a component."""
+    instances = {"h1": [{"id": "i1", "status": "stopped", "port": 8000}]}
+    with _Harness({}, {}, instances=instances) as h:
+        written = await StateSampler().sample_once()
+
+    # A literal "unknown" alias would become a phantom component on the page.
+    assert written == 0
+    assert h.inserted == []
+
+
+@pytest.mark.asyncio
 async def test_registry_instance_is_not_duplicated_from_the_instance_cache():
     """A stale cached status never overrides the registry's own row."""
     registry = {"core": [_entry("h1", "i1", "core")]}
