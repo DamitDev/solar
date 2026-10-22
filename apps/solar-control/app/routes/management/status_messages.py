@@ -6,7 +6,6 @@ PUT    /api/status-messages/{id}   — update body/type/window
 DELETE /api/status-messages/{id}   — delete a message
 """
 
-import logging
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException
@@ -20,8 +19,6 @@ from app.models.status_message import (
     StatusMessageResponse,
     StatusMessageUpdate,
 )
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/status-messages", tags=["status-messages"])
 

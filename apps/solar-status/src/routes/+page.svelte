@@ -14,13 +14,17 @@
   let load = $state<Load>({ kind: 'loading' });
   let cancelled = false;
   let timer: ReturnType<typeof setInterval> | undefined;
+  // The interval and the visibility handler can overlap, so a slow older
+  // response must never overwrite a newer summary that already landed.
+  let latestRequestId = 0;
 
   async function refresh(): Promise<void> {
+    const requestId = ++latestRequestId;
     try {
       const summary = await fetchJson<StatusSummary>('status');
-      if (!cancelled) load = { kind: 'ready', summary };
+      if (!cancelled && requestId === latestRequestId) load = { kind: 'ready', summary };
     } catch {
-      if (!cancelled) load = { kind: 'unreachable' };
+      if (!cancelled && requestId === latestRequestId) load = { kind: 'unreachable' };
     }
   }
 

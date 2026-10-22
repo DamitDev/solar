@@ -370,3 +370,51 @@ it('polls the summary and refreshes when the tab becomes visible', async () => {
   await vi.advanceTimersByTimeAsync(0);
   expect(fetchMock).toHaveBeenCalledTimes(3);
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function responseWith(body: StatusSummary) {
+  return { ok: true, status: 200, json: async () => body };
+}
+
+it('keeps the newest summary when an older request resolves last', async () => {
+  vi.useFakeTimers();
+  const slowFirst = deferred<ReturnType<typeof responseWith>>();
+  const fastSecond = deferred<ReturnType<typeof responseWith>>();
+  const responses = [slowFirst.promise, fastSecond.promise];
+  const fetchMock = vi.fn(() => responses.shift()!);
+  vi.stubGlobal('fetch', fetchMock);
+
+  render(Page);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+
+  // The 60 s poll starts a second request while the first is still in flight.
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(fetchMock).toHaveBeenCalledTimes(2);
+
+  // The newer response lands first.
+  fastSecond.resolve(
+    responseWith(
+      summary({ messages: [message({ id: 'fresh', type: 'incident', body: 'fresh summary' })] })
+    )
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  expect(screen.getByText('fresh summary')).toBeInTheDocument();
+
+  // The stale one must not overwrite it when it finally arrives.
+  slowFirst.resolve(
+    responseWith(
+      summary({ messages: [message({ id: 'stale', type: 'incident', body: 'stale summary' })] })
+    )
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  expect(screen.queryByText('stale summary')).not.toBeInTheDocument();
+  expect(screen.getByText('fresh summary')).toBeInTheDocument();
+});
