@@ -39,9 +39,16 @@ jobs:
           ALL=0
           for f in $CHANGED; do
             case "$f" in
+              # /api/status contract: solar-control's status route, summary
+              # service and models (status + status_message) plus the solar-status
+              # SPA are two sides of one interface — either side also runs the
+              # other's gates.
+              apps/solar-control/app/routes/management/status.py|apps/solar-control/app/services/status_summary.py|apps/solar-control/app/models/status.py|apps/solar-control/app/models/status_message.py)
+                APPS="$APPS solar-control solar-status";;
               apps/solar-control/*)   APPS="$APPS solar-control";;
               apps/solar-host/*)      APPS="$APPS solar-host";;
               apps/solar-webui/*)     APPS="$APPS solar-webui";;
+              apps/solar-status/*)    APPS="$APPS solar-status";;
               apps/data-repository/*) APPS="$APPS data-repository";;
               apps/supernova-steps/*) APPS="$APPS supernova-steps";;
               # training-platform-project is docs-only: no checks.
@@ -50,7 +57,7 @@ jobs:
             esac
           done
           if [ "$ALL" = "1" ]; then
-            APPS=" solar-control solar-host solar-webui data-repository supernova-steps"
+            APPS=" solar-control solar-host solar-webui solar-status data-repository supernova-steps"
           fi
 
           # Dedupe + drop empties in one awk pass. NOTE: never pipe through

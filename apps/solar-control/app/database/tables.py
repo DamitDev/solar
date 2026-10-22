@@ -267,6 +267,50 @@ class VirtualModelRow(Base):
     )
 
 
+class InstanceStateHistoryRow(Base):
+    """One sampled instance state; the source of availability and uptime history."""
+
+    __tablename__ = "instance_state_history"
+    __table_args__ = (
+        # Summary reads: one alias or instance over a 90-day sampled_at window.
+        Index("idx_state_history_alias_ts", "alias", "sampled_at"),
+        Index("idx_state_history_instance_ts", "instance_id", "sampled_at"),
+        # Retention cleanup: range delete on sampled_at alone.
+        Index("idx_state_history_sampled_at", "sampled_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    alias: Mapped[str] = mapped_column(Text, nullable=False)
+    instance_id: Mapped[str] = mapped_column(Text, nullable=False)
+    host_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    sampled_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class StatusMessageRow(Base):
+    """A maintainer-written status message shown on the public status page."""
+
+    __tablename__ = "status_messages"
+    __table_args__ = (Index("idx_status_messages_window", "start_time", "end_time"),)
+
+    id: Mapped[str] = mapped_column(
+        PG_UUID(as_uuid=False), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    type: Mapped[str] = mapped_column(Text, nullable=False)
+    start_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    end_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class IntentRow(Base):
     """A declarative deployment intent (S-040)."""
 

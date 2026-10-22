@@ -24,7 +24,7 @@
       "image": "solar-control",
       "registry_ns": "imgrepo.damit.hu/aiops",
       "secret_scope": "AIOPS",
-      "context": "apps/solar-control",
+      "context": ".",
       "dockerfile": "apps/solar-control/Dockerfile",
       "app_version": true
     },

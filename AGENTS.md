@@ -9,6 +9,7 @@ A közös repo a Solar rendszer minden komponensének. Ez a fájl a fejlesztői
 - `apps/data-repository` — FastAPI registry. Workspace tag (root `.venv`).
 - `apps/solar-host` — FastAPI host agent. **Nem** workspace tag: saját venv,
   PyPI-n publikált csomag.
+- `apps/solar-status` — SvelteKit (Svelte 5) status page SPA. pnpm workspace tag.
 - `apps/solar-webui` — React/Vite frontend. pnpm workspace tag.
 - `apps/supernova-steps` — Supernova lépésképek. **Nem** workspace tag: virtuális
   uv projekt (lint/test), Docker kép requirements.txt-ből épül.
@@ -22,15 +23,16 @@ make dev-control      # http://localhost:8000
 make dev-host         # http://localhost:8001
 make dev-data-repository  # http://localhost:8002
 make dev-webui
-make test             # minden unit teszt + webui lint
-make lint             # ruff check minden Python appon + webui lint
+make dev-status       # http://localhost:5174
+make test             # minden unit teszt + webui/status lint
+make lint             # ruff check minden Python appon + webui/status lint
 make format           # black minden Python appon
 make integration      # solar-control cross-service suite (Docker kell)
 ```
 
 App-szintű targetek: `make test-<app>` / `make lint-<app>`, ahol az app neve:
-`solar-control`, `solar-host`, `solar-webui`, `data-repository`, `supernova-steps`.
-Ezeket hívja a CI is.
+`solar-control`, `solar-host`, `solar-status`, `solar-webui`, `data-repository`,
+`supernova-steps`. Ezeket hívja a CI is.
 
 ## Konvenciók
 

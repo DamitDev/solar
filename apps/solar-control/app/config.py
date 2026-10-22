@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -121,6 +122,22 @@ class Settings(BaseSettings):
     # 300 s Redis TTL is only the hard expiry, not a freshness guarantee).
     instance_state_stale_after_s: float = 60.0
 
+    # Instance-state sampler: how often every registered instance's state is
+    # written to the history table that backs the status page's uptime. One
+    # replica samples per interval (Redis lock), so this is a fleet-wide rate.
+    state_sample_interval_s: float = 30.0
+
+    # State-history retention: samples older than this many days are deleted
+    # by a background job that runs every ``state_history_cleanup_interval_s``.
+    # 1826 days = 5 years including one leap day.
+    state_history_retention_days: int = 1826
+    state_history_cleanup_interval_s: float = 86400.0
+
+    # Public status summary: how long the 90-day uptime aggregation is reused
+    # in-process. The endpoint is unauthenticated, so this bounds the history
+    # query rate regardless of traffic; live availability is never cached.
+    status_history_cache_ttl_s: float = 60.0
+
     # Cursor proxy (/cursor/v1, S-059)
     # Self-HTTP target: solar-control's own /v1 gateway on the pod port.
     cursor_upstream_base_url: str = "http://127.0.0.1:8015/v1"
@@ -134,6 +151,13 @@ class Settings(BaseSettings):
     cursor_reasoning_cache_max_rows: int = 100_000
     cursor_display_reasoning: bool = True
     cursor_collapsible_reasoning: bool = True
+
+    # Built solar-status SPA served at /status. The default points at the
+    # sibling SPA checkout next to this package (apps/solar-status/dist);
+    # the Docker image overrides it to the baked-in copy via env var.
+    status_dist_dir: Path = (
+        Path(__file__).resolve().parent.parent / ".." / "solar-status" / "dist"
+    )
 
 
 settings = Settings()

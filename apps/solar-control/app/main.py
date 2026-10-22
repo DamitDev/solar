@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response
 from app.auth import auth_middleware
 from app.config import settings
 from app.routes.cursor import router as cursor_router
+from app.routes.frontend import create_frontend_router
 from app.routes.management import router as management_router
 from app.routes.openai import router as openai_router
 from app.socketio_app import sio
@@ -73,6 +74,18 @@ async def lifespan(app: FastAPI):
     await reconciler.start()
     logger.info("Reconciliation engine started")
 
+    # Start instance-state sampler (status page history)
+    from app.services.state_sampler import state_sampler
+
+    await state_sampler.start()
+    logger.info("State sampler started")
+
+    # Start state-history retention cleanup (daily)
+    from app.services.state_retention import state_history_retention
+
+    await state_history_retention.start()
+    logger.info("State history retention started")
+
     logger.info("Solar Control started successfully")
 
     yield
@@ -108,6 +121,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.error("Error stopping reconciler: %s", e)
 
+    try:
+        await state_sampler.stop()
+    except Exception as e:  # noqa: BLE001
+        logger.error("Error stopping state sampler: %s", e)
+
+    try:
+        await state_history_retention.stop()
+    except Exception as e:  # noqa: BLE001
+        logger.error("Error stopping state history retention: %s", e)
+
     await close_redis()
     await close_db()
     logger.info("Solar Control shut down")
@@ -122,7 +145,9 @@ app = FastAPI(
     swagger_ui_parameters={"persistAuthorization": True},
 )
 
-# CORS
+# CORS: intentionally open to any origin. No allow-list or env knob is
+# needed — cross-origin browser access (e.g. the dev-mode status SPA) is
+# always permitted. Do not tighten this without a new decision.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -168,6 +193,11 @@ async def _model_not_found_handler(request: Request, exc: HTTPException):
 app.include_router(openai_router)
 app.include_router(cursor_router)
 app.include_router(management_router)
+
+# Embedded status SPA (only registers routes when the built dist/ exists).
+# Frontend routes are low-priority: regular path operations (/api, /v1, ...)
+# always take precedence.
+app.include_router(create_frontend_router(), prefix="/status")
 
 
 @app.get("/health")

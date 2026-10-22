@@ -1,4 +1,4 @@
-.PHONY: install dev-control dev-host dev-data-repository dev-webui test lint format integration test-solar-control test-data-repository test-solar-host test-supernova-steps test-solar-webui lint-solar-control lint-data-repository lint-solar-host lint-supernova-steps lint-solar-webui
+.PHONY: install dev-control dev-host dev-data-repository dev-webui dev-status test lint format integration test-solar-control test-data-repository test-solar-host test-supernova-steps test-solar-webui test-solar-status lint-solar-control lint-data-repository lint-solar-host lint-supernova-steps lint-solar-webui lint-solar-status
 
 install:
 	pnpm install && uv sync && cd apps/solar-host && uv sync && cd ../supernova-steps && uv sync
@@ -14,6 +14,9 @@ dev-data-repository:
 
 dev-webui:
 	pnpm --filter solar-webui dev
+
+dev-status:
+	pnpm --filter solar-status dev
 
 # ── Per-app targets (used by CI quality gates) ──────────────────────
 # Target names must match the CI matrix app names (apps/<name>).
@@ -33,6 +36,9 @@ test-supernova-steps:
 test-solar-webui:
 	pnpm --filter solar-webui lint && pnpm --filter solar-webui test
 
+test-solar-status:
+	pnpm --filter solar-status test
+
 lint-solar-control:
 	cd apps/solar-control && uv run ruff check . && uv run black --check .
 
@@ -48,13 +54,16 @@ lint-supernova-steps:
 lint-solar-webui:
 	pnpm --filter solar-webui lint
 
+lint-solar-status:
+	pnpm --filter solar-status lint && pnpm --filter solar-status check
+
 # ── Aggregates ──────────────────────────────────────────────────────
 
 test:
-	cd apps/solar-control && uv run pytest -x -q && cd ../../apps/data-repository && uv run pytest -x -q && cd ../../apps/solar-host && uv run pytest -x -q && cd ../../apps/supernova-steps && uv run pytest -q && pnpm --filter solar-webui lint
+	cd apps/solar-control && uv run pytest -x -q && cd ../../apps/data-repository && uv run pytest -x -q && cd ../../apps/solar-host && uv run pytest -x -q && cd ../../apps/supernova-steps && uv run pytest -q && pnpm --filter solar-webui lint && pnpm --filter solar-status lint && pnpm --filter solar-status test
 
 lint:
-	cd apps/solar-control && uv run ruff check . && cd ../../apps/data-repository && uv run ruff check . && cd ../../apps/solar-host && uv run ruff check . && cd ../../apps/supernova-steps && uv run ruff check . && pnpm --filter solar-webui lint
+	cd apps/solar-control && uv run ruff check . && cd ../../apps/data-repository && uv run ruff check . && cd ../../apps/solar-host && uv run ruff check . && cd ../../apps/supernova-steps && uv run ruff check . && pnpm --filter solar-webui lint && pnpm --filter solar-status lint
 
 format:
 	cd apps/solar-control && uv run black . && cd ../../apps/data-repository && uv run black . && cd ../../apps/solar-host && uv run black . && cd ../../apps/supernova-steps && uv run black .

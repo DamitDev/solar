@@ -90,6 +90,16 @@ class HostConnectionStore:
             return []
         return json.loads(raw)
 
+    async def get_instance_cache_host_ids(self) -> list[str]:
+        """Host ids with a cached instance list (WS push or HTTP poll).
+
+        The registry only carries instances a host reports as ``running``, so the
+        cache is what still knows about a stopped instance; readers enumerate
+        its hosts instead of scanning the registry.
+        """
+        r = redis_client()
+        return list(await r.hkeys(INSTANCES_MAP))
+
     async def remove_host_instances(self, host_id: str) -> None:
         r = redis_client()
         await r.hdel(INSTANCES_MAP, host_id)

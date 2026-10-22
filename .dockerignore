@@ -1,17 +1,18 @@
-# Keep the root build context (apps/solar-webui) lean.
+# Keep the root build context lean — the solar-webui and solar-control images
+# both build with context "." from the repo root.
 # Python
-.venv/
-__pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
 
 # Node
-node_modules/
-dist/
-*.tsbuildinfo
+**/node_modules/
+**/dist/
+**/*.tsbuildinfo
 
 # Env & local state
 .env

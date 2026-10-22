@@ -206,6 +206,18 @@ async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyp
     if path.startswith("/socket.io"):
         return await call_next(request)
 
+    # Embedded status SPA: public read-only page; the foundation ships
+    # without a gate (key-gating is a deferred decision).
+    if path == "/status" or path.startswith("/status/"):
+        return await call_next(request)
+
+    # Public status summary: the only /api route readable without the
+    # management key. Exact match on both slash forms, GET/HEAD only, so the
+    # trailing-slash form reaches FastAPI's redirect instead of a 401 here;
+    # /api/status/* stays gated.
+    if path in ("/api/status", "/api/status/") and request.method in ("GET", "HEAD"):
+        return await call_next(request)
+
     api_key = _extract_api_key(request)
     if not api_key:
         return JSONResponse(
