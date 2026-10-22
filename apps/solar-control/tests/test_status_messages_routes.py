@@ -226,6 +226,28 @@ class TestStatusMessageValidation:
         )
         assert response.status_code == 422
 
+    @pytest.mark.parametrize("field", ["body", "type", "start_time"])
+    def test_update_rejects_explicit_null(self, field):
+        with patch(f"{DB}.update", new=AsyncMock(return_value=_msg())) as update:
+            response = _client().put(
+                f"/api/status-messages/{MESSAGE_ID}",
+                json={field: None},
+                headers=MANAGEMENT_KEY,
+            )
+        assert response.status_code == 422
+        update.assert_not_awaited()
+
+    def test_update_partial_body_leaves_other_fields_unset(self):
+        updated = _msg(body="Maintenance extended")
+        with patch(f"{DB}.update", new=AsyncMock(return_value=updated)) as update:
+            response = _client().put(
+                f"/api/status-messages/{MESSAGE_ID}",
+                json={"body": "Maintenance extended"},
+                headers=MANAGEMENT_KEY,
+            )
+        assert response.status_code == 200
+        assert update.await_args.args[1].model_fields_set == {"body"}
+
     def test_update_rejects_inverted_explicit_window(self):
         response = _client().put(
             f"/api/status-messages/{MESSAGE_ID}",

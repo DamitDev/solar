@@ -35,12 +35,25 @@ class StatusMessageCreate(BaseModel):
 
 
 class StatusMessageUpdate(BaseModel):
-    """Partial update; an explicit ``end_time: null`` makes the window open-ended."""
+    """Partial update; an explicit ``end_time: null`` makes the window open-ended.
+
+    ``body``, ``type`` and ``start_time`` are non-nullable columns: the database
+    update treats a null there as "unchanged", so an explicit null would silently
+    do nothing. Those fields are rejected instead; omitting them still leaves them
+    unchanged.
+    """
 
     body: str | None = Field(default=None, min_length=1)
     type: MessageType | None = None
     start_time: datetime | None = None
     end_time: datetime | None = None
+
+    @field_validator("body", "type", "start_time", mode="before")
+    @classmethod
+    def _reject_null(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("must not be null; omit the field to leave it unchanged")
+        return value
 
     @field_validator("start_time", "end_time")
     @classmethod
