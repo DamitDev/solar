@@ -29,16 +29,6 @@ class StateHistoryDB:
     def _session(self):
         return get_session_factory()()
 
-    @staticmethod
-    def _row_to_sample(row: InstanceStateHistoryRow) -> StateSample:
-        return StateSample(
-            alias=row.alias,
-            instance_id=row.instance_id,
-            host_id=row.host_id,
-            state=row.state,
-            sampled_at=row.sampled_at,
-        )
-
     @isolated_db_op
     async def insert_batch(self, samples: list[StateSample]) -> int:
         """Insert all samples in one statement. Returns the number written."""
@@ -58,35 +48,6 @@ class StateHistoryDB:
             await session.execute(insert(InstanceStateHistoryRow), values)
             await session.commit()
         return len(values)
-
-    @isolated_db_op
-    async def read_window(
-        self,
-        start: datetime,
-        end: datetime,
-        *,
-        alias: str | None = None,
-        instance_id: str | None = None,
-    ) -> list[StateSample]:
-        """Samples with ``start <= sampled_at < end``, oldest first.
-
-        ``alias`` / ``instance_id`` narrow the read; both hit a composite
-        index leading with the filtered column.
-        """
-        stmt = select(InstanceStateHistoryRow).where(
-            InstanceStateHistoryRow.sampled_at >= start,
-            InstanceStateHistoryRow.sampled_at < end,
-        )
-        if alias is not None:
-            stmt = stmt.where(InstanceStateHistoryRow.alias == alias)
-        if instance_id is not None:
-            stmt = stmt.where(InstanceStateHistoryRow.instance_id == instance_id)
-        stmt = stmt.order_by(
-            InstanceStateHistoryRow.sampled_at, InstanceStateHistoryRow.id
-        )
-        async with self._session() as session:
-            result = await session.execute(stmt)
-            return [self._row_to_sample(row) for row in result.scalars()]
 
     @isolated_db_op
     async def delete_older_than(self, cutoff: datetime) -> int:

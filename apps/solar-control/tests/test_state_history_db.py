@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy.dialects import postgresql
 
 from app.database.state_history import StateHistoryDB, StateSample
-from app.database.tables import Base, InstanceStateHistoryRow
+from app.database.tables import Base
 
 NOW = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
 
@@ -117,29 +117,6 @@ async def test_insert_batch_empty_is_a_noop():
 
 
 @pytest.mark.asyncio
-async def test_read_window_filters_by_window_and_alias():
-    row = InstanceStateHistoryRow(
-        id=1,
-        alias="core",
-        instance_id="i-1",
-        host_id="host-a",
-        state="running",
-        sampled_at=NOW,
-    )
-    session = _FakeSession([row])
-    start = NOW - timedelta(days=90)
-    with _patched(session):
-        out = await StateHistoryDB().read_window(start, NOW, alias="core")
-
-    assert out == [StateSample("core", "i-1", "host-a", "running", NOW)]
-    sql = _sql(session.statements[0])
-    assert "sampled_at >=" in sql and "sampled_at <" in sql
-    assert "alias = 'core'" in sql
-    assert "instance_id =" not in sql
-    assert "ORDER BY" in sql
-
-
-@pytest.mark.asyncio
 async def test_list_components_selects_distinct_aliases_only():
     """Only the alias is selected: no per-instance distinct work is needed."""
     session = _FakeSession(["core", "wind"])
@@ -151,17 +128,3 @@ async def test_list_components_selects_distinct_aliases_only():
     assert "SELECT DISTINCT instance_state_history.alias" in sql
     assert "instance_id" not in sql
     assert "ORDER BY instance_state_history.alias" in sql
-
-
-@pytest.mark.asyncio
-async def test_read_window_filters_by_instance():
-    session = _FakeSession()
-    with _patched(session):
-        out = await StateHistoryDB().read_window(
-            NOW - timedelta(days=1), NOW, instance_id="i-9"
-        )
-
-    assert out == []
-    sql = _sql(session.statements[0])
-    assert "instance_id = 'i-9'" in sql
-    assert "alias =" not in sql
