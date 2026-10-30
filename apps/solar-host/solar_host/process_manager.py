@@ -17,15 +17,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from solar_host.backends import prompt_cache
 from solar_host.backends.base import BackendRunner
 from solar_host.backends.huggingface import HuggingFaceRunner
 from solar_host.backends.llamacpp import LlamaCppRunner
-from solar_host.backends.sglang import (
-    SglangRunner,
-    detach_instance_prompt_cache,
-    purge_in_background,
-    remove_key_config,
-)
+from solar_host.backends.sglang import SglangRunner, remove_key_config
 from solar_host.backends.vllm import VllmRunner
 from solar_host.config import config_manager, parse_instance_config, settings
 from solar_host.memory_monitor import verify_gpu_capacity
@@ -208,25 +204,14 @@ class ProcessManager:
         self.ready_events.pop(instance_id, None)
 
     def _discard_prompt_cache_now(self, instance: Instance) -> None:
-        """Detach and purge *instance*'s SGLang prompt-cache dir; never raises.
+        """Detach and purge *instance*'s prompt-cache dir; never raises.
 
         Unconditional: the caller owns the decision that no live run needs
         the dir. Teardown paths must go through
-        :meth:`_discard_prompt_cache_if_idle` instead.
+        :meth:`_discard_prompt_cache_if_idle` instead. A backend without a
+        persistent prompt cache is a no-op.
         """
-        if getattr(instance.config, "backend_type", None) != "sglang":
-            return
-        try:
-            trash_dir = detach_instance_prompt_cache(instance.config.alias, instance.id)
-            if trash_dir is not None:
-                purge_in_background([trash_dir])
-        except Exception:
-            # Cleanup is best-effort; a helper regression must not fail a
-            # stop, purge or delete.
-            logger.exception(
-                "Failed to discard SGLang prompt cache dir for instance %s",
-                instance.id,
-            )
+        prompt_cache.discard_instance_prompt_cache_now(instance)
 
     def _discard_prompt_cache_if_idle(self, instance: Instance | None) -> None:
         """Teardown discard: skips a dir a live run still owns."""
