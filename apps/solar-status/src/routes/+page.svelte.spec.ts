@@ -142,6 +142,46 @@ it('renders models, aliases and instances with status, phase and uptime', async 
   expect(within(instance).queryByText(/Intent:/)).not.toBeInTheDocument();
 });
 
+it('labels virtual_models "Aliases" above aliases labelled "Models"', async () => {
+  stubSummary(
+    summary({
+      virtual_models: [
+        {
+          name: 'core',
+          targets: ['deepseek-v4.1-flash-1017:552b'],
+          target_status: { 'deepseek-v4.1-flash-1017:552b': 'satisfied' },
+          availability: 'operational',
+          uptime_pct: 100,
+          history: []
+        }
+      ],
+      aliases: [
+        {
+          alias: 'deepseek-v4.1-flash-1017:552b',
+          instances_running: 1,
+          instances_total: 1,
+          intent_phase: null,
+          availability: 'operational',
+          uptime_pct: 100,
+          history: []
+        }
+      ]
+    })
+  );
+  render(Page);
+
+  const headings = (await screen.findAllByRole('heading', { level: 2 })).map((heading) =>
+    heading.textContent?.trim()
+  );
+  expect(headings).toEqual(['Aliases', 'Models']);
+
+  const aliases = within(screen.getByRole('heading', { name: 'Aliases' }).closest('section')!);
+  expect(aliases.getByTestId('component-row')).toHaveTextContent('core');
+
+  const models = within(screen.getByRole('heading', { name: 'Models' }).closest('section')!);
+  expect(models.getByTestId('component-row')).toHaveTextContent('deepseek-v4.1-flash-1017:552b');
+});
+
 it('labels the uptime window from window_days, not the history length', async () => {
   stubSummary(
     summary({

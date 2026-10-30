@@ -93,8 +93,10 @@
       {/if}
 
       {#if summary.virtual_models.length > 0}
-        <section class="mt-8" aria-labelledby="models-heading">
-          <h2 id="models-heading" class="text-lg font-semibold">Models</h2>
+        <!-- Product naming: virtual names (core, wind, ...) are "Aliases"; the API
+             field stays `virtual_models`. -->
+        <section class="mt-8" aria-labelledby="aliases-heading">
+          <h2 id="aliases-heading" class="text-lg font-semibold">Aliases</h2>
           <ul class="mt-2 grid gap-x-8 md:grid-cols-2">
             {#each summary.virtual_models as model (model.name)}
               <ComponentRow
@@ -111,8 +113,10 @@
       {/if}
 
       {#if summary.aliases.length > 0}
-        <section class="mt-8" aria-labelledby="aliases-heading">
-          <h2 id="aliases-heading" class="text-lg font-semibold">Aliases</h2>
+        <!-- Product naming: concrete names (deepseek-v4.1-flash-1017:552b, ...) are
+             "Models"; the API field stays `aliases`. -->
+        <section class="mt-8" aria-labelledby="models-heading">
+          <h2 id="models-heading" class="text-lg font-semibold">Models</h2>
           <ul class="mt-2 grid gap-x-8 md:grid-cols-2">
             {#each summary.aliases as alias (alias.alias)}
               <ComponentRow
