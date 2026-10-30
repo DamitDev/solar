@@ -1,6 +1,10 @@
-"""SGLang prompt-cache cleanup: detach/purge helper behaviour (tmp_path) and
+"""Prompt-cache cleanup: detach/purge helper behaviour (tmp_path) and
 process-manager teardown coverage — failed starts, stop, delete, child exit,
-the live-run guard, and the boot sweep."""
+the live-run guard, and the boot sweep.
+
+The lifecycle is shared by the GPU backends, so this suite drives it through
+the SGLang descriptor; the vLLM binding of the same code lives in
+``test_vllm_prompt_cache.py``."""
 
 import logging
 import shutil
@@ -16,14 +20,16 @@ from types import SimpleNamespace
 import pytest
 
 from solar_host.backends.llamacpp import LlamaCppRunner
-from solar_host.backends.sglang import (
-    SglangRunner,
+from solar_host.backends.prompt_cache import (
+    SGLANG_PROMPT_CACHE as BACKEND,
+)
+from solar_host.backends.prompt_cache import (
     detach_all_prompt_cache_dirs,
     detach_instance_prompt_cache,
     discard_orphan_prompt_caches,
-    instance_prompt_cache_dir,
     purge_in_background,
 )
+from solar_host.backends.sglang import SglangRunner
 from solar_host.config import config_manager
 from solar_host.models import InstanceStatus, LogMessage
 from solar_host.models.base import Instance
@@ -47,7 +53,7 @@ def _failing_path_cls(
 ) -> type[Path]:
     """A ``Path`` subclass whose *method* raises ``OSError``, for *only* if given.
 
-    Patch it over ``solar_host.backends.sglang.Path`` so just the paths the
+    Patch it over ``solar_host.backends.prompt_cache.Path`` so just the paths the
     module constructs are affected — patching ``pathlib.Path`` itself breaks
     the method for the whole interpreter, including other tests' purge
     threads. Python 3.12 propagates the subclass through ``/``, ``iterdir``
@@ -155,7 +161,7 @@ class TestDetachPurgePromptCache:
     ) -> None:
         cache_dir = self._cache_dir(_isolated_env)
 
-        trash_dir = detach_instance_prompt_cache("deepseek:flash", "inst-1")
+        trash_dir = detach_instance_prompt_cache(BACKEND, "deepseek:flash", "inst-1")
 
         assert trash_dir is not None
         assert trash_dir.name.startswith(".trash-")
@@ -163,10 +169,10 @@ class TestDetachPurgePromptCache:
         assert trash_dir.is_dir()
         assert (trash_dir / "cache.bin").read_bytes() == b"x"
         # The instance's dir is gone, so a second detach has nothing to do.
-        assert detach_instance_prompt_cache("deepseek:flash", "inst-1") is None
+        assert detach_instance_prompt_cache(BACKEND, "deepseek:flash", "inst-1") is None
 
     def test_detach_missing_path_is_a_noop(self, _isolated_env) -> None:
-        assert detach_instance_prompt_cache("deepseek:flash", "inst-1") is None
+        assert detach_instance_prompt_cache(BACKEND, "deepseek:flash", "inst-1") is None
 
     def test_detach_symlink_is_left_alone(self, _isolated_env, tmp_path) -> None:
         cache_root = Path(_isolated_env / "prompt-cache")
@@ -177,14 +183,14 @@ class TestDetachPurgePromptCache:
             outside, target_is_directory=True
         )
 
-        assert detach_instance_prompt_cache("deepseek:flash", "inst-1") is None
+        assert detach_instance_prompt_cache(BACKEND, "deepseek:flash", "inst-1") is None
         assert (cache_root / "deepseek-flash-inst-1").is_symlink()
         assert outside.is_dir()
 
     def test_detach_unset_root_is_a_noop(self, monkeypatch) -> None:
         monkeypatch.setattr("solar_host.config.settings.sglang_prompt_cache_dir", "")
 
-        assert detach_instance_prompt_cache("deepseek:flash", "inst-1") is None
+        assert detach_instance_prompt_cache(BACKEND, "deepseek:flash", "inst-1") is None
 
     def test_purge_removes_trash_dir(self, _isolated_env) -> None:
         trash_dir = Path(_isolated_env / "prompt-cache" / f".trash-{_UUID_A}")
@@ -208,7 +214,7 @@ class TestDetachPurgePromptCache:
             purge_entered.set()
             raise OSError("permission denied")
 
-        monkeypatch.setattr("solar_host.backends.sglang.shutil.rmtree", _raise)
+        monkeypatch.setattr("solar_host.backends.prompt_cache.shutil.rmtree", _raise)
         purge_in_background([trash_dir])  # must not raise
         assert purge_entered.wait(5)
         assert trash_dir.is_dir()
@@ -244,9 +250,11 @@ class TestDetachPurgePromptCache:
             return real_rmtree(path, *args, **kwargs)
 
         monkeypatch.setattr(
-            "solar_host.backends.sglang.shutil.rmtree", _recording_rmtree
+            "solar_host.backends.prompt_cache.shutil.rmtree", _recording_rmtree
         )
-        with caplog.at_level(logging.WARNING, logger="solar_host.backends.sglang"):
+        with caplog.at_level(
+            logging.WARNING, logger="solar_host.backends.prompt_cache"
+        ):
             purge_in_background([trash_dir])
 
             assert _wait_for_removal(trash_dir)
@@ -260,7 +268,7 @@ class TestDetachPurgePromptCache:
             records = [
                 r
                 for r in caplog.records
-                if r.name == "solar_host.backends.sglang"
+                if r.name == "solar_host.backends.prompt_cache"
                 and r.getMessage().startswith("Purge of")
             ]
             assert len(records) == 1
@@ -282,7 +290,7 @@ class TestDetachAllPromptCacheDirs:
         for name in names:
             (cache_root / name).mkdir(parents=True)
 
-        detached = detach_all_prompt_cache_dirs()
+        detached = detach_all_prompt_cache_dirs(BACKEND)
 
         # All three are renamed aside to `.trash-*` and returned...
         assert len(detached) == 3
@@ -300,7 +308,7 @@ class TestDetachAllPromptCacheDirs:
         trash = cache_root / f".trash-{_UUID_A}"
         trash.mkdir(parents=True)
 
-        detached = detach_all_prompt_cache_dirs()
+        detached = detach_all_prompt_cache_dirs(BACKEND)
 
         # An interrupted purge's leftover is collected as-is, same path.
         assert detached == [trash]
@@ -325,11 +333,11 @@ class TestDetachAllPromptCacheDirs:
                 "alias": "deepseek:flash",
             }
         )
-        cache_dir = instance_prompt_cache_dir("deepseek:flash", instance.id)
+        cache_dir = BACKEND.instance_dir("deepseek:flash", instance.id)
         assert cache_dir is not None
         cache_dir.mkdir(parents=True)
 
-        detached = detach_all_prompt_cache_dirs()
+        detached = detach_all_prompt_cache_dirs(BACKEND)
 
         assert len(detached) == 1
         assert not cache_dir.exists()
@@ -340,7 +348,7 @@ class TestDetachAllPromptCacheDirs:
         foreign = cache_root / "shared-data"
         foreign.mkdir(parents=True)
 
-        assert detach_all_prompt_cache_dirs() == []
+        assert detach_all_prompt_cache_dirs(BACKEND) == []
 
         assert foreign.is_dir()
 
@@ -349,11 +357,11 @@ class TestDetachAllPromptCacheDirs:
             "solar_host.config.settings.sglang_prompt_cache_dir",
             str(tmp_path / "does-not-exist"),
         )
-        assert detach_all_prompt_cache_dirs() == []
+        assert detach_all_prompt_cache_dirs(BACKEND) == []
 
     def test_empty_cache_root_setting_is_a_noop(self, monkeypatch) -> None:
         monkeypatch.setattr("solar_host.config.settings.sglang_prompt_cache_dir", "")
-        assert detach_all_prompt_cache_dirs() == []
+        assert detach_all_prompt_cache_dirs(BACKEND) == []
 
     def test_purge_continues_after_unexpected_error(
         self, _isolated_env, monkeypatch
@@ -372,7 +380,9 @@ class TestDetachAllPromptCacheDirs:
                 raise RuntimeError("helper regression")
             return real_rmtree(path, *args, **kwargs)
 
-        monkeypatch.setattr("solar_host.backends.sglang.shutil.rmtree", _raise_on_first)
+        monkeypatch.setattr(
+            "solar_host.backends.prompt_cache.shutil.rmtree", _raise_on_first
+        )
 
         purge_in_background([first, second])  # must not raise
 
@@ -391,11 +401,11 @@ class TestDetachAllPromptCacheDirs:
         survivor.mkdir()
 
         monkeypatch.setattr(
-            "solar_host.backends.sglang.Path",
+            "solar_host.backends.prompt_cache.Path",
             _failing_path_cls("rename", only=lambda p: p == doomed),
         )
 
-        detached = detach_all_prompt_cache_dirs()
+        detached = detach_all_prompt_cache_dirs(BACKEND)
 
         assert doomed.is_dir()  # rename failed: logged and skipped
         assert not survivor.exists()  # still detached
@@ -453,14 +463,14 @@ class TestDetachAllPromptCacheDirs:
             return (p == cache_root) if only == "root" else (p != cache_root)
 
         monkeypatch.setattr(
-            "solar_host.backends.sglang.Path",
+            "solar_host.backends.prompt_cache.Path",
             _failing_path_cls(probe, only=_fails_only if only else None),
         )
 
         if detach_fn is detach_instance_prompt_cache:
-            assert detach_fn("deepseek:flash", _UUID_A) is None
+            assert detach_fn(BACKEND, "deepseek:flash", _UUID_A) is None
         else:
-            assert detach_fn() == []
+            assert detach_fn(BACKEND) == []
         assert target.is_dir()
 
     def test_loose_files_and_symlinks_are_left_alone(
@@ -474,7 +484,7 @@ class TestDetachAllPromptCacheDirs:
         outside.mkdir()
         (cache_root / "symlink").symlink_to(outside, target_is_directory=True)
 
-        detached = detach_all_prompt_cache_dirs()
+        detached = detach_all_prompt_cache_dirs(BACKEND)
 
         assert len(detached) == 1
         assert not (cache_root / f"orphan-dir-{_UUID_A}").exists()
@@ -500,10 +510,10 @@ class TestDiscardOrphanPromptCaches:
             return real_rmtree(path, *args, **kwargs)
 
         monkeypatch.setattr(
-            "solar_host.backends.sglang.shutil.rmtree", _blocking_rmtree
+            "solar_host.backends.prompt_cache.shutil.rmtree", _blocking_rmtree
         )
 
-        discard_orphan_prompt_caches()
+        discard_orphan_prompt_caches(BACKEND)
 
         # The detach pass is synchronous: the orphan is already renamed
         # aside when the call returns, while the purge thread is still
@@ -571,7 +581,7 @@ class TestProcessManagerTeardown:
         manager = ProcessManager()
         checked = False
 
-        def _checking_detach(alias: str, instance_id: str) -> None:
+        def _checking_detach(backend: object, alias: str, instance_id: str) -> None:
             nonlocal checked
             # No teardown work may run while _child_exit_lock is held —
             # _mark_instance_ready contends on it from other instances' log
@@ -582,7 +592,8 @@ class TestProcessManagerTeardown:
             checked = True
 
         monkeypatch.setattr(
-            "solar_host.process_manager.detach_instance_prompt_cache", _checking_detach
+            "solar_host.backends.prompt_cache.detach_instance_prompt_cache",
+            _checking_detach,
         )
         proc = SimpleNamespace(poll=lambda: 1)
         manager.processes["inst-1"] = proc  # type: ignore[assignment]
@@ -624,7 +635,7 @@ class TestProcessManagerTeardown:
         def _raise(path, *args, **kwargs) -> None:
             raise OSError("permission denied")
 
-        monkeypatch.setattr("solar_host.backends.sglang.shutil.rmtree", _raise)
+        monkeypatch.setattr("solar_host.backends.prompt_cache.shutil.rmtree", _raise)
 
         manager = ProcessManager()
         assert await manager.stop_instance("inst-1") is True
@@ -640,11 +651,11 @@ class TestProcessManagerTeardown:
         _make_sglang_instance("inst-1")
         self._cache_dir(_isolated_env, "inst-1")
 
-        def _boom(alias: str, instance_id: str) -> None:
+        def _boom(backend: object, alias: str, instance_id: str) -> None:
             raise RuntimeError("helper regression")
 
         monkeypatch.setattr(
-            "solar_host.process_manager.detach_instance_prompt_cache", _boom
+            "solar_host.backends.prompt_cache.detach_instance_prompt_cache", _boom
         )
 
         manager = ProcessManager()
@@ -796,11 +807,11 @@ class TestProcessManagerTeardown:
         _make_sglang_instance("inst-1", status=InstanceStatus.FAILED)
         self._cache_dir(_isolated_env, "inst-1")
 
-        def _boom(alias: str, instance_id: str) -> None:
+        def _boom(backend: object, alias: str, instance_id: str) -> None:
             raise RuntimeError("helper regression")
 
         monkeypatch.setattr(
-            "solar_host.process_manager.detach_instance_prompt_cache", _boom
+            "solar_host.backends.prompt_cache.detach_instance_prompt_cache", _boom
         )
 
         manager = ProcessManager()
@@ -849,7 +860,7 @@ class TestProcessManagerTeardown:
             return real_rmtree(path, *args, **kwargs)
 
         monkeypatch.setattr(
-            "solar_host.backends.sglang.shutil.rmtree", _blocking_rmtree
+            "solar_host.backends.prompt_cache.shutil.rmtree", _blocking_rmtree
         )
 
         manager = ProcessManager()

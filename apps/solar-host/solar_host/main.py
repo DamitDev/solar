@@ -11,7 +11,8 @@ from fastapi.responses import JSONResponse
 
 from solar_host import __version__
 from solar_host.backends import supported_backend_types
-from solar_host.backends.sglang import discard_orphan_prompt_caches, sweep_key_configs
+from solar_host.backends.prompt_cache import discard_all_orphan_prompt_caches
+from solar_host.backends.sglang import sweep_key_configs
 from solar_host.config import settings
 from solar_host.jobs import JobExecutor, cleanup_loop, job_store
 from solar_host.jobs.step_log_buffer import step_log_flush_loop
@@ -131,8 +132,8 @@ async def lifespan(app: FastAPI):
     logger.info("HF cache directory: %s", settings.hf_cache_dir)
 
     # Must run before init_clients: no start can be in flight, so every
-    # host-created dir under the root is an orphan.
-    discard_orphan_prompt_caches()
+    # host-created dir under any backend's root is an orphan.
+    discard_all_orphan_prompt_caches()
     # IT Sec #97: stale key config files from a crash between the key-file
     # write and the ready-line delete are swept the same way.
     sweep_key_configs()

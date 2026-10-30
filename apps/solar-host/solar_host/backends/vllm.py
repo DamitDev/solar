@@ -23,6 +23,7 @@ from typing import Any
 
 from solar_host.backends.base import BackendRunner, RuntimeStateUpdate
 from solar_host.backends.prom import parse_prometheus
+from solar_host.backends.prompt_cache import PromptCacheBackend
 from solar_host.config import settings
 from solar_host.memory_monitor import detect_gpu_type
 from solar_host.models.base import (
@@ -71,6 +72,15 @@ _BOOL_FLAGS: tuple[tuple[str, str], ...] = (
     ("trust_remote_code", "--trust-remote-code"),
     ("enforce_eager", "--enforce-eager"),
     ("enable_auto_tool_choice", "--enable-auto-tool-choice"),
+)
+
+# vLLM's KV offloading filesystem tier reads its root directory from this
+# variable when the instance's kv_connector_extra_config leaves it empty, so the
+# host owns the root and the instance config only carries the tier's tuning.
+PROMPT_CACHE = PromptCacheBackend(
+    label="vLLM",
+    setting="vllm_prompt_cache_dir",
+    env_var="VLLM_PROMPT_CACHE_DIR",
 )
 
 
@@ -247,11 +257,13 @@ class VllmRunner(BackendRunner):
         return cmd
 
     def build_env(self, instance: Any) -> dict[str, str]:
-        """Activate the vLLM venv; ``config.extra_env`` is applied last.
+        """Activate the vLLM venv and point its KV offload tier at this instance.
 
-        Starts from the base GPU visibility block (S-058). vLLM keeps its
-        prefix cache in memory, so unlike SGLang there is no per-instance
-        cache directory to point at.
+        Starts from the base GPU visibility block (S-058), then applies the
+        vLLM-specific variables; ``config.extra_env`` is applied last so an
+        operator can still override per instance. vLLM keeps its in-memory
+        prefix cache in the engine, but the KV offloading filesystem tier needs
+        a persistent directory, and the host owns where that lives.
         """
         env: dict[str, str] = super().build_env(instance)
         config = instance.config
@@ -269,6 +281,19 @@ class VllmRunner(BackendRunner):
 
         if settings.api_key:
             env["VLLM_API_KEY"] = settings.api_key
+
+        cache_dir = PROMPT_CACHE.instance_dir(config.alias, instance.id)
+        if cache_dir is not None:
+            # A leftover dir may survive here (stop, crash, or a failed
+            # start); the teardown paths and the boot detach pass own its
+            # removal. This only has to (re)create it.
+            try:
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                env[PROMPT_CACHE.env_var] = str(cache_dir)
+            except OSError as exc:
+                logger.warning(
+                    "Cannot create vLLM prompt cache dir %s: %s", cache_dir, exc
+                )
 
         if config.extra_env:
             env.update(config.extra_env)

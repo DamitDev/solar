@@ -6,11 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from solar_host.backends.sglang import (
-    HICACHE_STORAGE_DIR_ENV,
-    SglangRunner,
-    instance_prompt_cache_dir,
-)
+from solar_host.backends.prompt_cache import SGLANG_PROMPT_CACHE as PROMPT_CACHE
+from solar_host.backends.sglang import SglangRunner
 from solar_host.models.sglang import SglangConfig
 from solar_host.naming import sanitize_alias_for_fs
 
@@ -66,18 +63,18 @@ def test_each_instance_gets_its_own_prompt_cache_directory(
     second = build_env("inst-2")
 
     # The alias is part of the name for legibility, with ':' made path-safe.
-    assert first[HICACHE_STORAGE_DIR_ENV] == str(cache_root / "deepseek-flash-inst-1")
-    assert second[HICACHE_STORAGE_DIR_ENV] == str(cache_root / "deepseek-flash-inst-2")
-    assert Path(first[HICACHE_STORAGE_DIR_ENV]).is_dir()
-    assert Path(second[HICACHE_STORAGE_DIR_ENV]).is_dir()
+    assert first[PROMPT_CACHE.env_var] == str(cache_root / "deepseek-flash-inst-1")
+    assert second[PROMPT_CACHE.env_var] == str(cache_root / "deepseek-flash-inst-2")
+    assert Path(first[PROMPT_CACHE.env_var]).is_dir()
+    assert Path(second[PROMPT_CACHE.env_var]).is_dir()
 
 
 def test_no_cache_root_means_no_cache_variable(venv) -> None:
-    assert HICACHE_STORAGE_DIR_ENV not in build_env()
+    assert PROMPT_CACHE.env_var not in build_env()
 
 
 def test_empty_cache_root_helper_is_none(venv) -> None:
-    assert instance_prompt_cache_dir("deepseek:flash", "inst-1") is None
+    assert PROMPT_CACHE.instance_dir("deepseek:flash", "inst-1") is None
 
 
 def test_sanitize_alias_for_fs(venv) -> None:
@@ -95,10 +92,10 @@ def test_helper_matches_build_env_path(venv, tmp_path, monkeypatch) -> None:
 
     env = build_env("inst-9", alias="qwen3.6:8b/merged")
 
-    assert env[HICACHE_STORAGE_DIR_ENV] == str(
-        instance_prompt_cache_dir("qwen3.6:8b/merged", "inst-9")
+    assert env[PROMPT_CACHE.env_var] == str(
+        PROMPT_CACHE.instance_dir("qwen3.6:8b/merged", "inst-9")
     )
-    assert env[HICACHE_STORAGE_DIR_ENV] == str(cache_root / "qwen3.6-8b-merged-inst-9")
+    assert env[PROMPT_CACHE.env_var] == str(cache_root / "qwen3.6-8b-merged-inst-9")
 
 
 def test_build_env_creates_cache_dir_without_deleting_contents(
@@ -121,7 +118,7 @@ def test_build_env_creates_cache_dir_without_deleting_contents(
 
     env = build_env("inst-1")
 
-    assert env[HICACHE_STORAGE_DIR_ENV] == str(cache_dir)
+    assert env[PROMPT_CACHE.env_var] == str(cache_dir)
     assert cache_dir.is_dir()
     assert (cache_dir / "leftover.bin").read_bytes() == b"x" * 16
 
