@@ -6,6 +6,7 @@ import Page from './+page.svelte';
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 function day(index: number, uptime: number, samples: number): UptimePoint {
@@ -294,6 +295,7 @@ function message(overrides: Partial<StatusMessage> & Pick<StatusMessage, 'id' | 
 }
 
 it('renders active messages with body, type and window', async () => {
+  vi.stubEnv('TZ', 'Europe/Budapest');
   stubSummary(
     summary({
       messages: [
@@ -308,9 +310,13 @@ it('renders active messages with body, type and window', async () => {
   expect(items).toHaveLength(2);
   expect(items[0]).toHaveTextContent('Incident');
   expect(items[0]).toHaveTextContent('Core is slow');
-  expect(items[0]).toHaveTextContent('2026-01-04 10:00 UTC – 2026-01-04 14:00 UTC');
+  // The page uses the browser's zone and locale: TZ is pinned so the hours do not
+  // depend on the runner (a UTC runner would pass the old implementation too),
+  // while the layout and 12h/24h clock follow the runner's default locale.
+  expect(items[0]).toHaveTextContent(/11:00.*(15:00|03:00)/);
+  expect(items[0]).not.toHaveTextContent('UTC');
   expect(items[1]).toHaveTextContent('Resolution');
-  expect(items[1]).toHaveTextContent('From 2026-01-04 10:00 UTC');
+  expect(items[1]).toHaveTextContent(/From .*11:00/);
   expect(screen.getByRole('heading', { name: 'Messages' })).toBeInTheDocument();
   expect(screen.queryByRole('heading', { name: 'Upcoming maintenance' })).not.toBeInTheDocument();
   expect(screen.queryByTestId('messages-empty')).not.toBeInTheDocument();
