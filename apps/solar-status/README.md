@@ -22,6 +22,20 @@ aktuális elérhetőségét, 90 napos uptime-történetét, valamint az aktív �
   és 60 másodpercenként, illetve a fül újra láthatóvá válásakor frissíti. Minden más `/api`
   útvonal továbbra is a menedzsment kulcsot igényli.
 
+## Állapotüzenetek formázása (markdown)
+
+Az állapotüzenet `body` mezője markdown (GFM): `**félkövér**`, listák, linkek, inline
+`kód` és táblázatok használhatók, az egyszeres sortörések megmaradnak. A megjelenítés
+`marked` (parser) + `DOMPurify` (szanitizálás) párosra épül, mert az oldal nyilvános:
+
+- a nyers HTML és a szkriptek eltűnnek, csak egy szűk tag-allowlist marad meg;
+- a képek nem jelennek meg (nem töltünk be harmadik féltől származó tartalmat);
+- a címsorok `h3`-má alakulnak, hogy az üzenet ne hozzon létre második `h1`/`h2` elemet;
+- a linkek új lapon nyílnak (`rel="noopener noreferrer"`).
+
+A stílust a `@tailwindcss/typography` `prose prose-invert` osztályai adják. A `body` az
+adatbázisban sima szöveg, ezért séma- vagy migrációváltozás nem kell.
+
 ## Serving módok
 
 ### Fejlesztés: külön Vite dev szerver

@@ -21,6 +21,13 @@ def _check_window(start_time: datetime | None, end_time: datetime | None) -> Non
 
 
 class StatusMessageCreate(BaseModel):
+    """Create payload.
+
+    ``body`` accepts markdown (GFM: bold, lists, links, inline code; single
+    newlines are kept as line breaks). The public status page sanitizes it on
+    render: raw HTML, images and h1/h2 headings are not shown as written.
+    """
+
     body: str = Field(min_length=1)
     type: MessageType
     start_time: datetime
@@ -41,6 +48,8 @@ class StatusMessageUpdate(BaseModel):
     update treats a null there as "unchanged", so an explicit null would silently
     do nothing. Those fields are rejected instead; omitting them still leaves them
     unchanged.
+
+    ``body`` accepts markdown, see ``StatusMessageCreate``.
     """
 
     body: str | None = Field(default=None, min_length=1)

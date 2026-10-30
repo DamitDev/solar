@@ -4,6 +4,9 @@ POST   /api/status-messages        — create a message
 GET    /api/status-messages        — list all messages
 PUT    /api/status-messages/{id}   — update body/type/window
 DELETE /api/status-messages/{id}   — delete a message
+
+A message ``body`` is markdown (GFM, single newlines kept as line breaks). The
+public status page renders it sanitized; images and h1/h2 headings are not shown.
 """
 
 from uuid import UUID
