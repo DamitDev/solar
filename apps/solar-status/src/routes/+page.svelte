@@ -119,13 +119,7 @@
           <h2 id="models-heading" class="text-lg font-semibold">Models</h2>
           <ul class="mt-2 grid gap-x-8 md:grid-cols-2">
             {#each summary.aliases as alias (alias.alias)}
-              <ComponentRow
-                name={alias.alias}
-                detail={`${alias.instances_running}/${alias.instances_total} instances running`}
-                phase={alias.intent_phase}
-                windowDays={summary.window_days}
-                status={alias}
-              />
+              <ComponentRow name={alias.alias} windowDays={summary.window_days} status={alias} />
             {/each}
           </ul>
         </section>

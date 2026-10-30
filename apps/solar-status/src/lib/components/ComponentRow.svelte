@@ -6,13 +6,11 @@
   let {
     name,
     detail,
-    phase,
     windowDays,
     status
   }: {
     name: string;
     detail?: string;
-    phase?: string | null;
     windowDays: number;
     status: ComponentStatus;
   } = $props();
@@ -24,11 +22,6 @@
       <h3 class="font-medium">{name}</h3>
       {#if detail}
         <span class="text-xs text-zinc-500">{detail}</span>
-      {/if}
-      {#if phase}
-        <span class="rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-300">
-          Intent: {phase}
-        </span>
       {/if}
     </div>
     <StatusBadge availability={status.availability} />

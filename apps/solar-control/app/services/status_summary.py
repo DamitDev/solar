@@ -8,8 +8,10 @@ Two independent sources feed every component:
   ``gateway_requests``, so a requestless outage still counts as downtime.
 
 Components are virtual models, aliases (e.g. ``core``, ``wind``) and
-instances of aliases no intent manages. An intent-managed alias carries the
-intent's reconciliation phase instead of listing each replica.
+instances of aliases no intent manages. An intent-managed alias is listed as a
+single component instead of one row per replica. Instance counts and intent
+phases stay internal: they decide which components exist and their
+availability, but are not published.
 
 The public page is read during incidents, so every source degrades on its own:
 an unreadable registry, history or message table yields empty data and an
@@ -303,7 +305,7 @@ class StatusSummaryService:
         # Every intent-managed alias is published even when neither the registry
         # nor the history knows it: an intent whose instances all failed to
         # start (or that is still pending) exists only in the intent table, and
-        # its reconciliation phase is the one signal the page must not lose.
+        # must still surface (as "down") rather than vanish from the page.
         alias_names = sorted(
             set(registry or {}) | set(history or []) | set(intent_phase)
         )
@@ -321,9 +323,6 @@ class StatusSummaryService:
                         total,
                         known=live is not None,
                     ),
-                    instances_running=running,
-                    instances_total=total,
-                    intent_phase=intent_phase.get(name),
                     uptime_pct=pct,
                     history=points,
                 )

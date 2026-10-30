@@ -29,9 +29,6 @@ export interface VirtualModelStatus extends ComponentStatus {
 
 export interface AliasStatus extends ComponentStatus {
   alias: string;
-  instances_running: number;
-  instances_total: number;
-  intent_phase: string | null;
 }
 
 export interface InstanceStatus extends ComponentStatus {
