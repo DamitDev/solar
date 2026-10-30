@@ -17,11 +17,14 @@
 </script>
 
 <li class="border-b border-zinc-800 py-4" data-testid="component-row">
-  <div class="flex flex-wrap items-center justify-between gap-2">
-    <div class="flex flex-wrap items-baseline gap-x-3">
-      <h3 class="font-medium">{name}</h3>
+  <div class="flex items-center justify-between gap-3">
+    <div class="flex min-w-0 flex-1 items-baseline gap-x-3">
+      <h3 class="min-w-0 truncate font-medium" title={name}>{name}</h3>
       {#if detail}
-        <span class="text-xs text-zinc-500">{detail}</span>
+        <!-- shrink-100: the detail gives up space long before the name does. -->
+        <span class="min-w-0 shrink-100 truncate text-xs text-zinc-500" title={detail}
+          >{detail}</span
+        >
       {/if}
     </div>
     <StatusBadge availability={status.availability} />
