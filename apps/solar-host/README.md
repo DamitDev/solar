@@ -79,6 +79,7 @@ SGLANG_PROMPT_CACHE_DIR=/var/cache/sglang
 
 # vLLM backend (optional, NVIDIA hosts only)
 VLLM_VENV_PATH=/opt/venvs/vllm
+VLLM_PROMPT_CACHE_DIR=/var/cache/vllm
 ```
 
 - **API_KEY** - Used by solar-control (and other callers) to access this host’s REST API.
@@ -88,6 +89,7 @@ VLLM_VENV_PATH=/opt/venvs/vllm
 - **SGLANG_VENV_PATH** - Virtualenv SGLang is installed into (the directory holding `bin/sglang`). The host launches the executable from it directly, setting `VIRTUAL_ENV` and prepending `bin/` to `PATH` the way `activate` would. Leave empty to use a `sglang` on `PATH`; with neither, `sglang` is dropped from the advertised backends.
 - **SGLANG_PROMPT_CACHE_DIR** - Root of SGLang's file-backed prompt cache. Each instance gets its own `<root>/<alias>-<instance_id>` subdirectory, exported as `SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR`. When it is empty the `--hicache-storage-*` flags are dropped with a warning (the in-memory hierarchical cache still works). The host deletes the subdirectory when the instance stops and sweeps leftovers at startup, so point it at a dedicated path. While a stop is in flight the dir is transiently visible as `.trash-<uuid>` until the background purge finishes, and the root must be dedicated to a single host — a second host's startup sweep would otherwise discard the first's live caches.
 - **VLLM_VENV_PATH** - Virtualenv vLLM is installed into (the directory holding `bin/vllm`). The host launches the executable from it directly, setting `VIRTUAL_ENV` and prepending `bin/` to `PATH` the way `activate` would. Leave empty to use a `vllm` on `PATH`; with neither, `vllm` is dropped from the advertised backends.
+- **VLLM_PROMPT_CACHE_DIR** - Root of vLLM's KV offloading filesystem tier. Each instance gets its own `<root>/<alias>-<instance_id>` subdirectory, exported as `VLLM_PROMPT_CACHE_DIR`, and the instance's `--kv-transfer-config` leaves `root_dir` empty so the engine reads that variable. When it is empty the instance keeps whatever `root_dir` its own config names (and the host cleans nothing, because it owns no directory). The host deletes the subdirectory when the instance stops and sweeps leftovers at startup, so point it at a dedicated path. While a stop is in flight the dir is transiently visible as `.trash-<uuid>` until the background purge finishes, and the root must be dedicated to a single host — a second host's startup sweep would otherwise discard the first's live caches.
 - **GPU_TELEMETRY_OVERRIDE** - (S-058, dev/test only) JSON array of `{"index", "name", "total_gb", "used_gb"}` entries that fakes per-device NVIDIA telemetry without a physical GPU. When set, `GET /resources`, the `host_health` push and every GPU capacity check read these devices instead of NVML — the integration suite uses it to exercise the whole S-058 chain on CPU-only CI runners. Unset on production hosts.
 
 ### 2. Start the server
@@ -277,6 +279,14 @@ curl -X POST http://localhost:8001/instances \
 `--host`, `--port`, `--api-key`, `--model`, `--served-model-name`, `--enable-prompt-tokens-details` and `--disable-log-stats` are not config fields: the host binds the port from its own allocator, authenticates with its own API key, and serves the alias verbatim — vLLM performs no `:` parsing on model names (registry lookup is exact-match), so `glm-5.3-flash:320b` is served under exactly that name and solar-control's request translation is a no-op for direct-alias requests to this backend; a request under a virtual model name is still translated to the served name. `extra_args` is rejected when it tries to set one of the host-managed flags.
 
 Usage metrics: per-request token counts (prompt, cached split, generated) come from the `vllm:*` Prometheus counters at request end, and `decode_tps` is the engine's last ~10 s stats-window average seen while the request ran — a best-effort live number, not an exact per-request measurement, with the token counts the exact part.
+
+**KV cache offloading.** vLLM's `OffloadingConnector` can extend the prefix cache beyond GPU memory: a CPU primary tier stages evicted blocks, and a `secondary_tiers` entry of `type: fs` spills them to a host-owned directory, from which a later request promotes them back. Put the connector's JSON in `extra_args`:
+
+```
+--kv-transfer-config {"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":2147483648,"blocks_per_chunk":4,"eviction_policy":"lru","secondary_tiers":[{"type":"fs","n_read_threads":32,"n_write_threads":16}]}}
+```
+
+Leave the `fs` tier's `root_dir` out: the host fills it from `VLLM_PROMPT_CACHE_DIR`, so the instance config stays portable between hosts. `cpu_bytes_to_use` is the **total** across all workers, not per worker, and it is a hard gate on promotion — a block promoted from the filesystem tier must fit in it, so size it for the longest prefix you expect to serve from disk, not for the whole disk cache. The filesystem tier has no capacity or eviction of its own: its limit is the filesystem it lives on, so mount the root on a dedicated volume.
 
 ### Starting an Instance
 

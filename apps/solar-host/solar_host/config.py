@@ -124,6 +124,11 @@ class Settings(BaseSettings):
     # when empty the runner falls back to `vllm` on PATH, and when neither
     # resolves the host does not advertise the backend at all.
     vllm_venv_path: str = ""
+    # Root for vLLM's KV offloading filesystem tier. Each instance gets its
+    # own subdirectory under it, exported as VLLM_PROMPT_CACHE_DIR; when empty
+    # the tier's root_dir must come from the instance config instead (the host
+    # still cleans nothing, because it owns no directory).
+    vllm_prompt_cache_dir: str = ""
 
     # GPU telemetry override (dev/test only, L2): a JSON array of
     # {"index", "name", "total_gb", "used_gb"} describing the devices this
