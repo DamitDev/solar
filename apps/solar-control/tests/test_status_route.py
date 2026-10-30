@@ -314,6 +314,48 @@ def test_retired_instance_is_not_a_component(client: TestClient):
     assert body["instances"][0]["history"][-1]["uptime"] == 1.0
 
 
+def test_retired_manual_alias_is_not_a_component(client: TestClient):
+    """A manual alias only the history knows was deleted: no lingering row."""
+    registry = {"core": [_entry("h1", "i1", "core")]}
+
+    body = _get(
+        client,
+        registry,
+        components=["core", "deepseek-v4.1-flash-1017:cachetest"],
+    ).json()
+
+    assert [alias["alias"] for alias in body["aliases"]] == ["core"]
+
+
+def test_stopped_manual_instance_still_surfaces_as_down(client: TestClient):
+    """A manual instance that exists but is stopped is down, not gone."""
+    cached = {
+        "h1": [
+            {"id": "i1", "alias": "deepseek-v4.1-flash-1017:600k", "status": "stopped"}
+        ]
+    }
+
+    body = _get(client, {}, cached_instances=cached).json()
+
+    [alias] = body["aliases"]
+    assert alias["alias"] == "deepseek-v4.1-flash-1017:600k"
+    assert alias["availability"] == "down"
+    assert [instance["instance_id"] for instance in body["instances"]] == ["i1"]
+
+
+def test_scaled_to_zero_intent_alias_survives_history_only(client: TestClient):
+    """An intent scaled to zero keeps its alias even without a live instance."""
+    intents = [
+        SimpleNamespace(alias="wind", status=SimpleNamespace(phase=IntentPhase.READY))
+    ]
+
+    body = _get(client, {}, intents=intents, components=["wind"]).json()
+
+    [wind] = body["aliases"]
+    assert wind["alias"] == "wind"
+    assert wind["availability"] == "down"
+
+
 def _message(
     type_: str, start: datetime, end: datetime | None
 ) -> StatusMessageResponse:

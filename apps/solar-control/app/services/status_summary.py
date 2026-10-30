@@ -9,9 +9,11 @@ Two independent sources feed every component:
 
 Components are virtual models, aliases (e.g. ``core``, ``wind``) and
 instances of aliases no intent manages. An intent-managed alias is listed as a
-single component instead of one row per replica. Instance counts and intent
-phases stay internal: they decide which components exist and their
-availability, but are not published.
+single component instead of one row per replica, even when it is scaled to zero.
+A manual alias is listed only while a live instance of it exists, so a deleted
+instance does not linger as a "down" row. Instance counts and intent phases stay
+internal: they decide which components exist and their availability, but are not
+published.
 
 The public page is read during incidents, so every source degrades on its own:
 an unreadable registry, history or message table yields empty data and an
@@ -306,9 +308,18 @@ class StatusSummaryService:
         # nor the history knows it: an intent whose instances all failed to
         # start (or that is still pending) exists only in the intent table, and
         # must still surface (as "down") rather than vanish from the page.
-        alias_names = sorted(
-            set(registry or {}) | set(history or []) | set(intent_phase)
-        )
+        #
+        # A manual alias, on the other hand, exists only while the live
+        # observation still sees an instance of it. History alone is not enough:
+        # a deleted instance would otherwise linger as a "down" row for the whole
+        # window. When the live source is unreadable, keep the history aliases
+        # instead of hiding components we cannot verify.
+        alias_names = set(registry or {}) | set(intent_phase)
+        if live is not None:
+            alias_names |= {sample.alias for sample in live}
+        else:
+            alias_names |= set(history or [])
+        alias_names = sorted(alias_names)
         aliases = []
         for name in alias_names:
             running = running_by_alias.get(name, 0)
