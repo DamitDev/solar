@@ -15,7 +15,10 @@ permissions:
 
 jobs:
   pypi-publish:
-    runs-on: self-hosted
+    # Linux only: the version rewrite uses GNU sed and the publish action runs
+    # as a linux/amd64 container. The default labels keep the job off the macOS
+    # runner, whose plain `self-hosted` label would otherwise accept it.
+    runs-on: [self-hosted, linux]
     environment: release
     steps:
       - uses: actions/checkout@v4
