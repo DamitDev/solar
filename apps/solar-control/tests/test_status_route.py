@@ -23,6 +23,10 @@ from app.services.virtual_model_cache import virtual_model_cache
 
 API_KEY = settings.management_api_key
 
+# Alias fields kept off the unauthenticated payload; operators read them from
+# /api/instances and /api/intents.
+_INTERNAL_ALIAS_FIELDS = {"instances_running", "instances_total", "intent_phase"}
+
 
 @pytest.fixture
 def client():
@@ -177,10 +181,9 @@ def test_response_shape(client: TestClient):
     by_alias = {a["alias"]: a for a in body["aliases"]}
     assert set(by_alias) == {"core", "wind", "adhoc"}
     assert by_alias["core"]["availability"] == "operational"
-    assert by_alias["core"]["intent_phase"] == "ready"
-    assert by_alias["wind"]["intent_phase"] == "degraded"
-    assert by_alias["wind"]["instances_total"] == 2
-    assert by_alias["adhoc"]["intent_phase"] is None
+    # Counts and intent phases stay internal: the public payload omits them.
+    for alias in by_alias.values():
+        assert not _INTERNAL_ALIAS_FIELDS & alias.keys()
 
     # Only the alias no intent manages lists its instance as a component.
     assert [(i["instance_id"], i["alias"]) for i in body["instances"]] == [
@@ -190,7 +193,7 @@ def test_response_shape(client: TestClient):
 
 
 def test_intent_alias_without_instances_or_history_is_published(client: TestClient):
-    """An intent whose instances never started still surfaces its phase."""
+    """An intent whose instances never started still surfaces, as down."""
     intents = [
         SimpleNamespace(
             alias="orphan", status=SimpleNamespace(phase=IntentPhase.FAILED)
@@ -203,10 +206,9 @@ def test_intent_alias_without_instances_or_history_is_published(client: TestClie
     # only thing that says the group exists, so it must not be dropped.
     [orphan] = body["aliases"]
     assert orphan["alias"] == "orphan"
-    assert orphan["intent_phase"] == "failed"
+    assert not _INTERNAL_ALIAS_FIELDS & orphan.keys()
     # The live registry is readable and holds none of it, so the group is down
     # rather than unknown; zero instances is already a defined availability.
-    assert (orphan["instances_running"], orphan["instances_total"]) == (0, 0)
     assert orphan["availability"] == "down"
     assert orphan["uptime_pct"] is None
 
@@ -228,7 +230,8 @@ def test_virtual_model_degrades_when_one_replica_is_down(client: TestClient):
     ).json()
 
     [core] = body["aliases"]
-    assert (core["instances_running"], core["instances_total"]) == (1, 2)
+    assert not _INTERNAL_ALIAS_FIELDS & core.keys()
+    # Still derived from the internal 1/2 running count.
     assert core["availability"] == "degraded"
     [vm] = body["virtual_models"]
     assert vm["target_status"] == {"core": "satisfied"}
@@ -309,6 +312,70 @@ def test_retired_instance_is_not_a_component(client: TestClient):
     assert [instance["instance_id"] for instance in body["instances"]] == ["i1"]
     # The history still supplies the live instance's uptime series.
     assert body["instances"][0]["history"][-1]["uptime"] == 1.0
+
+
+def test_retired_manual_alias_is_not_a_component(client: TestClient):
+    """A manual alias only the history knows was deleted: no lingering row."""
+    registry = {"core": [_entry("h1", "i1", "core")]}
+
+    body = _get(
+        client,
+        registry,
+        components=["core", "deepseek-v4.1-flash-1017:cachetest"],
+    ).json()
+
+    assert [alias["alias"] for alias in body["aliases"]] == ["core"]
+
+
+def test_live_path_skips_component_history(client: TestClient):
+    """A readable live source needs no history query for the alias set."""
+    components_read = AsyncMock(return_value=["core"])
+    patches = _patched({"core": [_entry("h1", "i1", "core")]})
+    for p in patches:
+        p.start()
+    try:
+        with patch(
+            "app.services.status_summary.state_history_db.list_components",
+            components_read,
+        ):
+            body = client.get("/api/status").json()
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert [alias["alias"] for alias in body["aliases"]] == ["core"]
+    components_read.assert_not_awaited()
+
+
+def test_stopped_manual_instance_still_surfaces_as_down(client: TestClient):
+    """A manual instance that exists but is stopped is down, not gone."""
+    cached = {
+        "h1": [
+            {"id": "i1", "alias": "deepseek-v4.1-flash-1017:600k", "status": "stopped"}
+        ]
+    }
+
+    body = _get(client, {}, cached_instances=cached).json()
+
+    [alias] = body["aliases"]
+    assert alias["alias"] == "deepseek-v4.1-flash-1017:600k"
+    assert alias["availability"] == "down"
+    assert [instance["instance_id"] for instance in body["instances"]] == ["i1"]
+
+
+def test_scaled_to_zero_intent_alias_survives_without_a_live_instance(
+    client: TestClient,
+):
+    """An intent scaled to zero keeps its alias even without a live instance."""
+    intents = [
+        SimpleNamespace(alias="wind", status=SimpleNamespace(phase=IntentPhase.READY))
+    ]
+
+    body = _get(client, {}, intents=intents, components=["wind"]).json()
+
+    [wind] = body["aliases"]
+    assert wind["alias"] == "wind"
+    assert wind["availability"] == "down"
 
 
 def _message(

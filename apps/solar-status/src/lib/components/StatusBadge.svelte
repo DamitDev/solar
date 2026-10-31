@@ -15,7 +15,7 @@
 </script>
 
 <span
-  class="inline-flex items-center gap-2 text-sm font-medium {tone.text}"
+  class="inline-flex shrink-0 items-center gap-2 text-sm font-medium whitespace-nowrap {tone.text}"
   data-availability={availability}
 >
   <span class="size-2.5 rounded-full {tone.dot}" aria-hidden="true"></span>

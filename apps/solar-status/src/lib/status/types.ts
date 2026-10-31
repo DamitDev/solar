@@ -29,9 +29,6 @@ export interface VirtualModelStatus extends ComponentStatus {
 
 export interface AliasStatus extends ComponentStatus {
   alias: string;
-  instances_running: number;
-  instances_total: number;
-  intent_phase: string | null;
 }
 
 export interface InstanceStatus extends ComponentStatus {
@@ -110,13 +107,36 @@ export function splitMessages(summary: StatusSummary): {
   return { active, upcoming };
 }
 
-function formatInstant(iso: string): string {
-  return `${new Date(iso).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+/**
+ * Date and time of `iso` in the browser's own time zone as
+ * `YYYY-MM-DD HH:mm <short zone label>` (e.g. `2026-10-30 17:00 CET`). The
+ * layout stays fixed so every reader sees the same shape; only the short zone
+ * label follows the locale.
+ *
+ * `timeZone` and `locale` default to the browser's; they are overridable so
+ * tests do not depend on the runner.
+ */
+export function formatInstant(iso: string, timeZone?: string, locale?: string): string {
+  const parts = new Intl.DateTimeFormat(locale, {
+    timeZone,
+    calendar: 'gregory',
+    numberingSystem: 'latn',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+    timeZoneName: 'short'
+  }).formatToParts(new Date(iso));
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((candidate) => candidate.type === type)?.value ?? '';
+  return `${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')} ${part('timeZoneName')}`;
 }
 
-export function formatWindow(message: StatusMessage): string {
-  const start = formatInstant(message.start_time);
+export function formatWindow(message: StatusMessage, timeZone?: string, locale?: string): string {
+  const start = formatInstant(message.start_time, timeZone, locale);
   return message.end_time === null
     ? `From ${start}`
-    : `${start} – ${formatInstant(message.end_time)}`;
+    : `${start} – ${formatInstant(message.end_time, timeZone, locale)}`;
 }

@@ -2,9 +2,9 @@
 
 A Solar rendszer nyilvános állapotoldala: önálló single-page alkalmazás SvelteKit (Svelte 5) +
 TypeScript + Tailwind CSS alapon, a pnpm workspace tagje. A solar-control `GET /api/status`
-végpontjának összegzését jeleníti meg: virtuális modellek, aliasok és nem kezelt instance-ok
-aktuális elérhetőségét, 90 napos uptime-történetét, valamint az aktív és közelgő
-állapotüzeneteket.
+végpontjának összegzését jeleníti meg: a virtuális nevek (Aliases), a konkrét nevek
+(Models) és a nem kezelt instance-ok (Instances) aktuális elérhetőségét, 90 napos
+uptime-történetét, valamint az aktív és közelgő állapotüzeneteket.
 
 ## Fontos tudnivalók
 
@@ -21,6 +21,20 @@ aktuális elérhetőségét, 90 napos uptime-történetét, valamint az aktív �
   incidens, karbantartás, előre meghirdetett tervezett karbantartás). Az oldal ezt hívja meg,
   és 60 másodpercenként, illetve a fül újra láthatóvá válásakor frissíti. Minden más `/api`
   útvonal továbbra is a menedzsment kulcsot igényli.
+
+## Állapotüzenetek formázása (markdown)
+
+Az állapotüzenet `body` mezője markdown (GFM): `**félkövér**`, listák, linkek, inline
+`kód` és táblázatok használhatók, az egyszeres sortörések megmaradnak. A megjelenítés
+`marked` (parser) + `DOMPurify` (szanitizálás) párosra épül, mert az oldal nyilvános:
+
+- a nyers HTML és a szkriptek eltűnnek, csak egy szűk tag-allowlist marad meg;
+- a képek nem jelennek meg (nem töltünk be harmadik féltől származó tartalmat);
+- a címsorok `h3`-má alakulnak, hogy az üzenet ne hozzon létre második `h1`/`h2` elemet;
+- a linkek új lapon nyílnak (`rel="noopener noreferrer"`).
+
+A stílust a `@tailwindcss/typography` `prose prose-invert` osztályai adják. A `body` az
+adatbázisban sima szöveg, ezért séma- vagy migrációváltozás nem kell.
 
 ## Serving módok
 

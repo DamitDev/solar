@@ -6,6 +6,7 @@ import Page from './+page.svelte';
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 function day(index: number, uptime: number, samples: number): UptimePoint {
@@ -80,7 +81,7 @@ it('treats an HTTP error as unreachable', async () => {
   expect(await screen.findByRole('alert')).toBeInTheDocument();
 });
 
-it('renders models, aliases and instances with status, phase and uptime', async () => {
+it('renders aliases, models and instances with status and uptime', async () => {
   const history = [day(0, 1, 10), day(1, 0.5, 10), day(2, 0, 10), day(3, 0, 0)];
   stubSummary(
     summary({
@@ -97,9 +98,6 @@ it('renders models, aliases and instances with status, phase and uptime', async 
       aliases: [
         {
           alias: 'core',
-          instances_running: 1,
-          instances_total: 2,
-          intent_phase: 'degraded',
           availability: 'operational',
           uptime_pct: 99.123,
           history
@@ -129,8 +127,9 @@ it('renders models, aliases and instances with status, phase and uptime', async 
 
   expect(within(alias).getByRole('heading', { level: 3 })).toHaveTextContent('core');
   expect(alias).toHaveTextContent('Operational');
-  expect(alias).toHaveTextContent('Intent: degraded');
-  expect(alias).toHaveTextContent('1/2 instances running');
+  // Counts and intent phases are not part of the public payload.
+  expect(alias).not.toHaveTextContent(/Intent:/);
+  expect(alias).not.toHaveTextContent(/instances running/);
   expect(alias).toHaveTextContent('99.12% uptime');
   // The window label describes the summary's 90-day window, not the length of
   // this component's (shorter) history.
@@ -139,7 +138,44 @@ it('renders models, aliases and instances with status, phase and uptime', async 
   expect(within(instance).getByRole('heading', { level: 3 })).toHaveTextContent('inst-1');
   expect(instance).toHaveTextContent('Down');
   expect(instance).toHaveTextContent('No data');
-  expect(within(instance).queryByText(/Intent:/)).not.toBeInTheDocument();
+  expect(instance).not.toHaveTextContent(/Intent:/);
+});
+
+it('labels virtual_models "Aliases" above aliases labelled "Models"', async () => {
+  stubSummary(
+    summary({
+      virtual_models: [
+        {
+          name: 'core',
+          targets: ['deepseek-v4.1-flash-1017:552b'],
+          target_status: { 'deepseek-v4.1-flash-1017:552b': 'satisfied' },
+          availability: 'operational',
+          uptime_pct: 100,
+          history: []
+        }
+      ],
+      aliases: [
+        {
+          alias: 'deepseek-v4.1-flash-1017:552b',
+          availability: 'operational',
+          uptime_pct: 100,
+          history: []
+        }
+      ]
+    })
+  );
+  render(Page);
+
+  const headings = (await screen.findAllByRole('heading', { level: 2 })).map((heading) =>
+    heading.textContent?.trim()
+  );
+  expect(headings).toEqual(['Aliases', 'Models']);
+
+  const aliases = within(screen.getByRole('heading', { name: 'Aliases' }).closest('section')!);
+  expect(aliases.getByTestId('component-row')).toHaveTextContent('core');
+
+  const models = within(screen.getByRole('heading', { name: 'Models' }).closest('section')!);
+  expect(models.getByTestId('component-row')).toHaveTextContent('deepseek-v4.1-flash-1017:552b');
 });
 
 it('labels the uptime window from window_days, not the history length', async () => {
@@ -148,9 +184,6 @@ it('labels the uptime window from window_days, not the history length', async ()
       aliases: [
         {
           alias: 'young',
-          instances_running: 1,
-          instances_total: 1,
-          intent_phase: null,
           availability: 'operational',
           uptime_pct: 100,
           history: [day(0, 1, 10)]
@@ -171,9 +204,6 @@ it('draws one bar per day and renders outage days as gaps, not interpolated', as
       aliases: [
         {
           alias: 'core',
-          instances_running: 1,
-          instances_total: 1,
-          intent_phase: null,
           availability: 'operational',
           uptime_pct: 62.5,
           history: [day(0, 1, 10), day(1, 0.5, 10), day(2, 0, 10), day(3, 0, 0)]
@@ -198,9 +228,6 @@ it('renders days before the first sample as empty, never outage red', async () =
       aliases: [
         {
           alias: 'young',
-          instances_running: 1,
-          instances_total: 1,
-          intent_phase: null,
           availability: 'operational',
           uptime_pct: 100,
           history: [day(0, 0, 0), day(1, 0, 0), day(2, 1, 10), day(3, 1, 10)]
@@ -224,9 +251,6 @@ it('renders an unknown availability neutrally instead of down', async () => {
       aliases: [
         {
           alias: 'core',
-          instances_running: 0,
-          instances_total: 0,
-          intent_phase: null,
           availability: 'unknown',
           uptime_pct: null,
           history: []
@@ -254,6 +278,7 @@ function message(overrides: Partial<StatusMessage> & Pick<StatusMessage, 'id' | 
 }
 
 it('renders active messages with body, type and window', async () => {
+  vi.stubEnv('TZ', 'Europe/Budapest');
   stubSummary(
     summary({
       messages: [
@@ -268,9 +293,12 @@ it('renders active messages with body, type and window', async () => {
   expect(items).toHaveLength(2);
   expect(items[0]).toHaveTextContent('Incident');
   expect(items[0]).toHaveTextContent('Core is slow');
-  expect(items[0]).toHaveTextContent('2026-01-04 10:00 UTC – 2026-01-04 14:00 UTC');
+  // The page uses the browser's zone and locale: TZ is pinned so the hours do not
+  // depend on the runner (a UTC runner would pass the old implementation too),
+  // while the short zone label follows the runner's locale (CET, MEZ, GMT+1, ...).
+  expect(items[0]).toHaveTextContent(/2026-01-04 11:00 (\S+) – 2026-01-04 15:00 \1/);
   expect(items[1]).toHaveTextContent('Resolution');
-  expect(items[1]).toHaveTextContent('From 2026-01-04 10:00 UTC');
+  expect(items[1]).toHaveTextContent(/From .*11:00/);
   expect(screen.getByRole('heading', { name: 'Messages' })).toBeInTheDocument();
   expect(screen.queryByRole('heading', { name: 'Upcoming maintenance' })).not.toBeInTheDocument();
   expect(screen.queryByTestId('messages-empty')).not.toBeInTheDocument();
