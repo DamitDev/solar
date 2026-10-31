@@ -2,9 +2,9 @@
 
 A Solar rendszer nyilvános állapotoldala: önálló single-page alkalmazás SvelteKit (Svelte 5) +
 TypeScript + Tailwind CSS alapon, a pnpm workspace tagje. A solar-control `GET /api/status`
-végpontjának összegzését jeleníti meg: virtuális modellek, aliasok és nem kezelt instance-ok
-aktuális elérhetőségét, 90 napos uptime-történetét, valamint az aktív és közelgő
-állapotüzeneteket.
+végpontjának összegzését jeleníti meg: a virtuális nevek (Aliases), a konkrét nevek
+(Models) és a nem kezelt instance-ok (Instances) aktuális elérhetőségét, 90 napos
+uptime-történetét, valamint az aktív és közelgő állapotüzeneteket.
 
 ## Fontos tudnivalók
 
