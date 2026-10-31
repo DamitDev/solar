@@ -327,6 +327,26 @@ def test_retired_manual_alias_is_not_a_component(client: TestClient):
     assert [alias["alias"] for alias in body["aliases"]] == ["core"]
 
 
+def test_live_path_skips_component_history(client: TestClient):
+    """A readable live source needs no history query for the alias set."""
+    components_read = AsyncMock(return_value=["core"])
+    patches = _patched({"core": [_entry("h1", "i1", "core")]})
+    for p in patches:
+        p.start()
+    try:
+        with patch(
+            "app.services.status_summary.state_history_db.list_components",
+            components_read,
+        ):
+            body = client.get("/api/status").json()
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert [alias["alias"] for alias in body["aliases"]] == ["core"]
+    components_read.assert_not_awaited()
+
+
 def test_stopped_manual_instance_still_surfaces_as_down(client: TestClient):
     """A manual instance that exists but is stopped is down, not gone."""
     cached = {
@@ -343,7 +363,9 @@ def test_stopped_manual_instance_still_surfaces_as_down(client: TestClient):
     assert [instance["instance_id"] for instance in body["instances"]] == ["i1"]
 
 
-def test_scaled_to_zero_intent_alias_survives_history_only(client: TestClient):
+def test_scaled_to_zero_intent_alias_survives_without_a_live_instance(
+    client: TestClient,
+):
     """An intent scaled to zero keeps its alias even without a live instance."""
     intents = [
         SimpleNamespace(alias="wind", status=SimpleNamespace(phase=IntentPhase.READY))

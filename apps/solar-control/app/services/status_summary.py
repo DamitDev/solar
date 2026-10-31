@@ -287,7 +287,6 @@ class StatusSummaryService:
         registry = await self._registry()
         live = await self._live(now, registry)
         intent_phase = await self._intent_phase()
-        history = await self._components(start, now)
 
         running_by_alias, total_by_alias = _count_by_alias(live or [])
 
@@ -318,7 +317,9 @@ class StatusSummaryService:
         if live is not None:
             alias_names |= {sample.alias for sample in live}
         else:
-            alias_names |= set(history or [])
+            # Only this fallback needs the history aliases: the live path would
+            # discard the query.
+            alias_names |= set(await self._components(start, now) or [])
         alias_names = sorted(alias_names)
         aliases = []
         for name in alias_names:
