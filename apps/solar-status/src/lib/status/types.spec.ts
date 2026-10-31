@@ -1,32 +1,34 @@
 import { describe, expect, it } from 'vitest';
 import { formatInstant, formatWindow, type StatusMessage } from './types';
 
-// Explicit zones and locales keep these tests independent of the runner: a UTC
+// Explicit zone and locale keep these tests independent of the runner: a UTC
 // runner would otherwise pass the old UTC-only implementation too.
 const BUDAPEST = 'Europe/Budapest';
-
-// ICU may use a (narrow) no-break space before AM/PM, depending on its version.
-const plain = (text: string) => text.replace(/\s/g, ' ');
+// en-GB is CLDR's English locale whose short zone labels are abbreviations
+// (CET/CEST), not numeric offsets.
+const EN = 'en-GB';
 
 describe('formatInstant', () => {
-  it('converts to the given time zone without a zone label', () => {
-    expect(formatInstant('2026-10-30T16:00:00+00:00', BUDAPEST, 'de-DE')).toBe('30.10.2026, 17:00');
+  it('formats the instant as YYYY-MM-DD HH:mm with a short zone label', () => {
+    expect(formatInstant('2026-10-30T16:00:00+00:00', BUDAPEST, EN)).toBe('2026-10-30 17:00 CET');
   });
 
   it('follows daylight saving time', () => {
-    expect(formatInstant('2026-07-01T10:00:00+00:00', BUDAPEST, 'de-DE')).toBe('01.07.2026, 12:00');
+    expect(formatInstant('2026-07-01T10:00:00+00:00', BUDAPEST, EN)).toBe('2026-07-01 12:00 CEST');
   });
 
   it('rolls the date over when the zone crosses midnight', () => {
-    expect(formatInstant('2026-01-04T23:30:00+00:00', BUDAPEST, 'de-DE')).toBe('05.01.2026, 00:30');
+    expect(formatInstant('2026-01-04T23:30:00+00:00', BUDAPEST, EN)).toBe('2026-01-05 00:30 CET');
   });
 
-  it("uses the locale's native layout", () => {
-    const iso = '2026-10-30T16:00:00+00:00';
-    expect(plain(formatInstant(iso, BUDAPEST, 'en-US'))).toBe('10/30/2026, 05:00 PM');
-    expect(formatInstant(iso, BUDAPEST, 'en-GB')).toBe('30/10/2026, 17:00');
-    expect(formatInstant(iso, BUDAPEST, 'hu-HU')).toBe('2026. 10. 30. 17:00');
-    expect(formatInstant(iso, BUDAPEST, 'ja-JP')).toBe('2026/10/30 17:00');
+  it('zero-pads every field', () => {
+    expect(formatInstant('2026-01-04T04:05:00+00:00', BUDAPEST, EN)).toBe('2026-01-04 05:05 CET');
+  });
+
+  it('keeps the fixed layout and 24-hour clock for a locale with another layout', () => {
+    expect(formatInstant('2026-10-30T16:00:00+00:00', BUDAPEST, 'en-US')).toMatch(
+      /^2026-10-30 17:00 \S+$/
+    );
   });
 });
 
@@ -40,12 +42,12 @@ describe('formatWindow', () => {
   };
 
   it('formats both ends in the given zone and locale', () => {
-    expect(formatWindow(message, BUDAPEST, 'de-DE')).toBe('05.01.2026, 00:00 – 05.01.2026, 03:00');
+    expect(formatWindow(message, BUDAPEST, EN)).toBe('2026-01-05 00:00 CET – 2026-01-05 03:00 CET');
   });
 
   it('prefixes open-ended windows with From', () => {
-    expect(formatWindow({ ...message, end_time: null }, BUDAPEST, 'de-DE')).toBe(
-      'From 05.01.2026, 00:00'
+    expect(formatWindow({ ...message, end_time: null }, BUDAPEST, EN)).toBe(
+      'From 2026-01-05 00:00 CET'
     );
   });
 });

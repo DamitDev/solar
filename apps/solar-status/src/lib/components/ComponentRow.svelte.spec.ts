@@ -29,6 +29,12 @@ it('keeps the status badge on the first line next to a long name', () => {
   const badge = document.querySelector<HTMLElement>('[data-availability]')!;
   expect(badge.className).toContain('shrink-0');
 
+  // The row is a grid item of the component list; min-w-0 lets the implicit
+  // auto track shrink below the nowrap name's min-content width so the name
+  // truncates instead of overflowing the page at narrow viewports.
+  const row = screen.getByTestId('component-row');
+  expect(row.className).toContain('min-w-0');
+
   // Name column and badge share one non-wrapping flex line.
   const line = badge.parentElement!;
   expect(line.className).toContain('flex');

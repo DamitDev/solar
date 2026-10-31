@@ -295,9 +295,8 @@ it('renders active messages with body, type and window', async () => {
   expect(items[0]).toHaveTextContent('Core is slow');
   // The page uses the browser's zone and locale: TZ is pinned so the hours do not
   // depend on the runner (a UTC runner would pass the old implementation too),
-  // while the layout and 12h/24h clock follow the runner's default locale.
-  expect(items[0]).toHaveTextContent(/11:00.*(15:00|03:00)/);
-  expect(items[0]).not.toHaveTextContent('UTC');
+  // while the short zone label follows the runner's locale (CET, MEZ, GMT+1, ...).
+  expect(items[0]).toHaveTextContent(/2026-01-04 11:00 (\S+) – 2026-01-04 15:00 \1/);
   expect(items[1]).toHaveTextContent('Resolution');
   expect(items[1]).toHaveTextContent(/From .*11:00/);
   expect(screen.getByRole('heading', { name: 'Messages' })).toBeInTheDocument();

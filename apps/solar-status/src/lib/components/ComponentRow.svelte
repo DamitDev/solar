@@ -16,7 +16,7 @@
   } = $props();
 </script>
 
-<li class="border-b border-zinc-800 py-4" data-testid="component-row">
+<li class="min-w-0 border-b border-zinc-800 py-4" data-testid="component-row">
   <div class="flex items-center justify-between gap-3">
     <div class="flex min-w-0 flex-1 items-baseline gap-x-3">
       <h3 class="min-w-0 truncate font-medium" title={name}>{name}</h3>

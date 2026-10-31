@@ -47,16 +47,30 @@ const ALLOWED_TAGS = [
 ];
 const ALLOWED_ATTR = ['href', 'title', 'target', 'rel'];
 
-const sanitizer = DOMPurify(window);
-sanitizer.addHook('afterSanitizeAttributes', (node) => {
-  if (node.tagName === 'A' && node.hasAttribute('href')) {
-    node.setAttribute('target', '_blank');
-    node.setAttribute('rel', 'noopener noreferrer');
+// The public page is client-rendered (`ssr = false`), so the sanitizer is only
+// needed in the browser. Creating it lazily keeps this module importable in a
+// Node/SSR environment, where `window` does not exist.
+let sanitizer: ReturnType<typeof DOMPurify> | null = null;
+
+function getSanitizer(): ReturnType<typeof DOMPurify> {
+  if (sanitizer === null) {
+    sanitizer = DOMPurify(window);
+    sanitizer.addHook('afterSanitizeAttributes', (node) => {
+      if (node.tagName === 'A' && node.hasAttribute('href')) {
+        node.setAttribute('target', '_blank');
+        node.setAttribute('rel', 'noopener noreferrer');
+      }
+    });
   }
-});
+  return sanitizer;
+}
 
 /** Render a notice body (markdown) to sanitized HTML safe for `{@html}`. */
 export function renderMarkdown(body: string): string {
   const html = parser.parse(body, { async: false });
-  return sanitizer.sanitize(html, { ALLOWED_TAGS, ALLOWED_ATTR });
+  if (typeof window === 'undefined') {
+    // No DOM to sanitize against: render nothing rather than raw HTML.
+    return '';
+  }
+  return getSanitizer().sanitize(html, { ALLOWED_TAGS, ALLOWED_ATTR });
 }

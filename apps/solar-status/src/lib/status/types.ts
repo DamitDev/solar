@@ -108,23 +108,30 @@ export function splitMessages(summary: StatusSummary): {
 }
 
 /**
- * Date and time of `iso` in the browser's own locale and time zone, laid out
- * the way that locale writes them (e.g. `30.10.2026, 17:00` for de-DE,
- * `10/30/2026, 05:00 PM` for en-US). No zone label: the reader sees their own
- * local time.
+ * Date and time of `iso` in the browser's own time zone as
+ * `YYYY-MM-DD HH:mm <short zone label>` (e.g. `2026-10-30 17:00 CET`). The
+ * layout stays fixed so every reader sees the same shape; only the short zone
+ * label follows the locale.
  *
  * `timeZone` and `locale` default to the browser's; they are overridable so
  * tests do not depend on the runner.
  */
 export function formatInstant(iso: string, timeZone?: string, locale?: string): string {
-  return new Intl.DateTimeFormat(locale, {
+  const parts = new Intl.DateTimeFormat(locale, {
     timeZone,
+    calendar: 'gregory',
+    numberingSystem: 'latn',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
-    minute: '2-digit'
-  }).format(new Date(iso));
+    minute: '2-digit',
+    hourCycle: 'h23',
+    timeZoneName: 'short'
+  }).formatToParts(new Date(iso));
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((candidate) => candidate.type === type)?.value ?? '';
+  return `${part('year')}-${part('month')}-${part('day')} ${part('hour')}:${part('minute')} ${part('timeZoneName')}`;
 }
 
 export function formatWindow(message: StatusMessage, timeZone?: string, locale?: string): string {
