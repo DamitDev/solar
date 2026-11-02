@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.gateway import OpenAIGateway
+from app.models import RegistryEntry
 from app.services.model_list_cache import model_list_cache
 
 
@@ -61,3 +62,30 @@ async def test_empty_scope_is_not_the_unrestricted_scope():
         await gw.get_available_models(None)
     assert build.await_count == 2
     assert build.await_args_list[0].args[0] == []
+
+
+def _entry(alias: str) -> RegistryEntry:
+    return RegistryEntry(
+        host_id="host-1",
+        instance_id=f"inst-{alias}",
+        url=f"http://{alias}:8000",
+        api_key="sk-test",
+        model_alias=alias,
+    )
+
+
+def test_registry_fingerprint_changes_with_an_alias():
+    gw = OpenAIGateway()
+    first = gw._registry_fingerprint({"a": [_entry("a")]})
+    second = gw._registry_fingerprint({"b": [_entry("b")]})
+    assert first != second
+
+
+def test_registry_fingerprint_changes_with_the_instance_url():
+    gw = OpenAIGateway()
+    first = _entry("a")
+    moved = _entry("a")
+    moved.url = "http://a:9000"
+    assert gw._registry_fingerprint({"a": [first]}) != gw._registry_fingerprint(
+        {"a": [moved]}
+    )

@@ -90,9 +90,11 @@ def _upstream_headers(
         "X-Solar-Internal": "1",
     }
     if client_ip:
-        # Carry the caller's address through the self-call so the gateway log
-        # records the client, not the loopback hop.
-        headers["X-Forwarded-For"] = client_ip
+        # Carry the caller's address through the self-call in a dedicated
+        # header: uvicorn's proxy-headers middleware would rewrite
+        # X-Forwarded-For into the client scope for a loopback peer, which
+        # hides the loopback peer from the auth exemption.
+        headers["X-Solar-Client-IP"] = client_ip
     if authorization:
         # Forward the caller's credential verbatim; the /v1 hop re-resolves
         # it against the api_keys table (Redis-cached) for scoping/telemetry.

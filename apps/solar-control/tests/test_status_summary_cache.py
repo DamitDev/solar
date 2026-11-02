@@ -30,7 +30,7 @@ async def test_build_reuses_the_response_within_ttl():
         first = await svc.build()
         second = await svc.build()
         assert build.await_count == 1
-    assert first is second
+    assert first.value == second.value == "payload"
     assert first.generated_at != "build-time"
 
 

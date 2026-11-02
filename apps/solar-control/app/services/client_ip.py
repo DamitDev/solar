@@ -18,6 +18,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
+_LOOPBACK = ("127.0.0.1", "::1")
 
 
 @lru_cache(maxsize=8)
@@ -48,6 +49,17 @@ def resolve_client_ip(request: Request) -> str:
     peer = request.client.host if request.client else ""
     if not peer or not _trusted(peer):
         return peer or "unknown"
+    if peer in _LOOPBACK:
+        # The cursor proxy's self-call arrives over loopback with the caller's
+        # address in a dedicated header; X-Forwarded-For would be rewritten
+        # into the client scope by uvicorn's proxy-headers middleware.
+        dedicated = request.headers.get("x-solar-client-ip", "")
+        if dedicated:
+            try:
+                ipaddress.ip_address(dedicated)
+            except ValueError:
+                return peer
+            return dedicated
     forwarded = request.headers.get("x-forwarded-for", "")
     for raw in reversed(
         [part.strip() for part in forwarded.split(",") if part.strip()]

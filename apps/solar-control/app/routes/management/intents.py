@@ -19,6 +19,7 @@ from app.models.intent import (
     IntentResponse,
     IntentUpdate,
 )
+from app.services.status_summary import status_summary_service
 from app.validation import (
     canonicalize_intent_backend,
     validate_intent_create,
@@ -88,6 +89,7 @@ async def create_intent(request: Request, body: IntentCreate) -> IntentResponse:
     )
 
     logger.info("Intent created: id=%s alias=%s", intent.id, intent.alias)
+    status_summary_service.clear_cache()
     # Wake reconciler to process the new intent immediately
     from app.services.reconciliation import reconciler
 
@@ -201,6 +203,7 @@ async def update_intent(
         raise HTTPException(status_code=404, detail="Intent not found")
 
     logger.info("Intent updated: id=%s alias=%s", intent.id, intent.alias)
+    status_summary_service.clear_cache()
     # Wake the reconciler so the change is applied now, not on the next tick
     from app.services.reconciliation import reconciler
 
@@ -232,6 +235,7 @@ async def delete_intent(
     logger.info(
         "Intent deleted: id=%s alias=%s orphan=%s", intent_id, intent.alias, orphan
     )
+    status_summary_service.clear_cache()
     # Wake reconciler to process the deletion immediately
     from app.services.reconciliation import reconciler
 

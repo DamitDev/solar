@@ -73,6 +73,38 @@ class TestVirtualModelRoutes:
         assert data["warnings"] and "planned:8b" in data["warnings"][0]
 
     @pytest.mark.anyio
+    async def test_create_invalidates_both_caches(self, no_cache):
+        created = _vm(targets=("planned:8b",), warnings=[_WARNING])
+        with (
+            patch(
+                "app.routes.management.virtual_models._live_registry",
+                new=AsyncMock(return_value={}),
+            ),
+            patch(
+                "app.routes.management.virtual_models.virtual_model_db.create",
+                new=AsyncMock(return_value=created),
+            ),
+            patch(
+                "app.routes.management.virtual_models.validate_virtual_model",
+                MagicMock(return_value=([], [_WARNING])),
+            ),
+            patch(
+                "app.routes.management.virtual_models.model_list_cache.invalidate"
+            ) as models_invalidated,
+            patch(
+                "app.routes.management.virtual_models.status_summary_service.clear_cache"
+            ) as status_cleared,
+        ):
+            response = _client().post(
+                "/api/virtual-models",
+                json={"name": "team-chat", "targets": ["planned:8b"]},
+                headers=MANAGEMENT_KEY,
+            )
+        assert response.status_code == 201
+        models_invalidated.assert_called_once()
+        status_cleared.assert_called_once()
+
+    @pytest.mark.anyio
     async def test_create_validation_error_422(self, no_cache):
         with (
             patch(

@@ -13,7 +13,13 @@ from app.config import settings
 pytestmark = pytest.mark.anyio
 
 
-def _request(path: str, api_key: str | None, *, internal: bool = False) -> Request:
+def _request(
+    path: str,
+    api_key: str | None,
+    *,
+    internal: bool = False,
+    peer: str = "127.0.0.1",
+) -> Request:
     headers = []
     if api_key is not None:
         headers.append((b"x-api-key", api_key.encode()))
@@ -30,7 +36,7 @@ def _request(path: str, api_key: str | None, *, internal: bool = False) -> Reque
         "query_string": b"",
         "root_path": "",
         "headers": headers,
-        "client": ("127.0.0.1", 12345),
+        "client": (peer, 12345),
         "server": ("test", 80),
     }
     return Request(scope)
@@ -86,6 +92,24 @@ async def test_internal_self_call_is_exempt():
     response = await _call("sk-user", hit, internal=True)
     assert response.status_code == 200
     hit.assert_not_awaited()
+
+
+async def test_internal_header_from_a_non_loopback_peer_is_still_limited():
+    hit = AsyncMock(return_value=(False, 30))
+    request = _request("/v1/models", "sk-user", internal=True, peer="10.42.1.2")
+
+    async def _next(request):
+        return Response("ok")
+
+    with (
+        patch("app.auth.settings.management_api_key", "mgmt-key"),
+        patch("app.auth._resolve_endpoint", new=_resolve_ok),
+        patch("app.auth.rate_limit_store.hit", hit),
+    ):
+        response = await auth_middleware(request, _next)
+
+    assert response.status_code == 429
+    hit.assert_awaited_once()
 
 
 async def test_management_key_is_exempt():

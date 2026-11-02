@@ -57,7 +57,7 @@ MODELS_CACHE_TTL_S=5
 MODELS_FANOUT_CONCURRENCY=8
 MODELS_FANOUT_TIMEOUT_S=2
 STATUS_RESPONSE_CACHE_TTL_S=10
-TRUSTED_PROXY_CIDRS=10.42.0.0/16
+TRUSTED_PROXY_CIDRS=10.42.0.0/16,127.0.0.1/32
 ```
 
 - **MANAGEMENT_API_KEY** - Required for WebUI and management API (host approval, endpoints, gateway stats). Sent as `X-API-Key` or `Authorization: Bearer <key>` (or via Socket.IO `auth` for the `/webui` namespace).
@@ -68,7 +68,7 @@ TRUSTED_PROXY_CIDRS=10.42.0.0/16
 - **MODELS_CACHE_TTL_S** - In-process TTL for the aggregated `/v1/models` payload. A short TTL removes the backend fan-out from the hot path; a registry change shows up within the TTL. Default 5 seconds.
 - **MODELS_FANOUT_CONCURRENCY** / **MODELS_FANOUT_TIMEOUT_S** - Bounded parallel fan-out for the models list: at most N backend probes at once, each bounded by the timeout. A failed or slow alias falls back to its alias entry instead of stalling the list.
 - **STATUS_RESPONSE_CACHE_TTL_S** - In-process TTL for the full public `/api/status` response; a status-message write invalidates it explicitly. Default 10 seconds.
-- **TRUSTED_PROXY_CIDRS** - Comma-separated proxy CIDRs whose `X-Forwarded-For` is trusted for the real client IP. Default the cluster pod CIDR; a header from anywhere else is ignored.
+- **TRUSTED_PROXY_CIDRS** - Comma-separated proxy CIDRs whose `X-Forwarded-For` is trusted for the real client IP. Default `10.42.0.0/16,127.0.0.1/32` (the ingress pods plus the cursor proxy's loopback self-call); a header from anywhere else is ignored.
 
 Gateway API keys are managed through the multi-tenant endpoint system (see `/api/endpoints`).
 

@@ -1,7 +1,6 @@
 """Tests for the bounded parallel fan-out of the models payload."""
 
 import asyncio
-import time
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
@@ -16,9 +15,15 @@ async def test_fanout_runs_in_parallel():
     gw = OpenAIGateway()
     gw.session = AsyncMock()
     gw.session.closed = False
+    in_flight = 0
+    max_in_flight = 0
 
     async def fake(_session, alias, _instances, _semaphore, _timeout):
-        await asyncio.sleep(0.05)
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
         return alias, {alias: {"id": alias}}, {}
 
     with (
@@ -28,11 +33,9 @@ async def test_fanout_runs_in_parallel():
         ),
         patch.object(gw, "_models_for_alias", side_effect=fake),
     ):
-        started = time.perf_counter()
         result = await gw._build_available_models(None)
-        elapsed = time.perf_counter() - started
 
-    assert elapsed < 0.12  # three 50 ms probes run together
+    assert max_in_flight == 3  # all three probes were in flight together
     assert [model["id"] for model in result["data"]] == ["a", "b", "c"]
 
 

@@ -178,28 +178,31 @@ class StatusSummaryService:
 
         A single-flight lock makes a burst of misses trigger one build; the
         deadline starts after the build, and a build that raced an invalidation
-        is returned but not stored. ``generated_at`` is re-stamped to the
-        response time because the status page compares message start times
-        against it.
+        is returned but not stored. ``generated_at`` is re-stamped on every
+        response because the status page compares message start times against it.
         """
         now = time.monotonic()
         if self._response is not None and now < self._response_expires_at:
-            return self._response
+            return self._restamp(self._response)
         async with self._build_lock:
             now = time.monotonic()
             if self._response is not None and now < self._response_expires_at:
-                return self._response
+                return self._restamp(self._response)
             generation = self._generation
-            result = await self._build()
-            result = result.model_copy(
-                update={"generated_at": datetime.now(timezone.utc).isoformat()}
-            )
+            result = self._restamp(await self._build())
             if generation == self._generation:
                 self._response = result
                 self._response_expires_at = (
                     time.monotonic() + settings.status_response_cache_ttl_s
                 )
             return result
+
+    @staticmethod
+    def _restamp(summary: StatusSummary) -> StatusSummary:
+        """Stamp ``generated_at`` with the response time, not the build time."""
+        return summary.model_copy(
+            update={"generated_at": datetime.now(timezone.utc).isoformat()}
+        )
 
     async def _cached(self, key: Any, loader: Callable[[], Awaitable[Any]]) -> Any:
         """Reuse a history aggregation for ``status_history_cache_ttl_s``."""

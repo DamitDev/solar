@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # Redis). The edge's per-IP cap owns volume; this owns identity. Fails
     # open when Redis is unavailable: availability wins over the limiter.
     rate_limit_enabled: bool = True
-    rate_limit_rpm: int = 300
+    rate_limit_rpm: int = Field(default=300, ge=1)
 
     # Comma-separated proxy CIDRs whose X-Forwarded-For is trusted. The
     # ingress pods sit in the cluster pod CIDR, and the cursor proxy's self-call
@@ -160,7 +160,8 @@ class Settings(BaseSettings):
 
     # Public status summary: how long the 90-day uptime aggregation is reused
     # in-process. The endpoint is unauthenticated, so this bounds the history
-    # query rate regardless of traffic; live availability is never cached.
+    # query rate regardless of traffic; the full response cache below is a
+    # separate, shorter layer.
     status_history_cache_ttl_s: float = 60.0
 
     # Full status response cache (seconds): the whole payload is rebuilt on

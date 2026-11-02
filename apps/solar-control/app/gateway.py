@@ -352,6 +352,7 @@ class OpenAIGateway:
                 alias,
                 entry.host_id,
                 entry.instance_id,
+                entry.url,
                 entry.context_size,
                 entry.served_model_name,
                 entry.backend_type,
@@ -928,8 +929,9 @@ class OpenAIGateway:
             cached = model_list_cache.get(scope)
             if cached is not None:
                 return cached
+            generation = model_list_cache.generation
             result = await self._build_available_models(model_patterns)
-            model_list_cache.set(scope, result)
+            model_list_cache.set(scope, result, generation=generation)
             return result
 
     async def _build_available_models(
@@ -1057,7 +1059,10 @@ class OpenAIGateway:
                                 data[model_id] = model
             except Exception:  # noqa: BLE001
                 if alias not in data:
-                    fallback_caps = self._fallback_capabilities(instance.backend_type)
+                    fallback_caps = list(
+                        instance.capabilities
+                        or self._fallback_capabilities(instance.backend_type)
+                    )
                     created = int(datetime.now(timezone.utc).timestamp())
                     data[alias] = {
                         "id": alias,
