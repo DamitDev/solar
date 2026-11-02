@@ -36,8 +36,9 @@ def _client() -> TestClient:
 
 def test_create_invalidates_the_status_cache():
     clear = MagicMock()
-    with patch(f"{DB}.create", new=AsyncMock(return_value=_msg())), patch(
-        f"{CACHE}.clear_cache", clear
+    with (
+        patch(f"{DB}.create", new=AsyncMock(return_value=_msg())),
+        patch(f"{CACHE}.clear_cache", clear),
     ):
         response = _client().post(
             "/api/status-messages",
@@ -55,9 +56,10 @@ def test_create_invalidates_the_status_cache():
 
 def test_update_invalidates_the_status_cache():
     clear = MagicMock()
-    with patch(
-        f"{DB}.update", new=AsyncMock(return_value=_msg(body="Extended"))
-    ), patch(f"{CACHE}.clear_cache", clear):
+    with (
+        patch(f"{DB}.update", new=AsyncMock(return_value=_msg(body="Extended"))),
+        patch(f"{CACHE}.clear_cache", clear),
+    ):
         response = _client().put(
             f"/api/status-messages/{MESSAGE_ID}",
             json={"body": "Extended"},
@@ -69,8 +71,9 @@ def test_update_invalidates_the_status_cache():
 
 def test_delete_invalidates_the_status_cache():
     clear = MagicMock()
-    with patch(f"{DB}.delete", new=AsyncMock(return_value=True)), patch(
-        f"{CACHE}.clear_cache", clear
+    with (
+        patch(f"{DB}.delete", new=AsyncMock(return_value=True)),
+        patch(f"{CACHE}.clear_cache", clear),
     ):
         response = _client().delete(
             f"/api/status-messages/{MESSAGE_ID}", headers=MANAGEMENT_KEY
@@ -81,8 +84,9 @@ def test_delete_invalidates_the_status_cache():
 
 def test_failed_update_does_not_invalidate():
     clear = MagicMock()
-    with patch(f"{DB}.update", new=AsyncMock(return_value=None)), patch(
-        f"{CACHE}.clear_cache", clear
+    with (
+        patch(f"{DB}.update", new=AsyncMock(return_value=None)),
+        patch(f"{CACHE}.clear_cache", clear),
     ):
         response = _client().put(
             f"/api/status-messages/{MESSAGE_ID}",
@@ -95,8 +99,9 @@ def test_failed_update_does_not_invalidate():
 
 def test_failed_delete_does_not_invalidate():
     clear = MagicMock()
-    with patch(f"{DB}.delete", new=AsyncMock(return_value=False)), patch(
-        f"{CACHE}.clear_cache", clear
+    with (
+        patch(f"{DB}.delete", new=AsyncMock(return_value=False)),
+        patch(f"{CACHE}.clear_cache", clear),
     ):
         response = _client().delete(
             f"/api/status-messages/{MESSAGE_ID}", headers=MANAGEMENT_KEY

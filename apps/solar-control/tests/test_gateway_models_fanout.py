@@ -19,10 +19,13 @@ async def test_fanout_runs_in_parallel():
         await asyncio.sleep(0.05)
         return alias, {alias: {"id": alias}}, {}
 
-    with patch(
-        "app.gateway.registry_store.get_registry",
-        AsyncMock(return_value={"a": [object()], "b": [object()], "c": [object()]}),
-    ), patch.object(gw, "_models_for_alias", side_effect=fake):
+    with (
+        patch(
+            "app.gateway.registry_store.get_registry",
+            AsyncMock(return_value={"a": [object()], "b": [object()], "c": [object()]}),
+        ),
+        patch.object(gw, "_models_for_alias", side_effect=fake),
+    ):
         started = time.perf_counter()
         result = await gw._build_available_models(None)
         elapsed = time.perf_counter() - started
@@ -40,10 +43,13 @@ async def test_fanout_merges_per_alias_payloads():
     async def fake(_session, alias, _instances, _semaphore, _timeout):
         return alias, {alias: {"id": alias}}, {alias: {"name": alias}}
 
-    with patch(
-        "app.gateway.registry_store.get_registry",
-        AsyncMock(return_value={"a": [object()], "b": [object()]}),
-    ), patch.object(gw, "_models_for_alias", side_effect=fake):
+    with (
+        patch(
+            "app.gateway.registry_store.get_registry",
+            AsyncMock(return_value={"a": [object()], "b": [object()]}),
+        ),
+        patch.object(gw, "_models_for_alias", side_effect=fake),
+    ):
         result = await gw._build_available_models(None)
 
     assert [model["id"] for model in result["data"]] == ["a", "b"]

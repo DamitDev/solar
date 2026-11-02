@@ -48,9 +48,11 @@ async def _call(api_key: str, hit, *, path: str = "/v1/models"):
     async def _next(request):
         return Response("ok")
 
-    with patch("app.auth.settings.management_api_key", "mgmt-key"), patch(
-        "app.auth._resolve_endpoint", new=_resolve_ok
-    ), patch("app.auth.rate_limit_store.hit", hit):
+    with (
+        patch("app.auth.settings.management_api_key", "mgmt-key"),
+        patch("app.auth._resolve_endpoint", new=_resolve_ok),
+        patch("app.auth.rate_limit_store.hit", hit),
+    ):
         return await auth_middleware(request, _next)
 
 
@@ -79,9 +81,11 @@ async def test_management_key_is_exempt():
     async def _next(request):
         return Response("ok")
 
-    with patch("app.auth.settings.management_api_key", "mgmt-key"), patch(
-        "app.auth._resolve_endpoint", new=_resolve_none
-    ), patch("app.auth.rate_limit_store.hit", hit):
+    with (
+        patch("app.auth.settings.management_api_key", "mgmt-key"),
+        patch("app.auth._resolve_endpoint", new=_resolve_none),
+        patch("app.auth.rate_limit_store.hit", hit),
+    ):
         response = await auth_middleware(request, _next)
 
     assert response.status_code == 200
@@ -95,10 +99,11 @@ async def test_disabled_limiter_does_not_count():
     async def _next(request):
         return Response("ok")
 
-    with patch("app.auth.settings.management_api_key", "mgmt-key"), patch(
-        "app.auth.settings.rate_limit_enabled", False
-    ), patch("app.auth._resolve_endpoint", new=_resolve_ok), patch(
-        "app.auth.rate_limit_store.hit", hit
+    with (
+        patch("app.auth.settings.management_api_key", "mgmt-key"),
+        patch("app.auth.settings.rate_limit_enabled", False),
+        patch("app.auth._resolve_endpoint", new=_resolve_ok),
+        patch("app.auth.rate_limit_store.hit", hit),
     ):
         response = await auth_middleware(request, _next)
 

@@ -935,7 +935,9 @@ class OpenAIGateway:
         timeout = aiohttp.ClientTimeout(total=settings.models_fanout_timeout_s)
         results = await asyncio.gather(
             *(
-                self._models_for_alias(self.session, alias, instances, semaphore, timeout)
+                self._models_for_alias(
+                    self.session, alias, instances, semaphore, timeout
+                )
                 for alias, instances in registry.items()
             )
         )

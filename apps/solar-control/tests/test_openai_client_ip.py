@@ -42,8 +42,6 @@ async def test_chat_keeps_the_peer_for_an_untrusted_caller():
         messages=[ChatMessage(role="user", content="hi")],
     )
     with patch.object(openai_routes.gateway, "route_request", route):
-        await openai_routes.chat_completions(
-            request, _request(peer="198.51.100.9")
-        )
+        await openai_routes.chat_completions(request, _request(peer="198.51.100.9"))
     assert route.await_args is not None
     assert route.await_args.args[3] == "198.51.100.9"

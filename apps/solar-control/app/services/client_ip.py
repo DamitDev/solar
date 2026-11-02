@@ -39,7 +39,9 @@ def resolve_client_ip(request: Request) -> str:
     if not peer or not _trusted(peer):
         return peer or "unknown"
     forwarded = request.headers.get("x-forwarded-for", "")
-    for raw in reversed([part.strip() for part in forwarded.split(",") if part.strip()]):
+    for raw in reversed(
+        [part.strip() for part in forwarded.split(",") if part.strip()]
+    ):
         if not _trusted(raw):
             return raw
     return peer

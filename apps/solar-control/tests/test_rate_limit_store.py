@@ -72,8 +72,9 @@ async def test_hit_is_per_key():
 async def test_hit_uses_a_fixed_minute_window():
     store = RateLimitStore()
     fake = FakeRedis()
-    with patch("app.redis_state.rate_limit.redis_client", return_value=fake), patch(
-        "app.redis_state.rate_limit.time.time", return_value=120.5
+    with (
+        patch("app.redis_state.rate_limit.redis_client", return_value=fake),
+        patch("app.redis_state.rate_limit.time.time", return_value=120.5),
     ):
         await store.hit("key-1", 5)
     assert fake.last_key == "solar:ratelimit:key-1:2"
