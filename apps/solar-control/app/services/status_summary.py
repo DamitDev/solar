@@ -8,8 +8,12 @@ Two independent sources feed every component:
   ``gateway_requests``, so a requestless outage still counts as downtime.
 
 Components are virtual models, aliases (e.g. ``core``, ``wind``) and
-instances of aliases no intent manages. An intent-managed alias carries the
-intent's reconciliation phase instead of listing each replica.
+instances of aliases no intent manages. An intent-managed alias is listed as a
+single component instead of one row per replica, even when it is scaled to zero.
+A manual alias is listed only while a live instance of it exists, so a deleted
+instance does not linger as a "down" row. Instance counts and intent phases stay
+internal: they decide which components exist and their availability, but are not
+published.
 
 The public page is read during incidents, so every source degrades on its own:
 an unreadable registry, history or message table yields empty data and an
@@ -283,7 +287,6 @@ class StatusSummaryService:
         registry = await self._registry()
         live = await self._live(now, registry)
         intent_phase = await self._intent_phase()
-        history = await self._components(start, now)
 
         running_by_alias, total_by_alias = _count_by_alias(live or [])
 
@@ -303,10 +306,21 @@ class StatusSummaryService:
         # Every intent-managed alias is published even when neither the registry
         # nor the history knows it: an intent whose instances all failed to
         # start (or that is still pending) exists only in the intent table, and
-        # its reconciliation phase is the one signal the page must not lose.
-        alias_names = sorted(
-            set(registry or {}) | set(history or []) | set(intent_phase)
-        )
+        # must still surface (as "down") rather than vanish from the page.
+        #
+        # A manual alias, on the other hand, exists only while the live
+        # observation still sees an instance of it. History alone is not enough:
+        # a deleted instance would otherwise linger as a "down" row for the whole
+        # window. When the live source is unreadable, keep the history aliases
+        # instead of hiding components we cannot verify.
+        alias_names = set(registry or {}) | set(intent_phase)
+        if live is not None:
+            alias_names |= {sample.alias for sample in live}
+        else:
+            # Only this fallback needs the history aliases: the live path would
+            # discard the query.
+            alias_names |= set(await self._components(start, now) or [])
+        alias_names = sorted(alias_names)
         aliases = []
         for name in alias_names:
             running = running_by_alias.get(name, 0)
@@ -321,9 +335,6 @@ class StatusSummaryService:
                         total,
                         known=live is not None,
                     ),
-                    instances_running=running,
-                    instances_total=total,
-                    intent_phase=intent_phase.get(name),
                     uptime_pct=pct,
                     history=points,
                 )

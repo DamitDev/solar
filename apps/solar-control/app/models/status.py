@@ -46,12 +46,10 @@ class VirtualModelStatus(ComponentStatus):
 
 
 class AliasStatus(ComponentStatus):
+    # Instance counts and intent phases are deliberately not published: this
+    # model is served unauthenticated. Operators read them from the management
+    # API (/api/instances, /api/intents).
     alias: str
-    instances_running: int
-    instances_total: int
-    # Reconciliation phase of the intent managing this alias (e.g. "ready",
-    # "degraded", "failed"); None for aliases no intent manages.
-    intent_phase: str | None = None
 
 
 class InstanceStatus(ComponentStatus):
