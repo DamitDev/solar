@@ -149,6 +149,11 @@ class Settings(BaseSettings):
     # query rate regardless of traffic; live availability is never cached.
     status_history_cache_ttl_s: float = 60.0
 
+    # Full status response cache (seconds): the whole payload is rebuilt on
+    # every request otherwise, and a flood of unauthenticated reads would pay
+    # that cost each time. A status-message write invalidates it explicitly.
+    status_response_cache_ttl_s: float = 10.0
+
     # Cursor proxy (/cursor/v1, S-059)
     # Self-HTTP target: solar-control's own /v1 gateway on the pod port.
     cursor_upstream_base_url: str = "http://127.0.0.1:8015/v1"

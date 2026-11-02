@@ -157,10 +157,24 @@ class StatusSummaryService:
     def __init__(self) -> None:
         self._cache: dict[Any, Any] = {}
         self._expires_at = 0.0
+        self._response: StatusSummary | None = None
+        self._response_expires_at = 0.0
 
     def clear_cache(self) -> None:
         self._cache = {}
         self._expires_at = 0.0
+        self._response = None
+        self._response_expires_at = 0.0
+
+    async def build(self) -> StatusSummary:
+        """Reuse the whole response for ``status_response_cache_ttl_s``."""
+        now = time.monotonic()
+        if self._response is not None and now < self._response_expires_at:
+            return self._response
+        result = await self._build()
+        self._response = result
+        self._response_expires_at = now + settings.status_response_cache_ttl_s
+        return result
 
     async def _cached(self, key: Any, loader: Callable[[], Awaitable[Any]]) -> Any:
         """Reuse a history aggregation for ``status_history_cache_ttl_s``."""
@@ -277,7 +291,7 @@ class StatusSummaryService:
             logger.warning("Status summary: virtual model read failed", exc_info=True)
             return []
 
-    async def build(self) -> StatusSummary:
+    async def _build(self) -> StatusSummary:
         now = datetime.now(timezone.utc)
         start = window_start(now)
 
