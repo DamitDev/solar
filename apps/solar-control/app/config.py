@@ -25,6 +25,12 @@ class Settings(BaseSettings):
 
     management_api_key: str = "change-me-management"
 
+    # Per-key request rate limit on /v1 and /cursor/v1 (fixed 60 s window in
+    # Redis). The edge's per-IP cap owns volume; this owns identity. Fails
+    # open when Redis is unavailable: availability wins over the limiter.
+    rate_limit_enabled: bool = True
+    rate_limit_rpm: int = 300
+
     registry_refresh_interval_s: float = 2.0
     health_check_interval_s: float = 1.0
     health_ttl_s: float = 3.0

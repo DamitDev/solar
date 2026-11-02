@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.database.endpoints import endpoint_db
+from app.redis_state.rate_limit import rate_limit_store
 
 logger = logging.getLogger(__name__)
 
@@ -239,6 +240,33 @@ async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyp
         resolved = await _resolve_endpoint(api_key)
         if resolved:
             endpoint, api_key_id, api_key_name = resolved
+            if settings.rate_limit_enabled:
+                try:
+                    allowed, retry_after = await rate_limit_store.hit(
+                        api_key_id, settings.rate_limit_rpm
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("Rate limiter unavailable, allowing: %s", e)
+                    allowed, retry_after = True, 0
+                if not allowed:
+                    return JSONResponse(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        content={
+                            "error": {
+                                "message": (
+                                    "Rate limit exceeded: "
+                                    f"{settings.rate_limit_rpm} requests per minute"
+                                ),
+                                "type": "rate_limit_error",
+                                "param": None,
+                                "code": "rate_limit_exceeded",
+                            }
+                        },
+                        headers={
+                            **_CORS_HEADERS,
+                            "Retry-After": str(retry_after),
+                        },
+                    )
             request.state.endpoint = endpoint
             request.state.api_key_id = api_key_id
             request.state.api_key_name = api_key_name
