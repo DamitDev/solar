@@ -23,6 +23,7 @@ from app.models.status_message import (
     StatusMessageResponse,
     StatusMessageUpdate,
 )
+from app.services.status_summary import status_summary_service
 
 router = APIRouter(prefix="/status-messages", tags=["status-messages"])
 
@@ -48,7 +49,9 @@ async def list_status_messages() -> list[StatusMessageResponse]:
 
 @router.post("", response_model=StatusMessageResponse, status_code=201)
 async def create_status_message(body: StatusMessageCreate) -> StatusMessageResponse:
-    return await status_message_db.create(body)
+    created = await status_message_db.create(body)
+    status_summary_service.clear_cache()
+    return created
 
 
 @router.put("/{message_id}", response_model=StatusMessageResponse)
@@ -67,6 +70,7 @@ async def update_status_message(
         ) from exc
     if not updated:
         raise _not_found(message_id)
+    status_summary_service.clear_cache()
     return updated
 
 
@@ -75,4 +79,5 @@ async def delete_status_message(message_id: str) -> dict:
     _require_uuid(message_id)
     if not await status_message_db.delete(message_id):
         raise _not_found(message_id)
+    status_summary_service.clear_cache()
     return {"message": f"Status message '{message_id}' deleted"}
