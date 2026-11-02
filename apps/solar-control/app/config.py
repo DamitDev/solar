@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     health_probe_use_http: bool = False
     health_probe_http_path: str = "/v1/models"
 
+    # Read-path cache for the aggregated /v1/models payload (seconds). The
+    # payload is a fan-out to every registered backend, so a short TTL removes
+    # it from the hot path; a registry change shows up within this TTL.
+    models_cache_ttl_s: float = 5.0
+
     disconnect_grace_period_s: float = 15.0
     reconnect_request_interval_s: float = 30.0
 
