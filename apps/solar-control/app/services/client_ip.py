@@ -47,12 +47,13 @@ def _trusted(address: str) -> bool:
 
 def resolve_client_ip(request: Request) -> str:
     peer = request.client.host if request.client else ""
-    if not peer or not _trusted(peer):
-        return peer or "unknown"
+    if not peer:
+        return "unknown"
     if peer in _LOOPBACK:
         # The cursor proxy's self-call arrives over loopback with the caller's
-        # address in a dedicated header; X-Forwarded-For would be rewritten
-        # into the client scope by uvicorn's proxy-headers middleware.
+        # address in a dedicated header; uvicorn's proxy-headers middleware
+        # would rewrite X-Forwarded-For into the client scope. Loopback is
+        # trusted for this header even when the CIDR list is narrowed.
         dedicated = request.headers.get("x-solar-client-ip", "")
         if dedicated:
             try:
@@ -60,6 +61,8 @@ def resolve_client_ip(request: Request) -> str:
             except ValueError:
                 return peer
             return dedicated
+    if not _trusted(peer):
+        return peer
     forwarded = request.headers.get("x-forwarded-for", "")
     for raw in reversed(
         [part.strip() for part in forwarded.split(",") if part.strip()]

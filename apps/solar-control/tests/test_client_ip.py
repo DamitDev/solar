@@ -5,10 +5,16 @@ from starlette.requests import Request
 from app.services.client_ip import resolve_client_ip
 
 
-def _request(peer: str | None, forwarded: str | None = None) -> Request:
+def _request(
+    peer: str | None,
+    forwarded: str | None = None,
+    dedicated: str | None = None,
+) -> Request:
     headers = []
     if forwarded is not None:
         headers.append((b"x-forwarded-for", forwarded.encode()))
+    if dedicated is not None:
+        headers.append((b"x-solar-client-ip", dedicated.encode()))
     scope = {"type": "http", "headers": headers}
     if peer is not None:
         scope["client"] = (peer, 1234)
@@ -47,3 +53,18 @@ def test_malformed_forwarded_address_falls_back_to_the_peer():
 
 def test_loopback_peer_uses_the_forwarded_address():
     assert resolve_client_ip(_request("127.0.0.1", "203.0.113.5")) == "203.0.113.5"
+
+
+def test_loopback_peer_reads_the_dedicated_header():
+    request = _request("127.0.0.1", dedicated="203.0.113.5")
+    assert resolve_client_ip(request) == "203.0.113.5"
+
+
+def test_loopback_peer_ignores_an_invalid_dedicated_header():
+    request = _request("127.0.0.1", dedicated="not-an-ip")
+    assert resolve_client_ip(request) == "127.0.0.1"
+
+
+def test_non_loopback_peer_ignores_the_dedicated_header():
+    request = _request("10.42.1.2", dedicated="203.0.113.5")
+    assert resolve_client_ip(request) == "10.42.1.2"

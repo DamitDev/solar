@@ -100,3 +100,43 @@ async def test_a_build_that_raced_an_invalidation_is_not_stored():
         gate.set()
         await stale
     assert svc._response is None
+
+
+@pytest.mark.anyio
+async def test_cached_reuses_within_its_ttl(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("app.services.status_summary.time.monotonic", lambda: clock[0])
+    svc = StatusSummaryService()
+    loader = AsyncMock(return_value="value")
+    assert await svc._cached("key", loader) == "value"
+    clock[0] += 30
+    assert await svc._cached("key", loader) == "value"
+    assert loader.await_count == 1
+
+
+@pytest.mark.anyio
+async def test_cached_rebuilds_after_its_ttl(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("app.services.status_summary.time.monotonic", lambda: clock[0])
+    svc = StatusSummaryService()
+    loader = AsyncMock(return_value="value")
+    assert await svc._cached("key", loader) == "value"
+    clock[0] += 61
+    assert await svc._cached("key", loader) == "value"
+    assert loader.await_count == 2
+
+
+@pytest.mark.anyio
+async def test_cached_keys_own_their_deadline(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("app.services.status_summary.time.monotonic", lambda: clock[0])
+    svc = StatusSummaryService()
+    first = AsyncMock(return_value="a")
+    second = AsyncMock(return_value="b")
+    await svc._cached("a", first)
+    clock[0] += 30
+    await svc._cached("b", second)
+    clock[0] += 31
+    await svc._cached("a", first)
+    assert first.await_count == 2
+    assert second.await_count == 1

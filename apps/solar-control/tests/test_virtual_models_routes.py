@@ -105,6 +105,60 @@ class TestVirtualModelRoutes:
         status_cleared.assert_called_once()
 
     @pytest.mark.anyio
+    async def test_update_invalidates_both_caches(self, no_cache):
+        existing = _vm()
+        updated = _vm(name="team-chat")
+        with (
+            patch(
+                "app.routes.management.virtual_models.virtual_model_db.get_by_name",
+                new=AsyncMock(return_value=existing),
+            ),
+            patch(
+                "app.routes.management.virtual_models._validated_create",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "app.routes.management.virtual_models.virtual_model_db.update",
+                new=AsyncMock(return_value=updated),
+            ),
+            patch(
+                "app.routes.management.virtual_models.model_list_cache.invalidate"
+            ) as models_invalidated,
+            patch(
+                "app.routes.management.virtual_models.status_summary_service.clear_cache"
+            ) as status_cleared,
+        ):
+            response = _client().put(
+                "/api/virtual-models/team-chat",
+                json={},
+                headers=MANAGEMENT_KEY,
+            )
+        assert response.status_code == 200
+        models_invalidated.assert_called_once()
+        status_cleared.assert_called_once()
+
+    @pytest.mark.anyio
+    async def test_delete_invalidates_both_caches(self, no_cache):
+        with (
+            patch(
+                "app.routes.management.virtual_models.virtual_model_db.delete",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "app.routes.management.virtual_models.model_list_cache.invalidate"
+            ) as models_invalidated,
+            patch(
+                "app.routes.management.virtual_models.status_summary_service.clear_cache"
+            ) as status_cleared,
+        ):
+            response = _client().delete(
+                "/api/virtual-models/team-chat", headers=MANAGEMENT_KEY
+            )
+        assert response.status_code == 200
+        models_invalidated.assert_called_once()
+        status_cleared.assert_called_once()
+
+    @pytest.mark.anyio
     async def test_create_validation_error_422(self, no_cache):
         with (
             patch(

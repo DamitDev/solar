@@ -2,8 +2,9 @@
 
 Two independent sources feed every component:
 
-- *current availability* is live: the Redis registry plus host snapshot
-  freshness, via the same observation the sampler records;
+- *current availability* comes from the Redis registry plus host snapshot
+  freshness, via the same observation the sampler records; the assembled
+  response is reused for ``status_response_cache_ttl_s``;
 - *uptime history* comes from ``instance_state_history`` only, never from
   ``gateway_requests``, so a requestless outage still counts as downtime.
 
@@ -156,9 +157,9 @@ def visible_messages(
 
 class StatusSummaryService:
     def __init__(self) -> None:
-        self._cache: dict[Any, Any] = {}
-        self._expires_at = 0.0
-        self._locks: dict[Any, asyncio.Lock] = {}
+        # key -> (expires_at, value); every entry owns its deadline, so a new
+        # key cannot extend the life of the aggregations already cached.
+        self._cache: dict[Any, tuple[float, Any]] = {}
         self._response: StatusSummary | None = None
         self._response_expires_at = 0.0
         self._build_lock = asyncio.Lock()
@@ -166,7 +167,6 @@ class StatusSummaryService:
 
     def clear_cache(self) -> None:
         self._cache = {}
-        self._expires_at = 0.0
         self._response = None
         self._response_expires_at = 0.0
         # A build already in flight must not store the pre-write payload
@@ -180,11 +180,20 @@ class StatusSummaryService:
         deadline starts after the build, and a build that raced an invalidation
         is returned but not stored. ``generated_at`` is re-stamped on every
         response because the status page compares message start times against it.
+        The lock wait is bounded: a stuck build must not queue every
+        unauthenticated reader behind it.
         """
         now = time.monotonic()
         if self._response is not None and now < self._response_expires_at:
             return self._restamp(self._response)
-        async with self._build_lock:
+        try:
+            await asyncio.wait_for(
+                self._build_lock.acquire(),
+                timeout=settings.status_cache_wait_timeout_s,
+            )
+        except TimeoutError:
+            return self._restamp(await self._build())
+        try:
             now = time.monotonic()
             if self._response is not None and now < self._response_expires_at:
                 return self._restamp(self._response)
@@ -196,6 +205,8 @@ class StatusSummaryService:
                     time.monotonic() + settings.status_response_cache_ttl_s
                 )
             return result
+        finally:
+            self._build_lock.release()
 
     @staticmethod
     def _restamp(summary: StatusSummary) -> StatusSummary:
@@ -205,19 +216,21 @@ class StatusSummaryService:
         )
 
     async def _cached(self, key: Any, loader: Callable[[], Awaitable[Any]]) -> Any:
-        """Reuse a history aggregation for ``status_history_cache_ttl_s``."""
+        """Reuse a history aggregation for ``status_history_cache_ttl_s``.
+
+        Every key owns its deadline; a slow query must not shorten the window
+        of the aggregations already cached.
+        """
         now = time.monotonic()
-        if now >= self._expires_at:
-            self._cache = {}
-        if key not in self._cache:
-            lock = self._locks.setdefault(key, asyncio.Lock())
-            async with lock:
-                if key not in self._cache:
-                    self._cache[key] = await loader()
-            # Start the TTL after the load: a slow query must not consume
-            # the window it was supposed to fill.
-            self._expires_at = time.monotonic() + settings.status_history_cache_ttl_s
-        return self._cache[key]
+        entry = self._cache.get(key)
+        if entry is not None and now < entry[0]:
+            return entry[1]
+        value = await loader()
+        self._cache[key] = (
+            time.monotonic() + settings.status_history_cache_ttl_s,
+            value,
+        )
+        return value
 
     async def _buckets(
         self,

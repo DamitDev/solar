@@ -171,6 +171,11 @@ class Settings(BaseSettings):
     # this TTL.
     status_response_cache_ttl_s: float = 10.0
 
+    # How long an unauthenticated /api/status reader waits for the single-flight
+    # build lock before it builds its own response; a stuck build must not park
+    # every reader behind it.
+    status_cache_wait_timeout_s: float = 5.0
+
     # Cursor proxy (/cursor/v1, S-059)
     # Self-HTTP target: solar-control's own /v1 gateway on the pod port.
     cursor_upstream_base_url: str = "http://127.0.0.1:8015/v1"

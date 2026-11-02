@@ -40,3 +40,18 @@ def test_invalidate_clears_every_scope():
     cache.invalidate()
     assert cache.get(None) is None
     assert cache.get(("wind",)) is None
+
+
+def test_set_with_a_stale_generation_is_dropped():
+    cache = ModelListCache(ttl_s=60)
+    cache.set(None, {"models": []})
+    stale = cache.generation
+    cache.invalidate()
+    cache.set(None, {"models": [1]}, generation=stale)
+    assert cache.get(None) is None
+
+
+def test_set_with_the_current_generation_is_stored():
+    cache = ModelListCache(ttl_s=60)
+    cache.set(None, {"models": []}, generation=cache.generation)
+    assert cache.get(None) == {"models": []}

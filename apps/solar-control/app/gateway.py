@@ -97,6 +97,9 @@ class OpenAIGateway:
         # dropped only when the registry actually changed.
         self._registry_fp: frozenset[tuple[Any, ...]] = frozenset()
         self._session_lock = asyncio.Lock()
+        # One fan-out semaphore per event loop: it must bound the whole
+        # process, not one build, so concurrent scoped builds share it.
+        self._fanout_semaphores: dict[int, asyncio.Semaphore] = {}
         self._bg_tasks: list[asyncio.Task[None]] = []
         self._pending_tasks: set[asyncio.Task] = set()
         self._stop_event: asyncio.Event | None = None
@@ -332,10 +335,13 @@ class OpenAIGateway:
 
         new_registry = dict(new_model_map)
         fingerprint = self._registry_fingerprint(new_registry)
+        await registry_store.set_registry(new_registry)
+        # Invalidate after the write: a build that starts in the window
+        # between the invalidation and the write would read the old registry
+        # but capture the new generation, and cache the stale payload.
         if fingerprint != self._registry_fp:
             self._registry_fp = fingerprint
             model_list_cache.invalidate()
-        await registry_store.set_registry(new_registry)
 
     @staticmethod
     def _registry_fingerprint(
@@ -350,6 +356,7 @@ class OpenAIGateway:
         return frozenset(
             (
                 alias,
+                index,
                 entry.host_id,
                 entry.instance_id,
                 entry.url,
@@ -359,7 +366,7 @@ class OpenAIGateway:
                 tuple(entry.capabilities or ()),
             )
             for alias, entries in registry.items()
-            for entry in entries
+            for index, entry in enumerate(entries)
         )
 
     @staticmethod
@@ -934,6 +941,20 @@ class OpenAIGateway:
             model_list_cache.set(scope, result, generation=generation)
             return result
 
+    def _fanout_semaphore(self) -> asyncio.Semaphore:
+        """One fan-out semaphore per event loop (one loop per process).
+
+        A per-build semaphore would let two scoped builds run their probes at
+        the same time and multiply the backend load; this one bounds the whole
+        process while staying safe for a test suite that runs a loop per test.
+        """
+        loop_id = id(asyncio.get_running_loop())
+        semaphore = self._fanout_semaphores.get(loop_id)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(max(1, settings.models_fanout_concurrency))
+            self._fanout_semaphores[loop_id] = semaphore
+        return semaphore
+
     async def _build_available_models(
         self, model_patterns: list[str] | None = None
     ) -> dict[str, list[dict[str, Any]]]:
@@ -965,20 +986,32 @@ class OpenAIGateway:
                 alias: insts for alias, insts in registry.items() if alias in allowed
             }
 
-        semaphore = asyncio.Semaphore(max(1, settings.models_fanout_concurrency))
+        semaphore = self._fanout_semaphore()
         timeout = aiohttp.ClientTimeout(total=settings.models_fanout_timeout_s)
-        results = await asyncio.gather(
+        aliases = list(registry)
+        outcomes = await asyncio.gather(
             *(
                 self._models_for_alias(
                     self.session, alias, instances, semaphore, timeout
                 )
                 for alias, instances in registry.items()
-            )
+            ),
+            return_exceptions=True,
         )
 
         data_dict: dict[str, dict[str, Any]] = {}
         ollama_dict: dict[str, dict[str, Any]] = {}
-        for _alias, data, ollama in results:
+        for alias, outcome in zip(aliases, outcomes, strict=True):
+            if isinstance(outcome, BaseException):
+                instances = registry.get(alias) or []
+                instance = instances[0] if instances else None
+                data, ollama = self._alias_fallback(
+                    alias,
+                    instance,
+                    instance.context_size if instance else None,
+                )
+            else:
+                _alias, data, ollama = outcome
             for key, value in data.items():
                 data_dict.setdefault(key, value)
             for key, value in ollama.items():
@@ -1058,47 +1091,55 @@ class OpenAIGateway:
                             if model_id not in data:
                                 data[model_id] = model
             except Exception:  # noqa: BLE001
-                if alias not in data:
-                    fallback_caps = list(
-                        instance.capabilities
-                        or self._fallback_capabilities(instance.backend_type)
-                    )
-                    created = int(datetime.now(timezone.utc).timestamp())
-                    data[alias] = {
-                        "id": alias,
-                        "object": "model",
-                        "created": created,
-                        "owned_by": "solar",
-                        "capabilities": fallback_caps,
-                    }
-                    data[alias] = self._override_context_metadata(
-                        data[alias], context_size
-                    )
-                    if alias not in ollama:
-                        ollama[alias] = {
-                            "name": alias,
-                            "model": alias,
-                            "modified_at": "",
-                            "size": "",
-                            "digest": "",
-                            "type": "model",
-                            "description": "",
-                            "tags": [""],
-                            "capabilities": fallback_caps,
-                            "parameters": "",
-                            "details": {
-                                "parent_model": "",
-                                "format": "",
-                                "family": "",
-                                "families": [""],
-                                "parameter_size": "",
-                                "quantization_level": "",
-                            },
-                        }
-                        ollama[alias] = self._override_context_metadata(
-                            ollama[alias], context_size
-                        )
+                data, ollama = self._alias_fallback(alias, instance, context_size)
         return alias, data, ollama
+
+    def _alias_fallback(
+        self,
+        alias: str,
+        instance: RegistryEntry | None,
+        context_size: int | None,
+    ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+        """Alias-only entry for an alias whose probe failed."""
+        fallback_caps = (
+            list(
+                instance.capabilities
+                or self._fallback_capabilities(instance.backend_type)
+            )
+            if instance is not None
+            else []
+        )
+        created = int(datetime.now(timezone.utc).timestamp())
+        data = {
+            "id": alias,
+            "object": "model",
+            "created": created,
+            "owned_by": "solar",
+            "capabilities": fallback_caps,
+        }
+        data = self._override_context_metadata(data, context_size)
+        ollama = {
+            "name": alias,
+            "model": alias,
+            "modified_at": "",
+            "size": "",
+            "digest": "",
+            "type": "model",
+            "description": "",
+            "tags": [""],
+            "capabilities": fallback_caps,
+            "parameters": "",
+            "details": {
+                "parent_model": "",
+                "format": "",
+                "family": "",
+                "families": [""],
+                "parameter_size": "",
+                "quantization_level": "",
+            },
+        }
+        ollama = self._override_context_metadata(ollama, context_size)
+        return {alias: data}, {alias: ollama}
 
     @staticmethod
     def _fallback_capabilities(backend_type: str) -> list[str]:

@@ -1,7 +1,7 @@
 """Tests for the cached models payload on the gateway."""
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -89,3 +89,47 @@ def test_registry_fingerprint_changes_with_the_instance_url():
     assert gw._registry_fingerprint({"a": [first]}) != gw._registry_fingerprint(
         {"a": [moved]}
     )
+
+
+@pytest.mark.anyio
+async def test_refresh_model_registry_invalidates_on_change():
+    gw = OpenAIGateway()
+    gw.session = AsyncMock()
+    gw.session.closed = False
+    invalidate = MagicMock()
+    fingerprints = iter(["first", "second"])
+    with (
+        patch("app.gateway.host_db.get_all_hosts", AsyncMock(return_value=[])),
+        patch("app.gateway.registry_store.set_registry", AsyncMock()),
+        patch.object(
+            gw,
+            "_registry_fingerprint",
+            side_effect=lambda _registry: next(fingerprints),
+        ),
+        patch("app.gateway.model_list_cache.invalidate", invalidate),
+    ):
+        await gw.refresh_model_registry()
+        await gw.refresh_model_registry()
+    assert invalidate.call_count == 2
+
+
+@pytest.mark.anyio
+async def test_refresh_model_registry_keeps_the_cache_when_unchanged():
+    gw = OpenAIGateway()
+    gw.session = AsyncMock()
+    gw.session.closed = False
+    invalidate = MagicMock()
+    fingerprints = iter(["same", "same"])
+    with (
+        patch("app.gateway.host_db.get_all_hosts", AsyncMock(return_value=[])),
+        patch("app.gateway.registry_store.set_registry", AsyncMock()),
+        patch.object(
+            gw,
+            "_registry_fingerprint",
+            side_effect=lambda _registry: next(fingerprints),
+        ),
+        patch("app.gateway.model_list_cache.invalidate", invalidate),
+    ):
+        await gw.refresh_model_registry()
+        await gw.refresh_model_registry()
+    assert invalidate.call_count == 1
