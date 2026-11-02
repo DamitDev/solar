@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = True
     rate_limit_rpm: int = 300
 
+    # Comma-separated proxy CIDRs whose X-Forwarded-For is trusted. The
+    # ingress pods sit in the cluster pod CIDR; a header from anywhere else
+    # is ignored.
+    trusted_proxy_cidrs: str = "10.42.0.0/16"
+
     registry_refresh_interval_s: float = 2.0
     health_check_interval_s: float = 1.0
     health_ttl_s: float = 3.0
