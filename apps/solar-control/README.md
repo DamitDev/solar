@@ -51,12 +51,24 @@ PORT=8000
 DATABASE_URL=postgresql://solar:solar@localhost:5432/solar_gateway
 REDIS_URL=redis://localhost:6379/0
 ENDPOINT_CACHE_SECRET=
+RATE_LIMIT_ENABLED=true
+RATE_LIMIT_RPM=300
+MODELS_CACHE_TTL_S=5
+MODELS_FANOUT_CONCURRENCY=8
+MODELS_FANOUT_TIMEOUT_S=2
+STATUS_RESPONSE_CACHE_TTL_S=10
+TRUSTED_PROXY_CIDRS=10.42.0.0/16
 ```
 
 - **MANAGEMENT_API_KEY** - Required for WebUI and management API (host approval, endpoints, gateway stats). Sent as `X-API-Key` or `Authorization: Bearer <key>` (or via Socket.IO `auth` for the `/webui` namespace).
 - **DATABASE_URL** - PostgreSQL connection string. Stores hosts, API endpoints, and gateway request logs.
 - **REDIS_URL** - Required. Used for host connection state (sid-to-host, instances, pending hosts), endpoint API key cache, and routing state. Enables stateless operation and multiple replicas.
 - **ENDPOINT_CACHE_SECRET** - HMAC key for hashing API keys inside the endpoint-cache Redis key names (IT Sec #97). Must be identical on every replica, or hashed lookups miss and fall back to Postgres. Unset falls back to a constant — set a real secret in every environment.
+- **RATE_LIMIT_ENABLED** / **RATE_LIMIT_RPM** - Per-key request rate limit on `/v1` and `/cursor/v1` (fixed 60 s window in Redis). Default 300 requests/minute; the management key is exempt. Fails open when Redis is unavailable.
+- **MODELS_CACHE_TTL_S** - In-process TTL for the aggregated `/v1/models` payload. A short TTL removes the backend fan-out from the hot path; a registry change shows up within the TTL. Default 5 seconds.
+- **MODELS_FANOUT_CONCURRENCY** / **MODELS_FANOUT_TIMEOUT_S** - Bounded parallel fan-out for the models list: at most N backend probes at once, each bounded by the timeout. A failed or slow alias falls back to its alias entry instead of stalling the list.
+- **STATUS_RESPONSE_CACHE_TTL_S** - In-process TTL for the full public `/api/status` response; a status-message write invalidates it explicitly. Default 10 seconds.
+- **TRUSTED_PROXY_CIDRS** - Comma-separated proxy CIDRs whose `X-Forwarded-For` is trusted for the real client IP. Default the cluster pod CIDR; a header from anywhere else is ignored.
 
 Gateway API keys are managed through the multi-tenant endpoint system (see `/api/endpoints`).
 
