@@ -50,3 +50,14 @@ async def test_models_list_single_flight():
 
     assert calls == 1
     assert all(result == {"models": [], "data": []} for result in results)
+
+
+@pytest.mark.anyio
+async def test_empty_scope_is_not_the_unrestricted_scope():
+    gw = OpenAIGateway()
+    build = AsyncMock(return_value={"models": [], "data": []})
+    with patch.object(gw, "_build_available_models", build):
+        await gw.get_available_models([])
+        await gw.get_available_models(None)
+    assert build.await_count == 2
+    assert build.await_args_list[0].args[0] == []

@@ -20,6 +20,7 @@ an unreadable registry, history or message table yields empty data and an
 ``unknown`` availability instead of a failed response.
 """
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -157,33 +158,62 @@ class StatusSummaryService:
     def __init__(self) -> None:
         self._cache: dict[Any, Any] = {}
         self._expires_at = 0.0
+        self._locks: dict[Any, asyncio.Lock] = {}
         self._response: StatusSummary | None = None
         self._response_expires_at = 0.0
+        self._build_lock = asyncio.Lock()
+        self._generation = 0
 
     def clear_cache(self) -> None:
         self._cache = {}
         self._expires_at = 0.0
         self._response = None
         self._response_expires_at = 0.0
+        # A build already in flight must not store the pre-write payload
+        # with a fresh deadline after this invalidation.
+        self._generation += 1
 
     async def build(self) -> StatusSummary:
-        """Reuse the whole response for ``status_response_cache_ttl_s``."""
+        """Reuse the whole response for ``status_response_cache_ttl_s``.
+
+        A single-flight lock makes a burst of misses trigger one build; the
+        deadline starts after the build, and a build that raced an invalidation
+        is returned but not stored. ``generated_at`` is re-stamped to the
+        response time because the status page compares message start times
+        against it.
+        """
         now = time.monotonic()
         if self._response is not None and now < self._response_expires_at:
             return self._response
-        result = await self._build()
-        self._response = result
-        self._response_expires_at = now + settings.status_response_cache_ttl_s
-        return result
+        async with self._build_lock:
+            now = time.monotonic()
+            if self._response is not None and now < self._response_expires_at:
+                return self._response
+            generation = self._generation
+            result = await self._build()
+            result = result.model_copy(
+                update={"generated_at": datetime.now(timezone.utc).isoformat()}
+            )
+            if generation == self._generation:
+                self._response = result
+                self._response_expires_at = (
+                    time.monotonic() + settings.status_response_cache_ttl_s
+                )
+            return result
 
     async def _cached(self, key: Any, loader: Callable[[], Awaitable[Any]]) -> Any:
         """Reuse a history aggregation for ``status_history_cache_ttl_s``."""
         now = time.monotonic()
         if now >= self._expires_at:
             self._cache = {}
-            self._expires_at = now + settings.status_history_cache_ttl_s
         if key not in self._cache:
-            self._cache[key] = await loader()
+            lock = self._locks.setdefault(key, asyncio.Lock())
+            async with lock:
+                if key not in self._cache:
+                    self._cache[key] = await loader()
+            # Start the TTL after the load: a slow query must not consume
+            # the window it was supposed to fill.
+            self._expires_at = time.monotonic() + settings.status_history_cache_ttl_s
         return self._cache[key]
 
     async def _buckets(

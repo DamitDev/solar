@@ -33,9 +33,6 @@ class FakeRedis:
     def pipeline(self) -> FakePipeline:
         return FakePipeline(self)
 
-    async def ttl(self, key: str) -> int:
-        return self.ttls.get(key, 60)
-
 
 @pytest.mark.anyio
 async def test_hit_allows_under_the_limit():
@@ -45,6 +42,7 @@ async def test_hit_allows_under_the_limit():
         allowed, retry_after = await store.hit("key-1", 3)
     assert allowed is True
     assert retry_after == 0
+    assert list(fake.ttls.values()) == [120]
 
 
 @pytest.mark.anyio

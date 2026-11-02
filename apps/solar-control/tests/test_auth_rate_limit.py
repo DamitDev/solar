@@ -8,14 +8,17 @@ from fastapi.responses import Response
 from starlette.requests import Request
 
 from app.auth import auth_middleware
+from app.config import settings
 
 pytestmark = pytest.mark.anyio
 
 
-def _request(path: str, api_key: str | None) -> Request:
+def _request(path: str, api_key: str | None, *, internal: bool = False) -> Request:
     headers = []
     if api_key is not None:
         headers.append((b"x-api-key", api_key.encode()))
+    if internal:
+        headers.append((b"x-solar-internal", b"1"))
     scope = {
         "type": "http",
         "asgi": {"version": "3.0"},
@@ -42,8 +45,8 @@ def _resolve_ok(*args, **kwargs):
     return AsyncMock(return_value=(endpoint, "key-1", "default"))(*args, **kwargs)
 
 
-async def _call(api_key: str, hit, *, path: str = "/v1/models"):
-    request = _request(path, api_key)
+async def _call(api_key: str, hit, *, path: str = "/v1/models", internal: bool = False):
+    request = _request(path, api_key, internal=internal)
 
     async def _next(request):
         return Response("ok")
@@ -68,6 +71,21 @@ async def test_under_limit_passes():
     hit = AsyncMock(return_value=(True, 0))
     response = await _call("sk-user", hit)
     assert response.status_code == 200
+    hit.assert_awaited_once_with("key-1", settings.rate_limit_rpm)
+
+
+async def test_cursor_proxy_is_limited_too():
+    hit = AsyncMock(return_value=(False, 30))
+    response = await _call("sk-user", hit, path="/cursor/v1/chat/completions")
+    assert response.status_code == 429
+    assert hit.await_count == 1
+
+
+async def test_internal_self_call_is_exempt():
+    hit = AsyncMock(return_value=(False, 30))
+    response = await _call("sk-user", hit, internal=True)
+    assert response.status_code == 200
+    hit.assert_not_awaited()
 
 
 async def test_management_key_is_exempt():

@@ -93,6 +93,9 @@ class OpenAIGateway:
 
     def __init__(self) -> None:
         self.session: aiohttp.ClientSession | None = None
+        # Fingerprint of the last stored registry; the models payload cache is
+        # dropped only when the registry actually changed.
+        self._registry_fp: frozenset[tuple[Any, ...]] = frozenset()
         self._session_lock = asyncio.Lock()
         self._bg_tasks: list[asyncio.Task[None]] = []
         self._pending_tasks: set[asyncio.Task] = set()
@@ -327,7 +330,36 @@ class OpenAIGateway:
         if failed_host_ids:
             await self._carry_forward_failed_hosts(new_model_map, failed_host_ids)
 
-        await registry_store.set_registry(dict(new_model_map))
+        new_registry = dict(new_model_map)
+        fingerprint = self._registry_fingerprint(new_registry)
+        if fingerprint != self._registry_fp:
+            self._registry_fp = fingerprint
+            model_list_cache.invalidate()
+        await registry_store.set_registry(new_registry)
+
+    @staticmethod
+    def _registry_fingerprint(
+        registry: dict[str, list[RegistryEntry]],
+    ) -> frozenset[tuple[Any, ...]]:
+        """Stable identity of the registry's routable entries.
+
+        Order and list churn must not count as a change; only a different set
+        of aliases, instances or advertised metadata invalidates the cached
+        models payload.
+        """
+        return frozenset(
+            (
+                alias,
+                entry.host_id,
+                entry.instance_id,
+                entry.context_size,
+                entry.served_model_name,
+                entry.backend_type,
+                tuple(entry.capabilities or ()),
+            )
+            for alias, entries in registry.items()
+            for entry in entries
+        )
 
     @staticmethod
     async def _carry_forward_failed_hosts(
@@ -715,7 +747,7 @@ class OpenAIGateway:
                 return None
             url = f"{host.url}/instances/{instance.instance_id}"
             headers = {"X-API-Key": host.api_key}
-            timeout = aiohttp.ClientTimeout(total=3)
+            timeout = aiohttp.ClientTimeout(total=settings.models_fanout_timeout_s)
             async with self.session.get(url, headers=headers, timeout=timeout) as resp:
                 if resp.status != 200:
                     return None
@@ -931,7 +963,7 @@ class OpenAIGateway:
                 alias: insts for alias, insts in registry.items() if alias in allowed
             }
 
-        semaphore = asyncio.Semaphore(settings.models_fanout_concurrency)
+        semaphore = asyncio.Semaphore(max(1, settings.models_fanout_concurrency))
         timeout = aiohttp.ClientTimeout(total=settings.models_fanout_timeout_s)
         results = await asyncio.gather(
             *(

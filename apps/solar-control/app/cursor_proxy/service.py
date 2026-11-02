@@ -78,13 +78,21 @@ def _store_for(config: ProxyConfig) -> ReasoningStore:
     )
 
 
-def _upstream_headers(authorization: str, stream: bool) -> dict[str, str]:
+def _upstream_headers(
+    authorization: str, stream: bool, client_ip: str = ""
+) -> dict[str, str]:
     headers = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream" if stream else "application/json",
         "Accept-Encoding": "identity",
         "User-Agent": "solar-cursor-proxy",
+        # The self-HTTP /v1 hop must not consume a second rate-limit slot.
+        "X-Solar-Internal": "1",
     }
+    if client_ip:
+        # Carry the caller's address through the self-call so the gateway log
+        # records the client, not the loopback hop.
+        headers["X-Forwarded-For"] = client_ip
     if authorization:
         # Forward the caller's credential verbatim; the /v1 hop re-resolves
         # it against the api_keys table (Redis-cached) for scoping/telemetry.
@@ -142,6 +150,7 @@ async def proxy_non_stream(
     authorization: str,
     original_model: str,
     reasoning_effort: str | None = None,
+    client_ip: str = "",
 ) -> tuple[int, str, bytes]:
     """Non-streaming proxy: prepare -> self-HTTP /v1 -> rewrite -> respond."""
     store = _store_for(config)
@@ -152,7 +161,9 @@ async def proxy_non_stream(
     timeout = aiohttp.ClientTimeout(total=config.request_timeout)
     async with session.post(
         _upstream_url(config),
-        headers=_upstream_headers(authorization or "", stream=False),
+        headers=_upstream_headers(
+            authorization or "", stream=False, client_ip=client_ip
+        ),
         data=json.dumps(prepared.payload, ensure_ascii=False).encode("utf-8"),
         timeout=timeout,
     ) as response:
@@ -186,6 +197,7 @@ async def proxy_stream(
     authorization: str,
     original_model: str,
     reasoning_effort: str | None = None,
+    client_ip: str = "",
 ) -> AsyncIterator[bytes]:
     """Streaming proxy mirror of the upstream deepseek-cursor-proxy handler.
 
@@ -201,7 +213,9 @@ async def proxy_stream(
 
     async with session.post(
         _upstream_url(config),
-        headers=_upstream_headers(authorization or "", stream=True),
+        headers=_upstream_headers(
+            authorization or "", stream=True, client_ip=client_ip
+        ),
         data=json.dumps(prepared.payload, ensure_ascii=False).encode("utf-8"),
         timeout=timeout,
     ) as response:

@@ -8,22 +8,32 @@ proxies are stripped from the right, exactly as nginx's real_ip_recursive does.
 """
 
 import ipaddress
+import logging
 from functools import lru_cache
 
 from fastapi import Request
 
 from app.config import settings
 
+logger = logging.getLogger(__name__)
+
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 
 @lru_cache(maxsize=8)
 def _networks(cidrs: str) -> tuple[Network, ...]:
-    return tuple(
-        ipaddress.ip_network(cidr.strip(), strict=False)
-        for cidr in cidrs.split(",")
-        if cidr.strip()
-    )
+    networks: list[Network] = []
+    for cidr in cidrs.split(","):
+        raw = cidr.strip()
+        if not raw:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(raw, strict=False))
+        except ValueError:
+            # A typo in the setting must not turn every /v1 request into a 500;
+            # the worst case is that no proxy is trusted.
+            logger.warning("Ignoring invalid trusted proxy CIDR: %s", raw)
+    return tuple(networks)
 
 
 def _trusted(address: str) -> bool:
@@ -43,5 +53,11 @@ def resolve_client_ip(request: Request) -> str:
         [part.strip() for part in forwarded.split(",") if part.strip()]
     ):
         if not _trusted(raw):
+            try:
+                ipaddress.ip_address(raw)
+            except ValueError:
+                # A trusted peer can put anything in the header; never record
+                # an unparseable value as the client address.
+                return peer
             return raw
     return peer

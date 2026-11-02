@@ -5,11 +5,14 @@ from starlette.requests import Request
 from app.services.client_ip import resolve_client_ip
 
 
-def _request(peer: str, forwarded: str | None = None) -> Request:
+def _request(peer: str | None, forwarded: str | None = None) -> Request:
     headers = []
     if forwarded is not None:
         headers.append((b"x-forwarded-for", forwarded.encode()))
-    return Request({"type": "http", "client": (peer, 1234), "headers": headers})
+    scope = {"type": "http", "headers": headers}
+    if peer is not None:
+        scope["client"] = (peer, 1234)
+    return Request(scope)
 
 
 def test_trusted_peer_uses_the_forwarded_address():
@@ -30,4 +33,17 @@ def test_missing_header_returns_the_peer():
 
 
 def test_missing_peer_returns_unknown():
-    assert resolve_client_ip(_request("")) == "unknown"
+    assert resolve_client_ip(_request(None)) == "unknown"
+
+
+def test_ipv6_forwarded_address_is_used():
+    assert resolve_client_ip(_request("10.42.1.2", "2001:db8::5")) == "2001:db8::5"
+
+
+def test_malformed_forwarded_address_falls_back_to_the_peer():
+    request = _request("10.42.1.2", "not-an-ip")
+    assert resolve_client_ip(request) == "10.42.1.2"
+
+
+def test_loopback_peer_uses_the_forwarded_address():
+    assert resolve_client_ip(_request("127.0.0.1", "203.0.113.5")) == "203.0.113.5"

@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Under pytest, never read the developer-local .env — the test suite must
@@ -32,9 +33,11 @@ class Settings(BaseSettings):
     rate_limit_rpm: int = 300
 
     # Comma-separated proxy CIDRs whose X-Forwarded-For is trusted. The
-    # ingress pods sit in the cluster pod CIDR; a header from anywhere else
-    # is ignored.
-    trusted_proxy_cidrs: str = "10.42.0.0/16"
+    # ingress pods sit in the cluster pod CIDR, and the cursor proxy's self-call
+    # arrives over loopback; a header from anywhere else is ignored. Any pod in
+    # this CIDR can still forge the recorded client address, so narrow the range
+    # to the ingress pods where the cluster allows it.
+    trusted_proxy_cidrs: str = "10.42.0.0/16,127.0.0.1/32"
 
     registry_refresh_interval_s: float = 2.0
     health_check_interval_s: float = 1.0
@@ -56,8 +59,8 @@ class Settings(BaseSettings):
     # Bounded parallel fan-out for the /v1/models payload: at most this many
     # backend probes at once, each bounded by this timeout; an alias that fails
     # or times out falls back to its alias entry instead of stalling the list.
-    models_fanout_concurrency: int = 8
-    models_fanout_timeout_s: float = 2.0
+    models_fanout_concurrency: int = Field(default=8, ge=1)
+    models_fanout_timeout_s: float = Field(default=2.0, gt=0)
 
     disconnect_grace_period_s: float = 15.0
     reconnect_request_interval_s: float = 30.0
@@ -162,7 +165,9 @@ class Settings(BaseSettings):
 
     # Full status response cache (seconds): the whole payload is rebuilt on
     # every request otherwise, and a flood of unauthenticated reads would pay
-    # that cost each time. A status-message write invalidates it explicitly.
+    # that cost each time. A status-message write invalidates the writer
+    # replica explicitly; the other replicas serve the old payload for at most
+    # this TTL.
     status_response_cache_ttl_s: float = 10.0
 
     # Cursor proxy (/cursor/v1, S-059)

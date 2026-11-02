@@ -29,7 +29,13 @@ class ModelListCache:
         return None
 
     def set(self, scope: tuple[str, ...] | None, payload: dict[str, Any]) -> None:
-        self._entries[scope] = (time.monotonic() + self._ttl_s, payload)
+        now = time.monotonic()
+        # Drop expired scopes so a long-lived process does not accumulate one
+        # entry per endpoint scope it has ever served.
+        self._entries = {
+            key: entry for key, entry in self._entries.items() if now < entry[0]
+        }
+        self._entries[scope] = (now + self._ttl_s, payload)
 
     def lock(self, scope: tuple[str, ...] | None) -> asyncio.Lock:
         """Per-scope single-flight lock."""
