@@ -19,7 +19,7 @@ class ModelListCache:
     def __init__(self, ttl_s: float) -> None:
         self._ttl_s = ttl_s
         self._entries: dict[tuple[str, ...] | None, tuple[float, dict[str, Any]]] = {}
-        self._locks: dict[tuple[str, ...] | None, asyncio.Lock] = {}
+        self._locks: dict[tuple[tuple[str, ...] | None, int], asyncio.Lock] = {}
         self._generation = 0
 
     @property
@@ -52,12 +52,12 @@ class ModelListCache:
         self._entries[scope] = (now + self._ttl_s, payload)
 
     def lock(self, scope: tuple[str, ...] | None) -> asyncio.Lock:
-        """Per-scope single-flight lock."""
-        return self._locks.setdefault(scope, asyncio.Lock())
+        """Per-scope single-flight lock, bound to the running event loop."""
+        key = (scope, id(asyncio.get_running_loop()))
+        return self._locks.setdefault(key, asyncio.Lock())
 
     def invalidate(self) -> None:
         self._entries.clear()
-        self._locks.clear()
         self._generation += 1
 
 
