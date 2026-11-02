@@ -21,6 +21,20 @@ def _seed_empty_virtual_model_cache():
     virtual_model_cache.invalidate()
 
 
+@pytest.fixture(autouse=True)
+def _clear_model_list_cache():
+    """Default the models-list cache to empty for every test.
+
+    The payload cache is module-level and per-process; without a clear a test
+    could observe a previous test's payload and skip its own fan-out.
+    """
+    from app.services.model_list_cache import model_list_cache
+
+    model_list_cache.invalidate()
+    yield
+    model_list_cache.invalidate()
+
+
 @pytest.fixture
 def repo_settings():
     """Patch ``app.model_resolvers.repo.settings`` with sensible defaults.
