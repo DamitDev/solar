@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     # it from the hot path; a registry change shows up within this TTL.
     models_cache_ttl_s: float = 5.0
 
+    # Bounded parallel fan-out for the /v1/models payload: at most this many
+    # backend probes at once, each bounded by this timeout; an alias that fails
+    # or times out falls back to its alias entry instead of stalling the list.
+    models_fanout_concurrency: int = 8
+    models_fanout_timeout_s: float = 2.0
+
     disconnect_grace_period_s: float = 15.0
     reconnect_request_interval_s: float = 30.0
 

@@ -23,6 +23,7 @@ from app.models import HostStatus, RegistryEntry, WSMessageType
 from app.models.virtual_model import VirtualModelContract
 from app.redis_state import health_store, host_store, registry_store, routing_store
 from app.services.model_access import filter_aliases_for_patterns
+from app.services.model_list_cache import model_list_cache
 from app.services.virtual_model_cache import virtual_model_cache
 from app.services.virtual_model_contract import contract_violation
 
@@ -881,6 +882,27 @@ class OpenAIGateway:
     async def get_available_models(
         self, model_patterns: list[str] | None = None
     ) -> dict[str, list[dict[str, Any]]]:
+        """Cached aggregate /v1/models for the key's model scope.
+
+        The cache is keyed by the sorted ``model_patterns`` (``None`` when the
+        key is unscoped), and a per-scope lock makes a burst of misses trigger
+        one build instead of one fan-out per request.
+        """
+        scope = tuple(sorted(model_patterns)) if model_patterns is not None else None
+        cached = model_list_cache.get(scope)
+        if cached is not None:
+            return cached
+        async with model_list_cache.lock(scope):
+            cached = model_list_cache.get(scope)
+            if cached is not None:
+                return cached
+            result = await self._build_available_models(model_patterns)
+            model_list_cache.set(scope, result)
+            return result
+
+    async def _build_available_models(
+        self, model_patterns: list[str] | None = None
+    ) -> dict[str, list[dict[str, Any]]]:
         """Aggregate /v1/models from all registered upstream instances.
 
         Returns a dict with both an Ollama-style ``models`` array and an
@@ -893,6 +915,10 @@ class OpenAIGateway:
 
         ``model_patterns`` (model scope) restricts which registry aliases are
         advertised; ``None`` keeps the response unrestricted.
+
+        The per-alias probes run in parallel under a semaphore and a bounded
+        timeout: one slow backend cannot stall the list, and a failed alias
+        falls back to its alias entry.
         """
         await self._ensure_session()
         if not self.session:
@@ -904,21 +930,54 @@ class OpenAIGateway:
             registry = {
                 alias: insts for alias, insts in registry.items() if alias in allowed
             }
+
+        semaphore = asyncio.Semaphore(settings.models_fanout_concurrency)
+        timeout = aiohttp.ClientTimeout(total=settings.models_fanout_timeout_s)
+        results = await asyncio.gather(
+            *(
+                self._models_for_alias(self.session, alias, instances, semaphore, timeout)
+                for alias, instances in registry.items()
+            )
+        )
+
         data_dict: dict[str, dict[str, Any]] = {}
         ollama_dict: dict[str, dict[str, Any]] = {}
+        for _alias, data, ollama in results:
+            for key, value in data.items():
+                data_dict.setdefault(key, value)
+            for key, value in ollama.items():
+                ollama_dict.setdefault(key, value)
 
-        for alias, instances in registry.items():
-            if not instances:
-                continue
-            instance = instances[0]
+        result = {
+            "models": list(ollama_dict.values()),
+            "data": list(data_dict.values()),
+        }
+        await self._append_virtual_entries(result, model_patterns)
+        return result
+
+    async def _models_for_alias(
+        self,
+        session: aiohttp.ClientSession,
+        alias: str,
+        instances: list[RegistryEntry],
+        semaphore: asyncio.Semaphore,
+        timeout: aiohttp.ClientTimeout,
+    ) -> tuple[str, dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+        """Probe one alias's backend; fall back to the alias on failure."""
+        data: dict[str, dict[str, Any]] = {}
+        ollama: dict[str, dict[str, Any]] = {}
+        if not instances:
+            return alias, data, ollama
+        instance = instances[0]
+        async with semaphore:
             context_size = instance.context_size
             if context_size is None:
                 context_size = await self._fetch_instance_context_size(instance)
             try:
                 url = f"{instance.url}/v1/models"
                 headers = {"Authorization": f"Bearer {instance.api_key}"}
-                async with self.session.get(
-                    url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)
+                async with session.get(
+                    url, headers=headers, timeout=timeout
                 ) as response:
                     if response.status == 200:
                         payload = self._restore_alias_in_models(
@@ -931,8 +990,8 @@ class OpenAIGateway:
                             if not isinstance(m, dict):
                                 continue
                             name = m.get("name") or m.get("model")
-                            if name and name not in ollama_dict:
-                                ollama_dict[name] = self._override_context_metadata(
+                            if name and name not in ollama:
+                                ollama[name] = self._override_context_metadata(
                                     m, context_size
                                 )
                             caps = m.get("capabilities")
@@ -960,24 +1019,24 @@ class OpenAIGateway:
                                     "capabilities": instance.capabilities,
                                 }
                             model = self._override_context_metadata(model, context_size)
-                            if model_id not in data_dict:
-                                data_dict[model_id] = model
+                            if model_id not in data:
+                                data[model_id] = model
             except Exception:  # noqa: BLE001
-                if alias not in data_dict:
+                if alias not in data:
                     fallback_caps = self._fallback_capabilities(instance.backend_type)
                     created = int(datetime.now(timezone.utc).timestamp())
-                    data_dict[alias] = {
+                    data[alias] = {
                         "id": alias,
                         "object": "model",
                         "created": created,
                         "owned_by": "solar",
                         "capabilities": fallback_caps,
                     }
-                    data_dict[alias] = self._override_context_metadata(
-                        data_dict[alias], context_size
+                    data[alias] = self._override_context_metadata(
+                        data[alias], context_size
                     )
-                    if alias not in ollama_dict:
-                        ollama_dict[alias] = {
+                    if alias not in ollama:
+                        ollama[alias] = {
                             "name": alias,
                             "model": alias,
                             "modified_at": "",
@@ -997,16 +1056,10 @@ class OpenAIGateway:
                                 "quantization_level": "",
                             },
                         }
-                        ollama_dict[alias] = self._override_context_metadata(
-                            ollama_dict[alias], context_size
+                        ollama[alias] = self._override_context_metadata(
+                            ollama[alias], context_size
                         )
-
-        result = {
-            "models": list(ollama_dict.values()),
-            "data": list(data_dict.values()),
-        }
-        await self._append_virtual_entries(result, model_patterns)
-        return result
+        return alias, data, ollama
 
     @staticmethod
     def _fallback_capabilities(backend_type: str) -> list[str]:
