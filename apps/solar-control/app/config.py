@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Under pytest, never read the developer-local .env — the test suite must
@@ -25,6 +26,19 @@ class Settings(BaseSettings):
 
     management_api_key: str = "change-me-management"
 
+    # Per-key request rate limit on /v1 and /cursor/v1 (fixed 60 s window in
+    # Redis). The edge's per-IP cap owns volume; this owns identity. Fails
+    # open when Redis is unavailable: availability wins over the limiter.
+    rate_limit_enabled: bool = True
+    rate_limit_rpm: int = Field(default=300, ge=1)
+
+    # Comma-separated proxy CIDRs whose X-Forwarded-For is trusted. The
+    # ingress pods sit in the cluster pod CIDR, and the cursor proxy's self-call
+    # arrives over loopback; a header from anywhere else is ignored. Any pod in
+    # this CIDR can still forge the recorded client address, so narrow the range
+    # to the ingress pods where the cluster allows it.
+    trusted_proxy_cidrs: str = "10.42.0.0/16,127.0.0.1/32"
+
     registry_refresh_interval_s: float = 2.0
     health_check_interval_s: float = 1.0
     health_ttl_s: float = 3.0
@@ -36,6 +50,17 @@ class Settings(BaseSettings):
 
     health_probe_use_http: bool = False
     health_probe_http_path: str = "/v1/models"
+
+    # Read-path cache for the aggregated /v1/models payload (seconds). The
+    # payload is a fan-out to every registered backend, so a short TTL removes
+    # it from the hot path; a registry change shows up within this TTL.
+    models_cache_ttl_s: float = 5.0
+
+    # Bounded parallel fan-out for the /v1/models payload: at most this many
+    # backend probes at once, each bounded by this timeout; an alias that fails
+    # or times out falls back to its alias entry instead of stalling the list.
+    models_fanout_concurrency: int = Field(default=8, ge=1)
+    models_fanout_timeout_s: float = Field(default=2.0, gt=0)
 
     disconnect_grace_period_s: float = 15.0
     reconnect_request_interval_s: float = 30.0
@@ -135,8 +160,21 @@ class Settings(BaseSettings):
 
     # Public status summary: how long the 90-day uptime aggregation is reused
     # in-process. The endpoint is unauthenticated, so this bounds the history
-    # query rate regardless of traffic; live availability is never cached.
+    # query rate regardless of traffic; the full response cache below is a
+    # separate, shorter layer.
     status_history_cache_ttl_s: float = 60.0
+
+    # Full status response cache (seconds): the whole payload is rebuilt on
+    # every request otherwise, and a flood of unauthenticated reads would pay
+    # that cost each time. A status-message write invalidates the writer
+    # replica explicitly; the other replicas serve the old payload for at most
+    # this TTL.
+    status_response_cache_ttl_s: float = 10.0
+
+    # How long an unauthenticated /api/status reader waits for the single-flight
+    # build lock before it builds its own response; a stuck build must not park
+    # every reader behind it.
+    status_cache_wait_timeout_s: float = 5.0
 
     # Cursor proxy (/cursor/v1, S-059)
     # Self-HTTP target: solar-control's own /v1 gateway on the pod port.

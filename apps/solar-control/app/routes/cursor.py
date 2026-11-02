@@ -23,6 +23,7 @@ from app.cursor_proxy.service import (
     proxy_non_stream,
     proxy_stream,
 )
+from app.services.client_ip import resolve_client_ip
 
 logger = logging.getLogger("app.cursor_proxy")
 router = APIRouter(prefix="/cursor/v1", tags=["cursor"])
@@ -111,6 +112,7 @@ async def chat_completions(client: Request):
                     authorization,
                     original_model=model,
                     reasoning_effort=effort,
+                    client_ip=resolve_client_ip(client),
                 ):
                     yield chunk
             except CursorProxyUpstreamError as exc:
@@ -134,6 +136,7 @@ async def chat_completions(client: Request):
             authorization,
             original_model=model,
             reasoning_effort=effort,
+            client_ip=resolve_client_ip(client),
         )
     except CursorProxyUpstreamError as exc:
         return Response(

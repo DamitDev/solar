@@ -20,6 +20,7 @@ from app.models import (
     EmbeddingRequest,
     RerankRequest,
 )
+from app.services.client_ip import resolve_client_ip
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["openai"])
@@ -147,7 +148,7 @@ async def list_models(client: Request):
 @router.post("/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, client: Request):
     try:
-        client_ip = client.client.host if client.client else "unknown"
+        client_ip = resolve_client_ip(client)
         endpoint_id = _get_endpoint_id(client)
         api_key_id, api_key_name = _get_api_key_attribution(client)
         model_patterns = _model_patterns(client)
@@ -187,7 +188,7 @@ async def chat_completions(request: ChatCompletionRequest, client: Request):
 @router.post("/completions")
 async def completions(request: CompletionRequest, client: Request):
     try:
-        client_ip = client.client.host if client.client else "unknown"
+        client_ip = resolve_client_ip(client)
         endpoint_id = _get_endpoint_id(client)
         api_key_id, api_key_name = _get_api_key_attribution(client)
         model_patterns = _model_patterns(client)
@@ -227,7 +228,7 @@ async def completions(request: CompletionRequest, client: Request):
 @router.post("/classify")
 async def classify(request: ClassifyRequest, client: Request):
     try:
-        client_ip = client.client.host if client.client else "unknown"
+        client_ip = resolve_client_ip(client)
         endpoint_id = _get_endpoint_id(client)
         api_key_id, api_key_name = _get_api_key_attribution(client)
         model_patterns = _model_patterns(client)
@@ -255,7 +256,7 @@ async def classify(request: ClassifyRequest, client: Request):
 @router.post("/embeddings")
 async def embeddings(request: EmbeddingRequest, client: Request):
     try:
-        client_ip = client.client.host if client.client else "unknown"
+        client_ip = resolve_client_ip(client)
         endpoint_id = _get_endpoint_id(client)
         api_key_id, api_key_name = _get_api_key_attribution(client)
         model_patterns = _model_patterns(client)
@@ -283,7 +284,7 @@ async def embeddings(request: EmbeddingRequest, client: Request):
 @router.post("/rerank")
 async def rerank(request: RerankRequest, client: Request):
     try:
-        client_ip = client.client.host if client.client else "unknown"
+        client_ip = resolve_client_ip(client)
         endpoint_id = _get_endpoint_id(client)
         api_key_id, api_key_name = _get_api_key_attribution(client)
         model_patterns = _model_patterns(client)

@@ -56,4 +56,4 @@ HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:${PORT}/health')" || exit 1
 
 ENTRYPOINT ["./entrypoint.sh"]
-CMD ["sh", "-c", "uvicorn app.main:sio_asgi_app --host $HOST --port $PORT"]
+CMD ["sh", "-c", "uvicorn app.main:sio_asgi_app --host $HOST --port $PORT --forwarded-allow-ips=127.0.0.1"]

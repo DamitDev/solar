@@ -577,6 +577,102 @@ async def test_create_intent_success(valid_intent_create, mock_intent_response):
 
 
 @pytest.mark.anyio
+async def test_create_intent_invalidates_the_status_cache(
+    valid_intent_create, mock_intent_response
+):
+    """A new intent changes the status page's component list."""
+    from fastapi.testclient import TestClient
+
+    with (
+        patch(
+            "app.routes.management.intents.intent_db.create_intent",
+            new=AsyncMock(return_value=mock_intent_response),
+        ),
+        patch(
+            "app.routes.management.intents.intent_db.check_alias_conflict",
+            new=AsyncMock(return_value=False),
+        ),
+        patch(
+            "app.routes.management.intents.status_summary_service.clear_cache"
+        ) as status_cleared,
+    ):
+        from app.main import app
+
+        response = TestClient(app).post(
+            "/api/intents",
+            json=valid_intent_create.model_dump(),
+            headers={"X-API-Key": "change-me-management"},
+        )
+
+    assert response.status_code == 201
+    status_cleared.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_update_intent_invalidates_the_status_cache(
+    valid_intent_create, mock_intent_response
+):
+    """An updated intent can change the status page's availability."""
+    from fastapi.testclient import TestClient
+
+    with (
+        patch(
+            "app.routes.management.intents.intent_db.get_intent",
+            new=AsyncMock(return_value=mock_intent_response),
+        ),
+        patch(
+            "app.services.intent_validation.validate_intent_fleet",
+            new=AsyncMock(return_value=([], [])),
+        ),
+        patch(
+            "app.routes.management.intents.intent_db.check_alias_conflict",
+            new=AsyncMock(return_value=False),
+        ),
+        patch(
+            "app.routes.management.intents.intent_db.update_intent",
+            new=AsyncMock(return_value=mock_intent_response),
+        ),
+        patch(
+            "app.routes.management.intents.status_summary_service.clear_cache"
+        ) as status_cleared,
+    ):
+        from app.main import app
+
+        response = TestClient(app).put(
+            "/api/intents/intent-1",
+            json=valid_intent_create.model_dump(),
+            headers={"X-API-Key": "change-me-management"},
+        )
+
+    assert response.status_code == 200
+    status_cleared.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_delete_intent_invalidates_the_status_cache(mock_intent_response):
+    """A deleted intent removes its row from the status page."""
+    from fastapi.testclient import TestClient
+
+    with (
+        patch(
+            "app.routes.management.intents.intent_db.soft_delete_intent",
+            new=AsyncMock(return_value=mock_intent_response),
+        ),
+        patch(
+            "app.routes.management.intents.status_summary_service.clear_cache"
+        ) as status_cleared,
+    ):
+        from app.main import app
+
+        response = TestClient(app).delete(
+            "/api/intents/intent-1", headers={"X-API-Key": "change-me-management"}
+        )
+
+    assert response.status_code == 202
+    status_cleared.assert_called_once()
+
+
+@pytest.mark.anyio
 async def test_create_intent_response_carries_resolved_gpu_count():
     """POST /api/intents persists and returns the resolved gpu_count.
 

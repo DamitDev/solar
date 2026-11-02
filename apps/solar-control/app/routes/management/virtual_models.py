@@ -17,6 +17,8 @@ from app.models.virtual_model import (
     VirtualModelUpdate,
 )
 from app.redis_state import registry_store
+from app.services.model_list_cache import model_list_cache
+from app.services.status_summary import status_summary_service
 from app.services.virtual_model_cache import virtual_model_cache
 from app.services.virtual_model_contract import enrich_target_status
 from app.services.virtual_model_validation import (
@@ -60,6 +62,8 @@ async def create_virtual_model(body: VirtualModelCreate) -> VirtualModelResponse
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     virtual_model_cache.invalidate()
+    model_list_cache.invalidate()
+    status_summary_service.clear_cache()
     return created.model_copy(update={"warnings": warnings})
 
 
@@ -85,6 +89,8 @@ async def update_virtual_model(
     if not updated:  # pragma: no cover - raced delete
         raise HTTPException(status_code=404, detail=f"Virtual model '{name}' not found")
     virtual_model_cache.invalidate()
+    model_list_cache.invalidate()
+    status_summary_service.clear_cache()
     return updated
 
 
@@ -94,4 +100,6 @@ async def delete_virtual_model(name: str) -> dict:
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Virtual model '{name}' not found")
     virtual_model_cache.invalidate()
+    model_list_cache.invalidate()
+    status_summary_service.clear_cache()
     return {"message": f"Virtual model '{name}' deleted"}

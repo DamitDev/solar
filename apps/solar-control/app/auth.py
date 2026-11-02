@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.database.endpoints import endpoint_db
+from app.redis_state.rate_limit import rate_limit_store
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,27 @@ def _extract_api_key(request: Request) -> str | None:
     if auth and auth.startswith("Bearer "):
         return auth[7:]
     return None
+
+
+# The cursor proxy calls the app's own /v1 over loopback; that self-call must
+# not consume a second rate-limit slot. The header is trusted only from the
+# loopback peer, so a client cannot claim it through the ingress.
+_LOOPBACK = ("127.0.0.1", "::1")
+_WARNED_LIMITER = False
+
+
+def _is_internal_self_call(request: Request) -> bool:
+    peer = request.client.host if request.client else ""
+    return peer in _LOOPBACK and request.headers.get("x-solar-internal") == "1"
+
+
+def _warn_limiter_once(exc: Exception) -> None:
+    """Log the fail-open path once per process, not once per request."""
+    global _WARNED_LIMITER
+    if _WARNED_LIMITER:
+        return
+    _WARNED_LIMITER = True
+    logger.warning("Rate limiter unavailable, allowing requests: %s", exc)
 
 
 _UNAUTHORIZED_RESPONSE = {
@@ -239,6 +261,33 @@ async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyp
         resolved = await _resolve_endpoint(api_key)
         if resolved:
             endpoint, api_key_id, api_key_name = resolved
+            if settings.rate_limit_enabled and not _is_internal_self_call(request):
+                try:
+                    allowed, retry_after = await rate_limit_store.hit(
+                        api_key_id, settings.rate_limit_rpm
+                    )
+                except Exception as e:  # noqa: BLE001
+                    _warn_limiter_once(e)
+                    allowed, retry_after = True, 0
+                if not allowed:
+                    return JSONResponse(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        content={
+                            "error": {
+                                "message": (
+                                    "Rate limit exceeded: "
+                                    f"{settings.rate_limit_rpm} requests per minute"
+                                ),
+                                "type": "rate_limit_error",
+                                "param": None,
+                                "code": "rate_limit_exceeded",
+                            }
+                        },
+                        headers={
+                            **_CORS_HEADERS,
+                            "Retry-After": str(retry_after),
+                        },
+                    )
             request.state.endpoint = endpoint
             request.state.api_key_id = api_key_id
             request.state.api_key_name = api_key_name
