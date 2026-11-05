@@ -29,6 +29,13 @@ from solar_host.models.base import (
 from solar_host.models.llamacpp import LlamaCppConfig
 from solar_host.process_manager import ProcessManager
 
+# The banner a current llama.cpp build logs: the message moved into
+# `server_on_listening()` and SRV_INF pads `__func__` to twelve characters.
+NEW_UPSTREAM_BANNER = (
+    "[2026-11-05T09:01:55.189723+00:00] 1.46.114.688 I "
+    "srv  server_on_li: listening on http://0.0.0.0:3512"
+)
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -89,6 +96,7 @@ class TestLlamaCppReadyLine:
             "main: server is listening on http://0.0.0.0:8080 - starting the main loop",
             "main: server is listening on http://127.0.0.1:9001",
             "llama server: listening on https://0.0.0.0:8443",
+            NEW_UPSTREAM_BANNER,
         ],
     )
     def test_accepts_listening_banners(self, line):
@@ -101,6 +109,7 @@ class TestLlamaCppReadyLine:
             "slot launch_slot_: id 0",
             "this process is listening carefully",
             "main: starting the main loop",
+            "srv  server_run_i: model loaded",
         ],
     )
     def test_rejects_non_readiness(self, line):
@@ -478,6 +487,49 @@ class TestSglangFixtureParsing:
 # ---------------------------------------------------------------------------
 # Lifecycle: real subprocess driven by a script runner
 # ---------------------------------------------------------------------------
+
+
+class _BannerScriptRunner(LlamaCppRunner):
+    """The REAL llama.cpp readiness contract driving a python subprocess."""
+
+    def __init__(self, script: str):
+        super().__init__()
+        self._script = script
+
+    def build_command(self, instance) -> list[str]:
+        return [sys.executable, "-u", "-c", self._script]
+
+
+@pytest.mark.anyio
+async def test_start_promotes_on_the_new_upstream_banner(_isolated_env, monkeypatch):
+    """A current build promotes on the relocated banner.
+
+    SRV_INF pads __func__ to twelve characters, so the line reads
+    ``srv  server_on_li: listening on ...``; the REAL regex must accept it.
+    """
+    manager = ProcessManager()
+    _make_instance()
+    runner = _BannerScriptRunner(
+        "import time; time.sleep(0.5); "
+        f"print({NEW_UPSTREAM_BANNER!r}, flush=True); time.sleep(30)"
+    )
+    monkeypatch.setattr(
+        "solar_host.process_manager.get_runner_for_config", lambda cfg: runner
+    )
+    pushed = MagicMock()
+    monkeypatch.setattr(manager, "_push_instances_update", pushed)
+
+    result = await manager.start_instance("inst-1")
+
+    assert result is True
+    inst = config_manager.get_instance("inst-1")
+    assert inst is not None
+    assert inst.status == InstanceStatus.RUNNING
+
+    # Clean up the still-sleeping child.
+    proc = manager.processes.pop("inst-1", None)
+    if proc is not None:
+        proc.kill()
 
 
 @pytest.mark.anyio

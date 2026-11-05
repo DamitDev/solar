@@ -13,11 +13,15 @@ from solar_host.models.base import (
     InstanceUsageSnapshot,
 )
 
-# Tolerant matcher covering both the `llama_server:` and the newer
-# `main: server is listening` forms, any host/port. This is the readiness
-# contract: the lifecycle status only moves starting -> running on it.
+# Tolerant matcher: the banner is matched by its MESSAGE, never by the
+# logger/function name. Upstream has already moved it once (out of
+# `llama_server()` into `server_on_listening()`), and `SRV_INF` prints
+# `__func__` padded to twelve characters (`srv  server_on_li: ...`), so a
+# name-pinned pattern breaks every start on a new build. Any host/port.
+# This is the readiness contract: the lifecycle status only moves
+# starting -> running on it.
 _RE_READY = re.compile(
-    r"(?:llama[_ ]server|main)\s*:\s*(?:server is )?listening on https?://",
+    r":\s*(?:server is )?listening on https?://",
     re.IGNORECASE,
 )
 
@@ -27,6 +31,11 @@ class LlamaCppRunner(BackendRunner):
 
     def __init__(self):
         # Compile regex patterns for parsing llama-server logs
+        # The slot-line patterns below pin upstream function names the same
+        # way the readiness banner used to: SRV_INF/SLT_INF print `__func__`
+        # padded to twelve characters, so they survive only while those
+        # names fit that pad. If upstream renames them, they need the same
+        # message-first treatment.
         self._re_launch = re.compile(
             r"slot\s+launch_slot_:\s+id\s+(\d+)\s*\|\s*task\s+(-?\d+)\s*\|\s*processing task"
         )
