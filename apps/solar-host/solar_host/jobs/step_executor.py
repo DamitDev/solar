@@ -232,9 +232,8 @@ class JobStepExecutor:
             for dev_id in gpu.device_ids:
                 if dev_id not in available_uuids and dev_id not in available_indices:
                     raise GpuValidationError(dev_id, available_count)
-        elif gpu.count is not None and gpu.count != -1:
-            if gpu.count > available_count:
-                raise GpuValidationError(f"count={gpu.count}", available_count)
+        elif gpu.count is not None and gpu.count != -1 and gpu.count > available_count:
+            raise GpuValidationError(f"count={gpu.count}", available_count)
 
     def build_environment(
         self,
