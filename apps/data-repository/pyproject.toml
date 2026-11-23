@@ -7,9 +7,9 @@ name = "data-repository"
 version = "0.0.0.dev0"
 description = "API for managing model and dataset registry metadata"
 dependencies = [
-    "fastapi==0.162.5",
+    "fastapi==0.165.0",
     "uvicorn[standard]==0.54.0",
-    "pydantic==2.14.3",
+    "pydantic==2.14.4",
     "pydantic-settings==2.16.3",
     "asyncpg==0.32.0",
     "sqlalchemy==2.0.54",
