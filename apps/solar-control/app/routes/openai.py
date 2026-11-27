@@ -230,6 +230,7 @@ async def audio_transcriptions(request: Request):
                 continue
             fields.append((name, value))
 
+        api_key_id, api_key_name = _get_api_key_attribution(request)
         result = await gateway.route_request(
             payload.model,
             "/v1/audio/transcriptions",
@@ -238,8 +239,8 @@ async def audio_transcriptions(request: Request):
             required_endpoint="/v1/audio/transcriptions",
             endpoint_id=_get_endpoint_id(request),
             model_patterns=_model_patterns(request),
-            api_key_id=_get_api_key_attribution(request)[0],
-            api_key_name=_get_api_key_attribution(request)[1],
+            api_key_id=api_key_id,
+            api_key_name=api_key_name,
             multipart=MultipartUpload(
                 fields=fields,
                 path=tmp_path,

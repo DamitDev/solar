@@ -57,6 +57,7 @@ from solar_host.servers.audio_fields import (
 )
 from solar_host.servers.audio_formats import (
     RESPONSE_FORMATS,
+    TIMESTAMP_GRANULARITIES,
     attach_words_to_segments,
     normalize_language,
     render_cues,
@@ -95,6 +96,10 @@ TRANSCRIPTION_TIMEOUT_S = float(
 WORD_TIMESTAMP_TIMEOUT_S = float(
     os.environ.get("SOLAR_HF_WORD_TIMESTAMP_TIMEOUT_S", "60")
 )
+# ffmpeg decodes a client-supplied upload, so the child gets its own bound: a
+# crafted file must not hold the request open (and the worker slot) forever.
+# Override with SOLAR_HF_DECODE_TIMEOUT_S.
+DECODE_TIMEOUT_S = float(os.environ.get("SOLAR_HF_DECODE_TIMEOUT_S", "120"))
 
 # Configure logging to output structured messages for the runner to parse
 logging.basicConfig(
@@ -1267,6 +1272,20 @@ async def audio_transcriptions(
                 name,
                 "invalid_request_error",
             )
+    # The audio shim and the control plane refuse an unknown granularity, so a
+    # direct request must get the same 400 here instead of the value being
+    # silently dropped by this route.
+    for name, value in form.multi_items():
+        if (
+            name in ("timestamp_granularities[]", "timestamp_granularities")
+            and isinstance(value, str)
+            and value not in TIMESTAMP_GRANULARITIES
+        ):
+            return _transcription_error(
+                "timestamp_granularities must contain only 'word' or 'segment'",
+                "timestamp_granularities",
+                "invalid_request_error",
+            )
     if "model" not in values:
         return _transcription_error(
             "model is required", "model", "invalid_request_error"
@@ -1328,7 +1347,23 @@ async def audio_transcriptions(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        samples_bytes, stderr_bytes = await process.communicate()
+        try:
+            samples_bytes, stderr_bytes = await asyncio.wait_for(
+                process.communicate(), timeout=DECODE_TIMEOUT_S
+            )
+        except TimeoutError:
+            # A crafted upload must not hold the request open: kill the decoder
+            # and answer the same envelope as a failed decode. A child that
+            # exited at the deadline is already reaped, so only signal a live one.
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            return _transcription_error(
+                f"could not decode the uploaded audio: ffmpeg did not finish "
+                f"within {DECODE_TIMEOUT_S:g}s",
+                "file",
+                "invalid_request_error",
+            )
         if process.returncode != 0:
             tail = stderr_bytes.decode("utf-8", "replace").strip()[-300:]
             return _transcription_error(
@@ -1395,8 +1430,16 @@ async def audio_transcriptions(
                 samples, generate_kwargs, "word", WORD_TIMESTAMP_TIMEOUT_S
             )
         except TimeoutError:
+            # A bare TimeoutError stringifies to "", and the runner's
+            # "[ERROR] (.+)" regex needs text after the tag, so the timeout is
+            # logged explicitly: the instance must leave `generating`.
+            logger.error(
+                f"[ERROR] word-level timestamps did not finish within "
+                f"{WORD_TIMESTAMP_TIMEOUT_S:g}s"
+            )
             return _word_timeout_error(WORD_TIMESTAMP_TIMEOUT_S)
         except Exception as exc:  # noqa: BLE001
+            logger.error(f"[ERROR] {exc!s}")
             return _transcription_error(
                 f"transcription failed: {exc}", None, "server_error", 500
             )
@@ -1412,6 +1455,10 @@ async def audio_transcriptions(
                 return_language=True,
             )
         except TimeoutError:
+            logger.error(
+                f"[ERROR] transcription did not finish within "
+                f"{TRANSCRIPTION_TIMEOUT_S:g}s"
+            )
             return _transcription_error(
                 f"transcription did not finish within "
                 f"{TRANSCRIPTION_TIMEOUT_S:g}s on the HuggingFace audio backend",
@@ -1420,6 +1467,7 @@ async def audio_transcriptions(
                 504,
             )
         except Exception as exc:  # noqa: BLE001
+            logger.error(f"[ERROR] {exc!s}")
             return _transcription_error(
                 f"transcription failed: {exc}", None, "server_error", 500
             )
@@ -1461,7 +1509,11 @@ async def audio_transcriptions(
         )
     except TimeoutError:
         if return_timestamps == "word":
+            logger.error(
+                f"[ERROR] word-level timestamps did not finish within {timeout_s:g}s"
+            )
             return _word_timeout_error(timeout_s)
+        logger.error(f"[ERROR] transcription did not finish within {timeout_s:g}s")
         return _transcription_error(
             f"transcription did not finish within {timeout_s:g}s on the "
             "HuggingFace audio backend",
@@ -1470,6 +1522,7 @@ async def audio_transcriptions(
             504,
         )
     except Exception as exc:  # noqa: BLE001
+        logger.error(f"[ERROR] {exc!s}")
         return _transcription_error(
             f"transcription failed: {exc}", None, "server_error", 500
         )

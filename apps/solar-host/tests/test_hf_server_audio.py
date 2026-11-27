@@ -7,7 +7,9 @@ format matrix is proven without downloading a model.
 import io
 import json
 import logging
+import os
 import threading
+import time
 import wave
 
 import numpy as np
@@ -80,6 +82,15 @@ class _Pipeline:
         if kwargs.get("return_language") and self.language is not None:
             result["language"] = self.language
         return result
+
+
+class _FailingPipeline:
+    """Raises on every call, so the route answers its failure envelope."""
+
+    type = "seq2seq_whisper"
+
+    def __call__(self, samples, **kwargs):
+        raise RuntimeError("boom")
 
 
 @pytest.fixture(autouse=True)
@@ -734,6 +745,35 @@ async def test_a_broken_upload_is_a_400():
 
 
 @pytest.mark.anyio
+async def test_a_hung_ffmpeg_is_killed_and_answered_with_the_decode_envelope(
+    monkeypatch, tmp_path
+):
+    """A crafted upload must not hold the request open: the decode is bounded,
+    the decoder is killed, and the client gets the decode-failure envelope."""
+    bin_dir = tmp_path / "hung-bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "ffmpeg"
+    launcher.write_text("#!/bin/sh\nexec sleep 300\n")
+    launcher.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(hf, "DECODE_TIMEOUT_S", 0.1)
+
+    started = time.monotonic()
+    response = await _call(_form(model="whisper-hu"))
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 400
+    payload = json.loads(response.body)["error"]
+    assert payload["param"] == "file"
+    assert "could not decode the uploaded audio" in payload["message"]
+    assert "did not finish" in payload["message"]
+    # The hung decoder never reached the pipeline.
+    assert hf.state.pipeline.calls == []
+
+
+@pytest.mark.anyio
 async def test_a_non_numeric_temperature_is_a_400_envelope():
     """The shim answers this with the envelope; the HuggingFace route must not
     turn a malformed temperature into an unhandled ValueError (a 500)."""
@@ -846,6 +886,49 @@ async def test_a_backend_specific_field_is_accepted_and_dropped():
     assert response == {"text": "hello world"}
 
 
+@pytest.mark.anyio
+async def test_an_unknown_granularity_is_refused_before_the_pipeline():
+    """The shim and the control plane answer 400 for this request, so a direct
+    host request must not silently accept the value the route cannot honour."""
+    response = await _call(
+        _form(
+            model="whisper-hu",
+            response_format="verbose_json",
+            **{"timestamp_granularities[]": ["word", "sentence"]},
+        )
+    )
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 400
+    payload = json.loads(response.body)["error"]
+    assert payload["message"] == (
+        "timestamp_granularities must contain only 'word' or 'segment'"
+    )
+    assert payload["param"] == "timestamp_granularities"
+    # Refused before any pipeline work.
+    assert hf.state.pipeline.calls == []
+
+
+@pytest.mark.anyio
+async def test_the_non_array_granularity_spelling_is_validated_too():
+    """A client may send the field without the [] suffix; the shim validates both
+    spellings, so this route must too."""
+    response = await _call(
+        _form(
+            model="whisper-hu",
+            response_format="verbose_json",
+            timestamp_granularities="sentence",
+        )
+    )
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 400
+    assert json.loads(response.body)["error"]["message"] == (
+        "timestamp_granularities must contain only 'word' or 'segment'"
+    )
+    assert hf.state.pipeline.calls == []
+
+
 # ── a non-audio instance refuses the route ─────────────────────────
 
 
@@ -906,3 +989,67 @@ async def test_the_route_logs_the_request_and_complete_lines_the_runner_parses(c
     assert idle.phase is InstancePhase.IDLE
     # An audio request has no token count, so the runner records none.
     assert idle.generated_tokens == 0
+
+    # A failed pass answers an error envelope; the runner clears `busy` only on
+    # an `[ERROR]` line, so the route must log one or the instance stays
+    # `generating` until the next successful request.
+    caplog.clear()
+    hf.state.pipeline = _FailingPipeline()
+    response = await _call(_form(model="whisper-hu"))
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 500
+
+    messages = [record.getMessage() for record in caplog.records]
+    request_lines = [line for line in messages if line.startswith("[REQUEST]")]
+    error_lines = [line for line in messages if line.startswith("[ERROR]")]
+    assert len(request_lines) == 1
+    assert len(error_lines) == 1
+    assert "boom" in error_lines[0]
+
+    failed_context = runner.initialize_context()
+    failed_busy = runner.parse_log_line("inst-1", request_lines[0], failed_context)
+    failed_idle = runner.parse_log_line("inst-1", error_lines[0], failed_context)
+    assert failed_busy is not None and failed_busy.busy is True
+    assert failed_idle is not None and failed_idle.busy is False
+    assert failed_idle.phase is InstancePhase.IDLE
+
+
+@pytest.mark.anyio
+async def test_a_timed_out_request_logs_an_error_line_the_runner_parses(
+    monkeypatch, caplog
+):
+    """A 504 must leave the instance idle too: a bare TimeoutError stringifies
+    to "", so the route logs the timeout text the runner's regex matches."""
+    from solar_host.backends.huggingface import HuggingFaceRunner
+
+    release = threading.Event()
+
+    class _SlowPipeline:
+        def __call__(self, samples, **kwargs):
+            release.wait(5)
+            return {"text": "late"}
+
+    monkeypatch.setattr(hf.state, "pipeline", _SlowPipeline())
+    monkeypatch.setattr(hf, "TRANSCRIPTION_TIMEOUT_S", 0.05)
+    caplog.set_level(logging.INFO, logger=hf.logger.name)
+    try:
+        response = await _call(_form(model="whisper-hu"))
+    finally:
+        release.set()
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 504
+    messages = [record.getMessage() for record in caplog.records]
+    request_lines = [line for line in messages if line.startswith("[REQUEST]")]
+    error_lines = [line for line in messages if line.startswith("[ERROR]")]
+    assert len(request_lines) == 1
+    assert len(error_lines) == 1
+    assert "transcription did not finish" in error_lines[0]
+
+    runner = HuggingFaceRunner()
+    context = runner.initialize_context()
+    busy = runner.parse_log_line("inst-1", request_lines[0], context)
+    idle = runner.parse_log_line("inst-1", error_lines[0], context)
+    assert busy is not None and busy.busy is True
+    assert idle is not None and idle.busy is False
+    assert idle.phase is InstancePhase.IDLE
