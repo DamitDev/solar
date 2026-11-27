@@ -189,6 +189,9 @@ def _child_command(args: argparse.Namespace) -> list[str]:
         "--no-ui",
         "--device",
         device,
+        # verbose_json segments[] and diarized_json are synthesized from the
+        # runtime's words array, so the child must emit word timestamps.
+        "--word-times",
     ]
     if state.encoder:
         # v0.3.0 names the encoder sidecar --salm-encoder.
@@ -199,6 +202,8 @@ def _child_command(args: argparse.Namespace) -> list[str]:
         cmd.extend(["--translate-to", state.translate_to])
     if state.diar_model:
         cmd.extend(["--diar-model", state.diar_model])
+    if state.diarize:
+        cmd.append("--diarize")
     return cmd
 
 
@@ -692,7 +697,6 @@ def _forward_fields(
 async def _forward(
     upload: UploadFile,
     fields: list[tuple[str, str]],
-    response_format: str,
 ) -> tuple[int, bytes, str]:
     """Send the multipart to the child runtime and return its raw answer.
 
@@ -924,14 +928,14 @@ async def audio_transcriptions(
         flush=True,
     )
     try:
-        status, body, content_type = await _forward(upload, forwarded, response_format)
+        status, body, content_type = await _forward(upload, forwarded)
     except (TimeoutError, aiohttp.ClientError) as exc:
         print(f"[ERROR] runtime request failed: {exc}", flush=True)
         return _runtime_error(f"runtime request failed: {exc}", "runtime_unreachable")
     finally:
         await upload.close()
 
-    duration = time.monotonic() - started
+    elapsed = time.monotonic() - started
     if status != 200:
         text = body.decode("utf-8", "replace")
         print(f"[ERROR] runtime answered {status}: {text[:200]}", flush=True)
@@ -949,8 +953,8 @@ async def audio_transcriptions(
         return Response(content=body, status_code=status, media_type=content_type)
 
     print(
-        f"[COMPLETE] model={state.alias} duration_s={duration:.2f} "
-        f"time_ms={duration * 1000:.0f}",
+        f"[COMPLETE] model={state.alias} elapsed_s={elapsed:.2f} "
+        f"time_ms={elapsed * 1000:.0f}",
         flush=True,
     )
 
@@ -975,7 +979,10 @@ async def audio_transcriptions(
     if response_format == "json":
         return Response(content=body, media_type=FORMAT_MEDIA_TYPES["json"])
 
-    payload = json.loads(body)
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return Response(content=body, media_type=content_type)
     if response_format == "verbose_json":
         # NeMo reports "" when no language was requested; the OpenAI contract
         # wants "und" for an undetected language.

@@ -191,6 +191,24 @@ async def test_an_unknown_format_is_rejected_before_the_forward():
 
 
 @pytest.mark.anyio
+async def test_a_validation_message_drops_the_pydantic_prefix():
+    """Pydantic wraps a validator's ValueError as "Value error, ..."; that
+    wrapper is not part of the message the client should read."""
+    response, captured = await _call(
+        _form(model="whisper-tiny", response_format="mp3"),
+        result=UpstreamResponse(200, b"", "text/plain"),
+    )
+    assert response.status_code == 400
+    message = json.loads(response.body)["error"]["message"]
+    assert message == (
+        "response_format 'mp3' is not supported; must be one of: "
+        "json, text, srt, verbose_json, vtt, diarized_json"
+    )
+    assert "Value error, " not in message
+    assert captured == {}
+
+
+@pytest.mark.anyio
 async def test_an_upstream_timeout_is_relayed_as_the_upstream_status():
     """A runtime 504 must reach the client as a 504 with the host's message, not
     as a 404 model_not_found that blames the model."""

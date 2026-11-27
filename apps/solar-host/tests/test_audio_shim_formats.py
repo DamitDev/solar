@@ -53,9 +53,12 @@ def client(monkeypatch):
 def _forward_stub(monkeypatch, payload=None, content_type="application/json"):
     captured: dict = {}
 
-    async def _forward(upload, fields, response_format):
+    async def _forward(upload, fields):
         captured["fields"] = fields
-        captured["format"] = response_format
+        # The child is asked for its own format; an omitted response_format
+        # leaves the runtime's json default, and diarized_json is translated
+        # to verbose_json before it reaches the runtime.
+        captured["format"] = dict(fields).get("response_format", "json")
         captured["bytes"] = upload.file.read()
         body = payload if payload is not None else b'{"text": "hi"}'
         return 200, body, content_type
@@ -471,7 +474,7 @@ def test_whisper_vad_false_is_accepted_and_not_forwarded(client, monkeypatch):
 
 
 def test_whisper_a_child_decode_failure_is_a_400_envelope(client, monkeypatch):
-    async def _forward(upload, fields, response_format):
+    async def _forward(upload, fields):
         return 500, b'{"error":"FFmpeg conversion failed."}', "application/json"
 
     monkeypatch.setattr(shim, "_forward", _forward)
@@ -485,7 +488,7 @@ def test_whisper_a_child_decode_failure_is_a_400_envelope(client, monkeypatch):
 
 
 def test_whisper_a_child_non_decode_failure_is_still_relayed(client, monkeypatch):
-    async def _forward(upload, fields, response_format):
+    async def _forward(upload, fields):
         return 500, b'{"error":"internal"}', "application/json"
 
     monkeypatch.setattr(shim, "_forward", _forward)
@@ -595,7 +598,7 @@ def test_nemo_diarized_json_is_synthesized(nemo, monkeypatch):
         {"id": "A", "name": "A"},
         {"id": "B", "name": "B"},
     ]
-    assert captured["format"] == "diarized_json"
+    assert captured["format"] == "verbose_json"
     assert ("diarization", "true") in captured["fields"]
 
 
@@ -855,6 +858,20 @@ def test_whisper_verbose_json_language_is_und_when_none_was_detected(
 
     assert response.status_code == 200
     assert response.json()["language"] == "und"
+
+
+def test_nemo_verbose_json_with_a_non_json_body_is_relayed(nemo, monkeypatch):
+    """A 200 whose body is not JSON must reach the client, not become a 500.
+
+    The whisper branch already relays such a body with the runtime's content
+    type; the NeMo verbose_json/diarized_json path parsed it unguarded.
+    """
+    _forward_stub(monkeypatch, payload=b"not json", content_type="text/plain")
+    response = _post(nemo, response_format="verbose_json")
+
+    assert response.status_code == 200
+    assert response.text == "not json"
+    assert response.headers["content-type"].startswith("text/plain")
 
 
 def test_nemo_verbose_json_language_is_und_when_the_runtime_reports_empty(

@@ -10,6 +10,7 @@ import {
   isHuggingFaceClassificationConfig,
   isHuggingFaceEmbeddingConfig,
   isHuggingFaceAudioConfig,
+  isAudioConfig,
   isWhisperCppConfig,
   isNemoSpeechConfig,
   isSglangConfig,
@@ -119,6 +120,16 @@ export function EditInstanceModal({ instance, hostId, onClose, onUpdate }: EditI
         alert('Model Path and Alias are required');
         return;
       }
+    } else if (isWhisperCppConfig(formData)) {
+      if (!(formData as WhisperCppConfig).model || !formData.alias) {
+        alert('Model Path and Alias are required');
+        return;
+      }
+    } else if (isNemoSpeechConfig(formData)) {
+      if (!(formData as NemoSpeechConfig).model || !formData.alias) {
+        alert('Decoder GGUF and Alias are required');
+        return;
+      }
     } else {
       if (!(formData as HuggingFaceCausalConfig).model_id || !formData.alias) {
         alert('Model ID and Alias are required');
@@ -138,7 +149,7 @@ export function EditInstanceModal({ instance, hostId, onClose, onUpdate }: EditI
     // Strip empty strings from optional fields so the backend receives None
     // and llama.cpp uses its own defaults. Shared with the add/intent form so
     // the two editors cannot submit differently shaped configs.
-    if (isLlamaCppConfig(formData) || isSglangConfig(formData) || isVllmConfig(formData)) {
+    if (isLlamaCppConfig(formData) || isSglangConfig(formData) || isVllmConfig(formData) || isAudioConfig(formData)) {
       finalConfig = stripEmptyOptionalFields(finalConfig as Record<string, any>) as InstanceConfig;
     }
 

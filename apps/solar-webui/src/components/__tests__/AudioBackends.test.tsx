@@ -540,6 +540,88 @@ describe('required audio labels', () => {
   });
 });
 
+describe('EditInstanceModal audio submit', () => {
+  const instance = (id: string, config: Record<string, unknown>) => ({
+    id,
+    config,
+    status: 'running',
+    created_at: '2026-01-01T00:00:00Z',
+    retry_count: 0,
+  });
+
+  // The GGML runtimes name the model path `model`, not the HuggingFace
+  // `model_id`; the edit form used to fall through to the HuggingFace branch
+  // and refuse every audio edit with "Model ID and Alias are required".
+  it.each([
+    [
+      'whisper.cpp',
+      {
+        backend_type: 'whispercpp',
+        model: '/models/ggml-tiny.bin',
+        alias: 'whisper-tiny',
+        host: '0.0.0.0',
+        language: 'auto',
+        threads: 4,
+        device: 'auto',
+      },
+      {
+        backend_type: 'whispercpp',
+        model: '/models/ggml-tiny.bin',
+        alias: 'whisper-tiny',
+        host: '0.0.0.0',
+        language: 'auto',
+        threads: 4,
+        device: 'auto',
+      },
+    ],
+    [
+      'NeMo-Speech.cpp',
+      {
+        backend_type: 'nemospeech',
+        model: '/models/decoder.gguf',
+        alias: 'nemotron-stream-en',
+        host: '0.0.0.0',
+        encoder: '',
+        diar_model: '',
+        instruction: '',
+        translate_to: '',
+        language: 'en',
+        diarize: false,
+        device: 'auto',
+      },
+      // The empty sidecars are optional: the shared helper strips them so the
+      // host receives None instead of an empty path.
+      {
+        backend_type: 'nemospeech',
+        model: '/models/decoder.gguf',
+        alias: 'nemotron-stream-en',
+        host: '0.0.0.0',
+        language: 'en',
+        diarize: false,
+        device: 'auto',
+      },
+    ],
+  ])('submits the %s edit form without the model-id alert', async (_name, config, expected) => {
+    const onUpdate = vi.fn().mockResolvedValue(undefined);
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    render(
+      <EditInstanceModal
+        instance={instance('i1', config) as never}
+        hostId="h1"
+        onClose={vi.fn()}
+        onUpdate={onUpdate}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole('button', { name: /Save Changes/ }));
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(alertSpy).not.toHaveBeenCalled();
+    expect(onUpdate).toHaveBeenCalledWith('h1', 'i1', expected);
+    alertSpy.mockRestore();
+  });
+});
+
 describe('audio device options', () => {
   it('offers cuda on the NeMo-Speech device select', () => {
     render(<BackendConfigFields value={{ backend_type: 'nemospeech' }} onChange={vi.fn()} forIntent />);

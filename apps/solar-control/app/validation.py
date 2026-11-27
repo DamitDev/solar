@@ -183,7 +183,15 @@ BACKEND_FIELD_OWNERS: dict[str, frozenset[str]] = {
     "vllm": _VLLM_FIELDS,
     "whispercpp": frozenset({"model_file", "threads", "language"}),
     "nemospeech": frozenset(
-        {"model_file", "language", "encoder", "diar_model", "diarize"}
+        {
+            "model_file",
+            "language",
+            "encoder",
+            "instruction",
+            "translate_to",
+            "diar_model",
+            "diarize",
+        }
     ),
 }
 

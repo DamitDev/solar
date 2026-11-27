@@ -109,7 +109,15 @@ def test_backend_field_owners_cover_the_audio_fields():
         {"model_file", "threads", "language"}
     )
     assert BACKEND_FIELD_OWNERS["nemospeech"] == frozenset(
-        {"model_file", "language", "encoder", "diar_model", "diarize"}
+        {
+            "model_file",
+            "language",
+            "encoder",
+            "instruction",
+            "translate_to",
+            "diar_model",
+            "diarize",
+        }
     )
     assert BACKEND_FIELD_OWNERS["huggingface_audio"] == frozenset(
         {
@@ -153,6 +161,28 @@ def test_encoder_and_diarizer_are_nemo_only():
             {"backend_type": backend_type, "encoder": "e.gguf"}
         )
         assert errors and errors[0]["field"] == "backend.encoder"
+
+
+def test_instruction_and_translation_are_nemo_only():
+    """The host's NemoSpeechConfig carries both; whispercpp must not.
+
+    Before round 3 neither field had an owner, so the forward-compatibility
+    rule let a whispercpp intent carry them and the host dropped them silently.
+    """
+    for field, value in (
+        ("instruction", "Transcribe verbatim."),
+        ("translate_to", "en"),
+    ):
+        assert (
+            _validate_backend_field_ownership(
+                {"backend_type": "nemospeech", field: value}
+            )
+            == []
+        ), field
+        errors = _validate_backend_field_ownership(
+            {"backend_type": "whispercpp", field: value}
+        )
+        assert errors and errors[0]["field"] == f"backend.{field}", field
 
 
 def test_audio_device_vocabulary_is_per_backend():

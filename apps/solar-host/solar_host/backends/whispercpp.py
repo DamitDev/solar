@@ -21,11 +21,12 @@ from solar_host.models.base import BackendType, InstancePhase
 # signal: it appears before the child can serve anything.
 _RE_READY = re.compile(r"\[READY\] runtime ready")
 
-# Structured shim log lines. duration_s is the audio duration the runtime
-# reported, not a token count, so no token metric is invented here.
+# Structured shim log lines. elapsed_s is the wall-clock time the shim spent on
+# the request, not a token count or the audio duration, so no token metric is
+# invented here.
 _RE_REQUEST = re.compile(r"\[REQUEST\] model=(\S+) endpoint=(\S+) format=(\S+)")
 _RE_COMPLETE = re.compile(
-    r"\[COMPLETE\] model=(\S+) duration_s=([0-9.]+) time_ms=([0-9.]+)"
+    r"\[COMPLETE\] model=(\S+) elapsed_s=([0-9.]+) time_ms=([0-9.]+)"
 )
 _RE_ERROR = re.compile(r"\[ERROR\] (.+)")
 

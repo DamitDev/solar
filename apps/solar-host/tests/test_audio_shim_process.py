@@ -43,7 +43,13 @@ def _free_port() -> int:
         return int(probe.getsockname()[1])
 
 
-def _shim(model_type: str, binary: Path, port: int, **env: str):
+def _shim(
+    model_type: str,
+    binary: Path,
+    port: int,
+    extra_args: list[str] | None = None,
+    **env: str,
+):
     command = [
         sys.executable,
         "-m",
@@ -69,6 +75,7 @@ def _shim(model_type: str, binary: Path, port: int, **env: str):
     ]
     if model_type == "nemospeech":
         command.extend(["--language", "en"])
+    command.extend(extra_args or [])
     # A file, not a pipe: a chatty runtime would fill a 64 KiB pipe and block.
     log = _RUNTIMES / f"shim-{port}.log"
     handle = log.open("w")
@@ -201,6 +208,33 @@ def test_the_shim_exits_when_the_runtime_dies():
             os.kill(int(pid), 15)
         process.wait(timeout=10)
         assert process.returncode is not None
+    finally:
+        _stop(process)
+
+
+def test_the_nemo_child_is_asked_for_word_times_and_diarization():
+    """verbose_json segments[] and diarized_json are built from the runtime's
+    words array, so the child must emit word timestamps and speaker tags."""
+    port = _free_port()
+    process = _shim(
+        "nemospeech",
+        _executable(NEMO),
+        port,
+        extra_args=["--diar-model", "sortformer.gguf", "--diarize"],
+    )
+    try:
+        _wait_health(port, 200)
+        children = subprocess.run(
+            ["pgrep", "-f", f"{NEMO.name} serve --asr-model /tmp/model.bin"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert children.stdout.strip(), "the fake runtime was not running"
+        cmdline = Path(f"/proc/{children.stdout.split()[0]}/cmdline").read_bytes()
+        argv = [part.decode() for part in cmdline.split(b"\0") if part]
+        assert "--word-times" in argv
+        assert "--diarize" in argv
     finally:
         _stop(process)
 

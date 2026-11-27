@@ -120,7 +120,7 @@ def test_a_complete_line_clears_the_busy_state():
 
     finished = runner.parse_log_line(
         "inst-1",
-        "[COMPLETE] model=whisper-tiny duration_s=11.2 time_ms=850",
+        "[COMPLETE] model=whisper-tiny elapsed_s=11.2 time_ms=850",
         context,
     )
     assert finished is not None and finished.busy is False

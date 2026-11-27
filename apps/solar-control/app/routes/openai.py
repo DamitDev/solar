@@ -207,7 +207,10 @@ async def audio_transcriptions(request: Request):
             first = exc.errors()[0]
             field = first.get("loc") or ()
             param = ".".join(str(part) for part in field) or None
-            return _transcription_error(str(first.get("msg")), param)
+            # Pydantic prefixes a validator's ValueError with "Value error, ";
+            # that wrapper is not part of the message the client should read.
+            message = str(first.get("msg")).removeprefix("Value error, ")
+            return _transcription_error(message, param)
 
         # Copy the spooled upload to a named temp file so the gateway can
         # re-open it for every attempt (aiohttp closes the handle it is given
