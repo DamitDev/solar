@@ -11,6 +11,7 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
 import pytest
 
 from app.gateway import (
@@ -86,6 +87,19 @@ class _TimeoutSession:
     def post(self, url, *args, **kwargs):
         self.posted.append(kwargs)
         raise asyncio.TimeoutError
+
+
+class _ConnectTimeoutSession:
+    """Every post expires the connect budget before answering."""
+
+    closed = False
+
+    def __init__(self):
+        self.posted: list[dict] = []
+
+    def post(self, url, *args, **kwargs):
+        self.posted.append(kwargs)
+        raise aiohttp.ConnectionTimeoutError
 
 
 def _entry(**overrides) -> RegistryEntry:
@@ -351,6 +365,25 @@ async def test_a_gateway_timeout_is_a_504_not_model_not_found(tmp_path):
     assert payload["error"]["code"] == "timeout"
     assert payload["error"]["type"] == "server_error"
     assert "did not answer" in payload["error"]["message"]
+
+
+@pytest.mark.anyio
+async def test_a_connect_timeout_names_the_connect_budget(tmp_path):
+    """A connect timeout must not be reported as the answer budget expiring."""
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"RIFFdata")
+    session = _ConnectTimeoutSession()
+
+    with pytest.raises(UpstreamServiceError) as excinfo:
+        await _route(OpenAIGateway(), session, _upload(str(audio), [("model", ALIAS)]))
+
+    assert excinfo.value.status_code == 504
+    payload = json.loads(excinfo.value.body)
+    assert payload["error"]["code"] == "timeout"
+    timeout = session.posted[0]["timeout"]
+    assert f"within {timeout.connect:g}s" in payload["error"]["message"]
+    assert "accept a connection" in payload["error"]["message"]
+    assert f"within {timeout.total:g}s" not in payload["error"]["message"]
 
 
 @pytest.mark.anyio

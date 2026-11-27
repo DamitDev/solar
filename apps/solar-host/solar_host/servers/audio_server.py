@@ -745,7 +745,10 @@ def _wave_format(upload: UploadFile) -> WaveFormat | None:
             chunk_id = chunk_header[:4]
             size = int.from_bytes(chunk_header[4:8], "little")
             if chunk_id == b"fmt ":
-                data = upload.file.read(size)
+                # The parser reads only the first 16 bytes of the chunk; a
+                # crafted header declaring a huge size must not turn into a huge
+                # read.
+                data = upload.file.read(min(size, 16))
                 if len(data) < 16:
                     return None
                 return WaveFormat(

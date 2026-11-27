@@ -229,8 +229,8 @@ LANGUAGE_CODES: dict[str, str] = {
     "hausa": "ha",
     "ba": "ba",
     "bashkir": "ba",
-    "jw": "jw",
-    "javanese": "jw",
+    "jw": "jv",
+    "javanese": "jv",
     "su": "su",
     "sundanese": "su",
     "yue": "yue",
@@ -294,12 +294,13 @@ def render_cues(segments: list[dict[str, Any]], vtt: bool) -> str:
 
 
 def segments_from_chunks(
-    chunks: list[dict[str, Any]] | None, duration: float
+    chunks: list[dict[str, Any]] | None, duration: float, text: str
 ) -> list[dict[str, Any]]:
     """Build ``verbose_json`` segments from pipeline chunks.
 
     A chunked pipeline result carries ``chunks`` with a ``(start, end)`` timestamp
-    and the chunk text. Without chunks the whole transcript is one segment.
+    and the chunk text. Without chunks the whole transcript is one segment, so the
+    fallback carries the transcript text rather than an empty cue.
     """
     segments: list[dict[str, Any]] = []
     for index, chunk in enumerate(chunks or []):
@@ -322,7 +323,7 @@ def segments_from_chunks(
                 "id": 0,
                 "start": 0.0,
                 "end": duration,
-                "text": "",
+                "text": text,
             }
         )
     return segments

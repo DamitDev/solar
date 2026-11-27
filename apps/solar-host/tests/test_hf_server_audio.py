@@ -124,6 +124,22 @@ async def test_vtt_starts_with_the_webvtt_header():
 
 
 @pytest.mark.anyio
+async def test_a_transcript_without_chunks_is_one_text_segment():
+    """A pipeline result with only text (no chunks) must not render empty cues.
+
+    The fallback segment used to carry an empty string while the top-level text was
+    non-empty, so SRT/VTT had a blank cue and verbose_json a blank segment.
+    """
+    hf.state.pipeline = _Pipeline(text="hello world")
+
+    payload = await _call(_form(model="whisper-hu", response_format="verbose_json"))
+    assert [segment["text"] for segment in payload["segments"]] == ["hello world"]
+
+    response = await _call(_form(model="whisper-hu", response_format="srt"))
+    assert response.body.decode() == ("1\n00:00:00,000 --> 00:00:01,000\nhello world\n")
+
+
+@pytest.mark.anyio
 async def test_verbose_json_carries_segments_and_the_real_duration():
     hf.state.pipeline = _Pipeline(
         chunks=[

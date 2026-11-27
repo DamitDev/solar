@@ -352,6 +352,14 @@ HuggingFace `verbose_json` segments carry `id`, `start`, `end` and `text`, plus
 pipeline and are never invented, so the segment shape differs from the GGML
 runtimes there.
 
+NeMo-Speech.cpp `verbose_json` segments are a host-side grouping of the runtime's
+word timestamps, so they carry `id`, `start`, `end` and `text`, plus `words` and a
+`speaker` (null unless diarization is on). The OpenAI contract's `tokens`,
+`avg_logprob`, `compression_ratio` and `no_speech_prob` are not produced by the
+runtime and are never invented, so the segment shape differs from the GGML
+runtimes there. `diarized_json` carries no `usage` block for the same reason: no
+audio runtime reports token usage.
+
 NeMo-Speech uploads must be 16 kHz mono PCM16 WAV. Convert a recording with
 `ffmpeg -i input -ar 16000 -ac 1 -c:a pcm_s16le output.wav`. The runtime's own
 upload contract accepts a wider range (mono or stereo PCM16 and float32 WAVs at

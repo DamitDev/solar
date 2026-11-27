@@ -50,6 +50,10 @@ interface BackendConfigFieldsProps {
   /** Bound through for AddInstanceModal (alias is part of its formData). */
   aliasValue?: string;
   onAliasChange?: (v: string) => void;
+  /** Intent form: the intent-level model_source. The backend object must not
+   *  carry it, so it is passed separately to mark the model file selector
+   *  required for a pull source. */
+  modelSource?: string;
   /**
    * C3: renders the validation error for a backend field next to that field.
    * Keys are the API's dotted names (e.g. `backend.mmproj`). The parent form
@@ -90,6 +94,7 @@ export function BackendConfigFields({
   forIntent = false,
   aliasValue,
   onAliasChange,
+  modelSource,
   fieldError = () => null,
   disabledBackends = [],
   disabledReasons = {},
@@ -103,6 +108,14 @@ export function BackendConfigFields({
   const [labelsInput, setLabelsInput] = useState(Array.isArray(value?.labels) ? value.labels.join(', ') : '');
 
   const currentMode = primaryBackend === 'llamacpp' ? llamaCppMode : huggingFaceMode;
+
+  // A pull source returns a directory, so the host and the control plane reject
+  // it without a model file; marking the input required here makes that the first
+  // signal instead of a server 422.
+  const modelFileRequired =
+    forIntent &&
+    typeof modelSource === 'string' &&
+    (modelSource.trim().startsWith('repo://') || modelSource.trim().startsWith('huggingface://'));
 
   const handlePrimaryBackendChange = (newBackend: PrimaryBackend) => {
     setPrimaryBackend(newBackend);
@@ -1038,13 +1051,16 @@ export function BackendConfigFields({
               {/* Model file selector — intents point at a directory, not a file */}
               {forIntent && (
                 <div className="md:col-span-2">
-                  <label className="block text-sm font-medium text-nord-4 mb-1">Model file</label>
+                  <label className="block text-sm font-medium text-nord-4 mb-1">
+                    Model file {modelFileRequired && <span className="text-nord-11">*</span>}
+                  </label>
                   <input
                     type="text"
                     name="model_file"
                     value={value.model_file || ''}
                     onChange={handleChange}
                     placeholder="ggml-tiny.bin"
+                    required={modelFileRequired}
                     className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent font-mono text-sm"
                   />
                   <p className="text-xs text-nord-4 mt-1">Which GGML file to serve inside the downloaded snapshot.</p>
@@ -1145,13 +1161,16 @@ export function BackendConfigFields({
               {/* Model file selector — intents point at a directory, not a file */}
               {forIntent && (
                 <div className="md:col-span-2">
-                  <label className="block text-sm font-medium text-nord-4 mb-1">Decoder file</label>
+                  <label className="block text-sm font-medium text-nord-4 mb-1">
+                    Decoder file {modelFileRequired && <span className="text-nord-11">*</span>}
+                  </label>
                   <input
                     type="text"
                     name="model_file"
                     value={value.model_file || ''}
                     onChange={handleChange}
                     placeholder="*.q8_0.gguf"
+                    required={modelFileRequired}
                     className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent font-mono text-sm"
                   />
                   <p className="text-xs text-nord-4 mt-1">

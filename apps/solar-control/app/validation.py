@@ -8,7 +8,6 @@ the codebase.
 import json
 import math
 import re
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -360,24 +359,24 @@ def _validate_backend_model_selection(
         )
 
     # A pull source returns the snapshot directory, and a directory model needs
-    # a file selected from it; an explicit local file path needs no selector.
-    model = backend.get("model")
+    # a file selected from it. The control plane's filesystem is not the host's,
+    # so it cannot tell whether a local path is a directory: the host's own
+    # missing-model-file check is the authority for that case.
     pull_source = isinstance(model_source, str) and model_source.startswith(
         ("repo://", "huggingface://")
     )
-    directory_model = isinstance(model, str) and Path(model).is_dir()
     if (
         model_file is None
         and "model_file" not in exempt_fields
         and backend.get("backend_type") in ("whispercpp", "nemospeech")
-        and (pull_source or directory_model)
+        and pull_source
     ):
         errors.append(
             {
                 "field": "backend.model_file",
                 "message": (
-                    "model_file is required when the source is a pull or the "
-                    "model is a directory; the pull returns a directory"
+                    "model_file is required when the source is a pull; the pull "
+                    "returns a directory"
                 ),
             }
         )

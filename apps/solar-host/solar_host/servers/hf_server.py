@@ -1407,7 +1407,7 @@ async def audio_transcriptions(
             )
 
         text = str(result.get("text") or "").strip()
-        segments = segments_from_chunks(result.get("chunks"), duration)
+        segments = segments_from_chunks(result.get("chunks"), duration, text)
         words = words_from_chunks(word_result.get("chunks"))
         segments = attach_words_to_segments(segments, words)
         return {
@@ -1448,7 +1448,7 @@ async def audio_transcriptions(
         )
 
     text = str(result.get("text") or "").strip()
-    segments = segments_from_chunks(result.get("chunks"), duration)
+    segments = segments_from_chunks(result.get("chunks"), duration, text)
 
     if response_format == "json":
         return {"text": text}

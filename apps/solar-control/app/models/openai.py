@@ -10,7 +10,8 @@ class ModelInfo(BaseModel):
     The ``capabilities`` field is forwarded from llama.cpp / hf_server upstream
     so downstream apps can differentiate text vs multimodal models without
     trial-and-error. Typical values: ``["completion"]``,
-    ``["completion", "multimodal"]``, ``["embedding"]``, ``["classification"]``.
+    ``["completion", "multimodal"]``, ``["embedding"]``, ``["classification"]``,
+    ``["transcription"]``.
     """
 
     id: str

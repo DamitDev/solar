@@ -261,13 +261,30 @@ def test_model_file_is_not_required_for_a_local_file_source():
         )
 
 
-def test_model_file_is_required_for_a_directory_model(tmp_path):
+def test_model_file_is_required_for_a_pull_source_and_a_local_directory_passes(
+    tmp_path,
+):
+    """Only a pull source is knowable on the control plane.
+
+    The control plane's filesystem is not the host's, so a local path that is a
+    directory on the host cannot be recognised here; the host's own
+    missing-model-file check is the authority for a directory model.
+    """
     for backend_type in ("whispercpp", "nemospeech"):
+        # (a) A pull source without model_file is still rejected.
         errors = _validate_backend_model_selection(
-            {"backend_type": backend_type, "model": str(tmp_path)}, None
+            {"backend_type": backend_type}, "repo://models/whisper"
         )
         assert errors and errors[0]["field"] == "backend.model_file"
         assert "model_file is required" in errors[0]["message"]
+
+        # (b) A local directory path passes control and is judged by the host.
+        assert (
+            _validate_backend_model_selection(
+                {"backend_type": backend_type, "model": str(tmp_path)}, None
+            )
+            == []
+        )
 
 
 def test_fallback_capabilities_advertise_transcription():

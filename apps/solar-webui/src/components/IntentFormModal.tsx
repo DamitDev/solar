@@ -560,7 +560,13 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
           {/* Section 2: Backend */}
           <div>
             <h3 className="text-xs font-semibold text-nord-4 uppercase tracking-wide mb-3">Backend</h3>
-            <BackendConfigFields value={backend} onChange={setBackend} forIntent fieldError={fieldError} />
+            <BackendConfigFields
+              value={backend}
+              onChange={setBackend}
+              forIntent
+              modelSource={modelSource}
+              fieldError={fieldError}
+            />
             {fieldError('backend')}
           </div>
 

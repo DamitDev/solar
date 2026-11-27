@@ -2,6 +2,7 @@
 
 import io
 import json
+import struct
 import wave
 
 import pytest
@@ -823,6 +824,45 @@ def test_nemo_accepts_a_16k_mono_pcm16_wav(nemo, monkeypatch):
     assert captured["format"] == "json"
 
 
+class _RecordingFile(io.BytesIO):
+    """A BytesIO that records every size the parser asks it to read."""
+
+    def __init__(self, data: bytes):
+        super().__init__(data)
+        self.read_sizes: list[int] = []
+
+    def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
+        return super().read(size)
+
+
+def test_a_crafted_fmt_chunk_size_never_reads_more_than_16_bytes():
+    """A fmt chunk declaring 0xFFFFFFFF must not become a 4 GiB read.
+
+    The parser only uses the first 16 bytes of the chunk, so the read is capped;
+    the fake file records every requested size.
+    """
+    fmt = struct.pack("<HHIIHH", 1, 1, 16000, 32000, 2, 16)
+    payload = (
+        b"RIFF"
+        + (36).to_bytes(4, "little")
+        + b"WAVE"
+        + b"fmt "
+        + (0xFFFFFFFF).to_bytes(4, "little")
+        + fmt
+    )
+    recording = _RecordingFile(payload)
+
+    class _Upload:
+        file = recording
+        filename = "sample.wav"
+        content_type = "audio/wav"
+
+    assert shim._wave_format(_Upload()) is not None
+    assert recording.read_sizes
+    assert max(recording.read_sizes) <= 16
+
+
 # ── language is the ISO-639-1 code ───────────────────────────────
 
 
@@ -904,3 +944,9 @@ def test_nemo_verbose_json_language_is_kept_as_its_iso_code(nemo, monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["language"] == "en"
+
+
+def test_javanese_is_normalised_to_jv():
+    """The ISO-639-1 code is jv; whisper.cpp reports the name."""
+    assert shim.normalize_language("javanese") == "jv"
+    assert shim.normalize_language("jw") == "jv"

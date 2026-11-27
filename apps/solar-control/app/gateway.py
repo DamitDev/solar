@@ -2086,7 +2086,7 @@ class OpenAIGateway:
                                     )
                                 raise ValueError(msg)
 
-                    except asyncio.TimeoutError:
+                    except asyncio.TimeoutError as timeout_error:
                         # A gateway-side timeout means the instance never
                         # answered within the route's budget. Record a 504
                         # envelope so the route relays a timeout instead of
@@ -2096,12 +2096,23 @@ class OpenAIGateway:
                             instance.instance_id,
                             cooldown_s=settings.health_cooldown_s,
                         )
-                        total = timeout.total
-                        message = (
-                            f"upstream did not answer within {total:g}s"
-                            if total is not None
-                            else "upstream did not answer in time"
-                        )
+                        if isinstance(timeout_error, aiohttp.ConnectionTimeoutError):
+                            # aiohttp raises this when the connect budget
+                            # expires; naming the total would blame the
+                            # answer budget that never started.
+                            connect = timeout.connect
+                            message = (
+                                f"upstream did not accept a connection within {connect:g}s"
+                                if connect is not None
+                                else "upstream did not accept a connection in time"
+                            )
+                        else:
+                            total = timeout.total
+                            message = (
+                                f"upstream did not answer within {total:g}s"
+                                if total is not None
+                                else "upstream did not answer in time"
+                            )
                         body = json.dumps(
                             {
                                 "error": {

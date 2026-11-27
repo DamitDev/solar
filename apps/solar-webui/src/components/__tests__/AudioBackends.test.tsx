@@ -7,7 +7,7 @@
 
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AddInstanceModal } from '@/components/AddInstanceModal';
 import { BackendConfigFields } from '@/components/BackendConfigFields';
 import { EditInstanceModal } from '@/components/EditInstanceModal';
@@ -679,5 +679,36 @@ describe('audio device options', () => {
     );
     // whisper.cpp has no cuda device; its only device flag is --no-gpu.
     expect(screen.queryByRole('option', { name: 'cuda' })).not.toBeInTheDocument();
+  });
+});
+
+describe('required model file on a pull-source intent', () => {
+  const renderIntent = async (source: string, backend: 'whisper' | 'nemo' = 'whisper') => {
+    vi.spyOn(solarClient, 'getHosts').mockResolvedValue([]);
+    render(<IntentFormModal onClose={vi.fn()} onSaved={vi.fn()} />);
+    await userEvent.type(screen.getByPlaceholderText('repo://model-name:v1'), source);
+    await userEvent.click(backend === 'whisper' ? whisperButton() : nemoButton());
+  };
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('marks the whisper.cpp Model file required for a pull source', async () => {
+    await renderIntent('repo://models/whisper');
+
+    expect(screen.getByText(/Model file/).closest('label')).toHaveTextContent('*');
+  });
+
+  it('marks the NeMo Decoder file required for a pull source', async () => {
+    await renderIntent('huggingface://org/model', 'nemo');
+
+    expect(screen.getByText(/Decoder file/).closest('label')).toHaveTextContent('*');
+  });
+
+  it('does not mark the Model file required for a local source', async () => {
+    await renderIntent('local:///models/whisper');
+
+    expect(screen.getByText(/Model file/).closest('label')).not.toHaveTextContent('*');
   });
 });
