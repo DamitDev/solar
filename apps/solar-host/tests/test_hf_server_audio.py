@@ -72,7 +72,7 @@ class _Pipeline:
 
 
 @pytest.fixture(autouse=True)
-def _state(monkeypatch):
+def _state(monkeypatch, fake_ffmpeg):
     monkeypatch.setattr(hf.state, "alias", "whisper-hu")
     monkeypatch.setattr(hf.state, "model_type", "audio")
     monkeypatch.setattr(hf.state, "language", None)
@@ -80,7 +80,6 @@ def _state(monkeypatch):
     monkeypatch.setattr(hf.state, "batch_size", 8)
     monkeypatch.setattr(hf.state, "tokenizer", None)
     monkeypatch.setattr(hf.state, "pipeline", _Pipeline())
-    monkeypatch.setattr(hf.shutil, "which", lambda name: "/usr/bin/ffmpeg")
 
 
 async def _call(form: FormData):
