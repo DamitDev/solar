@@ -1342,7 +1342,9 @@ async def audio_transcriptions(
     )
 
     generate_kwargs: dict[str, object] = {"task": "transcribe"}
-    if language:
+    if language and language.strip().lower() != "auto":
+        # Whisper's lang_to_id has no 'auto' token; omitting the language is
+        # how auto-detection is requested.
         generate_kwargs["language"] = language
     if temperature_value is not None and temperature_value > 0:
         generate_kwargs["temperature"] = temperature_value
@@ -1363,7 +1365,9 @@ async def audio_transcriptions(
                 "prompt",
                 "invalid_request_error",
             )
-        generate_kwargs["prompt_ids"] = get_prompt_ids(prompt, return_tensors="pt")
+        generate_kwargs["prompt_ids"] = get_prompt_ids(prompt, return_tensors="pt").to(
+            state.device
+        )
 
     # Only verbose_json carries words. A word granularity on json/text/srt/vtt
     # cannot reach the client, so it must not pay for the extra alignment pass

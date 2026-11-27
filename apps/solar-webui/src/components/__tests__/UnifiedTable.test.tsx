@@ -82,6 +82,14 @@ describe('getModelDisplay', () => {
         alias: 'vllm',
       } as InstanceConfig),
     ).toBe('/models/vllm');
+    // A runtime config can arrive without its model path; the alias keeps the
+    // model line readable instead of blank.
+    expect(
+      getModelDisplay({
+        backend_type: 'llamacpp',
+        alias: 'llm',
+      } as InstanceConfig),
+    ).toBe('llm');
   });
 
   it('returns an empty string for a config with no model key', () => {

@@ -1223,6 +1223,38 @@ export function BackendConfigFields({
                 />
               </div>
 
+              {/* Instruction */}
+              <div>
+                <label className="block text-sm font-medium text-nord-4 mb-1">Instruction (Optional)</label>
+                <input
+                  type="text"
+                  name="instruction"
+                  value={value.instruction || ''}
+                  onChange={handleChange}
+                  placeholder="Transcribe verbatim."
+                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                />
+                <p className="text-xs text-nord-4 mt-1">
+                  Style hint passed to nemo-speech as <code>--instruction</code>
+                </p>
+              </div>
+
+              {/* Translate To */}
+              <div>
+                <label className="block text-sm font-medium text-nord-4 mb-1">Translate To (Optional)</label>
+                <input
+                  type="text"
+                  name="translate_to"
+                  value={value.translate_to || ''}
+                  onChange={handleChange}
+                  placeholder="hu"
+                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                />
+                <p className="text-xs text-nord-4 mt-1">
+                  Target language passed to nemo-speech as <code>--translate-to</code>
+                </p>
+              </div>
+
               {/* Device */}
               <div>
                 <label className="block text-sm font-medium text-nord-4 mb-1">Device</label>
@@ -1378,31 +1410,6 @@ export function BackendConfigFields({
                     />
                     <p className="text-xs text-nord-4 mt-1">Spoken language; empty lets the checkpoint decide</p>
                   </div>
-
-                  {forIntent && (
-                    <div className="md:col-span-2">
-                      <label className="block text-sm font-medium text-nord-4 mb-1">File filters (Optional)</label>
-                      <input
-                        type="text"
-                        name="file_filters"
-                        value={Array.isArray(value.file_filters) ? value.file_filters.join(', ') : ''}
-                        onChange={(e) =>
-                          onChange({
-                            ...value,
-                            file_filters: e.target.value
-                              .split(',')
-                              .map((entry) => entry.trim())
-                              .filter(Boolean),
-                          })
-                        }
-                        placeholder="*.safetensors, *.json, *.txt"
-                        className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent font-mono text-sm"
-                      />
-                      <p className="text-xs text-nord-4 mt-1">
-                        Only these files are pulled from the repository. Leave empty to pull everything.
-                      </p>
-                    </div>
-                  )}
                 </>
               )}
 

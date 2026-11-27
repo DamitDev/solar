@@ -171,12 +171,16 @@ export interface NemoSpeechConfig extends BaseInstanceConfig {
   model_file?: string;
   /** Encoder GGUF sidecar, when the release ships one */
   encoder?: string;
+  /** Optional style instruction passed as --instruction */
+  instruction?: string;
+  /** Optional translation target passed as --translate-to */
+  translate_to?: string;
   /** Speaker diarizer GGUF; required when `diarize` is on */
   diar_model?: string;
   alias: string;
   language?: string;
   diarize?: boolean;
-  device?: 'auto' | 'cpu';
+  device?: 'auto' | 'cpu' | 'cuda';
 }
 
 /**

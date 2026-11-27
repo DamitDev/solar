@@ -269,8 +269,8 @@ export function InstanceCard({
                 <h3 className="font-semibold text-lg truncate text-nord-6">{instance.config.alias}</h3>
                 <IntentManagedBadge instance={instance} />
               </div>
-              <p className="text-sm text-nord-4 truncate" title={getModelDisplay(instance.config)}>
-                {getModelDisplay(instance.config)}
+              <p className="text-sm text-nord-4 truncate" title={getModelDisplay(instance.config) || instance.id}>
+                {getModelDisplay(instance.config) || instance.id}
               </p>
             </div>
           </div>

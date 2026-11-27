@@ -170,6 +170,27 @@ def test_audio_device_vocabulary_is_per_backend():
     )
 
 
+def test_nemospeech_cuda_contradicts_a_non_nvidia_placement():
+    """cuda is in the NeMo vocabulary but still needs an NVIDIA host.
+
+    The nemospeech branch used to return before the placement check, so this
+    intent passed the form and failed only when the runtime started.
+    """
+    errors = _validate_device(
+        {"backend_type": "nemospeech", "device": "cuda"},
+        {"gpu_type": "apple_mps"},
+    )
+    assert errors and errors[0]["field"] == "backend.device"
+    assert "requires gpu_type 'nvidia_cuda'" in errors[0]["message"]
+    assert (
+        _validate_device(
+            {"backend_type": "nemospeech", "device": "cuda"},
+            {"gpu_type": "nvidia_cuda"},
+        )
+        == []
+    )
+
+
 def test_audio_backends_stay_single_gpu():
     for backend_type in AUDIO_BACKENDS:
         data = {
@@ -196,6 +217,27 @@ def test_model_file_is_required_when_the_pull_returns_a_directory():
             )
             == []
         )
+
+
+def test_model_file_is_not_required_for_a_local_file_source():
+    """A local:// file already names the model; the pull rule must not fire."""
+    for backend_type in ("whispercpp", "nemospeech"):
+        assert (
+            _validate_backend_model_selection(
+                {"backend_type": backend_type},
+                "local:///models/x.gguf",
+            )
+            == []
+        )
+
+
+def test_model_file_is_required_for_a_directory_model(tmp_path):
+    for backend_type in ("whispercpp", "nemospeech"):
+        errors = _validate_backend_model_selection(
+            {"backend_type": backend_type, "model": str(tmp_path)}, None
+        )
+        assert errors and errors[0]["field"] == "backend.model_file"
+        assert "model_file is required" in errors[0]["message"]
 
 
 def test_fallback_capabilities_advertise_transcription():

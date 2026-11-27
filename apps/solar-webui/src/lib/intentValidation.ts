@@ -390,8 +390,6 @@ function validateDevice(
   }
 
   if (backend.backend_type === 'nemospeech') {
-    // NeMo-Speech returns before the placement contradiction, so only the
-    // vocabulary applies here.
     if (!(NEMOSPEECH_DEVICES as readonly string[]).includes(device)) {
       return [
         {
@@ -400,7 +398,8 @@ function validateDevice(
         },
       ];
     }
-    return [];
+    // cuda is valid vocabulary but still constrains the placement, so fall
+    // through to the same contradiction check as the generic branch.
   }
 
   if (!DEVICE_OPTIONS.includes(device)) {

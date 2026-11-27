@@ -235,6 +235,19 @@ def test_an_unknown_field_is_refused(client, monkeypatch):
     assert captured == {}
 
 
+def test_diarize_is_not_an_accepted_request_field(client, monkeypatch):
+    """diarize is a backend config knob, not an OpenAI request field, and the
+    shim never reads it; forwarding it verbatim would reach the runtime."""
+    captured = _forward_stub(monkeypatch)
+    response = _post(client, diarize="true")
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == (
+        "field 'diarize' is not supported by /v1/audio/transcriptions"
+    )
+    assert captured == {}
+
+
 def test_the_four_openai_optional_fields_are_accepted_and_never_forwarded_by_name(
     client, monkeypatch
 ):

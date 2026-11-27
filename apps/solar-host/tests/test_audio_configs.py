@@ -57,6 +57,30 @@ def test_an_explicit_model_file_still_needs_no_selector():
     assert NemoSpeechConfig(model="/m", alias="a").model_file is None
 
 
+def test_a_local_file_source_needs_no_selector():
+    """A local:// file already names the model; the pull rule must not fire."""
+    assert (
+        WhisperCppConfig(
+            model_source="local:///models/ggml-tiny.bin", alias="whisper-tiny"
+        ).model_file
+        is None
+    )
+    assert (
+        NemoSpeechConfig(
+            model_source="local:///models/decoder.gguf", alias="nemotron"
+        ).model_file
+        is None
+    )
+
+
+def test_a_directory_model_requires_the_selector(tmp_path):
+    """A directory model needs model_file to name the file inside it."""
+    for config_class in (WhisperCppConfig, NemoSpeechConfig):
+        with pytest.raises(ValueError) as excinfo:
+            config_class(model=str(tmp_path), alias="tiny")
+        assert "model_file is required" in str(excinfo.value)
+
+
 def test_whispercpp_device_is_auto_or_cpu_only():
     assert WhisperCppConfig(model="/m", alias="a", device="cpu").device == "cpu"
     with pytest.raises(ValueError):

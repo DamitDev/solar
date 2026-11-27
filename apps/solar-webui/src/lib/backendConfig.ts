@@ -479,6 +479,8 @@ export const getDefaultConfig = (primary: PrimaryBackend, mode: string, forInten
       ...(forIntent ? {} : { alias: '' }),
       encoder: '',
       diar_model: '',
+      instruction: '',
+      translate_to: '',
       language: '',
       diarize: false,
       device: 'auto',
@@ -584,6 +586,8 @@ export const stripEmptyOptionalFields = (config: Record<string, any>): Record<st
     'language',
     'encoder',
     'diar_model',
+    'instruction',
+    'translate_to',
   ]) {
     if (!next[field]) delete next[field];
   }

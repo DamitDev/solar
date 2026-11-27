@@ -72,6 +72,8 @@ describe('getDefaultConfig', () => {
     expect(config.model).toBe('');
     expect(config.encoder).toBe('');
     expect(config.diar_model).toBe('');
+    expect(config.instruction).toBe('');
+    expect(config.translate_to).toBe('');
     expect(config.diarize).toBe(false);
   });
 
@@ -110,11 +112,15 @@ describe('stripEmptyOptionalFields', () => {
       language: '',
       encoder: '',
       diar_model: '',
+      instruction: '',
+      translate_to: '',
     });
 
     expect(stripped.language).toBeUndefined();
     expect(stripped.encoder).toBeUndefined();
     expect(stripped.diar_model).toBeUndefined();
+    expect(stripped.instruction).toBeUndefined();
+    expect(stripped.translate_to).toBeUndefined();
     expect(stripped.model).toBe('/m.gguf');
   });
 
@@ -208,6 +214,8 @@ describe('BackendConfigFields audio surfaces', () => {
     expect(screen.getByPlaceholderText('*.q8_0.gguf')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('encoder.gguf')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('sortformer.gguf')).toBeInTheDocument();
+    expect(screen.getByText('Instruction (Optional)')).toBeInTheDocument();
+    expect(screen.getByText('Translate To (Optional)')).toBeInTheDocument();
     expect(screen.getByLabelText(/Speaker diarization/)).toBeInTheDocument();
   });
 
@@ -223,8 +231,9 @@ describe('BackendConfigFields audio surfaces', () => {
     expect(screen.getByText('Chunk Length (s)')).toBeInTheDocument();
     expect(screen.getByText('Batch Size')).toBeInTheDocument();
     expect(screen.queryByText('Max Length')).not.toBeInTheDocument();
-    // file_filters is an intent-only pull knob.
-    expect(screen.getByText('File filters (Optional)')).toBeInTheDocument();
+    // file_filters is owned by IntentFormModal's Download filters, so a
+    // duplicate input here would be silently overwritten on submit.
+    expect(screen.queryByText('File filters (Optional)')).not.toBeInTheDocument();
   });
 
   it('shows an Alias input on the whisper.cpp instance form', () => {

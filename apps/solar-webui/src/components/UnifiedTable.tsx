@@ -121,7 +121,7 @@ export function UnifiedTable({
               const reachable = isHostReachable(host.id);
               const disabled = isLoading || !reachable;
               const offlineTitle = reachable ? undefined : 'Host is offline';
-              const model = getModelDisplay(instance.config);
+              const model = getModelDisplay(instance.config) || instance.id;
 
               return (
                 <tr

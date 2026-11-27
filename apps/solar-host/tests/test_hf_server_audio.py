@@ -533,16 +533,52 @@ async def test_plain_json_does_not_pay_for_timestamps():
     assert hf.state.pipeline.calls[0]["return_timestamps"] is False
 
 
+class _PromptIds:
+    """A torch.Tensor stand-in that records the device it is moved to."""
+
+    def __init__(self, ids: list[list[int]]):
+        self.ids = ids
+        self.devices: list[str] = []
+
+    def to(self, device: str) -> "_PromptIds":
+        self.devices.append(device)
+        return self
+
+    def __eq__(self, other: object) -> bool:
+        return self.ids == other
+
+
 @pytest.mark.anyio
 async def test_a_prompt_uses_the_tokenizer_prompt_ids():
     class _Tokenizer:
         def get_prompt_ids(self, prompt, return_tensors):
             assert return_tensors == "pt"
-            return [[1, 2, 3]]
+            self.prompt_ids = _PromptIds([[1, 2, 3]])
+            return self.prompt_ids
 
-    hf.state.tokenizer = _Tokenizer()
+    tokenizer = _Tokenizer()
+    hf.state.tokenizer = tokenizer
     await _call(_form(model="whisper-hu", prompt="Hello there"))
     assert hf.state.pipeline.calls[0]["generate_kwargs"]["prompt_ids"] == [[1, 2, 3]]
+
+
+@pytest.mark.anyio
+async def test_prompt_ids_move_to_the_pipeline_device(monkeypatch):
+    """Whisper concatenates prompt_ids with on-device decoder inputs, so a
+    CPU tensor fails with a device mismatch on a cuda/mps instance."""
+
+    class _Tokenizer:
+        def get_prompt_ids(self, prompt, return_tensors):
+            self.prompt_ids = _PromptIds([[1, 2, 3]])
+            return self.prompt_ids
+
+    tokenizer = _Tokenizer()
+    hf.state.tokenizer = tokenizer
+    monkeypatch.setattr(hf.state, "device", "cuda")
+
+    await _call(_form(model="whisper-hu", prompt="Hello there"))
+
+    assert tokenizer.prompt_ids.devices == ["cuda"]
 
 
 @pytest.mark.anyio
@@ -560,7 +596,7 @@ class _RecordingTokenizer:
 
     def get_prompt_ids(self, prompt, return_tensors):
         self.prompts.append(prompt)
-        return [[1, 2, 3]]
+        return _PromptIds([[1, 2, 3]])
 
 
 @pytest.mark.anyio
@@ -598,6 +634,16 @@ async def test_an_explicit_language_wins_over_languages():
     await _call(_form(model="whisper-hu", language="de", languages='["hu"]'))
 
     assert hf.state.pipeline.calls[0]["generate_kwargs"]["language"] == "de"
+
+
+@pytest.mark.anyio
+async def test_language_auto_is_treated_as_omitted():
+    """Whisper's lang_to_id has no 'auto' token; omitting the language asks
+    the pipeline to detect it instead of raising Unsupported language."""
+    await _call(_form(model="whisper-hu", language="auto"))
+
+    assert hf.state.pipeline is not None
+    assert "language" not in hf.state.pipeline.calls[0]["generate_kwargs"]
 
 
 @pytest.mark.anyio

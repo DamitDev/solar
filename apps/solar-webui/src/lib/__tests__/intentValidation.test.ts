@@ -237,11 +237,22 @@ describe('validateIntentRequest', () => {
           expect(fieldNames({ backend: { backend_type: 'nemospeech', device } })).not.toContain('backend.device');
         }
         expect(fieldNames({ backend: { backend_type: 'nemospeech', device: 'mps' } })).toContain('backend.device');
-        // The server returns before the placement contradiction on NeMo-Speech.
+      });
+
+      it('applies the cuda placement contradiction to NeMo-Speech', () => {
+        // cuda is in the NeMo vocabulary but still needs an NVIDIA host, so the
+        // form must reject it before the host fails at startup.
+        const errors = errorsFor({
+          backend: { backend_type: 'nemospeech', device: 'cuda' },
+          placement: { gpu_type: 'apple_mps' },
+        });
+        const err = errors.find((e) => e.field === 'backend.device');
+        expect(err).toBeDefined();
+        expect(err!.message).toContain("requires gpu_type 'nvidia_cuda'");
         expect(
           fieldNames({
             backend: { backend_type: 'nemospeech', device: 'cuda' },
-            placement: { gpu_type: 'apple_mps' },
+            placement: { gpu_type: 'cuda' },
           }),
         ).not.toContain('backend.device');
       });

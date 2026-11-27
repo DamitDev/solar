@@ -79,7 +79,6 @@ ACCEPTED_FIELDS: frozenset[str] = frozenset(
         "timestamp_granularities[]",
         "timestamp_granularities",
         "stream",
-        "diarize",
         *OPENAI_OPTIONAL_FIELDS,
         *OPENAI_ARRAY_FIELDS,
         *WHISPER_ONLY_FIELDS,

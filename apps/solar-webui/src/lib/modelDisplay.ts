@@ -11,7 +11,7 @@ import { InstanceConfig, isLlamaCppConfig, isSglangConfig, isVllmConfig } from '
 
 export function getModelDisplay(config: InstanceConfig): string {
   if (isLlamaCppConfig(config)) {
-    return config.model ?? '';
+    return config.model ?? config.alias ?? '';
   }
   if (isSglangConfig(config) || isVllmConfig(config)) {
     return config.model_path ?? '';

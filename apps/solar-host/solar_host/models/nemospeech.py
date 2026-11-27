@@ -1,5 +1,6 @@
 """NeMo-Speech.cpp backend configuration model."""
 
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -7,9 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from solar_host.models.huggingface import _strip_api_key
 
 _MODEL_FILE_DESCRIPTION = (
-    "Decoder GGUF selector inside the pulled artifact (filename, relative path "
-    "or glob). Required when model_source is set: a HuggingFace pull returns "
-    "the snapshot directory, so the decoder has to be selected from it."
+    "Decoder GGUF selector inside the pulled artifact (filename, relative "
+    "path or glob). Required for a pull source (repo:// or huggingface://) and "
+    "when model names a directory; an explicit local file needs no selector."
 )
 _SIDECAR_DESCRIPTION = (
     "Optional sidecar GGUF (SALM encoder or Sortformer diarizer). A bare "
@@ -85,22 +86,33 @@ class NemoSpeechConfig(BaseModel):
 
     @model_validator(mode="after")
     def check_model_file_for_source(self) -> "NemoSpeechConfig":
-        """A pull returns a directory, so the decoder must be selected from it.
+        """A pull or a directory model needs a selector; a file does not.
 
         A blank selector is as unusable as a missing one and answers with the
         same error, so a client sees one rule for the field.
         """
+        message = self._missing_model_file_message()
         if self.model_file is not None and not self.model_file.strip():
-            raise ValueError(
-                "model_file is required when model_source is set; the pull "
-                "returns a directory"
-            )
-        if self.model_source and not self.model_file:
-            raise ValueError(
-                "model_file is required when model_source is set; the pull "
-                "returns a directory"
-            )
+            raise ValueError(message or "model_file is required and must not be blank")
+        if not self.model_file and message is not None:
+            raise ValueError(message)
         return self
+
+    def _missing_model_file_message(self) -> str | None:
+        """Why a selector is needed, or None when model already names a file."""
+        if isinstance(self.model_source, str) and self.model_source.startswith(
+            ("repo://", "huggingface://")
+        ):
+            return (
+                "model_file is required when model_source is set; the pull "
+                "returns a directory"
+            )
+        if self.model and Path(self.model).is_dir():
+            return (
+                "model_file is required when model is a directory; select the "
+                "decoder GGUF inside it"
+            )
+        return None
 
     @model_validator(mode="after")
     def check_diarizer(self) -> "NemoSpeechConfig":

@@ -8,6 +8,7 @@ the codebase.
 import json
 import math
 import re
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -350,20 +351,25 @@ def _validate_backend_model_selection(
             }
         )
 
-    # A HuggingFace pull returns the snapshot directory, so the GGML file has to
-    # be selected from it; an explicit local file path needs no selector.
+    # A pull source returns the snapshot directory, and a directory model needs
+    # a file selected from it; an explicit local file path needs no selector.
+    model = backend.get("model")
+    pull_source = isinstance(model_source, str) and model_source.startswith(
+        ("repo://", "huggingface://")
+    )
+    directory_model = isinstance(model, str) and Path(model).is_dir()
     if (
         model_file is None
         and "model_file" not in exempt_fields
         and backend.get("backend_type") in ("whispercpp", "nemospeech")
-        and model_source is not None
+        and (pull_source or directory_model)
     ):
         errors.append(
             {
                 "field": "backend.model_file",
                 "message": (
-                    "model_file is required when model_source is set for "
-                    "whisper.cpp and NeMo-Speech; the pull returns a directory"
+                    "model_file is required when the source is a pull or the "
+                    "model is a directory; the pull returns a directory"
                 ),
             }
         )
@@ -627,15 +633,16 @@ def _validate_device(
             )
         return errors
 
-    if backend_type == "nemospeech":
-        if device not in ("auto", "cpu", "cuda"):
-            errors.append(
-                {
-                    "field": "backend.device",
-                    "message": "NeMo-Speech device must be auto, cpu or cuda",
-                }
-            )
+    if backend_type == "nemospeech" and device not in ("auto", "cpu", "cuda"):
+        errors.append(
+            {
+                "field": "backend.device",
+                "message": "NeMo-Speech device must be auto, cpu or cuda",
+            }
+        )
         return errors
+    # cuda is valid vocabulary but still constrains the placement, so fall
+    # through to the same contradiction check as the generic branch.
 
     if device not in DEVICE_OPTIONS:
         errors.append(
