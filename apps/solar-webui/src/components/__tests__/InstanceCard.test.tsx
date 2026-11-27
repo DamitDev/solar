@@ -85,3 +85,63 @@ describe('InstanceCard model line', () => {
     expect(screen.getByTitle('openai/whisper-large-v3-hu')).toBeInTheDocument();
   });
 });
+
+describe('InstanceCard audio backend details', () => {
+  it('shows the language and device of a whisper.cpp instance', () => {
+    renderCard({
+      backend_type: 'whispercpp',
+      model: '/models/ggml-tiny.bin',
+      alias: 'whisper-tiny',
+      host: '0.0.0.0',
+      language: 'auto',
+      threads: 4,
+      device: 'cpu',
+    });
+
+    expect(screen.getByText('Language:')).toBeInTheDocument();
+    expect(screen.getByText('auto')).toBeInTheDocument();
+    expect(screen.getByText('Device:')).toBeInTheDocument();
+    expect(screen.getByText('cpu')).toBeInTheDocument();
+    // whisper.cpp has no chunking, so the card must not invent one.
+    expect(screen.queryByText('Chunk Length:')).not.toBeInTheDocument();
+  });
+
+  it('shows the language and device of a NeMo-Speech.cpp instance', () => {
+    renderCard({
+      backend_type: 'nemospeech',
+      model: '/models/decoder.gguf',
+      alias: 'nemotron-stream-en',
+      host: '0.0.0.0',
+      language: 'en',
+      diarize: false,
+      device: 'cpu',
+    });
+
+    expect(screen.getByText('Language:')).toBeInTheDocument();
+    expect(screen.getByText('en')).toBeInTheDocument();
+    expect(screen.getByText('Device:')).toBeInTheDocument();
+    expect(screen.getByText('cpu')).toBeInTheDocument();
+    expect(screen.queryByText('Chunk Length:')).not.toBeInTheDocument();
+  });
+
+  it('shows the language, device and chunk length of a HuggingFace audio instance', () => {
+    renderCard({
+      backend_type: 'huggingface_audio',
+      model_id: 'openai/whisper-large-v3-hu',
+      alias: 'whisper-large-v3-hu',
+      host: '0.0.0.0',
+      device: 'cuda',
+      dtype: 'auto',
+      language: 'hu',
+      chunk_length_s: 30,
+      batch_size: 8,
+    });
+
+    expect(screen.getByText('Language:')).toBeInTheDocument();
+    expect(screen.getByText('hu')).toBeInTheDocument();
+    expect(screen.getByText('Device:')).toBeInTheDocument();
+    expect(screen.getByText('cuda')).toBeInTheDocument();
+    expect(screen.getByText('Chunk Length:')).toBeInTheDocument();
+    expect(screen.getByText('30s')).toBeInTheDocument();
+  });
+});

@@ -1,5 +1,8 @@
 """Tests for the transcription request model and the audio backend contract."""
 
+import ast
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -291,3 +294,38 @@ def test_fallback_capabilities_advertise_transcription():
     for backend_type in AUDIO_BACKENDS:
         assert OpenAIGateway._fallback_capabilities(backend_type) == ["transcription"]
     assert OpenAIGateway._fallback_capabilities("huggingface_causal") == ["completion"]
+
+
+# ── the format list is shared with the host ─────────────────────────
+
+
+def _tuple_assignment(path: Path, name: str) -> tuple[str, ...]:
+    """The literal tuple assigned to ``name`` in a Python source file."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.AnnAssign) and getattr(node.target, "id", None) == name:
+            assert node.value is not None, name
+            value = ast.literal_eval(node.value)
+            assert isinstance(value, tuple), name
+            return value
+    raise AssertionError(f"{name} is not assigned in {path}")
+
+
+def test_the_audio_response_formats_match_the_host():
+    """A format added on the host must not be rejected by control first.
+
+    The control venv cannot import the host package, so both source files are
+    read: the two lists must stay identical entry for entry.
+    """
+    control_root = Path(__file__).resolve().parents[1]
+    host_root = control_root.parent / "solar-host"
+
+    control_formats = _tuple_assignment(
+        control_root / "app" / "models" / "openai.py", "AUDIO_RESPONSE_FORMATS"
+    )
+    host_formats = _tuple_assignment(
+        host_root / "solar_host" / "servers" / "audio_formats.py",
+        "RESPONSE_FORMATS",
+    )
+
+    assert control_formats == host_formats

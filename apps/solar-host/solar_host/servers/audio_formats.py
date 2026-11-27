@@ -231,6 +231,9 @@ LANGUAGE_CODES: dict[str, str] = {
     "bashkir": "ba",
     "jw": "jv",
     "javanese": "jv",
+    # The normaliser must be idempotent: a client that already sends the
+    # ISO-639-1 code must get it back, not "und".
+    "jv": "jv",
     "su": "su",
     "sundanese": "su",
     "yue": "yue",

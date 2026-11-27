@@ -25,10 +25,14 @@ import {
   isHuggingFaceCausalConfig,
   isHuggingFaceClassificationConfig,
   isHuggingFaceEmbeddingConfig,
+  isAudioConfig,
   LlamaCppConfig,
   HuggingFaceCausalConfig,
   HuggingFaceClassificationConfig,
   HuggingFaceEmbeddingConfig,
+  WhisperCppConfig,
+  NemoSpeechConfig,
+  HuggingFaceAudioConfig,
 } from '@/api/types';
 import { cn, getStatusColor, formatUptime } from '@/lib/utils';
 import { getModelDisplay } from '@/lib/modelDisplay';
@@ -241,6 +245,33 @@ export function InstanceCard({
             <span>Normalize:</span>
             <span className="font-mono text-nord-8">{config.normalize_embeddings ? 'Yes' : 'No'}</span>
           </div>
+        </>
+      );
+    }
+
+    if (isAudioConfig(instance.config)) {
+      const config = instance.config as WhisperCppConfig | NemoSpeechConfig | HuggingFaceAudioConfig;
+      return (
+        <>
+          {config.language && (
+            <div className="flex justify-between">
+              <span>Language:</span>
+              <span className="font-mono text-nord-8">{config.language}</span>
+            </div>
+          )}
+          {config.device && (
+            <div className="flex justify-between">
+              <span>Device:</span>
+              <span className="font-mono text-nord-8">{config.device}</span>
+            </div>
+          )}
+          {/* Only the HuggingFace audio config chunks long-form audio. */}
+          {'chunk_length_s' in config && config.chunk_length_s != null && (
+            <div className="flex justify-between">
+              <span>Chunk Length:</span>
+              <span className="font-mono text-nord-8">{config.chunk_length_s}s</span>
+            </div>
+          )}
         </>
       );
     }

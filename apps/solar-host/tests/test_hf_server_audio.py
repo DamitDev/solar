@@ -6,6 +6,7 @@ format matrix is proven without downloading a model.
 
 import io
 import json
+import logging
 import threading
 import wave
 
@@ -15,6 +16,7 @@ from fastapi.responses import JSONResponse
 from starlette.datastructures import FormData, UploadFile
 
 import solar_host.servers.hf_server as hf
+from solar_host.models.base import InstancePhase
 
 
 def _wav_bytes(seconds: float = 1.0, rate: int = 16000) -> bytes:
@@ -870,3 +872,37 @@ def test_a_non_audio_instance_is_refused_with_a_400(monkeypatch):
     assert response.json()["detail"] == (
         "Transcriptions only available for audio models"
     )
+
+
+# ── the runner sees the audio request as busy ─────────────────────
+
+
+@pytest.mark.anyio
+async def test_the_route_logs_the_request_and_complete_lines_the_runner_parses(caplog):
+    """The HuggingFace runner derives `busy` from these two lines.
+
+    Without them an audio instance reports idle for the whole transcription, so
+    both lines must be present and shaped so the runner's regexes match.
+    """
+    from solar_host.backends.huggingface import HuggingFaceRunner
+
+    caplog.set_level(logging.INFO, logger=hf.logger.name)
+    await _call(_form(model="whisper-hu"))
+
+    messages = [record.getMessage() for record in caplog.records]
+    request_lines = [line for line in messages if line.startswith("[REQUEST]")]
+    complete_lines = [line for line in messages if line.startswith("[COMPLETE]")]
+    assert len(request_lines) == 1
+    assert len(complete_lines) == 1
+
+    runner = HuggingFaceRunner()
+    context = runner.initialize_context()
+    busy = runner.parse_log_line("inst-1", request_lines[0], context)
+    idle = runner.parse_log_line("inst-1", complete_lines[0], context)
+
+    assert busy is not None and busy.busy is True
+    assert busy.phase is InstancePhase.GENERATING
+    assert idle is not None and idle.busy is False
+    assert idle.phase is InstancePhase.IDLE
+    # An audio request has no token count, so the runner records none.
+    assert idle.generated_tokens == 0

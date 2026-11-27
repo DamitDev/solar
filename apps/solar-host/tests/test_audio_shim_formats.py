@@ -218,6 +218,40 @@ def test_whisper_word_and_segment_granularities_relay_the_same_body(
     assert word.json()["segments"][0]["words"]
 
 
+def test_an_unknown_granularity_is_refused_before_the_runtime(nemo, monkeypatch):
+    """NeMo-Speech forwards the field, so an unknown entry must be a 400 here.
+
+    Before the fix the value reached the runtime, which cannot know the OpenAI
+    vocabulary; the shim must validate it against its own list.
+    """
+    captured = _forward_stub(monkeypatch)
+    response = _post(
+        nemo,
+        response_format="verbose_json",
+        **{"timestamp_granularities[]": "sentence"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == (
+        "timestamp_granularities must contain only 'word' or 'segment'"
+    )
+    assert captured == {}
+
+
+def test_the_non_array_granularity_spelling_is_validated_too(nemo, monkeypatch):
+    """A client may send the field without the [] suffix; both spellings reach
+    the runtime, so both must be validated."""
+    captured = _forward_stub(monkeypatch)
+    response = _post(
+        nemo,
+        response_format="verbose_json",
+        timestamp_granularities="sentence",
+    )
+
+    assert response.status_code == 400
+    assert captured == {}
+
+
 def test_whisper_diarized_json_is_refused(client, monkeypatch):
     captured = _forward_stub(monkeypatch)
     response = _post(client, response_format="diarized_json")
@@ -1021,6 +1055,9 @@ def test_javanese_is_normalised_to_jv():
     """The ISO-639-1 code is jv; whisper.cpp reports the name."""
     assert shim.normalize_language("javanese") == "jv"
     assert shim.normalize_language("jw") == "jv"
+    # The normaliser must be idempotent: a client that already sends the ISO
+    # code must not have it turned into "und".
+    assert shim.normalize_language("jv") == "jv"
 
 
 # ── word segments never shrink ────────────────────────────────────

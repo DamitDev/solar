@@ -1384,6 +1384,8 @@ async def audio_transcriptions(
     # Only verbose_json carries words. A word granularity on json/text/srt/vtt
     # cannot reach the client, so it must not pay for the extra alignment pass
     # (which is slow enough to time out on CPU).
+    start_time = time.time()
+    logger.info(f"[REQUEST] model={state.alias} endpoint=/v1/audio/transcriptions")
     word_granularity = "word" in granularities and response_format == "verbose_json"
     if word_granularity:
         # Word timestamps come from the expensive alignment pass; run it first
@@ -1421,6 +1423,11 @@ async def audio_transcriptions(
             return _transcription_error(
                 f"transcription failed: {exc}", None, "server_error", 500
             )
+
+        # The runner derives the idle state from this line; an audio request
+        # has no token count, so the field is zero rather than invented.
+        elapsed_ms = (time.time() - start_time) * 1000
+        logger.info(f"[COMPLETE] model={state.alias} tokens=0 time_ms={elapsed_ms:.1f}")
 
         text = str(result.get("text") or "").strip()
         segments = segments_from_chunks(result.get("chunks"), duration, text)
@@ -1466,6 +1473,11 @@ async def audio_transcriptions(
         return _transcription_error(
             f"transcription failed: {exc}", None, "server_error", 500
         )
+
+    # The runner derives the idle state from this line; an audio request has no
+    # token count, so the field is zero rather than invented.
+    elapsed_ms = (time.time() - start_time) * 1000
+    logger.info(f"[COMPLETE] model={state.alias} tokens=0 time_ms={elapsed_ms:.1f}")
 
     text = str(result.get("text") or "").strip()
     segments = segments_from_chunks(result.get("chunks"), duration, text)

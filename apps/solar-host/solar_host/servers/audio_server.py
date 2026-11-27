@@ -69,6 +69,7 @@ from solar_host.servers.audio_fields import (
 from solar_host.servers.audio_formats import (
     FORMAT_MEDIA_TYPES,
     RESPONSE_FORMATS,
+    TIMESTAMP_GRANULARITIES,
     normalize_language,
 )
 
@@ -899,6 +900,17 @@ async def audio_transcriptions(
         if name not in ACCEPTED_FIELDS:
             return _error(
                 f"field '{name}' is not supported by /v1/audio/transcriptions",
+                "invalid_request_error",
+            )
+    # NeMo-Speech.cpp receives this field, so an unknown entry must be refused
+    # here rather than at the runtime, which cannot know the OpenAI vocabulary.
+    for name, value in fields:
+        if (
+            name in ("timestamp_granularities[]", "timestamp_granularities")
+            and value not in TIMESTAMP_GRANULARITIES
+        ):
+            return _error(
+                "timestamp_granularities must contain only 'word' or 'segment'",
                 "invalid_request_error",
             )
     if upload is None:
