@@ -58,6 +58,10 @@ def _form(**fields) -> FormData:
 class _Pipeline:
     """Records how the pipeline was called and returns canned output."""
 
+    # The ASR pipeline sets this from the model; Whisper is the only type that
+    # accepts return_language.
+    type = "seq2seq_whisper"
+
     def __init__(
         self, text: str = "hello world", chunks=None, language: str | None = "hungarian"
     ):
@@ -267,6 +271,8 @@ async def test_a_word_granularity_with_srt_does_not_run_the_word_pass():
 
 class _TwoPassPipeline:
     """Word chunks for ``"word"`` and real segments for ``True``."""
+
+    type = "seq2seq_whisper"
 
     def __init__(self):
         self.calls: list[dict] = []
@@ -781,6 +787,39 @@ async def test_verbose_json_language_is_normalised_to_the_iso_code():
     assert payload["language"] == "hu"
 
 
+class _NonWhisperPipeline:
+    """A seq2seq ASR pipeline that is not Whisper.
+
+    transformers raises ValueError when ``return_language`` is passed to anything
+    but a Whisper pipeline, so this fake does the same.
+    """
+
+    type = "seq2seq"
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def __call__(self, samples, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs.get("return_language") is not None:
+            raise ValueError("Only Whisper can return language for now.")
+        return {"text": "hello world"}
+
+
+@pytest.mark.anyio
+async def test_a_non_whisper_pipeline_is_not_asked_for_the_language():
+    """return_language is Whisper-only; a seq2seq pipeline must not receive it
+    and verbose_json must report the language as und."""
+    pipeline = _NonWhisperPipeline()
+    hf.state.pipeline = pipeline
+
+    payload = await _call(_form(model="whisper-hu", response_format="verbose_json"))
+
+    assert isinstance(payload, dict)
+    assert payload["language"] == "und"
+    assert "return_language" not in pipeline.calls[0]
+
+
 # ── the field set is the same as the shim's ──────────────────────
 
 
@@ -803,3 +842,31 @@ async def test_a_backend_specific_field_is_accepted_and_dropped():
     response = await _call(_form(model="whisper-hu", diarization="true"))
 
     assert response == {"text": "hello world"}
+
+
+# ── a non-audio instance refuses the route ─────────────────────────
+
+
+def test_a_non_audio_instance_is_refused_with_a_400(monkeypatch):
+    """A direct request to a causal instance must be a 400, like every sibling
+    route, not a bare 500 from the pipeline assertion."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(hf.state, "model_type", "causal")
+    monkeypatch.setattr(hf.state, "pipeline", None)
+    monkeypatch.setattr(hf.state, "api_key", "")
+    app = FastAPI()
+    app.post("/v1/audio/transcriptions")(hf.audio_transcriptions)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("sample.wav", io.BytesIO(_wav_bytes()), "audio/wav")},
+        data={"model": "whisper-hu"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Transcriptions only available for audio models"
+    )

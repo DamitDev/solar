@@ -526,7 +526,7 @@ def _segments_from_words(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
             }
             segments.append(current)
         else:
-            current["end"] = end
+            current["end"] = max(float(current["end"]), end)
             current["text"] = f"{current['text']} {text}"
             current["words"].append(word)
     return segments

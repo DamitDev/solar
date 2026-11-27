@@ -1021,3 +1021,20 @@ def test_javanese_is_normalised_to_jv():
     """The ISO-639-1 code is jv; whisper.cpp reports the name."""
     assert shim.normalize_language("javanese") == "jv"
     assert shim.normalize_language("jw") == "jv"
+
+
+# ── word segments never shrink ────────────────────────────────────
+
+
+def test_an_out_of_order_word_does_not_shrink_a_segment_end():
+    """A runtime word whose end is earlier than the segment's must not move the
+    segment end backwards."""
+    segments = shim._segments_from_words(
+        [
+            {"word": "hello", "start": 0.0, "end": 1.0},
+            {"word": "world", "start": 0.2, "end": 0.3},
+        ]
+    )
+
+    assert len(segments) == 1
+    assert segments[0]["end"] == 1.0

@@ -523,9 +523,10 @@ async def _run_transcription_pass(
         "generate_kwargs": generate_kwargs,
         "return_timestamps": return_timestamps,
     }
-    if return_language:
+    if return_language and getattr(state.pipeline, "type", "") == "seq2seq_whisper":
         # The detected language is only returned when the pipeline is asked for
-        # it, and the parameter is Whisper-only (False is not a valid value).
+        # it, and the parameter is Whisper-only: transformers raises
+        # "Only Whisper can return language for now." for any other type.
         pipeline_kwargs["return_language"] = True
     return await asyncio.wait_for(
         asyncio.to_thread(state.pipeline, samples, **pipeline_kwargs),
@@ -1205,6 +1206,12 @@ async def audio_transcriptions(
     HuggingFace path cannot label speakers. ``compression_ratio``, ``tokens``,
     ``avg_logprob`` and ``no_speech_prob`` are not available and are omitted.
     """
+    if state.model_type != "audio":
+        raise HTTPException(
+            status_code=400,
+            detail="Transcriptions only available for audio models",
+        )
+
     try:
         form = await request.form()
     except (MultipartParseError, MultiPartException, StarletteHTTPException):
