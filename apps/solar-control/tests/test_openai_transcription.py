@@ -8,6 +8,7 @@ relays the host's answer with its own content type.
 
 import io
 import json
+import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -58,6 +59,9 @@ async def _call(form: FormData, result=None, side_effect=None):
     async def _route(*args, **kwargs):
         captured["args"] = args
         captured["kwargs"] = kwargs
+        multipart = kwargs.get("multipart")
+        if multipart is not None:
+            captured["path_existed"] = os.path.exists(multipart.path)
         if side_effect is not None:
             raise side_effect
         return result
@@ -85,11 +89,13 @@ async def test_the_upload_is_forwarded_as_a_multipart_upload():
     assert kwargs["required_endpoint"] == "/v1/audio/transcriptions"
     upload = kwargs["multipart"]
     assert upload.filename == "sample.wav"
-    assert upload.content_type == "audio/octet-stream" or upload.content_type
+    # The form upload carries no content type, so the route forwards the
+    # documented fallback rather than a guessed type.
+    assert upload.content_type == "application/octet-stream"
     # The model is resolved before the forward, and the file is a real temp file
     # that the gateway can re-open per attempt.
     assert captured["args"][0] == "whisper-tiny"
-    assert kwargs["multipart"].path.endswith(".tmp") or kwargs["multipart"].path
+    assert captured["path_existed"] is True
     names = [name for name, _ in upload.fields]
     assert "model" in names
     assert "response_format" in names
@@ -108,8 +114,6 @@ async def test_the_forward_covers_the_host_audio_budget():
 
 @pytest.mark.anyio
 async def test_the_temp_file_is_removed_after_the_request():
-    import os
-
     _, captured = await _call(
         _form(model="whisper-tiny"),
         result=UpstreamResponse(200, b"ok", "text/plain"),

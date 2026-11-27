@@ -620,6 +620,80 @@ describe('EditInstanceModal audio submit', () => {
     expect(onUpdate).toHaveBeenCalledWith('h1', 'i1', expected);
     alertSpy.mockRestore();
   });
+
+  it('renders the NeMo instruction and translate-to inputs', () => {
+    render(
+      <EditInstanceModal
+        instance={
+          instance('n1', {
+            backend_type: 'nemospeech',
+            model: '/models/decoder.gguf',
+            alias: 'nemotron-stream-en',
+            host: '0.0.0.0',
+            encoder: '',
+            diar_model: '',
+            instruction: '',
+            translate_to: '',
+            language: 'en',
+            diarize: false,
+            device: 'auto',
+          }) as never
+        }
+        hostId="h1"
+        onClose={vi.fn()}
+        onUpdate={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByPlaceholderText('Transcribe verbatim.')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('hu')).toBeInTheDocument();
+  });
+
+  it('submits the NeMo instruction and translate-to values', async () => {
+    const onUpdate = vi.fn().mockResolvedValue(undefined);
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    render(
+      <EditInstanceModal
+        instance={
+          instance('n1', {
+            backend_type: 'nemospeech',
+            model: '/models/decoder.gguf',
+            alias: 'nemotron-stream-en',
+            host: '0.0.0.0',
+            encoder: '',
+            diar_model: '',
+            instruction: '',
+            translate_to: '',
+            language: 'en',
+            diarize: false,
+            device: 'auto',
+          }) as never
+        }
+        hostId="h1"
+        onClose={vi.fn()}
+        onUpdate={onUpdate}
+      />,
+    );
+
+    await userEvent.type(screen.getByPlaceholderText('Transcribe verbatim.'), 'Transcribe verbatim.');
+    await userEvent.type(screen.getByPlaceholderText('hu'), 'de');
+    await userEvent.click(screen.getByRole('button', { name: /Save Changes/ }));
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(alertSpy).not.toHaveBeenCalled();
+    expect(onUpdate).toHaveBeenCalledWith('h1', 'n1', {
+      backend_type: 'nemospeech',
+      model: '/models/decoder.gguf',
+      alias: 'nemotron-stream-en',
+      host: '0.0.0.0',
+      language: 'en',
+      diarize: false,
+      device: 'auto',
+      instruction: 'Transcribe verbatim.',
+      translate_to: 'de',
+    });
+    alertSpy.mockRestore();
+  });
 });
 
 describe('audio device options', () => {

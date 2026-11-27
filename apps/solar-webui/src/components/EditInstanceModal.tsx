@@ -802,6 +802,39 @@ export function EditInstanceModal({ instance, hostId, onClose, onUpdate }: EditI
                   />
                 </div>
 
+                {isNemoSpeechConfig(formData) && (
+                  <>
+                    <div>
+                      <label className="block text-sm font-medium text-nord-4 mb-1">Instruction (Optional)</label>
+                      <input
+                        type="text"
+                        name="instruction"
+                        value={(formData as NemoSpeechConfig).instruction || ''}
+                        onChange={handleChange}
+                        placeholder="Transcribe verbatim."
+                        className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                      />
+                      <p className="text-xs text-nord-4 mt-1">
+                        Style hint passed to nemo-speech as <code>--instruction</code>
+                      </p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-nord-4 mb-1">Translate To (Optional)</label>
+                      <input
+                        type="text"
+                        name="translate_to"
+                        value={(formData as NemoSpeechConfig).translate_to || ''}
+                        onChange={handleChange}
+                        placeholder="hu"
+                        className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                      />
+                      <p className="text-xs text-nord-4 mt-1">
+                        Target language passed to nemo-speech as <code>--translate-to</code>
+                      </p>
+                    </div>
+                  </>
+                )}
+
                 <div>
                   <label className="block text-sm font-medium text-nord-4 mb-1">Device</label>
                   <select

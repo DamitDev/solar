@@ -116,7 +116,6 @@ class ShimState:
         self.child_ready: bool = False
         self.child_error: str | None = None
         self.child_tail: collections.deque[str] = collections.deque(maxlen=20)
-        self.ready_event = threading.Event()
         self.watch_task: asyncio.Task | None = None
         self.session: aiohttp.ClientSession | None = None
         self.ready_task: asyncio.Task | None = None
@@ -345,7 +344,6 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        state.ready_event.set()
         if state.ready_task is not None:
             state.ready_task.cancel()
         if state.watch_task is not None:
@@ -689,7 +687,13 @@ def _forward_fields(
         if state.language and not any(name == "language" for name, _ in forwarded):
             forwarded.append(("language", state.language))
         wants_speakers = response_format in ("verbose_json", "diarized_json")
-        if wants_speakers and (state.diarize or response_format == "diarized_json"):
+        if (
+            wants_speakers
+            and (state.diarize or response_format == "diarized_json")
+            and not any(name == "diarization" for name, _ in forwarded)
+        ):
+            # An explicit diarization field is the caller's choice; appending a
+            # second one would send the child two conflicting parts.
             forwarded.append(("diarization", "true"))
     return forwarded
 
@@ -745,14 +749,24 @@ def _wave_format(upload: UploadFile) -> WaveFormat | None:
             chunk_id = chunk_header[:4]
             size = int.from_bytes(chunk_header[4:8], "little")
             if chunk_id == b"fmt ":
-                # The parser reads only the first 16 bytes of the chunk; a
-                # crafted header declaring a huge size must not turn into a huge
-                # read.
-                data = upload.file.read(min(size, 16))
+                # The parser reads at most 40 bytes of the chunk: the largest
+                # layout it understands is a WAVEFORMATEXTENSIBLE header, and a
+                # crafted size must never turn into a huge read.
+                data = upload.file.read(min(size, 40))
                 if len(data) < 16:
                     return None
+                audio_format = int.from_bytes(data[0:2], "little")
+                if audio_format == 0xFFFE:
+                    # WAVE_FORMAT_EXTENSIBLE names only the wrapper; the real
+                    # encoding is the first two bytes of its SubFormat GUID.
+                    if len(data) < 26:
+                        return None
+                    extension_size = int.from_bytes(data[16:18], "little")
+                    if extension_size < 22:
+                        return None
+                    audio_format = int.from_bytes(data[24:26], "little")
                 return WaveFormat(
-                    audio_format=int.from_bytes(data[0:2], "little"),
+                    audio_format=audio_format,
                     channels=int.from_bytes(data[2:4], "little"),
                     sample_rate=int.from_bytes(data[4:8], "little"),
                     bits_per_sample=int.from_bytes(data[14:16], "little"),

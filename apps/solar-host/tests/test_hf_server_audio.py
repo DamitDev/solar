@@ -58,9 +58,12 @@ def _form(**fields) -> FormData:
 class _Pipeline:
     """Records how the pipeline was called and returns canned output."""
 
-    def __init__(self, text: str = "hello world", chunks=None):
+    def __init__(
+        self, text: str = "hello world", chunks=None, language: str | None = "hungarian"
+    ):
         self.text = text
         self.chunks = chunks
+        self.language = language
         self.calls: list[dict] = []
 
     def __call__(self, samples, **kwargs):
@@ -68,6 +71,8 @@ class _Pipeline:
         result: dict = {"text": self.text}
         if self.chunks is not None:
             result["chunks"] = self.chunks
+        if kwargs.get("return_language") and self.language is not None:
+            result["language"] = self.language
         return result
 
 
@@ -213,6 +218,17 @@ async def test_the_instance_language_is_used_when_the_request_omits_it():
 async def test_a_word_granularity_with_json_does_not_run_the_word_pass():
     """json cannot carry words, so the expensive alignment pass must not run."""
     await _call(_form(model="whisper-hu", **{"timestamp_granularities[]": "word"}))
+    assert hf.state.pipeline.calls[0]["return_timestamps"] is False
+    assert len(hf.state.pipeline.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_a_segment_granularity_with_json_does_not_pay_for_timestamps():
+    """json drops the segments, so asking for them must not slow the pass."""
+    response = await _call(
+        _form(model="whisper-hu", **{"timestamp_granularities[]": "segment"})
+    )
+    assert response == {"text": "hello world"}
     assert hf.state.pipeline.calls[0]["return_timestamps"] is False
     assert len(hf.state.pipeline.calls) == 1
 
@@ -743,7 +759,16 @@ def test_a_malformed_multipart_body_is_a_400_envelope(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_verbose_json_language_is_und_when_none_was_requested():
+async def test_verbose_json_reports_the_detected_language_when_the_request_omits_it():
+    payload = await _call(_form(model="whisper-hu", response_format="verbose_json"))
+
+    assert payload["language"] == "hu"
+    assert hf.state.pipeline.calls[0]["return_language"] is True
+
+
+@pytest.mark.anyio
+async def test_verbose_json_language_is_und_when_the_pipeline_returns_none():
+    hf.state.pipeline = _Pipeline(language=None)
     payload = await _call(_form(model="whisper-hu", response_format="verbose_json"))
     assert payload["language"] == "und"
 

@@ -90,6 +90,14 @@ describe('getModelDisplay', () => {
         alias: 'llm',
       } as InstanceConfig),
     ).toBe('llm');
+    // An empty model string is not a model either; it must not shadow the alias.
+    expect(
+      getModelDisplay({
+        backend_type: 'llamacpp',
+        model: '',
+        alias: 'llm',
+      } as InstanceConfig),
+    ).toBe('llm');
   });
 
   it('returns an empty string for a config with no model key', () => {

@@ -512,18 +512,23 @@ async def _run_transcription_pass(
     generate_kwargs: dict[str, object],
     return_timestamps: bool | str,
     timeout_s: float,
+    *,
+    return_language: bool = False,
 ) -> dict[str, Any]:
     """Run one pipeline pass, bounded so the HTTP request always answers."""
     assert state.pipeline is not None
+    pipeline_kwargs: dict[str, Any] = {
+        "chunk_length_s": state.chunk_length_s,
+        "batch_size": state.batch_size,
+        "generate_kwargs": generate_kwargs,
+        "return_timestamps": return_timestamps,
+    }
+    if return_language:
+        # The detected language is only returned when the pipeline is asked for
+        # it, and the parameter is Whisper-only (False is not a valid value).
+        pipeline_kwargs["return_language"] = True
     return await asyncio.wait_for(
-        asyncio.to_thread(
-            state.pipeline,
-            samples,
-            chunk_length_s=state.chunk_length_s,
-            batch_size=state.batch_size,
-            generate_kwargs=generate_kwargs,
-            return_timestamps=return_timestamps,
-        ),
+        asyncio.to_thread(state.pipeline, samples, **pipeline_kwargs),
         timeout=timeout_s,
     )
 
@@ -1391,7 +1396,11 @@ async def audio_transcriptions(
         # each word is attached to the segment that contains it.
         try:
             result = await _run_transcription_pass(
-                samples, generate_kwargs, True, TRANSCRIPTION_TIMEOUT_S
+                samples,
+                generate_kwargs,
+                True,
+                TRANSCRIPTION_TIMEOUT_S,
+                return_language=True,
             )
         except TimeoutError:
             return _transcription_error(
@@ -1412,7 +1421,7 @@ async def audio_transcriptions(
         segments = attach_words_to_segments(segments, words)
         return {
             "task": "transcribe",
-            "language": normalize_language(language),
+            "language": normalize_language(result.get("language")),
             "duration": duration,
             "text": text,
             "segments": segments,
@@ -1420,7 +1429,7 @@ async def audio_transcriptions(
         }
 
     return_timestamps: bool | str = False
-    if response_format in ("verbose_json", "srt", "vtt") or "segment" in granularities:
+    if response_format in ("verbose_json", "srt", "vtt"):
         return_timestamps = True
 
     timeout_s = (
@@ -1430,7 +1439,11 @@ async def audio_transcriptions(
     )
     try:
         result = await _run_transcription_pass(
-            samples, generate_kwargs, return_timestamps, timeout_s
+            samples,
+            generate_kwargs,
+            return_timestamps,
+            timeout_s,
+            return_language=response_format == "verbose_json",
         )
     except TimeoutError:
         if return_timestamps == "word":
@@ -1462,7 +1475,7 @@ async def audio_transcriptions(
         return PlainTextResponse(render_cues(segments, True), media_type="text/vtt")
     return {
         "task": "transcribe",
-        "language": normalize_language(language),
+        "language": normalize_language(result.get("language")),
         "duration": duration,
         "text": text,
         "segments": segments,

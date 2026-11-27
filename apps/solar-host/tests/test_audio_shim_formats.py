@@ -25,6 +25,31 @@ def _wav_bytes(rate: int = 16000, channels: int = 1, sampwidth: int = 2) -> byte
 WAV = _wav_bytes()
 
 
+def _extensible_wav_bytes(subformat: int = 1, bits: int = 16) -> bytes:
+    """A 16 kHz mono WAV whose ``fmt `` chunk is WAVEFORMATEXTENSIBLE."""
+    block_align = bits // 8
+    fmt = struct.pack(
+        "<HHIIHH", 0xFFFE, 1, 16000, 16000 * block_align, block_align, bits
+    )
+    # cbSize, wValidBitsPerSample, dwChannelMask, then the SubFormat GUID.
+    fmt += struct.pack("<HHI", 22, bits, 0)
+    fmt += (
+        struct.pack("<IHH", subformat, 0, 0x0010) + b"\x80\x00\x00\xaa\x00\x38\x9b\x71"
+    )
+    data = b"\x00\x00" * 160
+    return (
+        b"RIFF"
+        + (4 + 8 + len(fmt) + 8 + len(data)).to_bytes(4, "little")
+        + b"WAVE"
+        + b"fmt "
+        + len(fmt).to_bytes(4, "little")
+        + fmt
+        + b"data"
+        + len(data).to_bytes(4, "little")
+        + data
+    )
+
+
 class _Child:
     """A runtime that is alive; the readiness gate only polls it."""
 
@@ -566,6 +591,17 @@ def test_nemo_verbose_json_gains_segments_and_diarization(nemo, monkeypatch):
     assert ("diarization", "true") in captured["fields"]
 
 
+def test_nemo_keeps_an_explicit_diarization_false(nemo, monkeypatch):
+    """An explicit diarization field wins; it must not be duplicated."""
+    captured = _forward_stub(monkeypatch)
+    shim.state.diarize = True
+    response = _post(nemo, response_format="verbose_json", diarization="false")
+
+    assert response.status_code == 200
+    values = [value for name, value in captured["fields"] if name == "diarization"]
+    assert values == ["false"]
+
+
 def test_nemo_json_on_a_diarized_instance_skips_the_flag(nemo, monkeypatch):
     captured = _forward_stub(monkeypatch)
     shim.state.diarize = True
@@ -824,6 +860,40 @@ def test_nemo_accepts_a_16k_mono_pcm16_wav(nemo, monkeypatch):
     assert captured["format"] == "json"
 
 
+def test_nemo_accepts_a_16k_mono_pcm16_extensible_wav(nemo, monkeypatch):
+    """WAVE_FORMAT_EXTENSIBLE with a PCM SubFormat is still PCM16."""
+    captured = _forward_stub(monkeypatch)
+    files = {"file": ("sample.wav", io.BytesIO(_extensible_wav_bytes()), "audio/wav")}
+    response = nemo.post(
+        "/v1/audio/transcriptions",
+        files=files,
+        data={"model": "nemotron-stream-en"},
+    )
+
+    assert response.status_code == 200
+    assert captured["format"] == "json"
+
+
+def test_nemo_refuses_a_float32_subformat_extensible_wav(nemo, monkeypatch):
+    captured = _forward_stub(monkeypatch)
+    files = {
+        "file": (
+            "sample.wav",
+            io.BytesIO(_extensible_wav_bytes(subformat=3, bits=32)),
+            "audio/wav",
+        )
+    }
+    response = nemo.post(
+        "/v1/audio/transcriptions",
+        files=files,
+        data={"model": "nemotron-stream-en"},
+    )
+
+    assert response.status_code == 400
+    assert "IEEE float" in response.json()["error"]["message"]
+    assert captured == {}
+
+
 class _RecordingFile(io.BytesIO):
     """A BytesIO that records every size the parser asks it to read."""
 
@@ -836,11 +906,12 @@ class _RecordingFile(io.BytesIO):
         return super().read(size)
 
 
-def test_a_crafted_fmt_chunk_size_never_reads_more_than_16_bytes():
+def test_a_crafted_fmt_chunk_size_never_reads_more_than_40_bytes():
     """A fmt chunk declaring 0xFFFFFFFF must not become a 4 GiB read.
 
-    The parser only uses the first 16 bytes of the chunk, so the read is capped;
-    the fake file records every requested size.
+    The parser only uses the first 40 bytes of the chunk (the largest layout it
+    understands), so the read is capped; the fake file records every requested
+    size.
     """
     fmt = struct.pack("<HHIIHH", 1, 1, 16000, 32000, 2, 16)
     payload = (
@@ -860,7 +931,7 @@ def test_a_crafted_fmt_chunk_size_never_reads_more_than_16_bytes():
 
     assert shim._wave_format(_Upload()) is not None
     assert recording.read_sizes
-    assert max(recording.read_sizes) <= 16
+    assert max(recording.read_sizes) <= 40
 
 
 # ── language is the ISO-639-1 code ───────────────────────────────
