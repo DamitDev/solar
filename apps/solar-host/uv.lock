@@ -2303,6 +2303,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "harbor-oci-client" },
     { name = "huggingface-hub" },
+    { name = "numpy" },
     { name = "pebble" },
     { name = "psutil" },
     { name = "pydantic" },

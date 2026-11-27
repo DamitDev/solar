@@ -81,9 +81,7 @@ export function AddInstanceModal({
   // The GGML speech runtimes are separate installs too, but they run on the
   // CPU, so only the advertised-backend check applies to them.
   const hostAdvertises = (name: string) =>
-    hostSupportedBackends === undefined ||
-    hostSupportedBackends.length === 0 ||
-    hostSupportedBackends.includes(name);
+    hostSupportedBackends === undefined || hostSupportedBackends.length === 0 || hostSupportedBackends.includes(name);
   const whisperUnavailable = !hostAdvertises('whispercpp');
   const whisperReason = `whisper-server is not installed on ${hostName}`;
   const nemoUnavailable = !hostAdvertises('nemospeech');
@@ -92,12 +90,8 @@ export function AddInstanceModal({
   // Selecting HuggingFace before choosing a mode leaves the form without a
   // backend_type, so naming llama.cpp in the submit button was a lie. Stay
   // neutral until a mode supplies the backend type.
-  const hasBackend =
-    formData.backend_type !== undefined &&
-    String(formData.backend_type) !== 'huggingface';
-  const submitLabel = hasBackend
-    ? `Create ${getBackendLabel(backendType)} Instance`
-    : 'Create Instance';
+  const hasBackend = formData.backend_type !== undefined && String(formData.backend_type) !== 'huggingface';
+  const submitLabel = hasBackend ? `Create ${getBackendLabel(backendType)} Instance` : 'Create Instance';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

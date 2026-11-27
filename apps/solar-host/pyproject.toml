@@ -33,6 +33,7 @@ dependencies = [
     "harbor-oci-client>=0.1.0",
     "huggingface-hub>=2.4.0",
     "docker>=7.2.0",
+    "numpy>=2.0.0",
 ]
 
 [project.optional-dependencies]

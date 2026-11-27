@@ -719,9 +719,7 @@ export function EditInstanceModal({ instance, hostId, onClose, onUpdate }: EditI
                     name="model"
                     value={(formData as WhisperCppConfig | NemoSpeechConfig).model || ''}
                     onChange={handleChange}
-                    placeholder={
-                      isNemoSpeechConfig(formData) ? '/path/to/decoder.gguf' : '/path/to/ggml-tiny.bin'
-                    }
+                    placeholder={isNemoSpeechConfig(formData) ? '/path/to/decoder.gguf' : '/path/to/ggml-tiny.bin'}
                     required
                     className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
                   />

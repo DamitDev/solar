@@ -144,11 +144,7 @@ export function BackendConfigFields({
     primaryBackend === 'vllm' ||
     primaryBackend === 'whispercpp' ||
     primaryBackend === 'nemospeech';
-  const modeOptions = singlePurpose
-    ? []
-    : primaryBackend === 'llamacpp'
-      ? LLAMACPP_MODES
-      : HUGGINGFACE_MODES;
+  const modeOptions = singlePurpose ? [] : primaryBackend === 'llamacpp' ? LLAMACPP_MODES : HUGGINGFACE_MODES;
   const sglangDisabled = disabledBackends.includes('sglang');
   const vllmDisabled = disabledBackends.includes('vllm');
   const whisperDisabled = disabledBackends.includes('whispercpp');
@@ -342,10 +338,7 @@ export function BackendConfigFields({
               <div
                 className={`p-2 rounded-lg ${primaryBackend === 'nemospeech' ? 'bg-nord-11 bg-opacity-20' : 'bg-nord-3'}`}
               >
-                <AudioLines
-                  size={24}
-                  className={primaryBackend === 'nemospeech' ? 'text-nord-11' : 'text-nord-4'}
-                />
+                <AudioLines size={24} className={primaryBackend === 'nemospeech' ? 'text-nord-11' : 'text-nord-4'} />
               </div>
               <div>
                 <div
@@ -1054,9 +1047,7 @@ export function BackendConfigFields({
                     placeholder="ggml-tiny.bin"
                     className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent font-mono text-sm"
                   />
-                  <p className="text-xs text-nord-4 mt-1">
-                    Which GGML file to serve inside the downloaded snapshot.
-                  </p>
+                  <p className="text-xs text-nord-4 mt-1">Which GGML file to serve inside the downloaded snapshot.</p>
                   {fieldError('backend.model_file')}
                 </div>
               )}
@@ -1182,9 +1173,7 @@ export function BackendConfigFields({
                   placeholder="encoder.gguf"
                   className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent font-mono text-sm"
                 />
-                <p className="text-xs text-nord-4 mt-1">
-                  Paired encoder GGUF, when the release ships one
-                </p>
+                <p className="text-xs text-nord-4 mt-1">Paired encoder GGUF, when the release ships one</p>
               </div>
 
               {/* Speaker diarizer */}
@@ -1246,9 +1235,7 @@ export function BackendConfigFields({
                   <option value="auto">auto (detect)</option>
                   <option value="cpu">cpu</option>
                 </select>
-                <p className="text-xs text-nord-4 mt-1">
-                  nemo-speech is built per backend; cpu always works
-                </p>
+                <p className="text-xs text-nord-4 mt-1">nemo-speech is built per backend; cpu always works</p>
               </div>
             </>
           ) : (
@@ -1388,9 +1375,7 @@ export function BackendConfigFields({
                       placeholder="hu"
                       className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
                     />
-                    <p className="text-xs text-nord-4 mt-1">
-                      Spoken language; empty lets the checkpoint decide
-                    </p>
+                    <p className="text-xs text-nord-4 mt-1">Spoken language; empty lets the checkpoint decide</p>
                   </div>
 
                   {forIntent && (

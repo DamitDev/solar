@@ -108,12 +108,12 @@ describe('validateIntentRequest', () => {
           'backend.model_file',
         );
       }
-      expect(
-        fieldNames({ backend: { backend_type: 'huggingface_causal', model_file: '*Q4*.gguf' } }),
-      ).toContain('backend.model_file');
-      expect(
-        fieldNames({ backend: { backend_type: 'huggingface_audio', model_file: 'x.bin' } }),
-      ).toContain('backend.model_file');
+      expect(fieldNames({ backend: { backend_type: 'huggingface_causal', model_file: '*Q4*.gguf' } })).toContain(
+        'backend.model_file',
+      );
+      expect(fieldNames({ backend: { backend_type: 'huggingface_audio', model_file: 'x.bin' } })).toContain(
+        'backend.model_file',
+      );
     });
 
     it('allows download filters only for huggingface:// sources', () => {

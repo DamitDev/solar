@@ -48,9 +48,7 @@ describe('getBackendTypeFromSelection', () => {
     expect(getBackendTypeFromSelection('sglang', '')).toBe('sglang');
     expect(getBackendTypeFromSelection('vllm', '')).toBe('vllm');
     expect(getBackendTypeFromSelection('huggingface', 'causal')).toBe('huggingface_causal');
-    expect(getBackendTypeFromSelection('huggingface', 'classifier')).toBe(
-      'huggingface_classification',
-    );
+    expect(getBackendTypeFromSelection('huggingface', 'classifier')).toBe('huggingface_classification');
     expect(getBackendTypeFromSelection('huggingface', 'embedding')).toBe('huggingface_embedding');
   });
 });
@@ -156,15 +154,11 @@ describe('backend labels, colours and categories', () => {
   });
 
   it('recognises the three configs and nothing else', () => {
-    expect(isWhisperCppConfig({ backend_type: 'whispercpp', model: '/m', alias: 'a' } as never)).toBe(
+    expect(isWhisperCppConfig({ backend_type: 'whispercpp', model: '/m', alias: 'a' } as never)).toBe(true);
+    expect(isNemoSpeechConfig({ backend_type: 'nemospeech', model: '/m', alias: 'a' } as never)).toBe(true);
+    expect(isHuggingFaceAudioConfig({ backend_type: 'huggingface_audio', model_id: '/m', alias: 'a' } as never)).toBe(
       true,
     );
-    expect(isNemoSpeechConfig({ backend_type: 'nemospeech', model: '/m', alias: 'a' } as never)).toBe(
-      true,
-    );
-    expect(
-      isHuggingFaceAudioConfig({ backend_type: 'huggingface_audio', model_id: '/m', alias: 'a' } as never),
-    ).toBe(true);
     expect(isAudioConfig({ backend_type: 'llamacpp', alias: 'a' } as never)).toBe(false);
   });
 });
@@ -224,9 +218,7 @@ describe('BackendConfigFields audio surfaces', () => {
   });
 
   it('renders the audio fields and hides max length for the audio mode', () => {
-    render(
-      <BackendConfigFields value={{ backend_type: 'huggingface_audio' }} onChange={vi.fn()} forIntent />,
-    );
+    render(<BackendConfigFields value={{ backend_type: 'huggingface_audio' }} onChange={vi.fn()} forIntent />);
 
     expect(screen.getByText('Chunk Length (s)')).toBeInTheDocument();
     expect(screen.getByText('Batch Size')).toBeInTheDocument();
@@ -456,11 +448,7 @@ describe('audio request field support note', () => {
   });
 
   it('has an entry for every audio backend', () => {
-    expect(Object.keys(AUDIO_REQUEST_FIELD_SUPPORT).sort()).toEqual([
-      'huggingface_audio',
-      'nemospeech',
-      'whispercpp',
-    ]);
+    expect(Object.keys(AUDIO_REQUEST_FIELD_SUPPORT).sort()).toEqual(['huggingface_audio', 'nemospeech', 'whispercpp']);
   });
 });
 
@@ -480,27 +468,13 @@ describe('AddInstanceModal submit label', () => {
 
 describe('required audio labels', () => {
   it('marks the whisper.cpp Model Path required', () => {
-    render(
-      <BackendConfigFields
-        value={{ backend_type: 'whispercpp' }}
-        onChange={vi.fn()}
-        showAlias
-        showModelFields
-      />,
-    );
+    render(<BackendConfigFields value={{ backend_type: 'whispercpp' }} onChange={vi.fn()} showAlias showModelFields />);
 
     expect(screen.getByText(/Model Path/).closest('label')).toHaveTextContent('*');
   });
 
   it('marks the NeMo Decoder GGUF required', () => {
-    render(
-      <BackendConfigFields
-        value={{ backend_type: 'nemospeech' }}
-        onChange={vi.fn()}
-        showAlias
-        showModelFields
-      />,
-    );
+    render(<BackendConfigFields value={{ backend_type: 'nemospeech' }} onChange={vi.fn()} showAlias showModelFields />);
 
     expect(screen.getByText(/Decoder GGUF/).closest('label')).toHaveTextContent('*');
   });

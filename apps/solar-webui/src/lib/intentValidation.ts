@@ -542,13 +542,11 @@ export function validateIntentRequest(
     }
 
     const modelFile = req.backend.model_file;
-    const modelFileAllowed =
-      backendType === 'llamacpp' || backendType === 'whispercpp' || backendType === 'nemospeech';
+    const modelFileAllowed = backendType === 'llamacpp' || backendType === 'whispercpp' || backendType === 'nemospeech';
     if (modelFile && !modelFileAllowed) {
       errors.push({
         field: 'backend.model_file',
-        message:
-          'Model file selection is only available for the llama.cpp, whisper.cpp and NeMo-Speech backends',
+        message: 'Model file selection is only available for the llama.cpp, whisper.cpp and NeMo-Speech backends',
       });
     }
 

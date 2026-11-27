@@ -325,9 +325,7 @@ export function isNemoSpeechConfig(config: InstanceConfig): config is NemoSpeech
 
 /** True for the three audio backends, which share the transcription endpoint. */
 export function isAudioConfig(config: InstanceConfig): boolean {
-  return (
-    isWhisperCppConfig(config) || isNemoSpeechConfig(config) || isHuggingFaceAudioConfig(config)
-  );
+  return isWhisperCppConfig(config) || isNemoSpeechConfig(config) || isHuggingFaceAudioConfig(config);
 }
 
 export function isSglangConfig(config: InstanceConfig): config is SglangConfig {
