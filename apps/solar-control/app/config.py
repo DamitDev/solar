@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     health_cooldown_s: float = 5.0
     route_connect_timeout_s: float = 0.5
     route_total_timeout_s: float = 600.0
+    # The host gives an audio request up to 1800 s (its
+    # audio_request_timeout_s); the generic route budget would cut a long
+    # recording the host would finish, so the transcription route asks for
+    # this budget instead.
+    audio_route_total_timeout_s: float = 1800.0
     route_max_attempts: int = 3
     route_retry_delay_s: float = 0.15
 

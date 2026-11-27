@@ -96,6 +96,17 @@ async def test_the_upload_is_forwarded_as_a_multipart_upload():
 
 
 @pytest.mark.anyio
+async def test_the_forward_covers_the_host_audio_budget():
+    """The host allows 1800 s for audio; the gateway's 600 s default would cut
+    a long recording the host would finish."""
+    _, captured = await _call(
+        _form(model="whisper-tiny"),
+        result=UpstreamResponse(200, b"", "text/plain"),
+    )
+    assert captured["kwargs"]["timeout_s"] == 1800.0
+
+
+@pytest.mark.anyio
 async def test_the_temp_file_is_removed_after_the_request():
     import os
 

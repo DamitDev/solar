@@ -67,7 +67,31 @@ def test_the_command_spawns_the_shim_with_the_verified_flags():
     assert "--gpu" not in cmd
 
 
-def test_the_sidecars_are_passed_only_when_set():
+def _child_command(cmd, monkeypatch):
+    """Run the shim's own startup wiring and return its child command.
+
+    ``uvicorn.run`` is replaced with a capture so ``main()`` parses the runner's
+    command and applies it to the shim state without starting a server.
+    """
+    from solar_host.servers import audio_server
+
+    child: list[str] = []
+
+    def _capture(app, **kwargs):
+        child.extend(audio_server._child_command(audio_server._ARGS))
+
+    monkeypatch.setattr(audio_server.uvicorn, "run", _capture)
+    monkeypatch.setattr(sys, "argv", [cmd[0], *cmd[3:]])
+    saved = dict(vars(audio_server.state))
+    try:
+        audio_server.main()
+    finally:
+        vars(audio_server.state).clear()
+        vars(audio_server.state).update(saved)
+    return child
+
+
+def test_the_sidecars_are_passed_only_when_set(monkeypatch):
     cmd = NemoSpeechRunner().build_command(
         _instance(
             encoder="/models/encoder.gguf",
@@ -75,9 +99,28 @@ def test_the_sidecars_are_passed_only_when_set():
             diarize=True,
         )
     )
-    assert cmd[cmd.index("--salm-encoder") + 1] == "/models/encoder.gguf"
+    # The shim's own option is --encoder; the child runtime spells the same
+    # sidecar --salm-encoder, and argparse exits 2 on that spelling.
+    assert cmd[cmd.index("--encoder") + 1] == "/models/encoder.gguf"
+    assert "--salm-encoder" not in cmd
     assert cmd[cmd.index("--diar-model") + 1] == "/models/sortformer.gguf"
     assert "--diarize" in cmd
+
+    child = _child_command(cmd, monkeypatch)
+    assert child[child.index("--salm-encoder") + 1] == "/models/encoder.gguf"
+    assert child[child.index("--diar-model") + 1] == "/models/sortformer.gguf"
+
+
+def test_the_instruction_and_translation_reach_the_child_command(monkeypatch):
+    cmd = NemoSpeechRunner().build_command(
+        _instance(instruction="Transcribe verbatim.", translate_to="en")
+    )
+    assert cmd[cmd.index("--instruction") + 1] == "Transcribe verbatim."
+    assert cmd[cmd.index("--translate-to") + 1] == "en"
+
+    child = _child_command(cmd, monkeypatch)
+    assert child[child.index("--instruction") + 1] == "Transcribe verbatim."
+    assert child[child.index("--translate-to") + 1] == "en"
 
 
 def test_the_language_is_omitted_when_unset():

@@ -106,6 +106,8 @@ class ShimState:
         self.language: str | None = None
         self.device: str = "auto"
         self.encoder: str | None = None
+        self.instruction: str | None = None
+        self.translate_to: str | None = None
         self.diar_model: str | None = None
         self.diarize: bool = False
         self.api_key: str = ""
@@ -191,6 +193,10 @@ def _child_command(args: argparse.Namespace) -> list[str]:
     if state.encoder:
         # v0.3.0 names the encoder sidecar --salm-encoder.
         cmd.extend(["--salm-encoder", state.encoder])
+    if state.instruction:
+        cmd.extend(["--instruction", state.instruction])
+    if state.translate_to:
+        cmd.extend(["--translate-to", state.translate_to])
     if state.diar_model:
         cmd.extend(["--diar-model", state.diar_model])
     return cmd
@@ -718,9 +724,10 @@ async def _forward(
 def _wave_format(upload: UploadFile) -> WaveFormat | None:
     """Parse the RIFF/WAVE ``fmt `` chunk, or None when the upload is not WAV.
 
-    The magic alone is not enough: NeMo-Speech.cpp decodes 16 kHz mono PCM16
-    only, so the sample rate, channel count, bit depth and encoding are read from
-    the header the runtime will actually use.
+    The magic alone is not enough: the NeMo-Speech model requires 16 kHz mono
+    PCM16, and wider input was observed to mis-transcribe, so the sample rate,
+    channel count, bit depth and encoding are read from the header the runtime
+    will actually use.
     """
     upload.file.seek(0)
     try:
@@ -750,11 +757,14 @@ def _wave_format(upload: UploadFile) -> WaveFormat | None:
 
 
 def _wave_problem(upload: UploadFile) -> str | None:
-    """A legible 400 when the upload is not the WAV NeMo-Speech.cpp accepts.
+    """A legible 400 when the upload is not the WAV the model accepts.
 
-    The message names what was received and what the runtime requires, because the
+    The message names what was received and what the model requires, because the
     magic-only guard accepted a 44.1 kHz stereo upload and mis-transcribed it
-    while the refusal claimed 16 kHz mono PCM16 only.
+    while the refusal claimed 16 kHz mono PCM16 only. The runtime's own upload
+    contract is wider (mono or stereo PCM16 and float32 WAVs at 8-96 kHz,
+    downmixing stereo), but wider input was observed to mis-transcribe, so the
+    shim deliberately keeps this strict gate and refuses it.
     """
     wave = _wave_format(upload)
     if wave is None:
@@ -994,6 +1004,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--encoder", default=None)
+    parser.add_argument("--instruction", default=None)
+    parser.add_argument("--translate-to", default=None)
     parser.add_argument("--diar-model", default=None)
     parser.add_argument("--diarize", action="store_true")
     parser.add_argument("--runtime-timeout-s", type=float, default=600.0)
@@ -1022,6 +1034,8 @@ def main() -> None:
     state.language = _ARGS.language
     state.device = _ARGS.device
     state.encoder = _ARGS.encoder
+    state.instruction = _ARGS.instruction
+    state.translate_to = _ARGS.translate_to
     state.diar_model = _ARGS.diar_model
     state.diarize = _ARGS.diarize
     state.runtime_timeout_s = _ARGS.runtime_timeout_s

@@ -7,6 +7,7 @@ does close it after a connection error), relays the answer verbatim, and never r
 the token-usage machinery on it.
 """
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -74,6 +75,19 @@ class _RecordingSession:
         return _RequestContext(response)
 
 
+class _TimeoutSession:
+    """Every post times out at the gateway."""
+
+    closed = False
+
+    def __init__(self):
+        self.posted: list[dict] = []
+
+    def post(self, url, *args, **kwargs):
+        self.posted.append(kwargs)
+        raise asyncio.TimeoutError
+
+
 def _entry(**overrides) -> RegistryEntry:
     return RegistryEntry(
         **{
@@ -126,7 +140,13 @@ def _form_bytes(form) -> bytes:
     return b""
 
 
-async def _route(gateway, session, upload, endpoint="/v1/audio/transcriptions"):
+async def _route(
+    gateway,
+    session,
+    upload,
+    endpoint="/v1/audio/transcriptions",
+    timeout_s=None,
+):
     gateway.session = session
     emitted: dict = {}
 
@@ -134,6 +154,16 @@ async def _route(gateway, session, upload, endpoint="/v1/audio/transcriptions"):
         request_id, model, instance, duration, usage_fields, endpoint_id, **kwargs
     ):
         emitted["usage"] = usage_fields
+
+    route_kwargs: dict = {
+        "model": ALIAS,
+        "endpoint": endpoint,
+        "data": {"model": ALIAS},
+        "required_endpoint": "/v1/audio/transcriptions",
+        "multipart": upload,
+    }
+    if timeout_s is not None:
+        route_kwargs["timeout_s"] = timeout_s
 
     with (
         patch.object(gateway, "_ensure_session", AsyncMock()),
@@ -154,13 +184,7 @@ async def _route(gateway, session, upload, endpoint="/v1/audio/transcriptions"):
         patch("app.gateway.health_store.mark_failed", AsyncMock()),
         patch("app.gateway.routing_store", AsyncMock()),
     ):
-        result = await gateway.route_request(
-            model=ALIAS,
-            endpoint=endpoint,
-            data={"model": ALIAS},
-            required_endpoint="/v1/audio/transcriptions",
-            multipart=upload,
-        )
+        result = await gateway.route_request(**route_kwargs)
     return result, emitted
 
 
@@ -291,6 +315,42 @@ async def test_a_retryable_upstream_error_keeps_the_status_and_body(tmp_path):
     assert excinfo.value.status_code == 504
     assert excinfo.value.body == body.decode()
     assert excinfo.value.content_type == "application/json"
+
+
+@pytest.mark.anyio
+async def test_an_explicit_timeout_covers_the_host_audio_budget(tmp_path):
+    """The route's 1800 s budget must replace the gateway's 600 s default, or
+    a long recording the host would finish is cut off at the gateway."""
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"RIFFdata")
+    session = _RecordingSession([_Response(200, b"ok", "text/plain")])
+
+    await _route(
+        OpenAIGateway(),
+        session,
+        _upload(str(audio), [("model", ALIAS)]),
+        timeout_s=1800.0,
+    )
+
+    assert session.posted[0]["timeout"].total == 1800.0
+
+
+@pytest.mark.anyio
+async def test_a_gateway_timeout_is_a_504_not_model_not_found(tmp_path):
+    """A host that never answers must reach the route as a 504 timeout, not as
+    the 404 model_not_found the plain ValueError funnel answers."""
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"RIFFdata")
+    session = _TimeoutSession()
+
+    with pytest.raises(UpstreamServiceError) as excinfo:
+        await _route(OpenAIGateway(), session, _upload(str(audio), [("model", ALIAS)]))
+
+    assert excinfo.value.status_code == 504
+    payload = json.loads(excinfo.value.body)
+    assert payload["error"]["code"] == "timeout"
+    assert payload["error"]["type"] == "server_error"
+    assert "did not answer" in payload["error"]["message"]
 
 
 @pytest.mark.anyio

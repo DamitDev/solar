@@ -147,6 +147,17 @@ const DEVICE_TO_GPU_TYPE: Record<string, string> = {
   mps: 'apple_mps',
 };
 
+/**
+ * whisper.cpp has no GPU device: `--no-gpu` is its only device flag, so the
+ * server accepts `auto` and `cpu` only.
+ */
+const WHISPERCPP_DEVICES = ['auto', 'cpu'] as const;
+
+/**
+ * NeMo-Speech.cpp runs on CPU or CUDA and takes `auto` to detect the host.
+ */
+const NEMOSPEECH_DEVICES = ['auto', 'cpu', 'cuda'] as const;
+
 const MODEL_SOURCE_RE = /^(repo|huggingface|local):\/\//;
 
 /**
@@ -362,6 +373,34 @@ function validateDevice(
           'device is only supported for huggingface_* backends; llama.cpp device selection is devices/n_gpu_layers/ot',
       },
     ];
+  }
+
+  if (backend.backend_type === 'whispercpp') {
+    // The server rejects every other value: --no-gpu is whisper.cpp's only
+    // device flag.
+    if (!(WHISPERCPP_DEVICES as readonly string[]).includes(device)) {
+      return [
+        {
+          field: 'backend.device',
+          message: 'whisper.cpp device must be auto or cpu; --no-gpu is its only device flag',
+        },
+      ];
+    }
+    return [];
+  }
+
+  if (backend.backend_type === 'nemospeech') {
+    // NeMo-Speech returns before the placement contradiction, so only the
+    // vocabulary applies here.
+    if (!(NEMOSPEECH_DEVICES as readonly string[]).includes(device)) {
+      return [
+        {
+          field: 'backend.device',
+          message: 'NeMo-Speech device must be auto, cpu or cuda',
+        },
+      ];
+    }
+    return [];
   }
 
   if (!DEVICE_OPTIONS.includes(device)) {
@@ -637,10 +676,14 @@ export function validateIntentRequest(
         // an unresolved/contested range makes the check meaningless.
         gpuCountError = true;
       }
-      if (String(req.backend?.backend_type ?? '').startsWith('huggingface') && explicitGpuCount > 1) {
+      const singleGpuBackend = String(req.backend?.backend_type ?? '');
+      const ggmlSingleGpu = singleGpuBackend === 'whispercpp' || singleGpuBackend === 'nemospeech';
+      if ((singleGpuBackend.startsWith('huggingface') || ggmlSingleGpu) && explicitGpuCount > 1) {
         errors.push({
           field: 'resources.gpu_count',
-          message: 'HuggingFace backends stay single-GPU — gpu_count must be 1',
+          message: ggmlSingleGpu
+            ? 'whisper.cpp and NeMo-Speech.cpp stay single-GPU - gpu_count must be 1'
+            : 'HuggingFace backends stay single-GPU — gpu_count must be 1',
         });
       }
     }

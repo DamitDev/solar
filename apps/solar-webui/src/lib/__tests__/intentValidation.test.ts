@@ -225,6 +225,26 @@ describe('validateIntentRequest', () => {
         expect(fieldNames({ backend: { backend_type: 'llamacpp' } })).not.toContain('backend.device');
         expect(fieldNames({ backend: hf(null) })).not.toContain('backend.device');
       });
+
+      it('mirrors the audio runtimes per-backend device vocabularies', () => {
+        for (const device of ['auto', 'cpu']) {
+          expect(fieldNames({ backend: { backend_type: 'whispercpp', device } })).not.toContain('backend.device');
+        }
+        for (const device of ['cuda', 'mps']) {
+          expect(fieldNames({ backend: { backend_type: 'whispercpp', device } })).toContain('backend.device');
+        }
+        for (const device of ['auto', 'cpu', 'cuda']) {
+          expect(fieldNames({ backend: { backend_type: 'nemospeech', device } })).not.toContain('backend.device');
+        }
+        expect(fieldNames({ backend: { backend_type: 'nemospeech', device: 'mps' } })).toContain('backend.device');
+        // The server returns before the placement contradiction on NeMo-Speech.
+        expect(
+          fieldNames({
+            backend: { backend_type: 'nemospeech', device: 'cuda' },
+            placement: { gpu_type: 'apple_mps' },
+          }),
+        ).not.toContain('backend.device');
+      });
     });
 
     // Mirrors _validate_sglang in app/validation.py — SGLang only runs on
@@ -581,6 +601,19 @@ describe('resources.gpu_count (S-058 mirror of app/validation.py)', () => {
   it('rejects zero or negative counts', () => {
     for (const bad of [0, -1]) {
       expect(fieldNames({ resources: { gpu_count: bad } })).toContain('resources.gpu_count');
+    }
+  });
+
+  it('keeps whisper.cpp and NeMo-Speech single-GPU too', () => {
+    for (const backend_type of ['whispercpp', 'nemospeech']) {
+      expect(fieldNames({ backend: { backend_type }, resources: { gpu_count: 1 } })).not.toContain(
+        'resources.gpu_count',
+      );
+      const errors = errorsFor({
+        backend: { backend_type },
+        resources: { vram_gb: 10, gpu_count: 2 },
+      });
+      expect(errors.some((e) => e.field === 'resources.gpu_count' && e.message.includes('single-GPU'))).toBe(true);
     }
   });
 });

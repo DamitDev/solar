@@ -92,13 +92,18 @@ class NemoSpeechRunner(BackendRunner):
             str(settings.audio_request_timeout_s),
         ]
         if config.encoder:
-            # v0.3.0 spells this --salm-encoder; --asr.salm.encoder_path is
-            # rejected, so the flag name is pinned here.
-            cmd.extend(["--salm-encoder", config.encoder])
+            # The shim's own option is --encoder; it translates the value to
+            # the child runtime's --salm-encoder (v0.3.0's spelling, because
+            # --asr.salm.encoder_path is rejected).
+            cmd.extend(["--encoder", config.encoder])
         if config.diar_model:
             cmd.extend(["--diar-model", config.diar_model])
         if config.language:
             cmd.extend(["--language", config.language])
+        if config.instruction:
+            cmd.extend(["--instruction", config.instruction])
+        if config.translate_to:
+            cmd.extend(["--translate-to", config.translate_to])
         if config.diarize:
             cmd.append("--diarize")
         return cmd

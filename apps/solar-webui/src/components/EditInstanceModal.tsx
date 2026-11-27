@@ -801,6 +801,7 @@ export function EditInstanceModal({ instance, hostId, onClose, onUpdate }: EditI
                   >
                     <option value="auto">auto (detect)</option>
                     <option value="cpu">cpu</option>
+                    {isNemoSpeechConfig(formData) && <option value="cuda">cuda</option>}
                   </select>
                 </div>
 

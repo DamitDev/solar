@@ -530,3 +530,63 @@ describe('required audio labels', () => {
     expect(screen.getByText(/Alias/).closest('label')).toHaveTextContent('*');
   });
 });
+
+describe('audio device options', () => {
+  it('offers cuda on the NeMo-Speech device select', () => {
+    render(<BackendConfigFields value={{ backend_type: 'nemospeech' }} onChange={vi.fn()} forIntent />);
+
+    expect(screen.getByRole('option', { name: 'cuda' })).toBeInTheDocument();
+  });
+
+  it('offers cuda only for NeMo-Speech in the edit modal', () => {
+    const nemo = render(
+      <EditInstanceModal
+        instance={{
+          id: 'n1',
+          config: {
+            backend_type: 'nemospeech',
+            model: '/models/decoder.gguf',
+            alias: 'nemotron-stream-en',
+            host: '0.0.0.0',
+            language: 'en',
+            diarize: false,
+            device: 'auto',
+          },
+          status: 'running',
+          created_at: '2026-01-01T00:00:00Z',
+          retry_count: 0,
+        }}
+        hostId="h1"
+        onClose={vi.fn()}
+        onUpdate={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('option', { name: 'cuda' })).toBeInTheDocument();
+    nemo.unmount();
+
+    render(
+      <EditInstanceModal
+        instance={{
+          id: 'w1',
+          config: {
+            backend_type: 'whispercpp',
+            model: '/models/ggml-tiny.bin',
+            alias: 'whisper-tiny',
+            host: '0.0.0.0',
+            language: 'auto',
+            threads: 4,
+            device: 'auto',
+          },
+          status: 'running',
+          created_at: '2026-01-01T00:00:00Z',
+          retry_count: 0,
+        }}
+        hostId="h1"
+        onClose={vi.fn()}
+        onUpdate={vi.fn()}
+      />,
+    );
+    // whisper.cpp has no cuda device; its only device flag is --no-gpu.
+    expect(screen.queryByRole('option', { name: 'cuda' })).not.toBeInTheDocument();
+  });
+});

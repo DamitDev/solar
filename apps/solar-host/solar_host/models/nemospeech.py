@@ -22,10 +22,6 @@ class NemoSpeechConfig(BaseModel):
     """Configuration for a NeMo-Speech.cpp (nemo-speech serve) instance.
 
     Note: api_key is NOT a config parameter - instances always use the host's API key.
-
-    ``instruction`` and ``translate_to`` are deliberately absent: on the server
-    they belong to the SALM chat-completions route and to
-    ``/v1/audio/translations``, both out of scope for this issue.
     """
 
     model_config = ConfigDict(protected_namespaces=())
@@ -50,6 +46,20 @@ class NemoSpeechConfig(BaseModel):
         description=(
             "Optional SALM encoder override. Empty means the encoder file the "
             "decoder names next to itself."
+        ),
+    )
+    instruction: str | None = Field(
+        default=None,
+        description=(
+            "Optional style instruction (verbatim vs written form, vocabulary "
+            "hints); passed to the runtime as --instruction"
+        ),
+    )
+    translate_to: str | None = Field(
+        default=None,
+        description=(
+            "Optional target language for translation; passed to the runtime as "
+            "--translate-to"
         ),
     )
     diar_model: str | None = Field(

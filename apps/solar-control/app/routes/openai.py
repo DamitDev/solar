@@ -19,6 +19,7 @@ from starlette.datastructures import UploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException
 
+from app.config import settings
 from app.gateway import (
     MultipartUpload,
     UpstreamResponse,
@@ -242,6 +243,7 @@ async def audio_transcriptions(request: Request):
                 filename=upload.filename or "audio",
                 content_type=upload.content_type or "application/octet-stream",
             ),
+            timeout_s=settings.audio_route_total_timeout_s,
         )
         if isinstance(result, UpstreamResponse):
             return Response(

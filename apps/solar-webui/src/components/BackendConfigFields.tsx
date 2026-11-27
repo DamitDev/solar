@@ -1234,6 +1234,7 @@ export function BackendConfigFields({
                 >
                   <option value="auto">auto (detect)</option>
                   <option value="cpu">cpu</option>
+                  <option value="cuda">cuda</option>
                 </select>
                 <p className="text-xs text-nord-4 mt-1">nemo-speech is built per backend; cpu always works</p>
               </div>

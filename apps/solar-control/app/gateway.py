@@ -1804,9 +1804,9 @@ class OpenAIGateway:
             )
         return None
 
-    def _make_route_timeout(self) -> aiohttp.ClientTimeout:
+    def _make_route_timeout(self, total: float | None = None) -> aiohttp.ClientTimeout:
         return aiohttp.ClientTimeout(
-            total=settings.route_total_timeout_s,
+            total=settings.route_total_timeout_s if total is None else total,
             connect=settings.route_connect_timeout_s,
         )
 
@@ -1824,6 +1824,7 @@ class OpenAIGateway:
         api_key_id: str | None = None,
         api_key_name: str | None = None,
         multipart: MultipartUpload | None = None,
+        timeout_s: float | None = None,
     ) -> dict[str, Any] | UpstreamResponse:
         request_id = str(uuid.uuid4())
         start_time = time.time()
@@ -1932,6 +1933,7 @@ class OpenAIGateway:
                     # Declared outside the try so the cleanup never sees an
                     # unbound name when an earlier step raises.
                     handle: BinaryIO | None = None
+                    timeout = self._make_route_timeout(timeout_s)
                     try:
                         await self._broadcast_routing_event(
                             {
@@ -1954,7 +1956,6 @@ class OpenAIGateway:
 
                         url = f"{instance.url}{endpoint}"
                         headers = {"Authorization": f"Bearer {instance.api_key}"}
-                        timeout = self._make_route_timeout()
                         if multipart is not None:
                             # The upload is streamed from a disk temp file, so
                             # the request never holds it whole in memory.
@@ -2085,7 +2086,37 @@ class OpenAIGateway:
                                     )
                                 raise ValueError(msg)
 
-                    except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
+                    except asyncio.TimeoutError:
+                        # A gateway-side timeout means the instance never
+                        # answered within the route's budget. Record a 504
+                        # envelope so the route relays a timeout instead of
+                        # answering the generic 404 model_not_found.
+                        await health_store.mark_failed(
+                            instance.host_id,
+                            instance.instance_id,
+                            cooldown_s=settings.health_cooldown_s,
+                        )
+                        total = timeout.total
+                        message = (
+                            f"upstream did not answer within {total:g}s"
+                            if total is not None
+                            else "upstream did not answer in time"
+                        )
+                        body = json.dumps(
+                            {
+                                "error": {
+                                    "message": message,
+                                    "type": "server_error",
+                                    "code": "timeout",
+                                }
+                            }
+                        )
+                        last_error = UpstreamServiceError(504, body, "application/json")
+                        last_upstream_error = last_error
+                        await self._emit_reroute(
+                            request_id, model, instance, attempt + 1, endpoint_id
+                        )
+                    except aiohttp.ClientConnectionError as e:
                         await health_store.mark_failed(
                             instance.host_id,
                             instance.instance_id,
