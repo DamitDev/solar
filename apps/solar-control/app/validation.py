@@ -22,8 +22,11 @@ VALID_BACKEND_TYPES: frozenset[str] = frozenset(
         "huggingface_classification",
         "huggingface_embedding",
         "huggingface_vision",
+        "huggingface_audio",
         "sglang",
         "vllm",
+        "whispercpp",
+        "nemospeech",
     }
 )
 VALID_MODEL_SOURCE_SCHEMES: frozenset[str] = frozenset({"repo", "huggingface", "local"})
@@ -165,8 +168,22 @@ BACKEND_FIELD_OWNERS: dict[str, frozenset[str]] = {
     "huggingface_embedding": frozenset({"normalize_embeddings"}),
     "huggingface_causal": frozenset({"use_flash_attention"}),
     "huggingface_vision": frozenset({"use_flash_attention"}),
+    "huggingface_audio": frozenset(
+        {
+            "device",
+            "dtype",
+            "trust_remote_code",
+            "language",
+            "chunk_length_s",
+            "batch_size",
+        }
+    ),
     "sglang": _SGLANG_FIELDS,
     "vllm": _VLLM_FIELDS,
+    "whispercpp": frozenset({"model_file", "threads", "language"}),
+    "nemospeech": frozenset(
+        {"model_file", "language", "encoder", "diar_model", "diarize"}
+    ),
 }
 
 # SGLang's kernels are CUDA-only, so an SGLang intent can only ever land on an
@@ -322,14 +339,32 @@ def _validate_backend_model_selection(
         model_file is not None
         and "model_file" not in exempt_fields
         # A wrong-backend model_file is reported by the ownership table; the
-        # shape check is llama.cpp's own contract.
-        and backend.get("backend_type") == "llamacpp"
+        # shape check is the GGML backends' own contract.
+        and backend.get("backend_type") in ("llamacpp", "whispercpp", "nemospeech")
         and (not isinstance(model_file, str) or not model_file.strip())
     ):
         errors.append(
             {
                 "field": "backend.model_file",
                 "message": "model_file must be a non-empty string",
+            }
+        )
+
+    # A HuggingFace pull returns the snapshot directory, so the GGML file has to
+    # be selected from it; an explicit local file path needs no selector.
+    if (
+        model_file is None
+        and "model_file" not in exempt_fields
+        and backend.get("backend_type") in ("whispercpp", "nemospeech")
+        and model_source is not None
+    ):
+        errors.append(
+            {
+                "field": "backend.model_file",
+                "message": (
+                    "model_file is required when model_source is set for "
+                    "whisper.cpp and NeMo-Speech; the pull returns a directory"
+                ),
             }
         )
 
@@ -562,18 +597,44 @@ def _validate_device(
     if device is None:
         return errors
 
-    if backend.get("backend_type") == "llamacpp":
+    backend_type = backend.get("backend_type")
+
+    if backend_type == "llamacpp":
         if "device" in exempt_fields:
             return errors
         errors.append(
             {
                 "field": "backend.device",
                 "message": (
-                    "device is only supported for huggingface_* backends; "
-                    "llama.cpp device selection is devices/n_gpu_layers/ot"
+                    "device is only supported for huggingface_*, whisper.cpp "
+                    "and NeMo-Speech backends; llama.cpp device selection is "
+                    "devices/n_gpu_layers/ot"
                 ),
             }
         )
+        return errors
+
+    if backend_type == "whispercpp":
+        if device not in ("auto", "cpu"):
+            errors.append(
+                {
+                    "field": "backend.device",
+                    "message": (
+                        "whisper.cpp device must be auto or cpu; --no-gpu is "
+                        "its only device flag"
+                    ),
+                }
+            )
+        return errors
+
+    if backend_type == "nemospeech":
+        if device not in ("auto", "cpu", "cuda"):
+            errors.append(
+                {
+                    "field": "backend.device",
+                    "message": "NeMo-Speech device must be auto, cpu or cuda",
+                }
+            )
         return errors
 
     if device not in DEVICE_OPTIONS:
@@ -850,6 +911,22 @@ def _validate_gpu_count(data: dict[str, Any], errors: list[dict[str, str]]) -> N
 
     resolved = explicit if explicit is not None else (derived or 1)
     resources["gpu_count"] = resolved
+
+    if (
+        isinstance(backend_type, str)
+        and backend_type in ("whispercpp", "nemospeech")
+        and resolved > 1
+    ):
+        errors.append(
+            {
+                "field": "resources.gpu_count",
+                "message": (
+                    "whisper.cpp and NeMo-Speech.cpp stay single-GPU - "
+                    "gpu_count must be 1"
+                ),
+            }
+        )
+        return
 
     if (
         isinstance(backend_type, str)

@@ -1,0 +1,204 @@
+"""Tests for the transcription request model and the audio backend contract."""
+
+import pytest
+from pydantic import ValidationError
+
+from app.gateway import OpenAIGateway
+from app.models.openai import TranscriptionRequest
+from app.validation import (
+    BACKEND_FIELD_OWNERS,
+    VALID_BACKEND_TYPES,
+    _validate_backend_field_ownership,
+    _validate_backend_model_selection,
+    _validate_device,
+    _validate_gpu_count,
+)
+
+AUDIO_BACKENDS = ("whispercpp", "nemospeech", "huggingface_audio")
+
+
+# ── TranscriptionRequest ───────────────────────────────────────────
+
+
+def test_minimal_request_validates():
+    request = TranscriptionRequest(model="whisper-tiny")
+    assert request.response_format == "json"
+    assert request.language is None
+    assert request.prompt is None
+    assert request.temperature is None
+    assert request.timestamp_granularities is None
+    assert request.stream is False
+
+
+def test_every_response_format_is_accepted():
+    for value in ("json", "text", "srt", "verbose_json", "vtt", "diarized_json"):
+        assert (
+            TranscriptionRequest(model="m", response_format=value).response_format
+            == value
+        )
+
+
+def test_unknown_response_format_is_rejected():
+    with pytest.raises(ValidationError) as excinfo:
+        TranscriptionRequest(model="m", response_format="mp3")
+    message = str(excinfo.value)
+    assert "response_format 'mp3' is not supported" in message
+    assert "json, text, srt, verbose_json, vtt, diarized_json" in message
+
+
+def test_stream_is_rejected_with_the_shared_message():
+    with pytest.raises(ValidationError) as excinfo:
+        TranscriptionRequest(model="m", stream=True)
+    assert "streaming transcription is not supported" in str(excinfo.value)
+
+
+def test_granularities_are_limited_to_word_and_segment():
+    request = TranscriptionRequest(
+        model="m", timestamp_granularities=["word", "segment"]
+    )
+    assert request.timestamp_granularities == ["word", "segment"]
+    with pytest.raises(ValidationError):
+        TranscriptionRequest(model="m", timestamp_granularities=["sentence"])
+
+
+def test_temperature_must_be_between_zero_and_one():
+    assert TranscriptionRequest(model="m", temperature=0.5).temperature == 0.5
+    with pytest.raises(ValidationError):
+        TranscriptionRequest(model="m", temperature=1.5)
+
+
+def test_empty_model_is_rejected():
+    with pytest.raises(ValidationError):
+        TranscriptionRequest(model="  ")
+
+
+def test_from_form_keeps_repeated_granularities():
+    from starlette.datastructures import FormData
+
+    form = FormData(
+        [
+            ("model", "whisper-tiny"),
+            ("response_format", "verbose_json"),
+            ("timestamp_granularities[]", "word"),
+            ("timestamp_granularities[]", "segment"),
+        ]
+    )
+    request = TranscriptionRequest.from_form(form)
+    assert request.model == "whisper-tiny"
+    assert request.response_format == "verbose_json"
+    assert request.timestamp_granularities == ["word", "segment"]
+
+
+def test_from_form_defaults_an_omitted_format():
+    from starlette.datastructures import FormData
+
+    request = TranscriptionRequest.from_form(FormData([("model", "m")]))
+    assert request.response_format == "json"
+
+
+# ── backend tables ───────────────────────────────────────────────
+
+
+def test_audio_backends_are_valid():
+    for backend_type in AUDIO_BACKENDS:
+        assert backend_type in VALID_BACKEND_TYPES
+
+
+def test_backend_field_owners_cover_the_audio_fields():
+    assert BACKEND_FIELD_OWNERS["whispercpp"] == frozenset(
+        {"model_file", "threads", "language"}
+    )
+    assert BACKEND_FIELD_OWNERS["nemospeech"] == frozenset(
+        {"model_file", "language", "encoder", "diar_model", "diarize"}
+    )
+    assert BACKEND_FIELD_OWNERS["huggingface_audio"] == frozenset(
+        {
+            "device",
+            "dtype",
+            "trust_remote_code",
+            "language",
+            "chunk_length_s",
+            "batch_size",
+        }
+    )
+
+
+def test_model_file_is_allowed_on_the_ggml_backends_only():
+    for backend_type in ("llamacpp", "whispercpp", "nemospeech"):
+        errors = _validate_backend_field_ownership(
+            {"backend_type": backend_type, "model_file": "ggml-tiny.bin"}
+        )
+        assert errors == [], backend_type
+    errors = _validate_backend_field_ownership(
+        {"backend_type": "huggingface_audio", "model_file": "x"}
+    )
+    assert errors and errors[0]["field"] == "backend.model_file"
+
+
+def test_encoder_and_diarizer_are_nemo_only():
+    assert (
+        _validate_backend_field_ownership(
+            {"backend_type": "nemospeech", "encoder": "e.gguf"}
+        )
+        == []
+    )
+    assert (
+        _validate_backend_field_ownership(
+            {"backend_type": "nemospeech", "diar_model": "d.gguf"}
+        )
+        == []
+    )
+    for backend_type in ("whispercpp", "huggingface_audio"):
+        errors = _validate_backend_field_ownership(
+            {"backend_type": backend_type, "encoder": "e.gguf"}
+        )
+        assert errors and errors[0]["field"] == "backend.encoder"
+
+
+def test_audio_device_vocabulary_is_per_backend():
+    assert _validate_device({"backend_type": "whispercpp", "device": "cpu"}, {}) == []
+    errors = _validate_device({"backend_type": "whispercpp", "device": "cuda"}, {})
+    assert errors and "auto or cpu" in errors[0]["message"]
+
+    assert _validate_device({"backend_type": "nemospeech", "device": "cuda"}, {}) == []
+    errors = _validate_device({"backend_type": "nemospeech", "device": "mps"}, {})
+    assert errors and "auto, cpu or cuda" in errors[0]["message"]
+
+    assert (
+        _validate_device({"backend_type": "huggingface_audio", "device": "mps"}, {})
+        == []
+    )
+
+
+def test_audio_backends_stay_single_gpu():
+    for backend_type in AUDIO_BACKENDS:
+        data = {
+            "backend": {"backend_type": backend_type},
+            "resources": {"gpu_count": 2},
+        }
+        errors: list[dict[str, str]] = []
+        _validate_gpu_count(data, errors)
+        assert errors, backend_type
+        assert "single-GPU" in errors[0]["message"]
+
+
+def test_model_file_is_required_when_the_pull_returns_a_directory():
+    for backend_type in ("whispercpp", "nemospeech"):
+        errors = _validate_backend_model_selection(
+            {"backend_type": backend_type}, "huggingface://org/repo"
+        )
+        assert errors and errors[0]["field"] == "backend.model_file"
+        assert "model_file is required" in errors[0]["message"]
+        # An explicit local path needs no selector.
+        assert (
+            _validate_backend_model_selection(
+                {"backend_type": backend_type, "model": "/models/x.gguf"}, None
+            )
+            == []
+        )
+
+
+def test_fallback_capabilities_advertise_transcription():
+    for backend_type in AUDIO_BACKENDS:
+        assert OpenAIGateway._fallback_capabilities(backend_type) == ["transcription"]
+    assert OpenAIGateway._fallback_capabilities("huggingface_causal") == ["completion"]

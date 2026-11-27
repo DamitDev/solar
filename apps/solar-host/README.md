@@ -324,6 +324,28 @@ curl -X POST http://localhost:8001/instances/{instance-id}/stop \
 - `GET /instances/{id}/state` - Get runtime state
 - `GET /instances/{id}/last-generation` - Get last generation metrics
 
+### Audio Transcription
+
+`POST /v1/audio/transcriptions` is served by every audio backend. The OpenAI
+optional request fields are handled as follows:
+
+| Field | Handling |
+|---|---|
+| `keywords` | Honoured as decoder biasing through the prompt path every runtime already has: `prompt` on whisper.cpp and HuggingFace, `speech_contexts` (`[{"phrases": [...], "boost": 10.0}]`) on NeMo-Speech.cpp. An explicit `prompt` in the request wins, as does an explicit `speech_contexts` on NeMo-Speech.cpp. |
+| `languages` | Honoured only when it carries exactly one entry: forwarded as `language`, because every runtime takes one language. An explicit `language` wins; a set of two or more is dropped. |
+| `chunking_strategy` | Accepted and dropped; no runtime implements chunked transcription. |
+| `include[]` | Accepted and dropped; no runtime returns logprobs. |
+| `timestamp_granularities[]` | Only `verbose_json` carries a `words` array; NeMo-Speech.cpp also forwards the field for `diarized_json`. whisper.cpp's `verbose_json` always carries per-segment `words`, so `word` is honoured there without forwarding the field; the field is dropped for the other whisper.cpp formats. HuggingFace handles `word` host-side: with `verbose_json` it runs a word pass plus a second segment pass and returns real segments with words attached and the OpenAI top-level `words` array (the extra pass is the cost of not inventing segment boundaries); with `srt`/`vtt` it renders one cue per word. NeMo-Speech.cpp forwards the field for `verbose_json` and `diarized_json` and drops it otherwise. |
+
+Neither `keywords` nor `languages` is ever forwarded to a runtime under its own
+name. `diarized_json` labels speakers with capital letters (`A`, `B`, ...) in order
+of first appearance; the runtime's own speaker id has no field in the OpenAI body,
+so it is not exposed.
+
+On HuggingFace audio, a `verbose_json` request with `word` runs two separate
+decodes, so the response's `text` and `segments` come from the segment pass while
+`words` come from the word pass; they can differ in punctuation or casing.
+
 ### WebSocket
 
 - `WS /instances/{id}/logs` - Stream logs with sequence numbers

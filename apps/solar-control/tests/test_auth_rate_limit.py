@@ -157,3 +157,14 @@ async def test_redis_failure_fails_open():
     hit = AsyncMock(side_effect=RuntimeError("redis down"))
     response = await _call("sk-user", hit)
     assert response.status_code == 200
+
+
+async def test_the_transcription_route_inherits_the_limiter():
+    """The new audio route is a /v1 path, so the middleware covers it."""
+    hit = AsyncMock(return_value=(False, 30))
+    response = await _call("sk-user", hit, path="/v1/audio/transcriptions")
+
+    assert response.status_code == 429
+    body = json.loads(response.body)
+    assert body["error"]["code"] == "rate_limit_exceeded"
+    hit.assert_awaited_once_with("key-1", settings.rate_limit_rpm)

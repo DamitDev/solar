@@ -22,6 +22,7 @@ from solar_host.models.base import (
     MemoryInfo,
 )
 from solar_host.models.huggingface import (
+    HuggingFaceAudioConfig,
     HuggingFaceCausalConfig,
     HuggingFaceClassificationConfig,
     HuggingFaceEmbeddingConfig,
@@ -30,8 +31,10 @@ from solar_host.models.huggingface import (
 
 # Import config models
 from solar_host.models.llamacpp import LlamaCppConfig
+from solar_host.models.nemospeech import NemoSpeechConfig
 from solar_host.models.sglang import SglangConfig
 from solar_host.models.vllm import VllmConfig
+from solar_host.models.whispercpp import WhisperCppConfig
 
 # Create the discriminated union type for InstanceConfig
 InstanceConfig = Annotated[
@@ -40,8 +43,11 @@ InstanceConfig = Annotated[
     | HuggingFaceClassificationConfig
     | HuggingFaceEmbeddingConfig
     | HuggingFaceVisionConfig
+    | HuggingFaceAudioConfig
     | SglangConfig
-    | VllmConfig,
+    | VllmConfig
+    | WhisperCppConfig
+    | NemoSpeechConfig,
     Field(discriminator="backend_type"),
 ]
 
@@ -49,6 +55,7 @@ __all__ = [
     # Enums
     "BackendType",
     "GenerationMetrics",
+    "HuggingFaceAudioConfig",
     "HuggingFaceCausalConfig",
     "HuggingFaceClassificationConfig",
     "HuggingFaceEmbeddingConfig",
@@ -71,6 +78,8 @@ __all__ = [
     "LogMessage",
     # Other
     "MemoryInfo",
+    "NemoSpeechConfig",
     "SglangConfig",
     "VllmConfig",
+    "WhisperCppConfig",
 ]

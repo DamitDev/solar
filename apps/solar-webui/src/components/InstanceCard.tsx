@@ -12,6 +12,8 @@ import {
   Search,
   GripVertical,
   Loader2,
+  Mic,
+  AudioLines,
 } from 'lucide-react';
 import {
   Instance,
@@ -29,6 +31,7 @@ import {
   HuggingFaceEmbeddingConfig,
 } from '@/api/types';
 import { cn, getStatusColor, formatUptime } from '@/lib/utils';
+import { getModelDisplay } from '@/lib/modelDisplay';
 import { LogViewer } from './LogViewer';
 import { EditInstanceModal } from './EditInstanceModal';
 import { useInstanceState } from '@/hooks/useInstanceState';
@@ -68,6 +71,12 @@ const BackendIcon = ({ config }: { config: InstanceConfig }) => {
       return <Tags size={14} />;
     case 'huggingface_embedding':
       return <Binary size={14} />;
+    case 'huggingface_audio':
+      return <AudioLines size={14} />;
+    case 'whispercpp':
+      return <Mic size={14} />;
+    case 'nemospeech':
+      return <AudioLines size={14} />;
     default:
       return <MessageSquare size={14} />;
   }
@@ -141,18 +150,6 @@ export function InstanceCard({
       setLoading(false);
       setPendingAction(null);
     }
-  };
-
-  const getModelDisplay = () => {
-    if (isLlamaCppConfig(instance.config)) {
-      return (instance.config as LlamaCppConfig).model || instance.config.alias || instance.id;
-    }
-    return (
-      (instance.config as HuggingFaceCausalConfig | HuggingFaceClassificationConfig | HuggingFaceEmbeddingConfig)
-        .model_id ||
-      instance.config.alias ||
-      instance.id
-    );
   };
 
   // Get backend-specific details (guards for incomplete config from Socket.IO placeholders)
@@ -272,8 +269,8 @@ export function InstanceCard({
                 <h3 className="font-semibold text-lg truncate text-nord-6">{instance.config.alias}</h3>
                 <IntentManagedBadge instance={instance} />
               </div>
-              <p className="text-sm text-nord-4 truncate" title={getModelDisplay()}>
-                {getModelDisplay()}
+              <p className="text-sm text-nord-4 truncate" title={getModelDisplay(instance.config)}>
+                {getModelDisplay(instance.config)}
               </p>
             </div>
           </div>

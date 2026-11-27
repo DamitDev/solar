@@ -287,7 +287,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Solar Host",
-    description="Process manager for model inference backends (llama.cpp, HuggingFace)",
+    description=(
+        "Process manager for model inference backends "
+        "(llama.cpp, HuggingFace, SGLang, vLLM, whisper.cpp, NeMo-Speech.cpp)"
+    ),
     version=__version__,
     lifespan=lifespan,
     swagger_ui_parameters={"persistAuthorization": True},
@@ -394,7 +397,7 @@ async def root():
         "version": __version__,
         "description": (
             "Process manager for model inference backends "
-            "(llama.cpp, HuggingFace, SGLang, vLLM)"
+            "(llama.cpp, HuggingFace, SGLang, vLLM, whisper.cpp, NeMo-Speech.cpp)"
         ),
         "supported_backends": await asyncio.to_thread(supported_backend_types),
     }

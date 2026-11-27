@@ -16,6 +16,9 @@ export type BackendType =
   | 'huggingface_classification'
   | 'huggingface_embedding'
   | 'huggingface_vision'
+  | 'huggingface_audio'
+  | 'whispercpp'
+  | 'nemospeech'
   | 'sglang'
   | 'vllm';
 
@@ -136,6 +139,65 @@ export interface HuggingFaceEmbeddingConfig extends BaseInstanceConfig {
 }
 
 /**
+ * whisper.cpp config. A single-purpose GGML runtime: it serves one model with
+ * the transcription endpoint and nothing else, so there is no mode dropdown.
+ * `model` is the resolved path to the GGUF; an intent sets `model_source` plus
+ * `model_file` (a filename or glob inside the pulled snapshot).
+ */
+export interface WhisperCppConfig extends BaseInstanceConfig {
+  backend_type: 'whispercpp';
+  /** Local path to the whisper.cpp GGUF (whisper-server -m) */
+  model: string;
+  /** Pull source; resolved into `model` server-side */
+  model_source?: string;
+  /** Filename or glob inside the pulled snapshot */
+  model_file?: string;
+  alias: string;
+  /** Spoken language, or 'auto' to detect */
+  language?: string;
+  threads?: number;
+  device?: 'auto' | 'cpu';
+}
+
+/**
+ * NeMo-Speech.cpp config. The Nemotron GGUF is paired with an encoder
+ * sidecar and an optional speaker diarizer; `diarize` needs `diar_model`.
+ */
+export interface NemoSpeechConfig extends BaseInstanceConfig {
+  backend_type: 'nemospeech';
+  /** Local path to the decoder GGUF (nemo-speech serve --asr-model) */
+  model: string;
+  model_source?: string;
+  model_file?: string;
+  /** Encoder GGUF sidecar, when the release ships one */
+  encoder?: string;
+  /** Speaker diarizer GGUF; required when `diarize` is on */
+  diar_model?: string;
+  alias: string;
+  language?: string;
+  diarize?: boolean;
+  device?: 'auto' | 'cpu';
+}
+
+/**
+ * HuggingFace audio config: `pipeline("automatic-speech-recognition")` with
+ * chunked long-form. `chunk_length_s` is the only way to transcribe audio
+ * longer than a single window, and `batch_size` bounds the batch per chunk.
+ */
+export interface HuggingFaceAudioConfig extends BaseInstanceConfig {
+  backend_type: 'huggingface_audio';
+  model_id: string;
+  model_source?: string;
+  file_filters?: string[];
+  device: string;
+  dtype: string;
+  language?: string;
+  chunk_length_s: number;
+  batch_size: number;
+  trust_remote_code?: boolean;
+}
+
+/**
  * SGLang config. Typed fields cover the knobs that are stable across SGLang
  * releases; `extra_args` / `extra_env` carry everything else, since SGLang's
  * flag surface moves faster than this type can.
@@ -226,6 +288,9 @@ export type InstanceConfig =
   | HuggingFaceCausalConfig
   | HuggingFaceClassificationConfig
   | HuggingFaceEmbeddingConfig
+  | HuggingFaceAudioConfig
+  | WhisperCppConfig
+  | NemoSpeechConfig
   | SglangConfig
   | VllmConfig;
 
@@ -244,6 +309,25 @@ export function isHuggingFaceClassificationConfig(config: InstanceConfig): confi
 
 export function isHuggingFaceEmbeddingConfig(config: InstanceConfig): config is HuggingFaceEmbeddingConfig {
   return config.backend_type === 'huggingface_embedding';
+}
+
+export function isHuggingFaceAudioConfig(config: InstanceConfig): config is HuggingFaceAudioConfig {
+  return config.backend_type === 'huggingface_audio';
+}
+
+export function isWhisperCppConfig(config: InstanceConfig): config is WhisperCppConfig {
+  return config.backend_type === 'whispercpp';
+}
+
+export function isNemoSpeechConfig(config: InstanceConfig): config is NemoSpeechConfig {
+  return config.backend_type === 'nemospeech';
+}
+
+/** True for the three audio backends, which share the transcription endpoint. */
+export function isAudioConfig(config: InstanceConfig): boolean {
+  return (
+    isWhisperCppConfig(config) || isNemoSpeechConfig(config) || isHuggingFaceAudioConfig(config)
+  );
 }
 
 export function isSglangConfig(config: InstanceConfig): config is SglangConfig {
@@ -272,6 +356,12 @@ export function getBackendLabel(backendType: BackendType): string {
       return 'HF Classifier';
     case 'huggingface_embedding':
       return 'HF Embedding';
+    case 'huggingface_audio':
+      return 'HF Audio';
+    case 'whispercpp':
+      return 'whisper.cpp';
+    case 'nemospeech':
+      return 'NeMo-Speech.cpp';
     case 'sglang':
       return 'SGLang';
     case 'vllm':
@@ -291,6 +381,12 @@ export function getBackendColor(backendType: BackendType): string {
       return 'bg-nord-13 text-nord-0'; // Yellow
     case 'huggingface_embedding':
       return 'bg-nord-15 text-nord-6'; // Purple
+    case 'huggingface_audio':
+      return 'bg-nord-9 text-nord-6'; // Deep blue
+    case 'whispercpp':
+      return 'bg-nord-4 text-nord-0'; // Light blue
+    case 'nemospeech':
+      return 'bg-nord-11 text-nord-6'; // Red
     case 'sglang':
       return 'bg-nord-7 text-nord-0'; // Teal
     case 'vllm':
@@ -301,7 +397,7 @@ export function getBackendColor(backendType: BackendType): string {
 }
 
 // Model category type for routing/display purposes
-export type ModelCategory = 'generation' | 'embedding' | 'classification' | 'reranker';
+export type ModelCategory = 'generation' | 'embedding' | 'classification' | 'reranker' | 'transcription';
 
 // Get the effective model category considering llama.cpp model_type
 export function getModelCategory(config: InstanceConfig): ModelCategory {
@@ -321,6 +417,9 @@ export function getModelCategory(config: InstanceConfig): ModelCategory {
   }
   if (isHuggingFaceEmbeddingConfig(config)) {
     return 'embedding';
+  }
+  if (isAudioConfig(config)) {
+    return 'transcription';
   }
   return 'generation';
 }
@@ -377,6 +476,12 @@ export function getFullModelHexColor(config: InstanceConfig): string {
       return '#EBCB8B'; // Yellow
     case 'huggingface_embedding':
       return '#B48EAD'; // Purple
+    case 'huggingface_audio':
+      return '#81A1C1'; // Deep blue
+    case 'whispercpp':
+      return '#88C0D0'; // Light blue
+    case 'nemospeech':
+      return '#BF616A'; // Red
     case 'sglang':
       return '#8FBCBB'; // Teal
     case 'vllm':

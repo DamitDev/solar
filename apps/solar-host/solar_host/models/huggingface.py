@@ -238,3 +238,67 @@ class HuggingFaceVisionConfig(BaseModel):
     port: int | None = Field(
         default=None, description="Port (auto-assigned if not specified)"
     )
+
+
+class HuggingFaceAudioConfig(BaseModel):
+    """Configuration for a HuggingFace speech-to-text instance.
+
+    Serves ``pipeline("automatic-speech-recognition")`` with
+    ``WhisperForConditionalGeneration`` / ``AutoModelForSpeechSeq2Seq``.
+    ``chunk_length_s`` enables chunked long-form transcription; the upload is
+    decoded to 16 kHz mono float32 by ffmpeg on the host.
+
+    Note: api_key is NOT a config parameter - instances always use the host's API key.
+    """
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    @model_validator(mode="before")
+    @classmethod
+    def strip_api_key(cls, data: Any) -> Any:
+        return _strip_api_key(data)
+
+    backend_type: Literal["huggingface_audio"] = Field(
+        default="huggingface_audio", description="Backend type identifier"
+    )
+    model_source: str | None = Field(
+        default=None, description="Model source URI (e.g. local://model_dir)"
+    )
+    model_id: str | None = Field(
+        default=None,
+        description=(
+            "HuggingFace model ID or local path " "(e.g., 'openai/whisper-large-v3')"
+        ),
+    )
+    file_filters: list[str] | None = Field(
+        default=None,
+        description=_FILE_FILTERS_DESCRIPTION,
+    )
+
+    @model_validator(mode="after")
+    def check_model_id_or_source(self) -> "HuggingFaceAudioConfig":
+        if not self.model_id and not self.model_source:
+            raise ValueError("Either 'model_id' or 'model_source' must be provided")
+        return self
+
+    alias: str = Field(..., description="Model alias (e.g., whisper-hu)")
+    device: str = Field(
+        default="auto", description="Device to run on: auto, cuda, mps (Mac), cpu"
+    )
+    dtype: str = Field(
+        default="auto", description="Data type: auto, float16, bfloat16, float32"
+    )
+    language: str | None = Field(
+        default=None, description="Language code; omit for model auto-detection"
+    )
+    chunk_length_s: float = Field(
+        default=30.0, gt=0, description="Chunk length for long-form transcription"
+    )
+    batch_size: int = Field(default=8, ge=1, description="Inference batch size")
+    trust_remote_code: bool = Field(
+        default=False, description="Whether to trust remote code from HuggingFace"
+    )
+    host: str = Field(default="0.0.0.0", description="Host to bind to")
+    port: int | None = Field(
+        default=None, description="Port (auto-assigned if not specified)"
+    )

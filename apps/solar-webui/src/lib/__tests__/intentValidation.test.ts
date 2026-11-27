@@ -102,13 +102,18 @@ describe('validateIntentRequest', () => {
       }
     });
 
-    it('allows a model file pattern only for llama.cpp', () => {
-      expect(fieldNames({ backend: { backend_type: 'llamacpp', model_file: '*Q4*.gguf' } })).not.toContain(
-        'backend.model_file',
-      );
-      expect(fieldNames({ backend: { backend_type: 'huggingface_causal', model_file: '*Q4*.gguf' } })).toContain(
-        'backend.model_file',
-      );
+    it('allows a model file pattern for the GGML backends', () => {
+      for (const backend_type of ['llamacpp', 'whispercpp', 'nemospeech']) {
+        expect(fieldNames({ backend: { backend_type, model_file: 'ggml-tiny.bin' } })).not.toContain(
+          'backend.model_file',
+        );
+      }
+      expect(
+        fieldNames({ backend: { backend_type: 'huggingface_causal', model_file: '*Q4*.gguf' } }),
+      ).toContain('backend.model_file');
+      expect(
+        fieldNames({ backend: { backend_type: 'huggingface_audio', model_file: 'x.bin' } }),
+      ).toContain('backend.model_file');
     });
 
     it('allows download filters only for huggingface:// sources', () => {

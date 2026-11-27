@@ -27,6 +27,7 @@ import {
   Microchip,
   HardDrive,
   MemoryStick,
+  AudioLines,
 } from 'lucide-react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
@@ -80,6 +81,8 @@ const CategoryIcon = ({ category, size = 14 }: { category: ModelCategory; size?:
       return <Binary size={size} />;
     case 'reranker':
       return <Search size={size} />;
+    case 'transcription':
+      return <AudioLines size={size} />;
     default:
       return <Brain size={size} />;
   }
@@ -95,6 +98,8 @@ const getCategoryLabel = (category: ModelCategory): string => {
       return 'Embedding';
     case 'reranker':
       return 'Reranker';
+    case 'transcription':
+      return 'Transcription';
     default:
       return category;
   }
@@ -200,6 +205,7 @@ export function HostCard({
       classification: { total: 0, running: 0 },
       embedding: { total: 0, running: 0 },
       reranker: { total: 0, running: 0 },
+      transcription: { total: 0, running: 0 },
     };
 
     for (const instance of host.instances) {
@@ -302,6 +308,7 @@ export function HostCard({
                         category === 'classification' && 'bg-nord-13 bg-opacity-30 text-nord-13',
                         category === 'embedding' && 'bg-nord-15 bg-opacity-30 text-nord-15',
                         category === 'reranker' && 'bg-nord-12 bg-opacity-30 text-nord-12',
+                        category === 'transcription' && 'bg-nord-8 bg-opacity-30 text-nord-8',
                       )}
                       title={`${getCategoryLabel(category)}: ${running}/${total}`}
                     >

@@ -20,26 +20,49 @@ Usage:
 """
 
 import argparse
+import asyncio
 import base64
 import io
 import json
 import logging
 import os
+import shutil
+import tempfile
 import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+import numpy
 import torch
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
+from python_multipart.exceptions import MultipartParseError
+from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.formparsers import MultiPartException
 
 from solar_host.servers.api_key import resolve_api_key
+from solar_host.servers.audio_fields import (
+    ACCEPTED_FIELDS,
+    keywords_prompt,
+    single_language,
+    text_parts,
+)
+from solar_host.servers.audio_formats import (
+    RESPONSE_FORMATS,
+    attach_words_to_segments,
+    normalize_language,
+    render_cues,
+    segments_from_chunks,
+    words_from_chunks,
+)
 
 if TYPE_CHECKING:
     from transformers import (
@@ -55,7 +78,23 @@ MODEL_TYPE_CAPABILITIES: dict[str, list[str]] = {
     "classification": ["classification"],
     "embedding": ["embedding"],
     "vision": ["completion", "multimodal"],
+    "audio": ["transcription"],
 }
+
+# A transcription request must always get an answer. Word-level timestamps make
+# transformers run a cross-attention alignment pass that has been observed to keep a
+# whisper-large-v3 worker at full CPU for more than 15 minutes on one short clip,
+# so they get a shorter bound than ordinary transcription. The worker thread cannot
+# be interrupted once started (asyncio.to_thread is not cancellable), so these
+# bounds unblock the HTTP request; they do not reclaim the worker.
+# Override with SOLAR_HF_TRANSCRIPTION_TIMEOUT_S and
+# SOLAR_HF_WORD_TIMESTAMP_TIMEOUT_S.
+TRANSCRIPTION_TIMEOUT_S = float(
+    os.environ.get("SOLAR_HF_TRANSCRIPTION_TIMEOUT_S", "600")
+)
+WORD_TIMESTAMP_TIMEOUT_S = float(
+    os.environ.get("SOLAR_HF_WORD_TIMESTAMP_TIMEOUT_S", "60")
+)
 
 # Configure logging to output structured messages for the runner to parse
 logging.basicConfig(
@@ -214,6 +253,11 @@ class ServerState:
         self.max_length: int = 4096
         self.labels: list[str] | None = None
         self.normalize_embeddings: bool = True
+        # Speech-to-text state (model_type == "audio")
+        self.pipeline: Any | None = None
+        self.chunk_length_s: float = 30.0
+        self.batch_size: int = 8
+        self.language: str | None = None
         self.api_key: str = ""
         self.created_at: int = int(datetime.now(UTC).timestamp())
 
@@ -259,6 +303,9 @@ class ServerState:
         trust_remote_code: bool,
         use_flash_attention: bool,
         normalize_embeddings: bool = True,
+        chunk_length_s: float = 30.0,
+        batch_size: int = 8,
+        language: str | None = None,
     ):
         """Load the model based on type."""
         from transformers import AutoTokenizer
@@ -270,6 +317,9 @@ class ServerState:
         self.max_length = max_length
         self.labels = labels
         self.normalize_embeddings = normalize_embeddings
+        self.chunk_length_s = chunk_length_s
+        self.batch_size = batch_size
+        self.language = language
 
         model_dtype = self.get_dtype(dtype)
 
@@ -372,6 +422,42 @@ class ServerState:
                 model = model.to(device=target_device)  # type: ignore[call-overload]
             self.model = model
 
+        elif model_type == "audio":
+            from transformers import (
+                AutoModelForSpeechSeq2Seq,
+                AutoProcessor,
+                pipeline,
+            )
+
+            processor = AutoProcessor.from_pretrained(
+                model_id,
+                trust_remote_code=trust_remote_code,
+            )
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                model_id,
+                dtype=model_dtype,
+                trust_remote_code=trust_remote_code,
+            )
+            target_device = torch.device(self.device)
+            model = model.to(device=target_device)  # type: ignore[call-overload]
+            self.processor = processor
+            self.tokenizer = processor.tokenizer
+            self.model = model
+            # The components must be passed explicitly: the pipeline cannot infer
+            # a tokenizer from a loaded model object, and a Whisper processor
+            # owns both halves the ASR pipeline needs.
+            pipeline_kwargs: dict[str, Any] = {}
+            feature_extractor = getattr(processor, "feature_extractor", None)
+            if feature_extractor is not None:
+                pipeline_kwargs["feature_extractor"] = feature_extractor
+            self.pipeline = pipeline(
+                "automatic-speech-recognition",
+                model=model,
+                tokenizer=processor.tokenizer,
+                device=self.device,
+                **pipeline_kwargs,
+            )
+
         if self.model is not None:
             self.model.eval()
         logger.info(f"Model loaded successfully on {self.device}")
@@ -384,6 +470,62 @@ security = HTTPBearer(auto_error=False)
 # ============================================================================
 # Auth
 # ============================================================================
+
+
+def _transcription_error(
+    message: str,
+    param: str | None,
+    code: str,
+    status_code: int = 400,
+) -> JSONResponse:
+    """OpenAI-shaped error envelope for the transcription endpoint."""
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "message": message,
+                "type": (
+                    "invalid_request_error" if status_code < 500 else "server_error"
+                ),
+                "param": param,
+                "code": code,
+            }
+        },
+    )
+
+
+def _word_timeout_error(timeout_s: float) -> JSONResponse:
+    """The dedicated 504 for a word-timestamp pass that ran out of time."""
+    return _transcription_error(
+        f"word-level timestamps did not finish within {timeout_s:g}s on "
+        "the HuggingFace audio backend; word timestamps are "
+        "prohibitively slow there, so request "
+        "timestamp_granularities[]=segment (or omit it) instead",
+        "timestamp_granularities[]",
+        "timeout",
+        504,
+    )
+
+
+async def _run_transcription_pass(
+    samples: numpy.ndarray,
+    generate_kwargs: dict[str, object],
+    return_timestamps: bool | str,
+    timeout_s: float,
+) -> dict[str, Any]:
+    """Run one pipeline pass, bounded so the HTTP request always answers."""
+    assert state.pipeline is not None
+    return await asyncio.wait_for(
+        asyncio.to_thread(
+            state.pipeline,
+            samples,
+            chunk_length_s=state.chunk_length_s,
+            batch_size=state.batch_size,
+            generate_kwargs=generate_kwargs,
+            return_timestamps=return_timestamps,
+        ),
+        timeout=timeout_s,
+    )
 
 
 async def verify_api_key(
@@ -1045,14 +1187,292 @@ async def embeddings(request: EmbeddingRequest, _: bool = Depends(verify_api_key
 # ============================================================================
 
 
-def parse_args():
+@app.post("/v1/audio/transcriptions")
+async def audio_transcriptions(
+    request: Request,
+    _: bool = Depends(verify_api_key),
+):
+    """OpenAI-compatible speech-to-text for a HuggingFace audio model.
+
+    The upload is decoded to 16 kHz mono float32 with ffmpeg (no new Python
+    dependency), then transcribed through the pipeline. ``srt`` and ``vtt`` are
+    rendered from the pipeline segments; ``diarized_json`` is refused because the
+    HuggingFace path cannot label speakers. ``compression_ratio``, ``tokens``,
+    ``avg_logprob`` and ``no_speech_prob`` are not available and are omitted.
+    """
+    try:
+        form = await request.form()
+    except (MultipartParseError, MultiPartException, StarletteHTTPException):
+        # Three layers can surface a bad body: python-multipart's own
+        # MultipartParseError, Starlette's MultiPartException, and - because
+        # Starlette converts the latter to HTTPException(400) when the request
+        # runs inside an app - an HTTPException. None carries the OpenAI
+        # envelope, so all are answered with one here.
+        return _transcription_error(
+            "malformed multipart body", None, "invalid_request_error"
+        )
+
+    upload = form.get("file")
+    if not isinstance(upload, StarletteUploadFile):
+        return _transcription_error("file is required", "file", "invalid_request_error")
+
+    values: dict[str, str] = {}
+    for name, value in form.multi_items():
+        if name == "file" or not isinstance(value, str):
+            continue
+        values[name] = value
+
+    response_format = values.get("response_format", "json")
+    if values.get("stream", "false").lower() in ("1", "true", "yes"):
+        return _transcription_error(
+            "streaming transcription is not supported by this endpoint; "
+            "omit 'stream' or set it to false",
+            "stream",
+            "invalid_request_error",
+        )
+    if response_format not in RESPONSE_FORMATS:
+        return _transcription_error(
+            f"response_format '{response_format}' is not supported; must be one "
+            f"of: {', '.join(RESPONSE_FORMATS)}",
+            "response_format",
+            "invalid_request_error",
+        )
+    if response_format == "diarized_json":
+        return _transcription_error(
+            "response_format 'diarized_json' is not supported by the HuggingFace "
+            "audio backend; supported formats are json, text, srt, verbose_json, vtt",
+            "response_format",
+            "invalid_request_error",
+        )
+    for name in values:
+        if name not in ACCEPTED_FIELDS:
+            # The audio shim and this route accept the same field set, so a
+            # client gets the same 400 for an unknown field on all three
+            # backends. A backend-specific field is accepted and dropped by a
+            # runtime that does not own it.
+            return _transcription_error(
+                f"field '{name}' is not supported by /v1/audio/transcriptions",
+                name,
+                "invalid_request_error",
+            )
+    if "model" not in values:
+        return _transcription_error(
+            "model is required", "model", "invalid_request_error"
+        )
+    if values["model"] != state.alias:
+        return _transcription_error(
+            f"model '{values['model']}' is not served by this instance; it "
+            f"serves '{state.alias}'",
+            "model",
+            "model_not_found",
+            404,
+        )
+    if not shutil.which("ffmpeg"):
+        return _transcription_error(
+            "ffmpeg is required to decode the upload; install ffmpeg on the host",
+            None,
+            "server_error",
+            500,
+        )
+
+    # A non-numeric temperature is client input, so it must be a 400 envelope
+    # (like the shim answers) rather than an unhandled ValueError.
+    temperature_value: float | None = None
+    temperature = values.get("temperature")
+    if temperature is not None:
+        try:
+            temperature_value = float(temperature)
+        except ValueError:
+            return _transcription_error(
+                f"temperature '{temperature}' is not a number",
+                "temperature",
+                "invalid_request_error",
+            )
+
+    with tempfile.NamedTemporaryFile(delete=False) as temp:
+        temp_path = temp.name
+        upload.file.seek(0)
+        while True:
+            chunk = upload.file.read(1024 * 1024)
+            if not chunk:
+                break
+            temp.write(chunk)
+    await upload.close()
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            temp_path,
+            "-f",
+            "f32le",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "pipe:1",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        samples_bytes, stderr_bytes = await process.communicate()
+        if process.returncode != 0:
+            tail = stderr_bytes.decode("utf-8", "replace").strip()[-300:]
+            return _transcription_error(
+                f"could not decode the uploaded audio: {tail}",
+                "file",
+                "invalid_request_error",
+            )
+    finally:
+        Path(temp_path).unlink(missing_ok=True)
+
+    samples = numpy.frombuffer(samples_bytes, dtype=numpy.float32)
+    duration = float(len(samples)) / 16000.0
+    language = (
+        values.get("language")
+        or single_language(
+            text_parts(form.getlist("languages"))
+            + text_parts(form.getlist("languages[]"))
+        )
+        or state.language
+    )
+    granularities = form.getlist("timestamp_granularities[]") or form.getlist(
+        "timestamp_granularities"
+    )
+
+    generate_kwargs: dict[str, object] = {"task": "transcribe"}
+    if language:
+        generate_kwargs["language"] = language
+    if temperature_value is not None and temperature_value > 0:
+        generate_kwargs["temperature"] = temperature_value
+        generate_kwargs["do_sample"] = True
+    prompt = (
+        values["prompt"]
+        if "prompt" in values
+        else keywords_prompt(
+            text_parts(form.getlist("keywords"))
+            + text_parts(form.getlist("keywords[]"))
+        )
+    )
+    if prompt:
+        get_prompt_ids = getattr(state.tokenizer, "get_prompt_ids", None)
+        if get_prompt_ids is None:
+            return _transcription_error(
+                "prompt is not supported by this checkpoint's tokenizer",
+                "prompt",
+                "invalid_request_error",
+            )
+        generate_kwargs["prompt_ids"] = get_prompt_ids(prompt, return_tensors="pt")
+
+    # Only verbose_json carries words. A word granularity on json/text/srt/vtt
+    # cannot reach the client, so it must not pay for the extra alignment pass
+    # (which is slow enough to time out on CPU).
+    word_granularity = "word" in granularities and response_format == "verbose_json"
+    if word_granularity:
+        # Word timestamps come from the expensive alignment pass; run it first
+        # so its dedicated timeout still answers with the word-specific 504.
+        try:
+            word_result = await _run_transcription_pass(
+                samples, generate_kwargs, "word", WORD_TIMESTAMP_TIMEOUT_S
+            )
+        except TimeoutError:
+            return _word_timeout_error(WORD_TIMESTAMP_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001
+            return _transcription_error(
+                f"transcription failed: {exc}", None, "server_error", 500
+            )
+        # A word pass yields one chunk per word, which is not a segment. A
+        # second ordinary pass supplies the model's own segment boundaries, and
+        # each word is attached to the segment that contains it.
+        try:
+            result = await _run_transcription_pass(
+                samples, generate_kwargs, True, TRANSCRIPTION_TIMEOUT_S
+            )
+        except TimeoutError:
+            return _transcription_error(
+                f"transcription did not finish within "
+                f"{TRANSCRIPTION_TIMEOUT_S:g}s on the HuggingFace audio backend",
+                None,
+                "timeout",
+                504,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _transcription_error(
+                f"transcription failed: {exc}", None, "server_error", 500
+            )
+
+        text = str(result.get("text") or "").strip()
+        segments = segments_from_chunks(result.get("chunks"), duration)
+        words = words_from_chunks(word_result.get("chunks"))
+        segments = attach_words_to_segments(segments, words)
+        return {
+            "task": "transcribe",
+            "language": normalize_language(language),
+            "duration": duration,
+            "text": text,
+            "segments": segments,
+            "words": words,
+        }
+
+    return_timestamps: bool | str = False
+    if response_format in ("verbose_json", "srt", "vtt") or "segment" in granularities:
+        return_timestamps = True
+
+    timeout_s = (
+        WORD_TIMESTAMP_TIMEOUT_S
+        if return_timestamps == "word"
+        else TRANSCRIPTION_TIMEOUT_S
+    )
+    try:
+        result = await _run_transcription_pass(
+            samples, generate_kwargs, return_timestamps, timeout_s
+        )
+    except TimeoutError:
+        if return_timestamps == "word":
+            return _word_timeout_error(timeout_s)
+        return _transcription_error(
+            f"transcription did not finish within {timeout_s:g}s on the "
+            "HuggingFace audio backend",
+            None,
+            "timeout",
+            504,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _transcription_error(
+            f"transcription failed: {exc}", None, "server_error", 500
+        )
+
+    text = str(result.get("text") or "").strip()
+    segments = segments_from_chunks(result.get("chunks"), duration)
+
+    if response_format == "json":
+        return {"text": text}
+    if response_format == "text":
+        return PlainTextResponse(text)
+    if response_format == "srt":
+        return PlainTextResponse(
+            render_cues(segments, False), media_type="application/x-subrip"
+        )
+    if response_format == "vtt":
+        return PlainTextResponse(render_cues(segments, True), media_type="text/vtt")
+    return {
+        "task": "transcribe",
+        "language": normalize_language(language),
+        "duration": duration,
+        "text": text,
+        "segments": segments,
+    }
+
+
+def parse_args(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="HuggingFace Model Server")
     parser.add_argument(
         "--model-id", required=True, help="HuggingFace model ID or path"
     )
     parser.add_argument(
         "--model-type",
-        choices=["causal", "classification", "embedding", "vision"],
+        choices=["causal", "classification", "embedding", "vision", "audio"],
         required=True,
     )
     parser.add_argument("--alias", required=True, help="Model alias")
@@ -1082,7 +1502,17 @@ def parse_args():
         action="store_true",
         help="L2 normalize embedding vectors",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--chunk-length-s",
+        type=float,
+        default=30.0,
+        help="Chunk length for long-form audio transcription",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=8, help="Inference batch size"
+    )
+    parser.add_argument("--language", default=None, help="Language code (audio models)")
+    return parser.parse_args(argv)
 
 
 def main():
@@ -1108,6 +1538,9 @@ def main():
         trust_remote_code=args.trust_remote_code,
         use_flash_attention=args.use_flash_attention,
         normalize_embeddings=args.normalize_embeddings,
+        chunk_length_s=args.chunk_length_s,
+        batch_size=args.batch_size,
+        language=args.language,
     )
 
     # Run server

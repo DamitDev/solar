@@ -7,13 +7,9 @@ import {
   getFullModelColor,
   getModelCategory,
   ModelCategory,
-  isLlamaCppConfig,
-  LlamaCppConfig,
-  HuggingFaceCausalConfig,
-  HuggingFaceClassificationConfig,
-  HuggingFaceEmbeddingConfig,
 } from '@/api/types';
 import { cn, getStatusColor, formatUptime } from '@/lib/utils';
+import { getModelDisplay, truncateModel } from '@/lib/modelDisplay';
 import { LogViewer } from './LogViewer';
 import { EditInstanceModal } from './EditInstanceModal';
 import { IntentManagedBadge } from './IntentManagedBadge';
@@ -48,29 +44,8 @@ const CATEGORY_ORDER: Record<ModelCategory, number> = {
   embedding: 1,
   classification: 2,
   reranker: 3,
+  transcription: 4,
 };
-
-/** Get model display name */
-function getModelDisplay(config: InstanceConfig): string {
-  if (isLlamaCppConfig(config)) {
-    return (config as LlamaCppConfig).model;
-  }
-  return (config as HuggingFaceCausalConfig | HuggingFaceClassificationConfig | HuggingFaceEmbeddingConfig).model_id;
-}
-
-/** Truncate long model paths */
-function truncateModel(model: string, maxLen = 40): string {
-  if (model.length <= maxLen) return model;
-  if (model.includes('/')) {
-    const parts = model.split('/');
-    const filename = parts[parts.length - 1];
-    if (filename.length <= maxLen - 4) {
-      return '.../' + filename;
-    }
-    return '...' + filename.slice(-(maxLen - 3));
-  }
-  return model.slice(0, maxLen - 3) + '...';
-}
 
 export function UnifiedTable({
   hosts,

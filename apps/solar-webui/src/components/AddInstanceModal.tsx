@@ -5,6 +5,9 @@ import {
   LlamaCppConfig,
   HuggingFaceCausalConfig,
   HuggingFaceClassificationConfig,
+  HuggingFaceAudioConfig,
+  WhisperCppConfig,
+  NemoSpeechConfig,
   SglangConfig,
   VllmConfig,
   getBackendLabel,
@@ -41,16 +44,22 @@ export function AddInstanceModal({
       ? 'sglang'
       : formData.backend_type === 'vllm'
         ? 'vllm'
-        : (formData.backend_type ?? 'llamacpp').startsWith('huggingface')
-          ? 'huggingface'
-          : 'llamacpp',
+        : formData.backend_type === 'whispercpp'
+          ? 'whispercpp'
+          : formData.backend_type === 'nemospeech'
+            ? 'nemospeech'
+            : (formData.backend_type ?? 'llamacpp').startsWith('huggingface')
+              ? 'huggingface'
+              : 'llamacpp',
     formData.backend_type === 'huggingface_causal'
       ? 'causal'
       : formData.backend_type === 'huggingface_classification'
         ? 'classifier'
         : formData.backend_type === 'huggingface_embedding'
           ? 'embedding'
-          : ((formData as Partial<LlamaCppConfig>).model_type ?? 'llm'),
+          : formData.backend_type === 'huggingface_audio'
+            ? 'audio'
+            : ((formData as Partial<LlamaCppConfig>).model_type ?? 'llm'),
   );
 
   // SGLang and vLLM run on CUDA only, and each is a separate install the
@@ -69,6 +78,26 @@ export function AddInstanceModal({
       hostSupportedBackends.length > 0 &&
       !hostSupportedBackends.includes('vllm'));
   const vllmReason = hostGpuType !== 'nvidia_cuda' ? 'Requires an NVIDIA host' : `vLLM is not installed on ${hostName}`;
+  // The GGML speech runtimes are separate installs too, but they run on the
+  // CPU, so only the advertised-backend check applies to them.
+  const hostAdvertises = (name: string) =>
+    hostSupportedBackends === undefined ||
+    hostSupportedBackends.length === 0 ||
+    hostSupportedBackends.includes(name);
+  const whisperUnavailable = !hostAdvertises('whispercpp');
+  const whisperReason = `whisper-server is not installed on ${hostName}`;
+  const nemoUnavailable = !hostAdvertises('nemospeech');
+  const nemoReason = `nemo-speech is not installed on ${hostName}`;
+
+  // Selecting HuggingFace before choosing a mode leaves the form without a
+  // backend_type, so naming llama.cpp in the submit button was a lie. Stay
+  // neutral until a mode supplies the backend type.
+  const hasBackend =
+    formData.backend_type !== undefined &&
+    String(formData.backend_type) !== 'huggingface';
+  const submitLabel = hasBackend
+    ? `Create ${getBackendLabel(backendType)} Instance`
+    : 'Create Instance';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -92,8 +121,22 @@ export function AddInstanceModal({
         alert('Model Path and Alias are required');
         return;
       }
+    } else if (backendType === 'whispercpp') {
+      const config = formData as Partial<WhisperCppConfig>;
+      if (!config.model || !config.alias) {
+        alert('Model Path and Alias are required');
+        return;
+      }
+    } else if (backendType === 'nemospeech') {
+      const config = formData as Partial<NemoSpeechConfig>;
+      if (!config.model || !config.alias) {
+        alert('Decoder GGUF and Alias are required');
+        return;
+      }
     } else {
-      const config = formData as Partial<HuggingFaceCausalConfig | HuggingFaceClassificationConfig>;
+      const config = formData as Partial<
+        HuggingFaceCausalConfig | HuggingFaceClassificationConfig | HuggingFaceAudioConfig
+      >;
       if (!config.model_id || !config.alias) {
         alert('Model ID and Alias are required');
         return;
@@ -139,10 +182,14 @@ export function AddInstanceModal({
             disabledBackends={[
               ...(sglangUnavailable ? (['sglang'] as const) : []),
               ...(vllmUnavailable ? (['vllm'] as const) : []),
+              ...(whisperUnavailable ? (['whispercpp'] as const) : []),
+              ...(nemoUnavailable ? (['nemospeech'] as const) : []),
             ]}
             disabledReasons={{
               ...(sglangUnavailable ? { sglang: sglangReason } : {}),
               ...(vllmUnavailable ? { vllm: vllmReason } : {}),
+              ...(whisperUnavailable ? { whispercpp: whisperReason } : {}),
+              ...(nemoUnavailable ? { nemospeech: nemoReason } : {}),
             }}
           />
 
@@ -161,7 +208,7 @@ export function AddInstanceModal({
               disabled={loading}
               className="flex-1 px-4 py-2 bg-nord-10 text-nord-6 rounded-md hover:bg-nord-9 transition-colors disabled:opacity-50 font-medium"
             >
-              {loading ? 'Creating...' : `Create ${getBackendLabel(backendType)} Instance`}
+              {loading ? 'Creating...' : submitLabel}
             </button>
           </div>
         </form>

@@ -21,8 +21,10 @@ from solar_host.backends import prompt_cache
 from solar_host.backends.base import BackendRunner
 from solar_host.backends.huggingface import HuggingFaceRunner
 from solar_host.backends.llamacpp import LlamaCppRunner
+from solar_host.backends.nemospeech import NemoSpeechRunner
 from solar_host.backends.sglang import SglangRunner, remove_key_config
 from solar_host.backends.vllm import VllmRunner
+from solar_host.backends.whispercpp import WhisperCppRunner
 from solar_host.config import config_manager, parse_instance_config, settings
 from solar_host.memory_monitor import verify_gpu_capacity
 from solar_host.models import (
@@ -66,15 +68,21 @@ def get_runner_for_config(config) -> BackendRunner:
         return SglangRunner()
     elif backend_type == BackendType.VLLM or backend_type == "vllm":
         return VllmRunner()
+    elif backend_type == BackendType.WHISPERCPP or backend_type == "whispercpp":
+        return WhisperCppRunner()
+    elif backend_type == BackendType.NEMOSPEECH or backend_type == "nemospeech":
+        return NemoSpeechRunner()
     elif backend_type in (
         BackendType.HUGGINGFACE_CAUSAL,
         BackendType.HUGGINGFACE_CLASSIFICATION,
         BackendType.HUGGINGFACE_EMBEDDING,
         BackendType.HUGGINGFACE_VISION,
+        BackendType.HUGGINGFACE_AUDIO,
         "huggingface_causal",
         "huggingface_classification",
         "huggingface_embedding",
         "huggingface_vision",
+        "huggingface_audio",
     ):
         return HuggingFaceRunner()
     else:

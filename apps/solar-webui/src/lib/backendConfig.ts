@@ -4,19 +4,116 @@
  * fast-refresh keeps working for BackendConfigFields.
  */
 
-import { Cpu, MessageSquare, Binary, Tags, Search } from 'lucide-react';
+import { Cpu, MessageSquare, Binary, Tags, Search, AudioLines } from 'lucide-react';
 import { BackendType, LlamaCppSplitMode, SpecType } from '@/api/types';
 
-export type PrimaryBackend = 'llamacpp' | 'huggingface' | 'sglang' | 'vllm';
+export type PrimaryBackend =
+  | 'llamacpp'
+  | 'huggingface'
+  | 'sglang'
+  | 'vllm'
+  // Single-purpose GGML speech runtimes: one mode each, no mode dropdown.
+  | 'whispercpp'
+  | 'nemospeech';
 
 export type LlamaCppMode = 'llm' | 'embedding' | 'reranker';
-export type HuggingFaceMode = 'causal' | 'classifier' | 'embedding';
+export type HuggingFaceMode = 'causal' | 'classifier' | 'embedding' | 'audio';
 
 export type ModeOption = {
   value: string;
   label: string;
   icon: typeof Cpu;
   description: string;
+};
+
+/**
+ * The audio backends and the optional OpenAI transcription request fields each
+ * one honours. Single source for the note under the backend selector; the host's
+ * OPENAI_OPTIONAL_FIELDS / WHISPER_ONLY_FIELDS / NEMO_ONLY_FIELDS groups and
+ * solar-control's BACKEND_FIELD_OWNERS are the server-side counterparts.
+ *
+ * `honoured` names the mapping when the request field is not forwarded under its
+ * own name; `notHonoured` fields are accepted and dropped.
+ */
+export type AudioBackendType = 'whispercpp' | 'nemospeech' | 'huggingface_audio';
+
+export interface AudioRequestFieldSupport {
+  honoured: string[];
+  notHonoured: string[];
+}
+
+export const AUDIO_REQUEST_FIELD_SUPPORT: Record<AudioBackendType, AudioRequestFieldSupport> = {
+  whispercpp: {
+    honoured: [
+      'keywords → prompt',
+      'languages (one entry) → language',
+      'prompt',
+      'language',
+      'timestamp_granularities[] (verbose_json; words always emitted)',
+      'temperature_inc',
+      'carry_initial_prompt',
+      'suppress_non_speech',
+    ],
+    notHonoured: [
+      'vad',
+      'chunking_strategy',
+      'include[]',
+      'diarization',
+      'automatic_punctuation',
+      'verbatim',
+      'profanity_filter',
+      'speech_contexts',
+      'max_speaker_count',
+    ],
+  },
+  nemospeech: {
+    honoured: [
+      'keywords → speech_contexts',
+      'languages (one entry) → language',
+      'prompt',
+      'language',
+      'timestamp_granularities[] (verbose_json, diarized_json)',
+      'diarization',
+      'automatic_punctuation',
+      'verbatim',
+      'profanity_filter',
+      'speech_contexts',
+    ],
+    notHonoured: [
+      'chunking_strategy',
+      'include[]',
+      'temperature_inc',
+      'carry_initial_prompt',
+      'suppress_non_speech',
+      'vad',
+      // nemo-speech documents this as a deprecated compatibility field it
+      // ignores; speaker capacity comes from the loaded Sortformer model.
+      'max_speaker_count',
+    ],
+  },
+  huggingface_audio: {
+    honoured: [
+      'keywords → prompt',
+      'languages (one entry) → language',
+      'prompt',
+      'language',
+      'timestamp_granularities[] (verbose_json; word adds a second pass)',
+    ],
+    notHonoured: [
+      'chunking_strategy',
+      'include[]',
+      'temperature_inc',
+      'carry_initial_prompt',
+      'suppress_non_speech',
+      'vad',
+      'diarization',
+      'automatic_punctuation',
+      'verbatim',
+      'profanity_filter',
+      'speech_contexts',
+      'max_speaker_count',
+    ],
+  },
 };
 
 export const LLAMACPP_MODES: ModeOption[] = [
@@ -29,6 +126,12 @@ export const HUGGINGFACE_MODES: ModeOption[] = [
   { value: 'causal', label: 'Causal LM', icon: MessageSquare, description: 'Text generation models' },
   { value: 'classifier', label: 'Classifier', icon: Tags, description: 'Sequence classification' },
   { value: 'embedding', label: 'Embedding', icon: Binary, description: 'Embedding models' },
+  {
+    value: 'audio',
+    label: 'Audio Transcription',
+    icon: AudioLines,
+    description: 'Speech-to-text models',
+  },
 ];
 
 export const DEVICE_OPTIONS = ['auto', 'cuda', 'mps', 'cpu'];
@@ -230,6 +333,13 @@ export const getBackendTypeFromSelection = (primary: PrimaryBackend, mode: strin
   if (primary === 'vllm') {
     return 'vllm';
   }
+  // The two GGML speech runtimes are single-purpose, like SGLang and vLLM.
+  if (primary === 'whispercpp') {
+    return 'whispercpp';
+  }
+  if (primary === 'nemospeech') {
+    return 'nemospeech';
+  }
   switch (mode) {
     case 'causal':
       return 'huggingface_causal';
@@ -237,6 +347,8 @@ export const getBackendTypeFromSelection = (primary: PrimaryBackend, mode: strin
       return 'huggingface_classification';
     case 'embedding':
       return 'huggingface_embedding';
+    case 'audio':
+      return 'huggingface_audio';
     default:
       return 'huggingface_causal';
   }
@@ -346,6 +458,33 @@ export const getDefaultConfig = (primary: PrimaryBackend, mode: string, forInten
     };
   }
 
+  if (primary === 'whispercpp') {
+    return {
+      ...base,
+      backend_type: 'whispercpp',
+      // An intent selects the GGUF by pattern; an instance gets the path.
+      ...(forIntent ? { model_file: '' } : { model: '' }),
+      ...(forIntent ? {} : { alias: '' }),
+      language: 'auto',
+      threads: 4,
+      device: 'auto',
+    };
+  }
+
+  if (primary === 'nemospeech') {
+    return {
+      ...base,
+      backend_type: 'nemospeech',
+      ...(forIntent ? { model_file: '' } : { model: '' }),
+      ...(forIntent ? {} : { alias: '' }),
+      encoder: '',
+      diar_model: '',
+      language: '',
+      diarize: false,
+      device: 'auto',
+    };
+  }
+
   // HuggingFace modes
   switch (mode) {
     case 'causal':
@@ -382,6 +521,21 @@ export const getDefaultConfig = (primary: PrimaryBackend, mode: string, forInten
         dtype: 'auto',
         max_length: 512,
         normalize_embeddings: true,
+        trust_remote_code: false,
+      };
+    case 'audio':
+      return {
+        ...base,
+        backend_type: 'huggingface_audio',
+        // An intent pulls the snapshot itself, so it names the files to keep.
+        ...(forIntent ? { file_filters: [] } : { model_id: '' }),
+        ...(forIntent ? {} : { alias: '' }),
+        device: 'auto',
+        dtype: 'auto',
+        language: '',
+        // 30 s is the window Whisper was trained on; longer audio is chunked.
+        chunk_length_s: 30,
+        batch_size: 8,
         trust_remote_code: false,
       };
     default:
@@ -425,6 +579,11 @@ export const stripEmptyOptionalFields = (config: Record<string, any>): Record<st
     'speculative_config',
     'tool_call_parser',
     'reasoning_parser',
+    // Audio backends: an empty language means "detect", and an empty
+    // encoder / diarizer path means the release ships none.
+    'language',
+    'encoder',
+    'diar_model',
   ]) {
     if (!next[field]) delete next[field];
   }

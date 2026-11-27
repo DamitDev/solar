@@ -1,0 +1,719 @@
+"""The HuggingFace audio path: endpoint formats, refusals and the pipeline call.
+
+The endpoint is exercised directly with a fake ``Request`` and a fake pipeline so the
+format matrix is proven without downloading a model.
+"""
+
+import io
+import json
+import threading
+import wave
+
+import numpy as np
+import pytest
+from fastapi.responses import JSONResponse
+from starlette.datastructures import FormData, UploadFile
+
+import solar_host.servers.hf_server as hf
+
+
+def _wav_bytes(seconds: float = 1.0, rate: int = 16000) -> bytes:
+    """A real 16 kHz mono WAV, so ffmpeg has something to decode."""
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        frames = np.zeros(int(seconds * rate), dtype=np.int16).tobytes()
+        handle.writeframes(frames)
+    return buffer.getvalue()
+
+
+class _Request:
+    def __init__(self, form: FormData):
+        self._form = form
+
+    async def form(self):
+        return self._form
+
+
+def _form(**fields) -> FormData:
+    payload = _wav_bytes()
+    items: list[tuple[str, object]] = [
+        (
+            "file",
+            UploadFile(
+                file=io.BytesIO(payload), filename="sample.wav", size=len(payload)
+            ),
+        )
+    ]
+    for name, value in fields.items():
+        if isinstance(value, list):
+            items.extend((name, entry) for entry in value)
+        else:
+            items.append((name, value))
+    return FormData(items)
+
+
+class _Pipeline:
+    """Records how the pipeline was called and returns canned output."""
+
+    def __init__(self, text: str = "hello world", chunks=None):
+        self.text = text
+        self.chunks = chunks
+        self.calls: list[dict] = []
+
+    def __call__(self, samples, **kwargs):
+        self.calls.append({"samples": samples, **kwargs})
+        result: dict = {"text": self.text}
+        if self.chunks is not None:
+            result["chunks"] = self.chunks
+        return result
+
+
+@pytest.fixture(autouse=True)
+def _state(monkeypatch):
+    monkeypatch.setattr(hf.state, "alias", "whisper-hu")
+    monkeypatch.setattr(hf.state, "model_type", "audio")
+    monkeypatch.setattr(hf.state, "language", None)
+    monkeypatch.setattr(hf.state, "chunk_length_s", 30.0)
+    monkeypatch.setattr(hf.state, "batch_size", 8)
+    monkeypatch.setattr(hf.state, "tokenizer", None)
+    monkeypatch.setattr(hf.state, "pipeline", _Pipeline())
+    monkeypatch.setattr(hf.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+
+
+async def _call(form: FormData):
+    return await hf.audio_transcriptions(_Request(form))
+
+
+@pytest.mark.anyio
+async def test_json_returns_only_the_text():
+    response = await _call(_form(model="whisper-hu"))
+    assert response == {"text": "hello world"}
+
+
+@pytest.mark.anyio
+async def test_text_returns_plain_text():
+    response = await _call(_form(model="whisper-hu", response_format="text"))
+    assert response.body == b"hello world"
+    assert response.media_type == "text/plain"
+
+
+@pytest.mark.anyio
+async def test_srt_is_rendered_from_the_chunks():
+    hf.state.pipeline = _Pipeline(
+        chunks=[
+            {"text": " hello", "timestamp": (0.0, 1.0)},
+            {"text": " world", "timestamp": (1.0, 2.0)},
+        ]
+    )
+    response = await _call(_form(model="whisper-hu", response_format="srt"))
+    assert response.body.decode() == (
+        "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\nworld\n"
+    )
+
+
+@pytest.mark.anyio
+async def test_vtt_starts_with_the_webvtt_header():
+    hf.state.pipeline = _Pipeline(chunks=[{"text": " hello", "timestamp": (0.0, 1.5)}])
+    response = await _call(_form(model="whisper-hu", response_format="vtt"))
+    body = response.body.decode()
+    assert body.startswith("WEBVTT\n\n")
+    assert "00:00:00.000 --> 00:00:01.500" in body
+
+
+@pytest.mark.anyio
+async def test_verbose_json_carries_segments_and_the_real_duration():
+    hf.state.pipeline = _Pipeline(
+        chunks=[
+            {"text": " hello", "timestamp": (0.0, 1.0)},
+            {"text": " world", "timestamp": (1.0, 2.0)},
+        ]
+    )
+    # verbose_json returns a dict, which FastAPI serialises itself.
+    payload = await _call(_form(model="whisper-hu", response_format="verbose_json"))
+    assert payload["task"] == "transcribe"
+    assert payload["duration"] == pytest.approx(1.0, abs=0.01)
+    assert [s["text"] for s in payload["segments"]] == ["hello", "world"]
+    # Not produced by any runtime, so never invented.
+    for absent in ("compression_ratio",):
+        assert absent not in payload["segments"][0]
+
+
+@pytest.mark.anyio
+async def test_diarized_json_is_refused():
+    response = await _call(_form(model="whisper-hu", response_format="diarized_json"))
+    assert response.status_code == 400
+    assert (
+        "not supported by the HuggingFace audio backend"
+        in json.loads(response.body)["error"]["message"]
+    )
+
+
+@pytest.mark.anyio
+async def test_an_unknown_format_is_refused():
+    response = await _call(_form(model="whisper-hu", response_format="mp3"))
+    assert response.status_code == 400
+    assert "must be one of" in json.loads(response.body)["error"]["message"]
+
+
+@pytest.mark.anyio
+async def test_stream_is_refused():
+    response = await _call(_form(model="whisper-hu", stream="true"))
+    assert response.status_code == 400
+    assert (
+        "streaming transcription is not supported"
+        in json.loads(response.body)["error"]["message"]
+    )
+
+
+@pytest.mark.anyio
+async def test_a_missing_file_is_refused():
+    response = await _call(
+        _form(model="whisper-hu").__class__([("model", "whisper-hu")])
+    )
+    assert response.status_code == 400
+    assert json.loads(response.body)["error"]["message"] == "file is required"
+
+
+@pytest.mark.anyio
+async def test_a_model_mismatch_is_a_404():
+    response = await _call(_form(model="other"))
+    assert response.status_code == 404
+    assert json.loads(response.body)["error"]["code"] == "model_not_found"
+
+
+@pytest.mark.anyio
+async def test_the_instance_language_is_used_when_the_request_omits_it():
+    hf.state.language = "hu"
+    await _call(_form(model="whisper-hu"))
+    kwargs = hf.state.pipeline.calls[0]["generate_kwargs"]
+    assert kwargs["language"] == "hu"
+    assert kwargs["task"] == "transcribe"
+
+
+@pytest.mark.anyio
+async def test_a_word_granularity_with_json_does_not_run_the_word_pass():
+    """json cannot carry words, so the expensive alignment pass must not run."""
+    await _call(_form(model="whisper-hu", **{"timestamp_granularities[]": "word"}))
+    assert hf.state.pipeline.calls[0]["return_timestamps"] is False
+    assert len(hf.state.pipeline.calls) == 1
+
+
+@pytest.mark.anyio
+async def test_a_word_granularity_with_verbose_json_runs_the_word_pass():
+    hf.state.pipeline = _TwoPassPipeline()
+
+    await _call(
+        _form(
+            model="whisper-hu",
+            response_format="verbose_json",
+            **{"timestamp_granularities[]": "word"},
+        )
+    )
+
+    assert [call["return_timestamps"] for call in hf.state.pipeline.calls] == [
+        "word",
+        True,
+    ]
+
+
+@pytest.mark.anyio
+async def test_a_word_granularity_with_srt_does_not_run_the_word_pass():
+    """srt carries cues, not words, so the extra pass would be wasted."""
+    await _call(
+        _form(
+            model="whisper-hu",
+            response_format="srt",
+            **{"timestamp_granularities[]": "word"},
+        )
+    )
+    assert hf.state.pipeline.calls[0]["return_timestamps"] is True
+    assert len(hf.state.pipeline.calls) == 1
+
+
+class _TwoPassPipeline:
+    """Word chunks for ``"word"`` and real segments for ``True``."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def __call__(self, samples, **kwargs):
+        self.calls.append(kwargs)
+        if kwargs["return_timestamps"] == "word":
+            return {
+                "text": " hello world",
+                "chunks": [
+                    {"text": " hello", "timestamp": (0.0, 0.4)},
+                    {"text": " world", "timestamp": (0.4, 1.0)},
+                ],
+            }
+        return {
+            "text": "hello world",
+            "chunks": [{"text": " hello world", "timestamp": (0.0, 1.0)}],
+        }
+
+
+@pytest.mark.anyio
+async def test_a_word_granularity_returns_real_segments_with_the_words_attached():
+    hf.state.pipeline = _TwoPassPipeline()
+
+    payload = await _call(
+        _form(
+            model="whisper-hu",
+            response_format="verbose_json",
+            **{"timestamp_granularities[]": "word"},
+        )
+    )
+
+    # The word pass runs first, so its dedicated timeout still answers with the
+    # word-specific 504; the second pass supplies the model's own segments.
+    assert [call["return_timestamps"] for call in hf.state.pipeline.calls] == [
+        "word",
+        True,
+    ]
+    assert len(payload["segments"]) == 1
+    assert payload["segments"][0]["text"] == "hello world"
+    assert payload["segments"][0]["words"] == [
+        {"word": " hello", "start": 0.0, "end": 0.4},
+        {"word": " world", "start": 0.4, "end": 1.0},
+    ]
+    assert payload["words"] == [
+        {"word": " hello", "start": 0.0, "end": 0.4},
+        {"word": " world", "start": 0.4, "end": 1.0},
+    ]
+
+
+@pytest.mark.anyio
+async def test_words_are_attached_to_the_segment_that_contains_them():
+    class _Pipeline:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def __call__(self, samples, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs["return_timestamps"] == "word":
+                return {
+                    "text": " one two three four",
+                    "chunks": [
+                        {"text": " one", "timestamp": (0.0, 0.4)},
+                        {"text": " two", "timestamp": (0.6, 0.9)},
+                        {"text": " three", "timestamp": (1.1, 1.4)},
+                        {"text": " four", "timestamp": (1.6, 1.9)},
+                    ],
+                }
+            return {
+                "text": "one two three four",
+                "chunks": [
+                    {"text": " one two", "timestamp": (0.0, 1.0)},
+                    {"text": " three four", "timestamp": (1.0, 2.0)},
+                ],
+            }
+
+    hf.state.pipeline = _Pipeline()
+
+    payload = await _call(
+        _form(
+            model="whisper-hu",
+            response_format="verbose_json",
+            **{"timestamp_granularities[]": "word"},
+        )
+    )
+
+    assert [word["word"] for word in payload["segments"][0]["words"]] == [
+        " one",
+        " two",
+    ]
+    assert [word["word"] for word in payload["segments"][1]["words"]] == [
+        " three",
+        " four",
+    ]
+
+
+@pytest.mark.anyio
+async def test_words_before_and_after_every_segment_stay_on_the_edge_segments():
+    class _Pipeline:
+        def __call__(self, samples, **kwargs):
+            if kwargs["return_timestamps"] == "word":
+                return {
+                    "text": " before after",
+                    "chunks": [
+                        {"text": " before", "timestamp": (0.0, 0.1)},
+                        {"text": " after", "timestamp": (3.0, 3.1)},
+                    ],
+                }
+            return {
+                "text": "before after",
+                "chunks": [{"text": " before after", "timestamp": (0.5, 2.0)}],
+            }
+
+    hf.state.pipeline = _Pipeline()
+
+    payload = await _call(
+        _form(
+            model="whisper-hu",
+            response_format="verbose_json",
+            **{"timestamp_granularities[]": "word"},
+        )
+    )
+
+    # No word may be dropped because the two passes disagree by a few
+    # milliseconds; the edge segment takes it.
+    assert [word["word"] for word in payload["segments"][0]["words"]] == [
+        " before",
+        " after",
+    ]
+    assert payload["words"] == [
+        {"word": " before", "start": 0.0, "end": 0.1},
+        {"word": " after", "start": 3.0, "end": 3.1},
+    ]
+
+
+@pytest.mark.anyio
+async def test_segment_granularity_does_not_add_words_or_a_second_pass():
+    hf.state.pipeline = _Pipeline(chunks=[{"text": " hello", "timestamp": (0.0, 1.0)}])
+
+    payload = await _call(
+        _form(
+            model="whisper-hu",
+            response_format="verbose_json",
+            **{"timestamp_granularities[]": "segment"},
+        )
+    )
+
+    assert len(hf.state.pipeline.calls) == 1
+    assert "words" not in payload
+    assert "words" not in payload["segments"][0]
+
+
+@pytest.mark.anyio
+async def test_words_without_a_timestamp_are_skipped_not_given_a_made_up_time():
+    from solar_host.servers.audio_formats import words_from_chunks
+
+    assert words_from_chunks(
+        [
+            {"text": " hello", "timestamp": (0.0, 0.5)},
+            {"text": " lost"},
+            {"text": " ", "timestamp": (0.5, 0.6)},
+        ]
+    ) == [{"word": " hello", "start": 0.0, "end": 0.5}]
+
+
+@pytest.mark.anyio
+async def test_a_slow_word_pass_on_verbose_json_times_out_before_the_segment_pass(
+    monkeypatch,
+):
+    release = threading.Event()
+
+    class _Pipeline:
+        def __call__(self, samples, **kwargs):
+            release.wait(5)
+            return {"text": "late"}
+
+    monkeypatch.setattr(hf.state, "pipeline", _Pipeline())
+    monkeypatch.setattr(hf, "WORD_TIMESTAMP_TIMEOUT_S", 0.05)
+    try:
+        response = await _call(
+            _form(
+                model="whisper-hu",
+                response_format="verbose_json",
+                **{"timestamp_granularities[]": "word"},
+            )
+        )
+    finally:
+        release.set()
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 504
+    payload = json.loads(bytes(response.body))["error"]
+    assert payload["code"] == "timeout"
+    assert "word-level timestamps did not finish" in payload["message"]
+
+
+@pytest.mark.anyio
+async def test_a_slow_segment_pass_after_a_word_pass_times_out_with_an_envelope(
+    monkeypatch,
+):
+    release = threading.Event()
+
+    class _Pipeline:
+        def __call__(self, samples, **kwargs):
+            if kwargs["return_timestamps"] == "word":
+                return {
+                    "text": " hello",
+                    "chunks": [{"text": " hello", "timestamp": (0.0, 0.5)}],
+                }
+            release.wait(5)
+            return {"text": "late"}
+
+    monkeypatch.setattr(hf.state, "pipeline", _Pipeline())
+    monkeypatch.setattr(hf, "TRANSCRIPTION_TIMEOUT_S", 0.05)
+    try:
+        response = await _call(
+            _form(
+                model="whisper-hu",
+                response_format="verbose_json",
+                **{"timestamp_granularities[]": "word"},
+            )
+        )
+    finally:
+        release.set()
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 504
+    payload = json.loads(bytes(response.body))["error"]
+    assert payload["code"] == "timeout"
+    assert "transcription did not finish" in payload["message"]
+
+
+@pytest.mark.anyio
+async def test_a_slow_word_timestamp_pipeline_times_out_with_an_envelope(monkeypatch):
+    """The pipeline thread cannot be cancelled; the request must still return."""
+    release = threading.Event()
+
+    class _SlowPipeline:
+        def __call__(self, samples, **kwargs):
+            release.wait(5)
+            return {"text": "late"}
+
+    monkeypatch.setattr(hf.state, "pipeline", _SlowPipeline())
+    monkeypatch.setattr(hf, "WORD_TIMESTAMP_TIMEOUT_S", 0.05)
+    try:
+        response = await _call(
+            _form(
+                model="whisper-hu",
+                response_format="verbose_json",
+                **{"timestamp_granularities[]": "word"},
+            )
+        )
+    finally:
+        release.set()
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 504
+    payload = json.loads(bytes(response.body))["error"]
+    assert payload["code"] == "timeout"
+    assert "word-level timestamps did not finish" in payload["message"]
+    assert "timestamp_granularities[]=segment" in payload["message"]
+
+
+@pytest.mark.anyio
+async def test_a_slow_plain_transcription_times_out_with_an_envelope(monkeypatch):
+    release = threading.Event()
+
+    class _SlowPipeline:
+        def __call__(self, samples, **kwargs):
+            release.wait(5)
+            return {"text": "late"}
+
+    monkeypatch.setattr(hf.state, "pipeline", _SlowPipeline())
+    monkeypatch.setattr(hf, "TRANSCRIPTION_TIMEOUT_S", 0.05)
+    try:
+        response = await _call(_form(model="whisper-hu"))
+    finally:
+        release.set()
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 504
+    payload = json.loads(bytes(response.body))["error"]
+    assert payload["code"] == "timeout"
+    assert "transcription did not finish" in payload["message"]
+
+
+@pytest.mark.anyio
+async def test_verbose_json_asks_for_segment_timestamps():
+    await _call(_form(model="whisper-hu", response_format="verbose_json"))
+    assert hf.state.pipeline.calls[0]["return_timestamps"] is True
+
+
+@pytest.mark.anyio
+async def test_plain_json_does_not_pay_for_timestamps():
+    await _call(_form(model="whisper-hu"))
+    assert hf.state.pipeline.calls[0]["return_timestamps"] is False
+
+
+@pytest.mark.anyio
+async def test_a_prompt_uses_the_tokenizer_prompt_ids():
+    class _Tokenizer:
+        def get_prompt_ids(self, prompt, return_tensors):
+            assert return_tensors == "pt"
+            return [[1, 2, 3]]
+
+    hf.state.tokenizer = _Tokenizer()
+    await _call(_form(model="whisper-hu", prompt="Hello there"))
+    assert hf.state.pipeline.calls[0]["generate_kwargs"]["prompt_ids"] == [[1, 2, 3]]
+
+
+@pytest.mark.anyio
+async def test_a_prompt_without_tokenizer_support_is_refused():
+    response = await _call(_form(model="whisper-hu", prompt="Hello"))
+    assert response.status_code == 400
+    assert "prompt is not supported" in json.loads(response.body)["error"]["message"]
+
+
+class _RecordingTokenizer:
+    """A tokenizer that records the prompt it was asked to encode."""
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def get_prompt_ids(self, prompt, return_tensors):
+        self.prompts.append(prompt)
+        return [[1, 2, 3]]
+
+
+@pytest.mark.anyio
+async def test_keywords_become_the_prompt_ids():
+    tokenizer = _RecordingTokenizer()
+    hf.state.tokenizer = tokenizer
+
+    await _call(_form(model="whisper-hu", keywords=["Kowalczyk", "Iris"]))
+
+    assert tokenizer.prompts == ["Kowalczyk, Iris"]
+    assert hf.state.pipeline.calls[0]["generate_kwargs"]["prompt_ids"] == [[1, 2, 3]]
+
+
+@pytest.mark.anyio
+async def test_an_explicit_prompt_wins_over_keywords():
+    tokenizer = _RecordingTokenizer()
+    hf.state.tokenizer = tokenizer
+
+    await _call(
+        _form(model="whisper-hu", prompt="Existing prompt", keywords=["Kowalczyk"])
+    )
+
+    assert tokenizer.prompts == ["Existing prompt"]
+
+
+@pytest.mark.anyio
+async def test_a_one_element_languages_set_becomes_language():
+    await _call(_form(model="whisper-hu", languages=["hu"]))
+
+    assert hf.state.pipeline.calls[0]["generate_kwargs"]["language"] == "hu"
+
+
+@pytest.mark.anyio
+async def test_an_explicit_language_wins_over_languages():
+    await _call(_form(model="whisper-hu", language="de", languages='["hu"]'))
+
+    assert hf.state.pipeline.calls[0]["generate_kwargs"]["language"] == "de"
+
+
+@pytest.mark.anyio
+async def test_a_multi_element_languages_set_is_dropped():
+    await _call(_form(model="whisper-hu", languages='["hu", "en"]'))
+
+    assert "language" not in hf.state.pipeline.calls[0]["generate_kwargs"]
+
+
+@pytest.mark.anyio
+async def test_the_chunk_length_and_batch_size_reach_the_pipeline():
+    await _call(_form(model="whisper-hu"))
+    call = hf.state.pipeline.calls[0]
+    assert call["chunk_length_s"] == 30.0
+    assert call["batch_size"] == 8
+
+
+@pytest.mark.anyio
+async def test_a_temperature_reaches_the_generate_kwargs():
+    await _call(_form(model="whisper-hu", temperature="0.4"))
+    kwargs = hf.state.pipeline.calls[0]["generate_kwargs"]
+    assert kwargs["temperature"] == 0.4
+    assert kwargs["do_sample"] is True
+
+
+@pytest.mark.anyio
+async def test_a_zero_temperature_is_not_forwarded():
+    await _call(_form(model="whisper-hu", temperature="0"))
+    assert "temperature" not in hf.state.pipeline.calls[0]["generate_kwargs"]
+
+
+@pytest.mark.anyio
+async def test_a_broken_upload_is_a_400():
+    payload = b"not a wav file"
+    items = [
+        (
+            "file",
+            UploadFile(file=io.BytesIO(payload), filename="x.bin", size=len(payload)),
+        ),
+        ("model", "whisper-hu"),
+    ]
+    response = await _call(FormData(items))
+    assert response.status_code == 400
+    assert (
+        "could not decode the uploaded audio"
+        in json.loads(response.body)["error"]["message"]
+    )
+
+
+@pytest.mark.anyio
+async def test_a_non_numeric_temperature_is_a_400_envelope():
+    """The shim answers this with the envelope; the HuggingFace route must not
+    turn a malformed temperature into an unhandled ValueError (a 500)."""
+    response = await _call(_form(model="whisper-hu", temperature="warm"))
+    assert response.status_code == 400
+    assert "is not a number" in json.loads(response.body)["error"]["message"]
+
+
+def test_a_malformed_multipart_body_is_a_400_envelope(monkeypatch):
+    """Starlette converts the parser error to HTTPException(400), whose default
+    body is {"detail": ...}; the route must answer with the OpenAI envelope."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(hf.state, "api_key", "")
+    app = FastAPI()
+    app.post("/v1/audio/transcriptions")(hf.audio_transcriptions)
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        content=b"garbage",
+        headers={"content-type": "multipart/form-data; boundary=x"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "malformed multipart body"
+
+
+# ── language is the ISO-639-1 code ───────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_verbose_json_language_is_und_when_none_was_requested():
+    payload = await _call(_form(model="whisper-hu", response_format="verbose_json"))
+    assert payload["language"] == "und"
+
+
+@pytest.mark.anyio
+async def test_verbose_json_language_is_normalised_to_the_iso_code():
+    payload = await _call(
+        _form(model="whisper-hu", response_format="verbose_json", language="hungarian")
+    )
+    assert payload["language"] == "hu"
+
+
+# ── the field set is the same as the shim's ──────────────────────
+
+
+@pytest.mark.anyio
+async def test_an_unknown_field_is_refused_like_the_shim():
+    """The shim and NeMo refuse an unknown field; HuggingFace used to return
+    200 and ignore it, so the same request behaved differently per backend."""
+    response = await _call(_form(model="whisper-hu", unexpected="1"))
+
+    assert response.status_code == 400
+    assert json.loads(response.body)["error"]["message"] == (
+        "field 'unexpected' is not supported by /v1/audio/transcriptions"
+    )
+
+
+@pytest.mark.anyio
+async def test_a_backend_specific_field_is_accepted_and_dropped():
+    """diarization belongs to NeMo; HuggingFace accepts and ignores it so one
+    client request works on all three backends."""
+    response = await _call(_form(model="whisper-hu", diarization="true"))
+
+    assert response == {"text": "hello world"}

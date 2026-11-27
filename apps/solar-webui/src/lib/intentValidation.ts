@@ -19,6 +19,9 @@ export const INTENT_BACKEND_TYPES = [
   'huggingface_classification',
   'huggingface_embedding',
   'huggingface_vision',
+  'huggingface_audio',
+  'whispercpp',
+  'nemospeech',
   'sglang',
   'vllm',
 ] as const;
@@ -539,10 +542,13 @@ export function validateIntentRequest(
     }
 
     const modelFile = req.backend.model_file;
-    if (modelFile && backendType !== 'llamacpp') {
+    const modelFileAllowed =
+      backendType === 'llamacpp' || backendType === 'whispercpp' || backendType === 'nemospeech';
+    if (modelFile && !modelFileAllowed) {
       errors.push({
         field: 'backend.model_file',
-        message: 'Model file selection is only available for the llama.cpp backend',
+        message:
+          'Model file selection is only available for the llama.cpp, whisper.cpp and NeMo-Speech backends',
       });
     }
 

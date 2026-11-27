@@ -121,6 +121,9 @@ from .openai import (
 from .openai import (
     StreamOptions as StreamOptions,
 )
+from .openai import (
+    TranscriptionRequest as TranscriptionRequest,
+)
 from .reservation import (
     MigrationCandidate as MigrationCandidate,
 )

@@ -78,6 +78,11 @@ class HuggingFaceRunner(BackendRunner):
             or backend_type == "huggingface_vision"
         ):
             model_type = "vision"
+        elif (
+            backend_type == BackendType.HUGGINGFACE_AUDIO
+            or backend_type == "huggingface_audio"
+        ):
+            model_type = "audio"
         else:
             raise RuntimeError(f"Unknown HuggingFace backend_type: {backend_type!r}")
 
@@ -99,14 +104,27 @@ class HuggingFaceRunner(BackendRunner):
             config.device,
             "--dtype",
             config.dtype,
-            "--max-length",
-            str(config.max_length),
         ]
+
+        if model_type == "audio":
+            # Audio models have no max_length; long-form is chunked instead.
+            cmd.extend(
+                [
+                    "--chunk-length-s",
+                    str(config.chunk_length_s),
+                    "--batch-size",
+                    str(config.batch_size),
+                ]
+            )
+            if config.language:
+                cmd.extend(["--language", config.language])
+        else:
+            cmd.extend(["--max-length", str(getattr(config, "max_length", 4096))])
 
         if getattr(config, "trust_remote_code", False):
             cmd.append("--trust-remote-code")
 
-        if getattr(config, "use_flash_attention", True):
+        if model_type != "audio" and getattr(config, "use_flash_attention", True):
             cmd.append("--use-flash-attention")
 
         # For classification models, pass labels if specified
@@ -178,6 +196,15 @@ class HuggingFaceRunner(BackendRunner):
         ):
             return [
                 "/v1/chat/completions",
+                "/v1/models",
+                "/health",
+            ]
+        elif (
+            backend_type == BackendType.HUGGINGFACE_AUDIO
+            or backend_type == "huggingface_audio"
+        ):
+            return [
+                "/v1/audio/transcriptions",
                 "/v1/models",
                 "/health",
             ]
