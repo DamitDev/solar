@@ -3,7 +3,9 @@
 import asyncio
 import io
 import json
+import os
 import struct
+import tempfile
 import wave
 
 import pytest
@@ -669,6 +671,34 @@ def test_every_file_part_is_closed(client):
     assert response.status_code == 400
     assert first.close_calls == 1
     assert second.close_calls == 1
+
+
+def test_a_failed_copy_does_not_leak_the_temp_file(client, monkeypatch):
+    """A seek/copy failure happens before the post's try/finally, so the failed
+    copy itself has to remove the temp copy."""
+    created: list[str] = []
+    real_named_temporary_file = tempfile.NamedTemporaryFile
+
+    def _recording_named_temporary_file(*args, **kwargs):
+        handle = real_named_temporary_file(*args, **kwargs)
+        created.append(handle.name)
+        return handle
+
+    def _failing_copy(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        shim.tempfile, "NamedTemporaryFile", _recording_named_temporary_file
+    )
+    monkeypatch.setattr(shim.shutil, "copyfileobj", _failing_copy)
+    monkeypatch.setattr(shim.state, "session", object())
+    upload = UploadFile(file=io.BytesIO(WAV), filename="sample.wav", size=len(WAV))
+
+    with pytest.raises(OSError, match="disk full"):
+        asyncio.run(shim._forward(upload, []))
+
+    assert created
+    assert not os.path.exists(created[0])
 
 
 # ── NeMo-Speech.cpp ──────────────────────────────────────────────

@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import tempfile
 import threading
 import time
 import wave
@@ -239,6 +240,53 @@ async def test_every_file_part_is_closed():
     assert response.status_code == 400
     assert first.close_calls == 1
     assert second.close_calls == 1
+
+
+@pytest.mark.anyio
+async def test_a_text_file_part_still_closes_every_upload():
+    """A text ``file`` part returns 'file is required' before the values loop;
+    that return must still close the form, or an upload under another name keeps
+    its spool until GC."""
+    other = _TrackingUpload(_wav_bytes())
+    form = FormData(
+        [
+            ("file", "not an upload"),
+            ("other", other),
+            ("model", "whisper-hu"),
+        ]
+    )
+
+    response = await hf.audio_transcriptions(_Request(form))
+
+    assert response.status_code == 400
+    assert other.close_calls == 1
+
+
+@pytest.mark.anyio
+async def test_a_failed_copy_does_not_leak_the_temp_file(monkeypatch):
+    """A seek/copy failure happens before the decode try/finally that unlinks the
+    temp copy, so the failed copy itself has to remove it."""
+    created: list[str] = []
+    real_named_temporary_file = tempfile.NamedTemporaryFile
+
+    def _recording_named_temporary_file(*args, **kwargs):
+        handle = real_named_temporary_file(*args, **kwargs)
+        created.append(handle.name)
+        return handle
+
+    def _failing_copy(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        hf.tempfile, "NamedTemporaryFile", _recording_named_temporary_file
+    )
+    monkeypatch.setattr(hf.shutil, "copyfileobj", _failing_copy)
+
+    with pytest.raises(OSError, match="disk full"):
+        await _call(_form(model="whisper-hu"))
+
+    assert created
+    assert not os.path.exists(created[0])
 
 
 @pytest.mark.anyio

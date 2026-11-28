@@ -367,7 +367,7 @@ describe('audio request field support note', () => {
       'suppress_non_speech',
     ]);
     expect(items('not-honored')).toEqual([
-      'vad',
+      'vad (true is refused; false is accepted and dropped)',
       'chunking_strategy',
       'include[]',
       'diarization',

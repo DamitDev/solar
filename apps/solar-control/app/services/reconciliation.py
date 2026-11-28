@@ -3269,7 +3269,14 @@ def _coerce_jsonish(value: Any) -> Any:
 # it reports no drift where there is some — silently keeping a stale replica
 # alive after a real config change.
 _PATH_RESOLVED_KEYS: frozenset[str] = frozenset(
-    {"mmproj", "chat_template_file", "model_file", "spec_draft_model"}
+    {
+        "mmproj",
+        "chat_template_file",
+        "model_file",
+        "spec_draft_model",
+        "encoder",
+        "diar_model",
+    }
 )
 
 # Backend keys the control canonicalizer stores as compact JSON (or drops when

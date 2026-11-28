@@ -33,7 +33,8 @@ export type ModeOption = {
  * solar-control's BACKEND_FIELD_OWNERS are the server-side counterparts.
  *
  * `honoured` names the mapping when the request field is not forwarded under its
- * own name; `notHonoured` fields are accepted and dropped.
+ * own name; `notHonoured` fields are accepted and dropped unless the entry names
+ * a refusal (whisper.cpp's `vad=true`).
  */
 export type AudioBackendType = 'whispercpp' | 'nemospeech' | 'huggingface_audio';
 
@@ -55,7 +56,7 @@ export const AUDIO_REQUEST_FIELD_SUPPORT: Record<AudioBackendType, AudioRequestF
       'suppress_non_speech',
     ],
     notHonoured: [
-      'vad',
+      'vad (true is refused; false is accepted and dropped)',
       'chunking_strategy',
       'include[]',
       'diarization',

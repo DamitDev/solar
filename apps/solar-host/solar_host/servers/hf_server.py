@@ -1230,11 +1230,13 @@ async def audio_transcriptions(
             "malformed multipart body", None, "invalid_request_error"
         )
 
-    upload = form.get("file")
-    if not isinstance(upload, StarletteUploadFile):
-        return _transcription_error("file is required", "file", "invalid_request_error")
-
     try:
+        upload = form.get("file")
+        if not isinstance(upload, StarletteUploadFile):
+            return _transcription_error(
+                "file is required", "file", "invalid_request_error"
+            )
+
         values: dict[str, str] = {}
         for name, value in form.multi_items():
             if name == "file" or not isinstance(value, str):
@@ -1324,8 +1326,17 @@ async def audio_transcriptions(
 
         with tempfile.NamedTemporaryFile(delete=False) as temp:
             temp_path = temp.name
-            upload.file.seek(0)
-            await asyncio.to_thread(shutil.copyfileobj, upload.file, temp, 1024 * 1024)
+            try:
+                upload.file.seek(0)
+                await asyncio.to_thread(
+                    shutil.copyfileobj, upload.file, temp, 1024 * 1024
+                )
+            except BaseException:
+                # The decode try/finally below owns the unlink for a successful
+                # copy; a failed seek/copy never reaches it, so the temp file
+                # would leak. Remove it here and let the failure surface.
+                Path(temp_path).unlink(missing_ok=True)
+                raise
     finally:
         # FormData.close() closes every UploadFile part. Starlette keeps only
         # the last value per key, so closing the selected ``upload`` alone would

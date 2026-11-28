@@ -732,8 +732,15 @@ async def _forward(
 
     with tempfile.NamedTemporaryFile(delete=False) as temp:
         temp_path = temp.name
-        upload.file.seek(0)
-        await asyncio.to_thread(shutil.copyfileobj, upload.file, temp, 1024 * 1024)
+        try:
+            upload.file.seek(0)
+            await asyncio.to_thread(shutil.copyfileobj, upload.file, temp, 1024 * 1024)
+        except BaseException:
+            # The outer finally below owns the unlink for a successful copy; a
+            # failed seek/copy never reaches it, so remove the temp file here
+            # and let the failure surface.
+            os.unlink(temp_path)
+            raise
     try:
         form = aiohttp.FormData()
         for name, value in fields:
