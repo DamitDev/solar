@@ -367,7 +367,7 @@ describe('audio request field support note', () => {
       'suppress_non_speech',
     ]);
     expect(items('not-honored')).toEqual([
-      'vad (true is refused; false is accepted and dropped)',
+      'vad (true is refused on whisper.cpp; false is accepted and dropped)',
       'chunking_strategy',
       'include[]',
       'diarization',

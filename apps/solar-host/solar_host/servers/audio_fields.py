@@ -43,10 +43,11 @@ OPENAI_ARRAY_FIELDS: tuple[str, ...] = (
 )
 
 # whisper-server-only tuning fields. Forwarded for whisper.cpp, accepted and
-# ignored for NeMo-Speech.cpp (which would reject an unknown key). `vad` is
-# accepted but never forwarded when false; `vad=true` is refused with a 400
-# because no VAD model is configurable on a shim instance, and whisper-server
-# fails with a bare 500 when asked to use one.
+# ignored for NeMo-Speech.cpp (which would reject an unknown key). `vad=false`
+# is accepted and dropped everywhere; on whisper.cpp instances `vad=true` is
+# refused with a 400 because no VAD model is configurable there and
+# whisper-server fails with a bare 500 when asked to use one, while
+# NeMo-Speech.cpp accepts and drops `vad` like its other whisper-only fields.
 WHISPER_ONLY_FIELDS: tuple[str, ...] = (
     "temperature_inc",
     "carry_initial_prompt",

@@ -56,7 +56,7 @@ export const AUDIO_REQUEST_FIELD_SUPPORT: Record<AudioBackendType, AudioRequestF
       'suppress_non_speech',
     ],
     notHonoured: [
-      'vad (true is refused; false is accepted and dropped)',
+      'vad (true is refused on whisper.cpp; false is accepted and dropped)',
       'chunking_strategy',
       'include[]',
       'diarization',
