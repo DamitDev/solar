@@ -776,7 +776,12 @@ class ProcessManager:
         instance.error_message = None
 
         if hasattr(runner, "get_supported_endpoints_for_model_type"):
-            model_type = getattr(instance.config, "model_type", "llm")
+            # llama.cpp declares a model_type; the HuggingFace and GGML audio
+            # configs declare a backend_type, which is the value their shared
+            # contract takes.
+            model_type = getattr(instance.config, "model_type", None)
+            if model_type is None:
+                model_type = getattr(instance.config, "backend_type", "llamacpp")
             instance.supported_endpoints = (
                 runner.get_supported_endpoints_for_model_type(model_type)
             )
@@ -1122,7 +1127,12 @@ class ProcessManager:
         runner = get_runner_for_config(config)
 
         if hasattr(runner, "get_supported_endpoints_for_model_type"):
-            model_type = getattr(config, "model_type", "llm")
+            # llama.cpp declares a model_type; the HuggingFace and GGML audio
+            # configs declare a backend_type, which is the value their shared
+            # contract takes.
+            model_type = getattr(config, "model_type", None)
+            if model_type is None:
+                model_type = getattr(config, "backend_type", "llamacpp")
             supported_endpoints = runner.get_supported_endpoints_for_model_type(
                 model_type
             )

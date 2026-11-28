@@ -1388,11 +1388,17 @@ async def audio_transcriptions(
         "timestamp_granularities"
     )
 
-    generate_kwargs: dict[str, object] = {"task": "transcribe"}
-    if language and language.strip().lower() != "auto":
-        # Whisper's lang_to_id has no 'auto' token; omitting the language is
-        # how auto-detection is requested.
-        generate_kwargs["language"] = language
+    # `task`, `language` and `prompt_ids` are Whisper-only generate arguments:
+    # another seq2seq checkpoint raises when they reach model.generate. The
+    # pipeline type is the same signal that gates `return_language` above.
+    whisper_pipeline = getattr(state.pipeline, "type", "") == "seq2seq_whisper"
+    generate_kwargs: dict[str, object] = {}
+    if whisper_pipeline:
+        generate_kwargs["task"] = "transcribe"
+        if language and language.strip().lower() != "auto":
+            # Whisper's lang_to_id has no 'auto' token; omitting the language
+            # is how auto-detection is requested.
+            generate_kwargs["language"] = language
     if temperature_value is not None and temperature_value > 0:
         generate_kwargs["temperature"] = temperature_value
         generate_kwargs["do_sample"] = True
@@ -1406,7 +1412,7 @@ async def audio_transcriptions(
     )
     if prompt:
         get_prompt_ids = getattr(state.tokenizer, "get_prompt_ids", None)
-        if get_prompt_ids is None:
+        if get_prompt_ids is None or not whisper_pipeline:
             return _transcription_error(
                 "prompt is not supported by this checkpoint's tokenizer",
                 "prompt",
@@ -1490,32 +1496,23 @@ async def audio_transcriptions(
             "words": words,
         }
 
-    return_timestamps: bool | str = False
-    if response_format in ("verbose_json", "srt", "vtt"):
-        return_timestamps = True
+    return_timestamps = response_format in ("verbose_json", "srt", "vtt")
 
-    timeout_s = (
-        WORD_TIMESTAMP_TIMEOUT_S
-        if return_timestamps == "word"
-        else TRANSCRIPTION_TIMEOUT_S
-    )
     try:
         result = await _run_transcription_pass(
             samples,
             generate_kwargs,
             return_timestamps,
-            timeout_s,
+            TRANSCRIPTION_TIMEOUT_S,
             return_language=response_format == "verbose_json",
         )
     except TimeoutError:
-        if return_timestamps == "word":
-            logger.error(
-                f"[ERROR] word-level timestamps did not finish within {timeout_s:g}s"
-            )
-            return _word_timeout_error(timeout_s)
-        logger.error(f"[ERROR] transcription did not finish within {timeout_s:g}s")
+        logger.error(
+            f"[ERROR] transcription did not finish within "
+            f"{TRANSCRIPTION_TIMEOUT_S:g}s"
+        )
         return _transcription_error(
-            f"transcription did not finish within {timeout_s:g}s on the "
+            f"transcription did not finish within {TRANSCRIPTION_TIMEOUT_S:g}s on the "
             "HuggingFace audio backend",
             None,
             "timeout",

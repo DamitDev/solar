@@ -122,7 +122,7 @@ class NemoSpeechRunner(BackendRunner):
     def get_supported_endpoints(self) -> list[str]:
         return ["/v1/audio/transcriptions", "/v1/models", "/health"]
 
-    def get_supported_endpoints_for_model_type(self, backend_type: str) -> list[str]:
+    def get_supported_endpoints_for_model_type(self, _backend_type: str) -> list[str]:
         """The GGML runtimes are single-purpose: one endpoint set."""
         return ["/v1/audio/transcriptions", "/v1/models", "/health"]
 

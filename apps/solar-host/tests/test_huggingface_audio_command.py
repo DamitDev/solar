@@ -86,3 +86,17 @@ def test_the_causal_endpoint_list_is_unchanged():
     )
     assert "/v1/audio/transcriptions" not in endpoints
     assert "/v1/chat/completions" in endpoints
+
+
+def test_the_shared_endpoint_contract_accepts_the_backend_type():
+    """The process manager's shared contract is called with a config's type
+    identifier; HuggingFace configs declare a backend_type, so the model-type
+    spelling must return the same per-backend endpoint set."""
+    endpoints = HuggingFaceRunner().get_supported_endpoints_for_model_type(
+        "huggingface_audio"
+    )
+    assert endpoints == [
+        "/v1/audio/transcriptions",
+        "/v1/models",
+        "/health",
+    ]

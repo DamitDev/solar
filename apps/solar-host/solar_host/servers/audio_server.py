@@ -618,6 +618,15 @@ def _forward_fields(
             # NeMo treats an unknown model as a 404, whisper-server ignores it;
             # the shim validated it already. stream is not implemented.
             continue
+        if name == "language" and not value.strip():
+            # An empty language is absent, not an explicit choice: a one-entry
+            # languages hint below supplies the runtime's language instead.
+            continue
+        if name == "temperature" and state.model_type == "nemospeech":
+            # The shim accepts temperature=0 as a no-op for NeMo-Speech.cpp and
+            # refuses anything else; the runtime has no temperature, so the field
+            # must not be forwarded even when it is zero.
+            continue
         if name == "vad":
             # No VAD model is configurable on a shim instance. Forwarding vad
             # makes whisper-server try to load an empty model path and fail with
@@ -653,9 +662,9 @@ def _forward_fields(
         forwarded.append((name, value))
 
     # A one-entry languages set is a language hint; every runtime takes exactly
-    # one language. An explicit language always wins, and a candidate set of two
-    # or more is dropped because no runtime accepts a set.
-    if "language" not in values:
+    # one language. An explicit non-blank language always wins, and a candidate
+    # set of two or more is dropped because no runtime accepts a set.
+    if not values.get("language", "").strip():
         language = single_language(
             value for name, value in fields if name in ("languages", "languages[]")
         )

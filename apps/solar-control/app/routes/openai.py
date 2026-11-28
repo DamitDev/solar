@@ -6,8 +6,10 @@ passed through to the gateway for scoping and logging. A key belongs to
 exactly one endpoint, whose model scoping restricts the registry.
 """
 
+import asyncio
 import json
 import logging
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -214,15 +216,13 @@ async def audio_transcriptions(request: Request):
 
         # Copy the spooled upload to a named temp file so the gateway can
         # re-open it for every attempt (aiohttp closes the handle it is given
-        # after a connection error, so a single handle cannot be retried).
+        # after a connection error, so a single handle cannot be retried). The
+        # copy runs in a worker thread so a large upload cannot block the event
+        # loop.
         with tempfile.NamedTemporaryFile(delete=False) as temp:
             tmp_path = temp.name
             upload.file.seek(0)
-            while True:
-                chunk = upload.file.read(1024 * 1024)
-                if not chunk:
-                    break
-                temp.write(chunk)
+            await asyncio.to_thread(shutil.copyfileobj, upload.file, temp, 1024 * 1024)
 
         fields: list[tuple[str, str]] = []
         for name, value in form.multi_items():

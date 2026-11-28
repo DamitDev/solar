@@ -160,6 +160,15 @@ class HuggingFaceRunner(BackendRunner):
             "/health",
         ]
 
+    def get_supported_endpoints_for_model_type(self, backend_type: str) -> list[str]:
+        """Get supported endpoints based on the backend type.
+
+        The process manager passes a config's ``model_type`` when it declares
+        one; HuggingFace configs carry ``backend_type`` instead, so both
+        spellings name the same per-backend endpoint set here.
+        """
+        return self.get_supported_endpoints_for_type(backend_type)
+
     def get_supported_endpoints_for_type(self, backend_type: str) -> list[str]:
         """Get supported endpoints based on backend type."""
         if (

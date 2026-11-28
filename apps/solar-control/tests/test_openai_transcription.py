@@ -102,6 +102,41 @@ async def test_the_upload_is_forwarded_as_a_multipart_upload():
 
 
 @pytest.mark.anyio
+async def test_the_upload_copy_runs_off_the_event_loop():
+    """A large upload must not block the control plane's event loop."""
+    import asyncio
+
+    class _RecordingFile(io.BytesIO):
+        def __init__(self, payload: bytes):
+            super().__init__(payload)
+            self.read_running_loops: list[bool] = []
+
+        def read(self, size: int | None = -1) -> bytes:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                self.read_running_loops.append(False)
+            else:
+                self.read_running_loops.append(True)
+            return super().read(-1 if size is None else size)
+
+    upload_file = _RecordingFile(WAV)
+    form = FormData(
+        [
+            (
+                "file",
+                UploadFile(file=upload_file, filename="sample.wav", size=len(WAV)),
+            ),
+            ("model", "whisper-tiny"),
+        ]
+    )
+    await _call(form, result=UpstreamResponse(200, b"ok", "text/plain"))
+
+    assert upload_file.read_running_loops
+    assert not any(upload_file.read_running_loops)
+
+
+@pytest.mark.anyio
 async def test_the_forward_covers_the_host_audio_budget():
     """The host allows 1800 s for audio; the gateway's 600 s default would cut
     a long recording the host would finish."""

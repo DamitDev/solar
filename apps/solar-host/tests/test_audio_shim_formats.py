@@ -361,6 +361,14 @@ def test_an_explicit_language_wins_over_languages(client, monkeypatch):
     assert [name for name, _ in captured["fields"]].count("language") == 1
 
 
+def test_a_blank_language_falls_through_to_the_languages_hint(client, monkeypatch):
+    captured = _forward_stub(monkeypatch)
+    response = _post(client, language="", languages="en")
+
+    assert response.status_code == 200
+    assert dict(captured["fields"])["language"] == "en"
+
+
 def test_a_multi_element_languages_set_is_dropped(client, monkeypatch):
     captured = _forward_stub(monkeypatch)
     response = _post(client, languages='["hu", "en"]')
@@ -804,6 +812,7 @@ def test_nemo_accepts_a_zero_temperature(nemo, monkeypatch):
     response = _post(nemo, temperature="0")
     assert response.status_code == 200
     assert captured["format"] == "json"
+    assert "temperature" not in [name for name, _ in captured["fields"]]
 
 
 def test_nemo_granularities_reach_only_the_verbose_formats(nemo, monkeypatch):

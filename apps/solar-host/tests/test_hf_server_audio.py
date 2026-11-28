@@ -862,6 +862,19 @@ async def test_a_non_whisper_pipeline_is_not_asked_for_the_language():
     assert "return_language" not in pipeline.calls[0]
 
 
+@pytest.mark.anyio
+async def test_a_non_whisper_pipeline_gets_no_whisper_only_generate_kwargs():
+    """`task`, `language` and `prompt_ids` are Whisper-only: another seq2seq
+    checkpoint raises when they reach model.generate()."""
+    pipeline = _NonWhisperPipeline()
+    hf.state.pipeline = pipeline
+    hf.state.language = "hu"
+
+    await _call(_form(model="whisper-hu"))
+
+    assert pipeline.calls[0]["generate_kwargs"] == {}
+
+
 # ── the field set is the same as the shim's ──────────────────────
 
 
