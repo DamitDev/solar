@@ -1904,9 +1904,12 @@ class OpenAIGateway:
         for target_alias in itinerary:
             if target_alias != model:
                 # Advance to the next target: reset attempt bookkeeping so
-                # this target gets a fresh shot.
+                # this target gets a fresh shot. A retryable answer from the
+                # target just abandoned must not outlive it — the next target's
+                # connection failure would otherwise relay that stale 504.
                 attempted.clear()
                 retried_once[0] = False
+                last_upstream_error = None
                 model = target_alias
                 virtual_target = target_alias
 

@@ -1249,6 +1249,19 @@ async def audio_transcriptions(
                 continue
             values[name] = value
 
+        # FormData.close() only closes the UploadFile parts today, but the
+        # string fields are not part of its contract: read the repeated fields
+        # while the form is open and use these locals afterwards.
+        language_parts = text_parts(form.getlist("languages")) + text_parts(
+            form.getlist("languages[]")
+        )
+        granularities = form.getlist("timestamp_granularities[]") or form.getlist(
+            "timestamp_granularities"
+        )
+        keyword_parts = text_parts(form.getlist("keywords")) + text_parts(
+            form.getlist("keywords[]")
+        )
+
         response_format = values.get("response_format", "json")
         if values.get("stream", "false").lower() in ("1", "true", "yes"):
             return _transcription_error(
@@ -1419,15 +1432,7 @@ async def audio_transcriptions(
     samples = numpy.frombuffer(samples_bytes, dtype=numpy.float32)
     duration = float(len(samples)) / 16000.0
     language = (
-        values.get("language")
-        or single_language(
-            text_parts(form.getlist("languages"))
-            + text_parts(form.getlist("languages[]"))
-        )
-        or state.language
-    )
-    granularities = form.getlist("timestamp_granularities[]") or form.getlist(
-        "timestamp_granularities"
+        values.get("language") or single_language(language_parts) or state.language
     )
 
     # `task`, `language` and `prompt_ids` are Whisper-only generate arguments:
@@ -1444,14 +1449,7 @@ async def audio_transcriptions(
     if temperature_value is not None and temperature_value > 0:
         generate_kwargs["temperature"] = temperature_value
         generate_kwargs["do_sample"] = True
-    prompt = (
-        values["prompt"]
-        if "prompt" in values
-        else keywords_prompt(
-            text_parts(form.getlist("keywords"))
-            + text_parts(form.getlist("keywords[]"))
-        )
-    )
+    prompt = values["prompt"] if "prompt" in values else keywords_prompt(keyword_parts)
     if prompt:
         get_prompt_ids = getattr(state.tokenizer, "get_prompt_ids", None)
         if get_prompt_ids is None or pipeline_type != "seq2seq_whisper":

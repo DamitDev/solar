@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from app.gateway import OpenAIGateway, VirtualModelUnavailableError
+from app.gateway import (
+    OpenAIGateway,
+    UpstreamServiceError,
+    VirtualModelUnavailableError,
+)
 from app.models.virtual_model import (
     VirtualModelContract,
     VirtualModelResponse,
@@ -445,6 +449,106 @@ class TestResolveVirtual:
             )
 
         assert set(excinfo.value.reasons) == {"dead:8b", "gone:8b"}
+
+    @pytest.mark.anyio
+    async def test_a_504_from_an_earlier_target_does_not_outlive_it(self, gateway):
+        """Target 1 answers a retryable 504, target 2 refuses the connection:
+        the client must get the connection failure, not the abandoned target's
+        stale 504 (Commander's failover report)."""
+        registry = {
+            "a-first:8b": [_inst()],
+            "b-second:8b": [_inst()],
+        }
+        body = b'{"error": {"message": "upstream timeout"}}'
+
+        class _Resp:
+            status = 504
+
+            def __init__(self):
+                self.headers = {"Content-Type": "application/json"}
+
+            async def text(self):
+                return body.decode()
+
+        class _Ctx:
+            def __init__(self, resp):
+                self._resp = resp
+
+            async def __aenter__(self):
+                return self._resp
+
+            async def __aexit__(self, *exc):
+                return False
+
+        posted: list[str] = []
+
+        def post(url, **_kwargs):
+            posted.append(url)
+            if "a-first" in url:
+                return _Ctx(_Resp())
+            raise aiohttp.ClientConnectionError("second target refused the connection")
+
+        async def fake_find(
+            model, fe, attempted, retry, patterns, contract_filter=None
+        ):
+            return SimpleNamespace(
+                host_id=f"h-{model}",
+                instance_id=f"i-{model}",
+                model_alias=model,
+                context_size=4096,
+                capabilities=None,
+                url=f"http://{model.replace(':', '-')}:9999",
+                api_key=f"key-{model}",
+                served_model_name=None,
+                supported_endpoints=["/v1/chat/completions"],
+                backend_type="sglang",
+            )
+
+        null_cm = AsyncMock()
+        null_cm.__aenter__ = AsyncMock(return_value=None)
+        null_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch.object(gateway, "_ensure_session", AsyncMock()),
+            patch.object(gateway, "session", MagicMock(post=post)),
+            patch(
+                "app.services.virtual_model_cache.virtual_model_cache.get_all",
+                return_value=[_vm("team", ("a-first:8b", "b-second:8b"))],
+            ),
+            patch(
+                "app.redis_state.registry_store.get_registry",
+                new=AsyncMock(return_value=registry),
+            ),
+            patch(
+                "app.gateway.OpenAIGateway._find_instance_or_retry",
+                side_effect=fake_find,
+            ),
+            patch.object(gateway, "_broadcast_routing_event", AsyncMock()),
+            patch.object(gateway, "_emit_error", AsyncMock()),
+            patch("app.gateway.host_db.get_host", AsyncMock(return_value=None)),
+            patch.object(gateway, "_routing_context", return_value=null_cm),
+            patch(
+                "app.gateway.health_store.mark_healthy", AsyncMock(return_value=True)
+            ),
+            patch("app.gateway.health_store.mark_failed", AsyncMock(return_value=None)),
+            patch(
+                "app.gateway.routing_store.get_host_active", AsyncMock(return_value=0)
+            ),
+            patch("app.gateway.routing_store.get_weight", AsyncMock(return_value=0.0)),
+            patch("app.gateway.settings.route_max_attempts", 1),
+            pytest.raises(ValueError) as excinfo,
+        ):
+            await gateway.route_request(
+                "team",
+                "/v1/chat/completions",
+                {"model": "team"},
+            )
+
+        assert posted, "both targets must have been attempted"
+        # The stale 504 of a-first must not be relayed once b-second was the
+        # last target tried; its connection error is the answer.
+        assert not isinstance(excinfo.value, UpstreamServiceError)
+        assert "b-second:8b" in str(excinfo.value)
 
     @pytest.mark.anyio
     async def test_route_request_sends_the_resolved_name(self, gateway):

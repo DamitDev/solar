@@ -963,6 +963,24 @@ export function EditInstanceModal({ instance, hostId, onClose, onUpdate }: EditI
                     className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
                   />
                 </div>
+
+                {/* Trust Remote Code */}
+                <div className="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    id="trust_remote_code"
+                    name="trust_remote_code"
+                    checked={!!(formData as HuggingFaceAudioConfig).trust_remote_code}
+                    onChange={handleChange}
+                    className="h-4 w-4 mt-0.5 rounded border-nord-3 bg-nord-1 text-nord-10 focus:ring-nord-10"
+                  />
+                  <div>
+                    <label htmlFor="trust_remote_code" className="block text-sm font-medium text-nord-4">
+                      Trust Remote Code
+                    </label>
+                    <p className="text-xs text-nord-4">Allow running custom model code from HuggingFace</p>
+                  </div>
+                </div>
               </>
             ) : (
               /* HuggingFace specific fields */

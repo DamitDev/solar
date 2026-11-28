@@ -694,6 +694,52 @@ describe('EditInstanceModal audio submit', () => {
     });
     alertSpy.mockRestore();
   });
+
+  // HuggingFace audio carries trust_remote_code like the causal branch does;
+  // without the checkbox the flag could never be changed after creation.
+  it('renders and submits the HuggingFace audio Trust Remote Code checkbox', async () => {
+    const onUpdate = vi.fn().mockResolvedValue(undefined);
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    render(
+      <EditInstanceModal
+        instance={
+          instance('a1', {
+            backend_type: 'huggingface_audio',
+            model_id: 'openai/whisper-large-v3',
+            alias: 'whisper-large',
+            host: '0.0.0.0',
+            device: 'auto',
+            dtype: 'auto',
+            language: 'hu',
+            chunk_length_s: 30,
+            batch_size: 8,
+            trust_remote_code: false,
+          }) as never
+        }
+        hostId="h1"
+        onClose={vi.fn()}
+        onUpdate={onUpdate}
+      />,
+    );
+
+    const checkbox = screen.getByLabelText(/Trust Remote Code/);
+    expect(checkbox).not.toBeChecked();
+
+    await userEvent.click(checkbox);
+    await userEvent.click(screen.getByRole('button', { name: /Save Changes/ }));
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(alertSpy).not.toHaveBeenCalled();
+    expect(onUpdate).toHaveBeenCalledWith(
+      'h1',
+      'a1',
+      expect.objectContaining({
+        backend_type: 'huggingface_audio',
+        trust_remote_code: true,
+      }),
+    );
+    alertSpy.mockRestore();
+  });
 });
 
 describe('audio device options', () => {
