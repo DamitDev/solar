@@ -17,6 +17,9 @@ from typing import Any
 
 VISION_CAPABILITIES: list[str] = ["completion", "multimodal"]
 
+# The GGML speech runtimes and the HuggingFace audio mode serve transcription.
+AUDIO_CAPABILITIES: list[str] = ["transcription"]
+
 # HF ``model_type`` values known to be multimodal, checked when the
 # checkpoint's config.json has no ``vision_config`` key (that key is the
 # primary marker; this is the fallback for checkpoints that omit it).
@@ -74,6 +77,9 @@ def capabilities_for_config(config: Any) -> list[str] | None:
     ``None`` so upstream advertisements keep their authority.
     """
     backend_type = getattr(config, "backend_type", "llamacpp")
+
+    if backend_type in ("whispercpp", "nemospeech", "huggingface_audio"):
+        return list(AUDIO_CAPABILITIES)
 
     if backend_type == "huggingface_vision":
         return list(VISION_CAPABILITIES)

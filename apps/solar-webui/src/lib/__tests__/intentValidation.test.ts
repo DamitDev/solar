@@ -102,13 +102,74 @@ describe('validateIntentRequest', () => {
       }
     });
 
-    it('allows a model file pattern only for llama.cpp', () => {
-      expect(fieldNames({ backend: { backend_type: 'llamacpp', model_file: '*Q4*.gguf' } })).not.toContain(
-        'backend.model_file',
-      );
+    it('allows a model file pattern for the GGML backends', () => {
+      for (const backend_type of ['llamacpp', 'whispercpp', 'nemospeech']) {
+        expect(fieldNames({ backend: { backend_type, model_file: 'ggml-tiny.bin' } })).not.toContain(
+          'backend.model_file',
+        );
+      }
       expect(fieldNames({ backend: { backend_type: 'huggingface_causal', model_file: '*Q4*.gguf' } })).toContain(
         'backend.model_file',
       );
+      expect(fieldNames({ backend: { backend_type: 'huggingface_audio', model_file: 'x.bin' } })).toContain(
+        'backend.model_file',
+      );
+    });
+
+    it('requires a model file for a whisper.cpp or NeMo-Speech pull source', () => {
+      // A pull source returns the snapshot directory; the control plane rejects a
+      // whisper.cpp/NeMo-Speech intent without a file picked from it.
+      for (const backend_type of ['whispercpp', 'nemospeech']) {
+        const errors = errorsFor({ backend: { backend_type } });
+        const err = errors.find((e) => e.field === 'backend.model_file');
+        expect(err?.message).toBe('model_file is required when the source is a pull; the pull returns a directory');
+        expect(fieldNames({ backend: { backend_type, model_file: 'ggml-tiny.bin' } })).not.toContain(
+          'backend.model_file',
+        );
+      }
+    });
+
+    it('does not require a model file for a local source or llama.cpp', () => {
+      // local:// points at a directory the host owns, and llama.cpp picks a file
+      // itself; only the whisper.cpp/NeMo-Speech pull path needs a selection.
+      expect(fieldNames({ backend: { backend_type: 'whispercpp' }, model_source: 'local:///tmp/model' })).not.toContain(
+        'backend.model_file',
+      );
+      expect(fieldNames({ backend: { backend_type: 'llamacpp' } })).not.toContain('backend.model_file');
+    });
+
+    it('grandfathers an unchanged model file on update', () => {
+      const payload: any = { ...validRequest, backend: { backend_type: 'whispercpp' } };
+      expect(validateIntentRequest(payload, ['model_file'])).toEqual([]);
+    });
+
+    it('requires a diarizer model when NeMo-Speech diarization is on', () => {
+      // The host's NemoSpeechConfig.check_diarizer rejects diarize without a
+      // diarizer model, so the form says it instead of a 422 round trip.
+      const errors = errorsFor({ backend: { backend_type: 'nemospeech', diarize: true } });
+      const err = errors.find((e) => e.field === 'backend.diar_model');
+      expect(err?.message).toBe('a diarizer model is required for diarization');
+      expect(fieldNames({ backend: { backend_type: 'nemospeech', diarize: true, diar_model: '   ' } })).toContain(
+        'backend.diar_model',
+      );
+
+      expect(
+        fieldNames({ backend: { backend_type: 'nemospeech', diarize: true, diar_model: 'sortformer.gguf' } }),
+      ).not.toContain('backend.diar_model');
+      // Diarization off needs no diarizer; the default NeMo-Speech config has none.
+      expect(fieldNames({ backend: { backend_type: 'nemospeech', diarize: false } })).not.toContain(
+        'backend.diar_model',
+      );
+    });
+
+    it('grandfathers an unchanged diarizer on update', () => {
+      // A stored intent predates the host rule: diarize is on with no diarizer
+      // key at all, so only the flag can carry the exemption.
+      const current = { backend_type: 'nemospeech', diarize: true };
+      const payload: any = { ...validRequest, model_source: 'local:///tmp/model', backend: { ...current } };
+      const unchanged = unchangedBackendFields(payload.backend, current);
+      expect(unchanged).toContain('diarize');
+      expect(validateIntentRequest(payload, unchanged)).toEqual([]);
     });
 
     it('allows download filters only for huggingface:// sources', () => {
@@ -219,6 +280,50 @@ describe('validateIntentRequest', () => {
       it('ignores an absent device on any backend', () => {
         expect(fieldNames({ backend: { backend_type: 'llamacpp' } })).not.toContain('backend.device');
         expect(fieldNames({ backend: hf(null) })).not.toContain('backend.device');
+      });
+
+      it('mirrors the audio runtimes per-backend device vocabularies', () => {
+        for (const device of ['auto', 'cpu']) {
+          expect(fieldNames({ backend: { backend_type: 'whispercpp', device } })).not.toContain('backend.device');
+        }
+        for (const device of ['cuda', 'mps']) {
+          expect(fieldNames({ backend: { backend_type: 'whispercpp', device } })).toContain('backend.device');
+        }
+        for (const device of ['auto', 'cpu']) {
+          expect(fieldNames({ backend: { backend_type: 'nemospeech', device } })).not.toContain('backend.device');
+        }
+        expect(fieldNames({ backend: { backend_type: 'nemospeech', device: 'cuda' } })).toContain('backend.device');
+        expect(fieldNames({ backend: { backend_type: 'nemospeech', device: 'mps' } })).toContain('backend.device');
+      });
+
+      it('applies the cuda placement contradiction to NeMo-Speech', () => {
+        // cuda is in the NeMo vocabulary but still needs an NVIDIA host, so the
+        // form must reject it before the host fails at startup.
+        const errors = errorsFor({
+          backend: { backend_type: 'nemospeech', device: 'cuda' },
+          placement: { gpu_type: 'apple_mps' },
+        });
+        const err = errors.find((e) => e.field === 'backend.device');
+        expect(err).toBeDefined();
+        expect(err!.message).toContain("requires gpu_type 'nvidia_cuda'");
+        expect(
+          fieldNames({
+            backend: { backend_type: 'nemospeech', device: 'cuda' },
+            placement: { gpu_type: 'cuda' },
+          }),
+        ).not.toContain('backend.device');
+      });
+
+      it('rejects a NeMo-Speech cuda device with no gpu_type', () => {
+        // The scheduler filters on gpu_type, so an unset value can land the
+        // instance on a CPU-only host and --device cuda fails at startup.
+        const errors = errorsFor({
+          backend: { backend_type: 'nemospeech', device: 'cuda' },
+        });
+        const err = errors.find((e) => e.field === 'backend.device');
+        expect(err).toBeDefined();
+        expect(err!.message).toContain("requires gpu_type 'nvidia_cuda'");
+        expect(err!.message).toContain('no gpu_type');
       });
     });
 
@@ -576,6 +681,19 @@ describe('resources.gpu_count (S-058 mirror of app/validation.py)', () => {
   it('rejects zero or negative counts', () => {
     for (const bad of [0, -1]) {
       expect(fieldNames({ resources: { gpu_count: bad } })).toContain('resources.gpu_count');
+    }
+  });
+
+  it('keeps whisper.cpp and NeMo-Speech single-GPU too', () => {
+    for (const backend_type of ['whispercpp', 'nemospeech']) {
+      expect(fieldNames({ backend: { backend_type }, resources: { gpu_count: 1 } })).not.toContain(
+        'resources.gpu_count',
+      );
+      const errors = errorsFor({
+        backend: { backend_type },
+        resources: { vram_gb: 10, gpu_count: 2 },
+      });
+      expect(errors.some((e) => e.field === 'resources.gpu_count' && e.message.includes('single-GPU'))).toBe(true);
     }
   });
 });

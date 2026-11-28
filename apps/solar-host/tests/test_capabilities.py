@@ -160,3 +160,16 @@ def test_a_text_sglang_instance_reports_no_capabilities(tmp_path) -> None:
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["instance"]["capabilities"] is None
+
+
+def test_the_three_audio_backends_report_transcription() -> None:
+    from solar_host.models.huggingface import HuggingFaceAudioConfig
+    from solar_host.models.nemospeech import NemoSpeechConfig
+    from solar_host.models.whispercpp import WhisperCppConfig
+
+    for config in (
+        WhisperCppConfig(alias="whisper-tiny", model="/tmp/ggml-tiny.bin"),
+        NemoSpeechConfig(alias="nemotron", model="/tmp/decoder.gguf"),
+        HuggingFaceAudioConfig(alias="whisper-hu", model_id="/tmp/m"),
+    ):
+        assert capabilities_for_config(config) == ["transcription"]

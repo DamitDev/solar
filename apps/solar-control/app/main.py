@@ -252,6 +252,7 @@ async def root():
                 "/v1/classify",
                 "/v1/embeddings",
                 "/v1/rerank",
+                "/v1/audio/transcriptions",
             ],
             "cursor": [
                 "/cursor/v1/models",

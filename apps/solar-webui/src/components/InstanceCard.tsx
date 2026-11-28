@@ -12,6 +12,8 @@ import {
   Search,
   GripVertical,
   Loader2,
+  Mic,
+  AudioLines,
 } from 'lucide-react';
 import {
   Instance,
@@ -23,12 +25,17 @@ import {
   isHuggingFaceCausalConfig,
   isHuggingFaceClassificationConfig,
   isHuggingFaceEmbeddingConfig,
+  isAudioConfig,
   LlamaCppConfig,
   HuggingFaceCausalConfig,
   HuggingFaceClassificationConfig,
   HuggingFaceEmbeddingConfig,
+  WhisperCppConfig,
+  NemoSpeechConfig,
+  HuggingFaceAudioConfig,
 } from '@/api/types';
 import { cn, getStatusColor, formatUptime } from '@/lib/utils';
+import { getModelDisplay } from '@/lib/modelDisplay';
 import { LogViewer } from './LogViewer';
 import { EditInstanceModal } from './EditInstanceModal';
 import { useInstanceState } from '@/hooks/useInstanceState';
@@ -68,6 +75,12 @@ const BackendIcon = ({ config }: { config: InstanceConfig }) => {
       return <Tags size={14} />;
     case 'huggingface_embedding':
       return <Binary size={14} />;
+    case 'huggingface_audio':
+      return <AudioLines size={14} />;
+    case 'whispercpp':
+      return <Mic size={14} />;
+    case 'nemospeech':
+      return <AudioLines size={14} />;
     default:
       return <MessageSquare size={14} />;
   }
@@ -141,18 +154,6 @@ export function InstanceCard({
       setLoading(false);
       setPendingAction(null);
     }
-  };
-
-  const getModelDisplay = () => {
-    if (isLlamaCppConfig(instance.config)) {
-      return (instance.config as LlamaCppConfig).model || instance.config.alias || instance.id;
-    }
-    return (
-      (instance.config as HuggingFaceCausalConfig | HuggingFaceClassificationConfig | HuggingFaceEmbeddingConfig)
-        .model_id ||
-      instance.config.alias ||
-      instance.id
-    );
   };
 
   // Get backend-specific details (guards for incomplete config from Socket.IO placeholders)
@@ -248,6 +249,33 @@ export function InstanceCard({
       );
     }
 
+    if (isAudioConfig(instance.config)) {
+      const config = instance.config as WhisperCppConfig | NemoSpeechConfig | HuggingFaceAudioConfig;
+      return (
+        <>
+          {config.language && (
+            <div className="flex justify-between">
+              <span>Language:</span>
+              <span className="font-mono text-nord-8">{config.language}</span>
+            </div>
+          )}
+          {config.device && (
+            <div className="flex justify-between">
+              <span>Device:</span>
+              <span className="font-mono text-nord-8">{config.device}</span>
+            </div>
+          )}
+          {/* Only the HuggingFace audio config chunks long-form audio. */}
+          {'chunk_length_s' in config && config.chunk_length_s != null && (
+            <div className="flex justify-between">
+              <span>Chunk Length:</span>
+              <span className="font-mono text-nord-8">{config.chunk_length_s}s</span>
+            </div>
+          )}
+        </>
+      );
+    }
+
     return null;
   };
 
@@ -272,8 +300,8 @@ export function InstanceCard({
                 <h3 className="font-semibold text-lg truncate text-nord-6">{instance.config.alias}</h3>
                 <IntentManagedBadge instance={instance} />
               </div>
-              <p className="text-sm text-nord-4 truncate" title={getModelDisplay()}>
-                {getModelDisplay()}
+              <p className="text-sm text-nord-4 truncate" title={getModelDisplay(instance.config) || instance.id}>
+                {getModelDisplay(instance.config) || instance.id}
               </p>
             </div>
           </div>

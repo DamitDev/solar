@@ -19,6 +19,9 @@ export const INTENT_BACKEND_TYPES = [
   'huggingface_classification',
   'huggingface_embedding',
   'huggingface_vision',
+  'huggingface_audio',
+  'whispercpp',
+  'nemospeech',
   'sglang',
   'vllm',
 ] as const;
@@ -143,6 +146,17 @@ const DEVICE_TO_GPU_TYPE: Record<string, string> = {
   cuda: 'nvidia_cuda',
   mps: 'apple_mps',
 };
+
+/**
+ * whisper.cpp has no GPU device: `--no-gpu` is its only device flag, so the
+ * server accepts `auto` and `cpu` only.
+ */
+const WHISPERCPP_DEVICES = ['auto', 'cpu'] as const;
+
+/**
+ * NeMo-Speech.cpp runs on CPU or CUDA and takes `auto` to detect the host.
+ */
+const NEMOSPEECH_DEVICES = ['auto', 'cpu', 'cuda'] as const;
 
 const MODEL_SOURCE_RE = /^(repo|huggingface|local):\/\//;
 
@@ -361,6 +375,46 @@ function validateDevice(
     ];
   }
 
+  if (backend.backend_type === 'whispercpp') {
+    // The server rejects every other value: --no-gpu is whisper.cpp's only
+    // device flag.
+    if (!(WHISPERCPP_DEVICES as readonly string[]).includes(device)) {
+      return [
+        {
+          field: 'backend.device',
+          message: 'whisper.cpp device must be auto or cpu; --no-gpu is its only device flag',
+        },
+      ];
+    }
+    return [];
+  }
+
+  if (backend.backend_type === 'nemospeech') {
+    if (!(NEMOSPEECH_DEVICES as readonly string[]).includes(device)) {
+      return [
+        {
+          field: 'backend.device',
+          message: 'NeMo-Speech device must be auto, cpu or cuda',
+        },
+      ];
+    }
+    // cuda is valid vocabulary but the scheduler must land the instance on
+    // an NVIDIA host; an absent gpu_type is not a wildcard here. A concrete
+    // non-NVIDIA value falls through to the generic contradiction check.
+    if (device === 'cuda') {
+      const gpuType = placement?.gpu_type;
+      const canonical = gpuType ? (normalizeGpuType(gpuType) ?? gpuType) : null;
+      if (!canonical) {
+        return [
+          {
+            field: 'backend.device',
+            message: "device 'cuda' requires gpu_type 'nvidia_cuda', but the placement carries no gpu_type",
+          },
+        ];
+      }
+    }
+  }
+
   if (!DEVICE_OPTIONS.includes(device)) {
     return [
       {
@@ -539,10 +593,46 @@ export function validateIntentRequest(
     }
 
     const modelFile = req.backend.model_file;
-    if (modelFile && backendType !== 'llamacpp') {
+    const modelFileAllowed = backendType === 'llamacpp' || backendType === 'whispercpp' || backendType === 'nemospeech';
+    if (modelFile && !modelFileAllowed) {
       errors.push({
         field: 'backend.model_file',
-        message: 'Model file selection is only available for the llama.cpp backend',
+        message: 'Model file selection is only available for the llama.cpp, whisper.cpp and NeMo-Speech backends',
+      });
+    }
+
+    // A pull source returns the snapshot directory, and a directory model needs a
+    // file selected from it; the server rejects a whisper.cpp/NeMo-Speech pull
+    // without model_file, so catch it here instead of as a 422 round trip.
+    const pullSource = source.startsWith('repo://') || source.startsWith('huggingface://');
+    if (
+      !modelFile &&
+      (backendType === 'whispercpp' || backendType === 'nemospeech') &&
+      pullSource &&
+      !unchangedFields.includes('model_file')
+    ) {
+      errors.push({
+        field: 'backend.model_file',
+        message: 'model_file is required when the source is a pull; the pull returns a directory',
+      });
+    }
+
+    // The host's NemoSpeechConfig.check_diarizer rejects diarization without a
+    // diarizer model, so a ticked box with an empty selector is a 422 round
+    // trip; say it here instead. A flag an edit carries over untouched is
+    // grandfathered the same way the pull-source model_file rule is: the missing
+    // diarizer has no key to compare, so only the flag can identify a stored
+    // intent that predates the rule.
+    const diarModel = req.backend.diar_model;
+    if (
+      backendType === 'nemospeech' &&
+      req.backend.diarize &&
+      !(typeof diarModel === 'string' && diarModel.trim()) &&
+      !unchangedFields.includes('diarize')
+    ) {
+      errors.push({
+        field: 'backend.diar_model',
+        message: 'a diarizer model is required for diarization',
       });
     }
 
@@ -633,10 +723,14 @@ export function validateIntentRequest(
         // an unresolved/contested range makes the check meaningless.
         gpuCountError = true;
       }
-      if (String(req.backend?.backend_type ?? '').startsWith('huggingface') && explicitGpuCount > 1) {
+      const singleGpuBackend = String(req.backend?.backend_type ?? '');
+      const ggmlSingleGpu = singleGpuBackend === 'whispercpp' || singleGpuBackend === 'nemospeech';
+      if ((singleGpuBackend.startsWith('huggingface') || ggmlSingleGpu) && explicitGpuCount > 1) {
         errors.push({
           field: 'resources.gpu_count',
-          message: 'HuggingFace backends stay single-GPU — gpu_count must be 1',
+          message: ggmlSingleGpu
+            ? 'whisper.cpp and NeMo-Speech.cpp stay single-GPU - gpu_count must be 1'
+            : 'HuggingFace backends stay single-GPU — gpu_count must be 1',
         });
       }
     }

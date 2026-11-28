@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ModelInfo(BaseModel):
@@ -10,7 +10,8 @@ class ModelInfo(BaseModel):
     The ``capabilities`` field is forwarded from llama.cpp / hf_server upstream
     so downstream apps can differentiate text vs multimodal models without
     trial-and-error. Typical values: ``["completion"]``,
-    ``["completion", "multimodal"]``, ``["embedding"]``, ``["classification"]``.
+    ``["completion", "multimodal"]``, ``["embedding"]``, ``["classification"]``,
+    ``["transcription"]``.
     """
 
     id: str
@@ -173,6 +174,112 @@ class EmbeddingResponse(BaseModel):
     data: list[EmbeddingData]
     model: str
     usage: dict[str, int]
+
+
+# OpenAI response formats for POST /v1/audio/transcriptions. diarized_json is in
+# scope for NeMo-Speech.cpp only; the other runtimes refuse it explicitly.
+AUDIO_RESPONSE_FORMATS: tuple[str, ...] = (
+    "json",
+    "text",
+    "srt",
+    "verbose_json",
+    "vtt",
+    "diarized_json",
+)
+
+TIMESTAMP_GRANULARITIES: frozenset[str] = frozenset({"word", "segment"})
+
+
+class TranscriptionRequest(BaseModel):
+    """OpenAI-compatible transcription request (multipart form fields).
+
+    The ``file`` part stays in the route: it is a binary upload, not a field of
+    this model. ``keywords`` and ``languages`` are part of the OpenAI contract
+    and are forwarded to the shim, which maps them onto the runtime's prompt and
+    language fields; ``chunking_strategy`` and ``include[]`` are accepted and
+    dropped there because no runtime implements them.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    model: str
+    language: str | None = None
+    prompt: str | None = None
+    response_format: str = "json"
+    temperature: float | None = None
+    timestamp_granularities: list[str] | None = None
+    stream: bool = False
+
+    @field_validator("model")
+    @classmethod
+    def check_model(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("model is required")
+        return value
+
+    @field_validator("response_format")
+    @classmethod
+    def check_response_format(cls, value: str) -> str:
+        if value not in AUDIO_RESPONSE_FORMATS:
+            raise ValueError(
+                f"response_format '{value}' is not supported; must be one of: "
+                f"{', '.join(AUDIO_RESPONSE_FORMATS)}"
+            )
+        return value
+
+    @field_validator("temperature")
+    @classmethod
+    def check_temperature(cls, value: float | None) -> float | None:
+        if value is not None and not 0.0 <= value <= 1.0:
+            raise ValueError("temperature must be between 0 and 1")
+        return value
+
+    @field_validator("timestamp_granularities")
+    @classmethod
+    def check_granularities(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None:
+            for entry in value:
+                if entry not in TIMESTAMP_GRANULARITIES:
+                    raise ValueError(
+                        "timestamp_granularities must contain only 'word' or 'segment'"
+                    )
+        return value
+
+    @field_validator("stream")
+    @classmethod
+    def check_stream(cls, value: bool) -> bool:
+        if value:
+            raise ValueError(
+                "streaming transcription is not supported by this endpoint; "
+                "omit 'stream' or set it to false"
+            )
+        return value
+
+    @classmethod
+    def from_form(cls, form: Any) -> "TranscriptionRequest":
+        """Build the request from a parsed multipart form.
+
+        Repeated ``timestamp_granularities[]`` fields survive because the form is
+        read with ``getlist``; an empty value is dropped so the defaults apply.
+        """
+        fields: dict[str, Any] = {}
+        for name in (
+            "model",
+            "language",
+            "prompt",
+            "response_format",
+            "temperature",
+            "stream",
+        ):
+            value = form.get(name)
+            if value is not None:
+                fields[name] = value
+        granularities = form.getlist("timestamp_granularities[]") or form.getlist(
+            "timestamp_granularities"
+        )
+        if granularities:
+            fields["timestamp_granularities"] = granularities
+        return cls(**fields)
 
 
 class RerankRequest(BaseModel):

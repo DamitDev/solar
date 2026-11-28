@@ -224,6 +224,27 @@ class TestHelpers:
         }
         assert _detect_backend_drift(intent, instance_config) == []
 
+    def test_detect_backend_drift_skips_the_resolved_nemospeech_sidecars(self):
+        """The host resolves a bare ``encoder``/``diar_model`` name inside the
+        artifact, so the instance reports an absolute path while the spec keeps
+        the filename. Reading that pair as drift traps the intent in the same
+        REPLACE-stop churn as an unresolved mmproj."""
+        intent = _make_intent(
+            backend={
+                "backend_type": "nemospeech",
+                "encoder": "encoder.gguf",
+                "diar_model": "sortformer.gguf",
+            }
+        )
+        instance_config = {
+            "backend_type": "nemospeech",
+            "encoder": ("/opt/projects/models/hf--nvidia--nemo-parakeet/encoder.gguf"),
+            "diar_model": (
+                "/opt/projects/models/hf--nvidia--nemo-parakeet/sortformer.gguf"
+            ),
+        }
+        assert _detect_backend_drift(intent, instance_config) == []
+
     def test_detect_backend_drift_resolved_glob_is_not_drift(self):
         """A glob resolves to a path too — the DSpark drafter's exact filename
         is not knowable from the intent, so the spec keeps the pattern."""

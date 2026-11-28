@@ -15,7 +15,7 @@
  */
 
 import { useState, type ReactNode } from 'react';
-import { Cpu, Brain, Zap, Rocket } from 'lucide-react';
+import { Cpu, Brain, Zap, Rocket, AudioLines, Mic } from 'lucide-react';
 import {
   PrimaryBackend,
   LlamaCppMode,
@@ -26,6 +26,7 @@ import {
   DEVICE_OPTIONS,
   DTYPE_OPTIONS,
   SPLIT_MODE_OPTIONS,
+  AUDIO_REQUEST_FIELD_SUPPORT,
   getDefaultConfig,
 } from '@/lib/backendConfig';
 import { SglangConfigFields } from './SglangConfigFields';
@@ -49,6 +50,10 @@ interface BackendConfigFieldsProps {
   /** Bound through for AddInstanceModal (alias is part of its formData). */
   aliasValue?: string;
   onAliasChange?: (v: string) => void;
+  /** Intent form: the intent-level model_source. The backend object must not
+   *  carry it, so it is passed separately to mark the model file selector
+   *  required for a pull source. */
+  modelSource?: string;
   /**
    * C3: renders the validation error for a backend field next to that field.
    * Keys are the API's dotted names (e.g. `backend.mmproj`). The parent form
@@ -73,6 +78,9 @@ function getInitialSelection(value: Record<string, any>): { primary: PrimaryBack
   if (backendType === 'huggingface_classification') return { primary: 'huggingface', mode: 'classifier' };
   if (backendType === 'huggingface_embedding') return { primary: 'huggingface', mode: 'embedding' };
   if (backendType === 'huggingface_vision') return { primary: 'huggingface', mode: 'causal' };
+  if (backendType === 'huggingface_audio') return { primary: 'huggingface', mode: 'audio' };
+  if (backendType === 'whispercpp') return { primary: 'whispercpp', mode: '' };
+  if (backendType === 'nemospeech') return { primary: 'nemospeech', mode: '' };
   const modelType = value?.model_type;
   if (modelType === 'embedding' || modelType === 'reranker') return { primary: 'llamacpp', mode: modelType };
   return { primary: 'llamacpp', mode: 'llm' };
@@ -86,6 +94,7 @@ export function BackendConfigFields({
   forIntent = false,
   aliasValue,
   onAliasChange,
+  modelSource,
   fieldError = () => null,
   disabledBackends = [],
   disabledReasons = {},
@@ -99,6 +108,14 @@ export function BackendConfigFields({
   const [labelsInput, setLabelsInput] = useState(Array.isArray(value?.labels) ? value.labels.join(', ') : '');
 
   const currentMode = primaryBackend === 'llamacpp' ? llamaCppMode : huggingFaceMode;
+
+  // A pull source returns a directory, so the host and the control plane reject
+  // it without a model file; marking the input required here makes that the first
+  // signal instead of a server 422.
+  const modelFileRequired =
+    forIntent &&
+    typeof modelSource === 'string' &&
+    (modelSource.trim().startsWith('repo://') || modelSource.trim().startsWith('huggingface://'));
 
   const handlePrimaryBackendChange = (newBackend: PrimaryBackend) => {
     setPrimaryBackend(newBackend);
@@ -133,15 +150,29 @@ export function BackendConfigFields({
     });
   };
 
-  // SGLang and vLLM serve generation models only, so they contribute no mode cards.
-  const modeOptions =
-    primaryBackend === 'sglang' || primaryBackend === 'vllm'
-      ? []
-      : primaryBackend === 'llamacpp'
-        ? LLAMACPP_MODES
-        : HUGGINGFACE_MODES;
+  // SGLang, vLLM and the two GGML speech runtimes serve one kind of model
+  // each, so they contribute no mode cards.
+  const singlePurpose =
+    primaryBackend === 'sglang' ||
+    primaryBackend === 'vllm' ||
+    primaryBackend === 'whispercpp' ||
+    primaryBackend === 'nemospeech';
+  const modeOptions = singlePurpose ? [] : primaryBackend === 'llamacpp' ? LLAMACPP_MODES : HUGGINGFACE_MODES;
   const sglangDisabled = disabledBackends.includes('sglang');
   const vllmDisabled = disabledBackends.includes('vllm');
+  const whisperDisabled = disabledBackends.includes('whispercpp');
+  const nemoDisabled = disabledBackends.includes('nemospeech');
+  // The optional OpenAI transcription fields each audio backend honours; the
+  // note under the selector is the same constant for both surfaces.
+  const audioBackend =
+    primaryBackend === 'whispercpp'
+      ? 'whispercpp'
+      : primaryBackend === 'nemospeech'
+        ? 'nemospeech'
+        : primaryBackend === 'huggingface' && huggingFaceMode === 'audio'
+          ? 'huggingface_audio'
+          : null;
+  const audioSupport = audioBackend ? AUDIO_REQUEST_FIELD_SUPPORT[audioBackend] : null;
 
   return (
     <div className="space-y-6">
@@ -266,7 +297,103 @@ export function BackendConfigFields({
               </div>
             </div>
           </button>
+
+          {/* whisper.cpp */}
+          <button
+            type="button"
+            onClick={() => handlePrimaryBackendChange('whispercpp')}
+            disabled={whisperDisabled}
+            title={whisperDisabled ? disabledReasons.whispercpp : undefined}
+            className={`p-4 rounded-lg border-2 transition-all text-left ${
+              whisperDisabled
+                ? 'border-nord-3 bg-nord-2 opacity-50 cursor-not-allowed'
+                : primaryBackend === 'whispercpp'
+                  ? 'border-nord-8 bg-nord-8 bg-opacity-15'
+                  : 'border-nord-3 hover:border-nord-4 bg-nord-2'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <div
+                className={`p-2 rounded-lg ${primaryBackend === 'whispercpp' ? 'bg-nord-8 bg-opacity-20' : 'bg-nord-3'}`}
+              >
+                <Mic size={24} className={primaryBackend === 'whispercpp' ? 'text-nord-8' : 'text-nord-4'} />
+              </div>
+              <div>
+                <div
+                  className={`text-base font-semibold ${primaryBackend === 'whispercpp' ? 'text-nord-8' : 'text-nord-6'}`}
+                >
+                  whisper.cpp
+                </div>
+                <div className="text-xs text-nord-4">
+                  {whisperDisabled
+                    ? (disabledReasons.whispercpp ?? 'whisper-server is not installed')
+                    : 'Whisper GGUFs with whisper-server'}
+                </div>
+              </div>
+            </div>
+          </button>
+
+          {/* NeMo-Speech.cpp */}
+          <button
+            type="button"
+            onClick={() => handlePrimaryBackendChange('nemospeech')}
+            disabled={nemoDisabled}
+            title={nemoDisabled ? disabledReasons.nemospeech : undefined}
+            className={`p-4 rounded-lg border-2 transition-all text-left ${
+              nemoDisabled
+                ? 'border-nord-3 bg-nord-2 opacity-50 cursor-not-allowed'
+                : primaryBackend === 'nemospeech'
+                  ? 'border-nord-11 bg-nord-11 bg-opacity-15'
+                  : 'border-nord-3 hover:border-nord-4 bg-nord-2'
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <div
+                className={`p-2 rounded-lg ${primaryBackend === 'nemospeech' ? 'bg-nord-11 bg-opacity-20' : 'bg-nord-3'}`}
+              >
+                <AudioLines size={24} className={primaryBackend === 'nemospeech' ? 'text-nord-11' : 'text-nord-4'} />
+              </div>
+              <div>
+                <div
+                  className={`text-base font-semibold ${primaryBackend === 'nemospeech' ? 'text-nord-11' : 'text-nord-6'}`}
+                >
+                  NeMo-Speech.cpp
+                </div>
+                <div className="text-xs text-nord-4">
+                  {nemoDisabled
+                    ? (disabledReasons.nemospeech ?? 'nemo-speech is not installed')
+                    : 'Nemotron GGUFs with nemo-speech'}
+                </div>
+              </div>
+            </div>
+          </button>
         </div>
+        {audioSupport && (
+          <details
+            data-testid="audio-request-field-support"
+            className="mt-2 text-xs leading-snug text-nord-4 opacity-70"
+          >
+            <summary className="cursor-pointer select-none">Supported Fields</summary>
+            <div data-testid="audio-request-field-body" className="mt-1 space-y-1">
+              <div>
+                <div>Honored:</div>
+                <ul data-testid="audio-request-field-honored" className="list-disc pl-4">
+                  {audioSupport.honoured.map((field) => (
+                    <li key={field}>{field}</li>
+                  ))}
+                </ul>
+              </div>
+              <div>
+                <div>Not honored:</div>
+                <ul data-testid="audio-request-field-not-honored" className="list-disc pl-4">
+                  {audioSupport.notHonoured.map((field) => (
+                    <li key={field}>{field}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </details>
+        )}
       </div>
 
       {/* Step 2: Mode Selection — only for backends that serve more than one */}
@@ -873,6 +1000,296 @@ export function BackendConfigFields({
                 </>
               )}
             </>
+          ) : primaryBackend === 'whispercpp' ? (
+            /* whisper.cpp specific fields */
+            <>
+              {/* Model Path */}
+              {showModelFields && (
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-nord-4 mb-1">
+                    Model Path <span className="text-nord-11">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    name="model"
+                    value={value.model || ''}
+                    onChange={handleChange}
+                    placeholder="/path/to/ggml-tiny.bin"
+                    required
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  />
+                  <p className="text-xs text-nord-4 mt-1">
+                    whisper.cpp GGUF (ggml-*.bin), passed to whisper-server as <code>-m</code>
+                  </p>
+                </div>
+              )}
+
+              {/* Alias */}
+              {showAlias && (
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-nord-4 mb-1">
+                    Alias <span className="text-nord-11">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    name="alias"
+                    value={aliasValue ?? value.alias ?? ''}
+                    onChange={(e) => {
+                      if (onAliasChange) {
+                        onAliasChange(e.target.value);
+                      } else {
+                        onChange({ ...value, alias: e.target.value });
+                      }
+                    }}
+                    placeholder="whisper-tiny:3500"
+                    required
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  />
+                </div>
+              )}
+
+              {/* Model file selector — intents point at a directory, not a file */}
+              {forIntent && (
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-nord-4 mb-1">
+                    Model file {modelFileRequired && <span className="text-nord-11">*</span>}
+                  </label>
+                  <input
+                    type="text"
+                    name="model_file"
+                    value={value.model_file || ''}
+                    onChange={handleChange}
+                    placeholder="ggml-tiny.bin"
+                    required={modelFileRequired}
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent font-mono text-sm"
+                  />
+                  <p className="text-xs text-nord-4 mt-1">Which GGML file to serve inside the downloaded snapshot.</p>
+                  {fieldError('backend.model_file')}
+                </div>
+              )}
+
+              {/* Language */}
+              <div>
+                <label className="block text-sm font-medium text-nord-4 mb-1">Language</label>
+                <input
+                  type="text"
+                  name="language"
+                  value={value.language || ''}
+                  onChange={handleChange}
+                  placeholder="auto"
+                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                />
+                <p className="text-xs text-nord-4 mt-1">Spoken language, or auto to detect it</p>
+              </div>
+
+              {/* Threads */}
+              <div>
+                <label className="block text-sm font-medium text-nord-4 mb-1">Threads</label>
+                <input
+                  type="number"
+                  name="threads"
+                  value={value.threads ?? 4}
+                  onChange={handleChange}
+                  min="1"
+                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                />
+              </div>
+
+              {/* Device */}
+              <div>
+                <label className="block text-sm font-medium text-nord-4 mb-1">Device</label>
+                <select
+                  name="device"
+                  value={value.device || 'auto'}
+                  onChange={handleChange}
+                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                >
+                  <option value="auto">auto (detect)</option>
+                  <option value="cpu">cpu</option>
+                </select>
+                <p className="text-xs text-nord-4 mt-1">whisper.cpp runs on the CPU unless built with GPU support</p>
+              </div>
+            </>
+          ) : primaryBackend === 'nemospeech' ? (
+            /* NeMo-Speech.cpp specific fields */
+            <>
+              {/* Model Path */}
+              {showModelFields && (
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-nord-4 mb-1">
+                    Decoder GGUF <span className="text-nord-11">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    name="model"
+                    value={value.model || ''}
+                    onChange={handleChange}
+                    placeholder="/path/to/decoder.gguf"
+                    required
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  />
+                  <p className="text-xs text-nord-4 mt-1">
+                    Passed to nemo-speech as <code>--asr-model</code>
+                  </p>
+                </div>
+              )}
+
+              {/* Alias */}
+              {showAlias && (
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-nord-4 mb-1">
+                    Alias <span className="text-nord-11">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    name="alias"
+                    value={aliasValue ?? value.alias ?? ''}
+                    onChange={(e) => {
+                      if (onAliasChange) {
+                        onAliasChange(e.target.value);
+                      } else {
+                        onChange({ ...value, alias: e.target.value });
+                      }
+                    }}
+                    placeholder="nemotron-stream-en:3502"
+                    required
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  />
+                </div>
+              )}
+
+              {/* Model file selector — intents point at a directory, not a file */}
+              {forIntent && (
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-nord-4 mb-1">
+                    Decoder file {modelFileRequired && <span className="text-nord-11">*</span>}
+                  </label>
+                  <input
+                    type="text"
+                    name="model_file"
+                    value={value.model_file || ''}
+                    onChange={handleChange}
+                    placeholder="*.q8_0.gguf"
+                    required={modelFileRequired}
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent font-mono text-sm"
+                  />
+                  <p className="text-xs text-nord-4 mt-1">
+                    Which GGUF to serve inside the downloaded snapshot. The decoder is required; the encoder is a
+                    separate file.
+                  </p>
+                  {fieldError('backend.model_file')}
+                </div>
+              )}
+
+              {/* Encoder sidecar */}
+              <div>
+                <label className="block text-sm font-medium text-nord-4 mb-1">Encoder (Optional)</label>
+                <input
+                  type="text"
+                  name="encoder"
+                  value={value.encoder || ''}
+                  onChange={handleChange}
+                  placeholder="encoder.gguf"
+                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent font-mono text-sm"
+                />
+                <p className="text-xs text-nord-4 mt-1">Paired encoder GGUF, when the release ships one</p>
+              </div>
+
+              {/* Speaker diarizer */}
+              <div>
+                <label className="block text-sm font-medium text-nord-4 mb-1">Diarizer (Optional)</label>
+                <input
+                  type="text"
+                  name="diar_model"
+                  value={value.diar_model || ''}
+                  onChange={handleChange}
+                  placeholder="sortformer.gguf"
+                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent font-mono text-sm"
+                />
+                <p className="text-xs text-nord-4 mt-1">
+                  Required when diarization is on; without it only <code>diarized_json</code> is refused
+                </p>
+              </div>
+
+              {/* Diarize */}
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id={forIntent ? 'intent-nemo-diarize' : 'add-nemo-diarize'}
+                  name="diarize"
+                  checked={!!value.diarize}
+                  onChange={handleChange}
+                  className="w-4 h-4 rounded border-nord-3 bg-nord-2 text-nord-10 focus:ring-nord-10"
+                />
+                <label
+                  htmlFor={forIntent ? 'intent-nemo-diarize' : 'add-nemo-diarize'}
+                  className="text-sm font-medium text-nord-4"
+                >
+                  Speaker diarization
+                </label>
+              </div>
+
+              {/* Language */}
+              <div>
+                <label className="block text-sm font-medium text-nord-4 mb-1">Language</label>
+                <input
+                  type="text"
+                  name="language"
+                  value={value.language || ''}
+                  onChange={handleChange}
+                  placeholder="en"
+                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                />
+              </div>
+
+              {/* Instruction */}
+              <div>
+                <label className="block text-sm font-medium text-nord-4 mb-1">Instruction (Optional)</label>
+                <input
+                  type="text"
+                  name="instruction"
+                  value={value.instruction || ''}
+                  onChange={handleChange}
+                  placeholder="Transcribe verbatim."
+                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                />
+                <p className="text-xs text-nord-4 mt-1">
+                  Style hint passed to nemo-speech as <code>--instruction</code>
+                </p>
+              </div>
+
+              {/* Translate To */}
+              <div>
+                <label className="block text-sm font-medium text-nord-4 mb-1">Translate To (Optional)</label>
+                <input
+                  type="text"
+                  name="translate_to"
+                  value={value.translate_to || ''}
+                  onChange={handleChange}
+                  placeholder="hu"
+                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                />
+                <p className="text-xs text-nord-4 mt-1">
+                  Target language passed to nemo-speech as <code>--translate-to</code>
+                </p>
+              </div>
+
+              {/* Device */}
+              <div>
+                <label className="block text-sm font-medium text-nord-4 mb-1">Device</label>
+                <select
+                  name="device"
+                  value={value.device || 'auto'}
+                  onChange={handleChange}
+                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                >
+                  <option value="auto">auto (detect)</option>
+                  <option value="cpu">cpu</option>
+                  <option value="cuda">cuda</option>
+                </select>
+                <p className="text-xs text-nord-4 mt-1">nemo-speech is built per backend; cpu always works</p>
+              </div>
+            </>
           ) : (
             /* HuggingFace specific fields */
             <>
@@ -954,18 +1371,66 @@ export function BackendConfigFields({
                 </select>
               </div>
 
-              {/* Max Length */}
-              <div>
-                <label className="block text-sm font-medium text-nord-4 mb-1">Max Length</label>
-                <input
-                  type="number"
-                  name="max_length"
-                  value={value.max_length}
-                  onChange={handleChange}
-                  min="1"
-                  className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
-                />
-              </div>
+              {/* Max Length — audio models chunk instead of truncating */}
+              {huggingFaceMode !== 'audio' && (
+                <div>
+                  <label className="block text-sm font-medium text-nord-4 mb-1">Max Length</label>
+                  <input
+                    type="number"
+                    name="max_length"
+                    value={value.max_length}
+                    onChange={handleChange}
+                    min="1"
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  />
+                </div>
+              )}
+
+              {/* Audio-specific: chunking, language, file filters */}
+              {huggingFaceMode === 'audio' && (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-nord-4 mb-1">Chunk Length (s)</label>
+                    <input
+                      type="number"
+                      name="chunk_length_s"
+                      value={value.chunk_length_s ?? 30}
+                      onChange={handleChange}
+                      min="1"
+                      step="0.5"
+                      className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                    />
+                    <p className="text-xs text-nord-4 mt-1">
+                      Window for long-form audio; 30 s is what Whisper was trained on
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-nord-4 mb-1">Batch Size</label>
+                    <input
+                      type="number"
+                      name="batch_size"
+                      value={value.batch_size ?? 8}
+                      onChange={handleChange}
+                      min="1"
+                      className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-nord-4 mb-1">Language</label>
+                    <input
+                      type="text"
+                      name="language"
+                      value={value.language || ''}
+                      onChange={handleChange}
+                      placeholder="hu"
+                      className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                    />
+                    <p className="text-xs text-nord-4 mt-1">Spoken language; empty lets the checkpoint decide</p>
+                  </div>
+                </>
+              )}
 
               {/* Classification-specific: Labels */}
               {huggingFaceMode === 'classifier' && (

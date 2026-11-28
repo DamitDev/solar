@@ -22,8 +22,11 @@ VALID_BACKEND_TYPES: frozenset[str] = frozenset(
         "huggingface_classification",
         "huggingface_embedding",
         "huggingface_vision",
+        "huggingface_audio",
         "sglang",
         "vllm",
+        "whispercpp",
+        "nemospeech",
     }
 )
 VALID_MODEL_SOURCE_SCHEMES: frozenset[str] = frozenset({"repo", "huggingface", "local"})
@@ -99,7 +102,6 @@ _HUGGINGFACE_ONLY_FIELDS: frozenset[str] = frozenset(
     {
         "device",
         "dtype",
-        "max_length",
         "trust_remote_code",
     }
 )
@@ -158,15 +160,41 @@ _VLLM_FIELDS: frozenset[str] = frozenset(
         "extra_env",
     }
 )
+# ``max_length`` is per-type rather than shared: the host's
+# ``HuggingFaceAudioConfig`` has no such field (long-form audio is chunked),
+# so claiming it for every huggingface_* type would let control accept a value
+# the audio backend silently drops.
 BACKEND_FIELD_OWNERS: dict[str, frozenset[str]] = {
     "llamacpp": _LLAMACPP_ONLY_FIELDS,
     "huggingface": _HUGGINGFACE_ONLY_FIELDS,
-    "huggingface_classification": frozenset({"labels"}),
-    "huggingface_embedding": frozenset({"normalize_embeddings"}),
-    "huggingface_causal": frozenset({"use_flash_attention"}),
-    "huggingface_vision": frozenset({"use_flash_attention"}),
+    "huggingface_classification": frozenset({"labels", "max_length"}),
+    "huggingface_embedding": frozenset({"normalize_embeddings", "max_length"}),
+    "huggingface_causal": frozenset({"use_flash_attention", "max_length"}),
+    "huggingface_vision": frozenset({"use_flash_attention", "max_length"}),
+    "huggingface_audio": frozenset(
+        {
+            "device",
+            "dtype",
+            "trust_remote_code",
+            "language",
+            "chunk_length_s",
+            "batch_size",
+        }
+    ),
     "sglang": _SGLANG_FIELDS,
     "vllm": _VLLM_FIELDS,
+    "whispercpp": frozenset({"model_file", "threads", "language"}),
+    "nemospeech": frozenset(
+        {
+            "model_file",
+            "language",
+            "encoder",
+            "instruction",
+            "translate_to",
+            "diar_model",
+            "diarize",
+        }
+    ),
 }
 
 # SGLang's kernels are CUDA-only, so an SGLang intent can only ever land on an
@@ -309,6 +337,12 @@ def _validate_backend_model_selection(
     (``_LLAMACPP_ONLY_FIELDS``) rather than here, so one mechanism owns it and
     grandfathering applies uniformly.
 
+    A diarized NeMo-Speech intent needs its Sortformer model: the host's
+    ``NemoSpeechConfig.check_diarizer`` refuses ``diarize`` without one, so the
+    same rule here fails at save time instead of instance creation.
+    ``diarize`` carries the grandfathering because a stored intent has no
+    ``diar_model`` value to compare.
+
     ``exempt_fields`` grandfathers values an update carried over unchanged, so
     tightening a rule cannot strand a stored intent. ``file_filters`` is
     deliberately *not* grandfathered: it is validated against ``model_source``,
@@ -322,14 +356,54 @@ def _validate_backend_model_selection(
         model_file is not None
         and "model_file" not in exempt_fields
         # A wrong-backend model_file is reported by the ownership table; the
-        # shape check is llama.cpp's own contract.
-        and backend.get("backend_type") == "llamacpp"
+        # shape check is the GGML backends' own contract.
+        and backend.get("backend_type") in ("llamacpp", "whispercpp", "nemospeech")
         and (not isinstance(model_file, str) or not model_file.strip())
     ):
         errors.append(
             {
                 "field": "backend.model_file",
                 "message": "model_file must be a non-empty string",
+            }
+        )
+
+    # A pull source returns the snapshot directory, and a directory model needs
+    # a file selected from it. The control plane's filesystem is not the host's,
+    # so it cannot tell whether a local path is a directory: the host's own
+    # missing-model-file check is the authority for that case.
+    pull_source = isinstance(model_source, str) and model_source.startswith(
+        ("repo://", "huggingface://")
+    )
+    if (
+        model_file is None
+        and "model_file" not in exempt_fields
+        and backend.get("backend_type") in ("whispercpp", "nemospeech")
+        and pull_source
+    ):
+        errors.append(
+            {
+                "field": "backend.model_file",
+                "message": (
+                    "model_file is required when the source is a pull; the pull "
+                    "returns a directory"
+                ),
+            }
+        )
+
+    # The host's NemoSpeechConfig.check_diarizer refuses diarization without
+    # a Sortformer model, so an intent saved with diarize=true and no
+    # diar_model used to fail only when the instance was created.
+    diar_model = backend.get("diar_model")
+    if (
+        backend.get("backend_type") == "nemospeech"
+        and backend.get("diarize")
+        and "diarize" not in exempt_fields
+        and not (isinstance(diar_model, str) and diar_model.strip())
+    ):
+        errors.append(
+            {
+                "field": "backend.diar_model",
+                "message": "a diarizer model is required for diarization",
             }
         )
 
@@ -551,6 +625,9 @@ def _validate_device(
     backends the value must be one of ``auto/cuda/mps/cpu`` and must not
     contradict an explicitly chosen ``placement.gpu_type`` — the reported
     ``mps`` plus NVIDIA-host symptom is fully static and a hard 422.
+    NeMo-Speech accepts ``cuda`` too, but only with an explicit
+    ``nvidia_cuda`` placement: unlike HF, an absent ``gpu_type`` is not a
+    wildcard there because the scheduler could pick a CPU-only host.
 
     ``exempt_fields`` grandfathers the *ownership* rejection only. The value
     checks below still run: an update that leaves ``device`` alone but points
@@ -562,19 +639,64 @@ def _validate_device(
     if device is None:
         return errors
 
-    if backend.get("backend_type") == "llamacpp":
+    backend_type = backend.get("backend_type")
+
+    if backend_type == "llamacpp":
         if "device" in exempt_fields:
             return errors
         errors.append(
             {
                 "field": "backend.device",
                 "message": (
-                    "device is only supported for huggingface_* backends; "
-                    "llama.cpp device selection is devices/n_gpu_layers/ot"
+                    "device is only supported for huggingface_*, whisper.cpp "
+                    "and NeMo-Speech backends; llama.cpp device selection is "
+                    "devices/n_gpu_layers/ot"
                 ),
             }
         )
         return errors
+
+    if backend_type == "whispercpp":
+        if device not in ("auto", "cpu"):
+            errors.append(
+                {
+                    "field": "backend.device",
+                    "message": (
+                        "whisper.cpp device must be auto or cpu; --no-gpu is "
+                        "its only device flag"
+                    ),
+                }
+            )
+        return errors
+
+    if backend_type == "nemospeech" and device not in ("auto", "cpu", "cuda"):
+        errors.append(
+            {
+                "field": "backend.device",
+                "message": "NeMo-Speech device must be auto, cpu or cuda",
+            }
+        )
+        return errors
+
+    if backend_type == "nemospeech" and device == "cuda":
+        # cuda is valid vocabulary but only makes sense on an NVIDIA host; an
+        # unset gpu_type would let the scheduler pick a CPU-only host and
+        # --device cuda would fail at startup. A concrete non-NVIDIA value
+        # falls through to the generic contradiction check below.
+        gpu_type = placement.get("gpu_type") if isinstance(placement, dict) else None
+        if gpu_type is None:
+            errors.append(
+                {
+                    "field": "backend.device",
+                    "message": (
+                        "device 'cuda' requires gpu_type 'nvidia_cuda', but "
+                        "the placement carries no gpu_type"
+                    ),
+                }
+            )
+            return errors
+    # cuda is valid vocabulary but still constrains the placement, so fall
+    # through to the same contradiction check as the generic branch.
 
     if device not in DEVICE_OPTIONS:
         errors.append(
@@ -850,6 +972,22 @@ def _validate_gpu_count(data: dict[str, Any], errors: list[dict[str, str]]) -> N
 
     resolved = explicit if explicit is not None else (derived or 1)
     resources["gpu_count"] = resolved
+
+    if (
+        isinstance(backend_type, str)
+        and backend_type in ("whispercpp", "nemospeech")
+        and resolved > 1
+    ):
+        errors.append(
+            {
+                "field": "resources.gpu_count",
+                "message": (
+                    "whisper.cpp and NeMo-Speech.cpp stay single-GPU - "
+                    "gpu_count must be 1"
+                ),
+            }
+        )
+        return
 
     if (
         isinstance(backend_type, str)

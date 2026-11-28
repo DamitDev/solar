@@ -1,12 +1,41 @@
 """Shared pytest fixtures for solar-host tests."""
 
+import os
 import queue
+import shlex
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from solar_host.config import Settings, config_manager, settings
 from solar_host.process_manager import process_manager
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture
+def fake_ffmpeg(monkeypatch, tmp_path):
+    """Put a fake ``ffmpeg`` first on PATH.
+
+    The HuggingFace audio route decodes every upload by executing ``ffmpeg``,
+    which the CI runner does not have. The fake implements the route's exact
+    argv for the 16 kHz mono PCM16 WAV the tests upload, so the route keeps
+    exercising its real ``shutil.which`` gate, subprocess plumbing and
+    decode-failure envelope.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    launcher = bin_dir / "ffmpeg"
+    launcher.write_text(
+        "#!/bin/sh\n"
+        f"exec {shlex.quote(sys.executable)} "
+        f"{shlex.quote(str(FIXTURES / 'fake_ffmpeg.py'))} \"$@\"\n"
+    )
+    launcher.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return launcher
 
 
 @pytest.fixture(autouse=True)

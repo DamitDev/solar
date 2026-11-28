@@ -315,6 +315,24 @@ def _instance_uses_model(instance_config: object, model_dir: Path) -> bool:
         resolved = Path(instance_model).resolve()
         return resolved == model_dir or resolved.is_relative_to(model_dir)
 
+    if backend_type in ("whispercpp", "nemospeech"):
+        # The GGML runtimes take a single model path; a bare sidecar filename is
+        # resolved inside the model directory, so resolve it before comparing.
+        candidates = [
+            getattr(instance_config, field, None)
+            for field in ("model", "encoder", "diar_model")
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            resolved = Path(candidate)
+            if not resolved.is_absolute():
+                resolved = model_dir / resolved
+            resolved = resolved.resolve()
+            if resolved == model_dir or resolved.is_relative_to(model_dir):
+                return True
+        return False
+
     if backend_type in ("sglang", "vllm"):
         model_path = getattr(instance_config, "model_path", None)
         if not model_path:

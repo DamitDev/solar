@@ -36,7 +36,7 @@ jobs:
               pnpm install --frozen-lockfile
               ;;
             solar-host)
-              cd apps/solar-host && uv sync
+              cd apps/solar-host && uv sync --extra dev --extra huggingface
               ;;
             supernova-steps)
               cd apps/supernova-steps && uv sync

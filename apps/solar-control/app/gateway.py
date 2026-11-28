@@ -12,8 +12,9 @@ import uuid
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, BinaryIO
 
 import aiohttp
 
@@ -50,6 +51,56 @@ class VirtualModelUnavailableError(ValueError):
         self.reasons = reasons
         detail = "; ".join(f"{t}: {r}" for t, r in reasons.items()) or "no targets"
         super().__init__(f"Virtual model '{name}' has no available target ({detail})")
+
+
+class UpstreamServiceError(ValueError):
+    """An instance answered, but with a retryable upstream failure.
+
+    Subclasses ValueError so every existing ``except ValueError`` funnel keeps its
+    behaviour. The transcription route catches it first and relays the upstream
+    status and body, so a 504 from a slow or overloaded runtime is not reported
+    as ``model_not_found`` (a 404 that blames the model). A request that never
+    reached an instance stays a plain ValueError, which is still a 404.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        body: str,
+        content_type: str = "application/json",
+    ) -> None:
+        self.status_code = status_code
+        self.body = body
+        self.content_type = content_type
+        super().__init__(f"Upstream {status_code}: {body}")
+
+
+@dataclass
+class MultipartUpload:
+    """A multipart upload relayed to the host as a raw body.
+
+    ``path`` is a disk temporary file rather than an open handle: aiohttp keeps
+    a user-supplied ``BufferedReader`` open after a successful post but CLOSES it
+    after a connection error, so a retry must open a fresh handle of its own.
+    """
+
+    fields: list[tuple[str, str]]
+    path: str
+    filename: str
+    content_type: str
+
+
+@dataclass
+class UpstreamResponse:
+    """A non-JSON upstream answer relayed verbatim.
+
+    A transcription answer may be JSON, plain text, SRT or WebVTT, so the gateway
+    cannot decode it into a dict; the route returns this as the HTTP response.
+    """
+
+    status_code: int
+    body: bytes
+    content_type: str
 
 
 def _task_done_callback(task: asyncio.Task) -> None:
@@ -830,6 +881,65 @@ class OpenAIGateway:
 
         return body, injected
 
+    @staticmethod
+    def _upstream_fields(
+        instance: RegistryEntry,
+        fields: list[tuple[str, str]],
+        *,
+        virtual: bool = False,
+    ) -> list[tuple[str, str]]:
+        """The multipart twin of :meth:`_upstream_body`.
+
+        ``model`` is rewritten to the name the backend serves. The three audio
+        backends always serve the alias, so the rewrite also covers a partial
+        name control resolved (whisper, whisper-tiny): the shim matches the alias
+        exactly, so forwarding the partial name would 404 there.
+        """
+        served = instance.served_model_name
+        rewrite = bool(
+            instance.backend_type in ("whispercpp", "nemospeech", "huggingface_audio")
+        )
+        if served and (served != instance.model_alias or virtual):
+            rewrite = True
+        if rewrite:
+            target = served or instance.model_alias
+            return [
+                ("model", target) if name == "model" else (name, value)
+                for name, value in fields
+            ]
+        return list(fields)
+
+    async def _multipart_form(
+        self,
+        instance: RegistryEntry,
+        upload: MultipartUpload,
+        *,
+        virtual: bool = False,
+    ) -> tuple[aiohttp.FormData, BinaryIO]:
+        """Build the multipart body and the handle that streams it.
+
+        A fresh handle is opened per attempt (the caller closes it): aiohttp does
+        not close a user-supplied file after a successful post but DOES close it
+        after a connection error, so a retry needs its own handle.
+        """
+        form = aiohttp.FormData()
+        for name, value in self._upstream_fields(
+            instance, upload.fields, virtual=virtual
+        ):
+            form.add_field(name, value)
+        # The caller owns the handle's lifetime: it must stay open across the
+        # post and be closed per attempt, so it is deliberately not a context
+        # manager. The open is a filesystem call, so it runs in a worker thread
+        # and never blocks the event loop.
+        handle = await asyncio.to_thread(open, upload.path, "rb")
+        form.add_field(
+            "file",
+            handle,
+            filename=upload.filename,
+            content_type=upload.content_type,
+        )
+        return form, handle
+
     def _sse_usage(self, payload: bytes) -> tuple[dict[str, Any], bool] | None:
         """Extract the OpenAI usage block from one SSE *data:* event.
 
@@ -1148,6 +1258,8 @@ class OpenAIGateway:
             return ["classification"]
         if backend_type == "huggingface_embedding":
             return ["embedding"]
+        if backend_type in ("whispercpp", "nemospeech", "huggingface_audio"):
+            return ["transcription"]
         return ["completion"]
 
     async def _get_virtuals(self):
@@ -1694,9 +1806,9 @@ class OpenAIGateway:
             )
         return None
 
-    def _make_route_timeout(self) -> aiohttp.ClientTimeout:
+    def _make_route_timeout(self, total: float | None = None) -> aiohttp.ClientTimeout:
         return aiohttp.ClientTimeout(
-            total=settings.route_total_timeout_s,
+            total=settings.route_total_timeout_s if total is None else total,
             connect=settings.route_connect_timeout_s,
         )
 
@@ -1713,7 +1825,9 @@ class OpenAIGateway:
         model_patterns: list[str] | None = None,
         api_key_id: str | None = None,
         api_key_name: str | None = None,
-    ) -> dict[str, Any]:
+        multipart: MultipartUpload | None = None,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any] | UpstreamResponse:
         request_id = str(uuid.uuid4())
         start_time = time.time()
         original_model = model
@@ -1740,6 +1854,9 @@ class OpenAIGateway:
 
         attempted: set[str] = set()
         last_error: Exception | None = None
+        # The last retryable upstream answer, kept apart from a later
+        # connection error so a 504 still reaches the client with its body.
+        last_upstream_error: UpstreamServiceError | None = None
         retried_once = [False]
         filter_endpoint = required_endpoint or endpoint
 
@@ -1789,9 +1906,12 @@ class OpenAIGateway:
         for target_alias in itinerary:
             if target_alias != model:
                 # Advance to the next target: reset attempt bookkeeping so
-                # this target gets a fresh shot.
+                # this target gets a fresh shot. A retryable answer from the
+                # target just abandoned must not outlive it — the next target's
+                # connection failure would otherwise relay that stale 504.
                 attempted.clear()
                 retried_once[0] = False
+                last_upstream_error = None
                 model = target_alias
                 virtual_target = target_alias
 
@@ -1815,6 +1935,10 @@ class OpenAIGateway:
                 host_name = host.name if host else "unknown"
 
                 async with self._routing_context(instance, weight):
+                    # Declared outside the try so the cleanup never sees an
+                    # unbound name when an earlier step raises.
+                    handle: BinaryIO | None = None
+                    timeout = self._make_route_timeout(timeout_s)
                     try:
                         await self._broadcast_routing_event(
                             {
@@ -1836,19 +1960,29 @@ class OpenAIGateway:
                         )
 
                         url = f"{instance.url}{endpoint}"
-                        headers = {
-                            "Authorization": f"Bearer {instance.api_key}",
-                            "Content-Type": "application/json",
-                        }
-                        timeout = self._make_route_timeout()
+                        headers = {"Authorization": f"Bearer {instance.api_key}"}
+                        if multipart is not None:
+                            # The upload is streamed from a disk temp file, so
+                            # the request never holds it whole in memory.
+                            form, handle = await self._multipart_form(
+                                instance,
+                                multipart,
+                                virtual=virtual_target is not None,
+                            )
+                            post_kwargs: dict[str, Any] = {"data": form}
+                        else:
+                            headers["Content-Type"] = "application/json"
+                            post_kwargs = {
+                                "json": self._upstream_body(
+                                    instance, data, virtual=virtual_target is not None
+                                )[0]
+                            }
 
                         async with self.session.post(
                             url,
-                            json=self._upstream_body(
-                                instance, data, virtual=virtual_target is not None
-                            )[0],
                             headers=headers,
                             timeout=timeout,
+                            **post_kwargs,
                         ) as response:
                             if response.status == 200:
                                 await health_store.mark_healthy(
@@ -1856,6 +1990,27 @@ class OpenAIGateway:
                                     instance.instance_id,
                                     ttl_s=settings.health_ttl_s + 2,
                                 )
+                                if multipart is not None:
+                                    # A transcription answer may be JSON, plain
+                                    # text, SRT or VTT, and no runtime reports
+                                    # token usage for audio.
+                                    body = await response.read()
+                                    content_type = response.headers.get(
+                                        "Content-Type", "application/octet-stream"
+                                    )
+                                    duration = time.time() - start_time
+                                    await self._emit_success(
+                                        request_id,
+                                        model,
+                                        instance,
+                                        duration,
+                                        {},
+                                        endpoint_id,
+                                        api_key_id=api_key_id,
+                                        api_key_name=api_key_name,
+                                    )
+                                    return UpstreamResponse(200, body, content_type)
+
                                 result = await response.json()
                                 duration = time.time() - start_time
 
@@ -1888,7 +2043,18 @@ class OpenAIGateway:
                                     instance.instance_id,
                                     cooldown_s=settings.health_cooldown_s,
                                 )
-                                last_error = Exception(f"Upstream {response.status}")
+                                # Keep the upstream status and body: a 504
+                                # must reach the client as a 504, not as the
+                                # generic ValueError a 404 funnel blames the
+                                # model for.
+                                last_error = UpstreamServiceError(
+                                    response.status,
+                                    error_text,
+                                    response.headers.get(
+                                        "Content-Type", "application/json"
+                                    ),
+                                )
+                                last_upstream_error = last_error
                                 await self._emit_reroute(
                                     request_id,
                                     model,
@@ -1913,9 +2079,60 @@ class OpenAIGateway:
                                     api_key_id=api_key_id,
                                     api_key_name=api_key_name,
                                 )
+                                if multipart is not None:
+                                    # The host's 400/404 body is OpenAI-shaped
+                                    # already; relaying it keeps the reason.
+                                    return UpstreamResponse(
+                                        response.status,
+                                        error_text.encode(),
+                                        response.headers.get(
+                                            "Content-Type", "application/json"
+                                        ),
+                                    )
                                 raise ValueError(msg)
 
-                    except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as e:
+                    except asyncio.TimeoutError as timeout_error:
+                        # A gateway-side timeout means the instance never
+                        # answered within the route's budget. Record a 504
+                        # envelope so the route relays a timeout instead of
+                        # answering the generic 404 model_not_found.
+                        await health_store.mark_failed(
+                            instance.host_id,
+                            instance.instance_id,
+                            cooldown_s=settings.health_cooldown_s,
+                        )
+                        if isinstance(timeout_error, aiohttp.ConnectionTimeoutError):
+                            # aiohttp raises this when the connect budget
+                            # expires; naming the total would blame the
+                            # answer budget that never started.
+                            connect = timeout.connect
+                            message = (
+                                f"upstream did not accept a connection within {connect:g}s"
+                                if connect is not None
+                                else "upstream did not accept a connection in time"
+                            )
+                        else:
+                            total = timeout.total
+                            message = (
+                                f"upstream did not answer within {total:g}s"
+                                if total is not None
+                                else "upstream did not answer in time"
+                            )
+                        body = json.dumps(
+                            {
+                                "error": {
+                                    "message": message,
+                                    "type": "server_error",
+                                    "code": "timeout",
+                                }
+                            }
+                        )
+                        last_error = UpstreamServiceError(504, body, "application/json")
+                        last_upstream_error = last_error
+                        await self._emit_reroute(
+                            request_id, model, instance, attempt + 1, endpoint_id
+                        )
+                    except aiohttp.ClientConnectionError as e:
                         await health_store.mark_failed(
                             instance.host_id,
                             instance.instance_id,
@@ -1938,6 +2155,9 @@ class OpenAIGateway:
                             api_key_name=api_key_name,
                         )
                         raise
+                    finally:
+                        if handle is not None:
+                            handle.close()
 
         error_msg = (
             f"Model '{model}' not found or no instances available"
@@ -1958,6 +2178,10 @@ class OpenAIGateway:
             raise VirtualModelUnavailableError(
                 original_model, {model: "no satisfying instance"}
             )
+        if last_upstream_error is not None:
+            # A reachable instance answered with a retryable failure; relay its
+            # status and body instead of the 404 "model does not exist".
+            raise last_upstream_error
         if attempted:
             raise ValueError(error_msg)
         raise ValueError(error_msg)

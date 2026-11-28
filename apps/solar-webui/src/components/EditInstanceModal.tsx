@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { X, MessageSquare, Tags, Binary, Search, Zap, Rocket } from 'lucide-react';
+import { X, MessageSquare, Tags, Binary, Search, Zap, Rocket, Mic, AudioLines } from 'lucide-react';
 import {
   Instance,
   InstanceConfig,
@@ -9,12 +9,19 @@ import {
   isHuggingFaceCausalConfig,
   isHuggingFaceClassificationConfig,
   isHuggingFaceEmbeddingConfig,
+  isHuggingFaceAudioConfig,
+  isAudioConfig,
+  isWhisperCppConfig,
+  isNemoSpeechConfig,
   isSglangConfig,
   isVllmConfig,
   LlamaCppConfig,
   HuggingFaceCausalConfig,
   HuggingFaceClassificationConfig,
   HuggingFaceEmbeddingConfig,
+  HuggingFaceAudioConfig,
+  WhisperCppConfig,
+  NemoSpeechConfig,
   SglangConfig,
   VllmConfig,
 } from '@/api/types';
@@ -55,6 +62,12 @@ const BackendIcon = ({ config }: { config: InstanceConfig }) => {
       return <Tags size={18} className="text-nord-13" />;
     case 'huggingface_embedding':
       return <Binary size={18} className="text-nord-15" />;
+    case 'huggingface_audio':
+      return <AudioLines size={18} className="text-nord-9" />;
+    case 'whispercpp':
+      return <Mic size={18} className="text-nord-4" />;
+    case 'nemospeech':
+      return <AudioLines size={18} className="text-nord-11" />;
     case 'sglang':
       return <Zap size={18} className="text-nord-7" />;
     case 'vllm':
@@ -107,6 +120,16 @@ export function EditInstanceModal({ instance, hostId, onClose, onUpdate }: EditI
         alert('Model Path and Alias are required');
         return;
       }
+    } else if (isWhisperCppConfig(formData)) {
+      if (!(formData as WhisperCppConfig).model || !formData.alias) {
+        alert('Model Path and Alias are required');
+        return;
+      }
+    } else if (isNemoSpeechConfig(formData)) {
+      if (!(formData as NemoSpeechConfig).model || !formData.alias) {
+        alert('Decoder GGUF and Alias are required');
+        return;
+      }
     } else {
       if (!(formData as HuggingFaceCausalConfig).model_id || !formData.alias) {
         alert('Model ID and Alias are required');
@@ -126,7 +149,7 @@ export function EditInstanceModal({ instance, hostId, onClose, onUpdate }: EditI
     // Strip empty strings from optional fields so the backend receives None
     // and llama.cpp uses its own defaults. Shared with the add/intent form so
     // the two editors cannot submit differently shaped configs.
-    if (isLlamaCppConfig(formData) || isSglangConfig(formData) || isVllmConfig(formData)) {
+    if (isLlamaCppConfig(formData) || isSglangConfig(formData) || isVllmConfig(formData) || isAudioConfig(formData)) {
       finalConfig = stripEmptyOptionalFields(finalConfig as Record<string, any>) as InstanceConfig;
     }
 
@@ -694,6 +717,271 @@ export function EditInstanceModal({ instance, hostId, onClose, onUpdate }: EditI
                   />
                 </div>
               </>
+            ) : isWhisperCppConfig(formData) || isNemoSpeechConfig(formData) ? (
+              /* GGML speech runtimes: model path, sidecars, language, device */
+              <>
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-nord-4 mb-1">
+                    {isNemoSpeechConfig(formData) ? 'Decoder GGUF' : 'Model Path'}{' '}
+                    <span className="text-nord-11">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    name="model"
+                    value={(formData as WhisperCppConfig | NemoSpeechConfig).model || ''}
+                    onChange={handleChange}
+                    placeholder={isNemoSpeechConfig(formData) ? '/path/to/decoder.gguf' : '/path/to/ggml-tiny.bin'}
+                    required
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  />
+                </div>
+
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-nord-4 mb-1">
+                    Alias <span className="text-nord-11">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    name="alias"
+                    value={formData.alias}
+                    onChange={handleChange}
+                    required
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  />
+                </div>
+
+                {isNemoSpeechConfig(formData) && (
+                  <>
+                    <div>
+                      <label className="block text-sm font-medium text-nord-4 mb-1">Encoder (Optional)</label>
+                      <input
+                        type="text"
+                        name="encoder"
+                        value={(formData as NemoSpeechConfig).encoder || ''}
+                        onChange={handleChange}
+                        placeholder="encoder.gguf"
+                        className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent font-mono text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-nord-4 mb-1">Diarizer (Optional)</label>
+                      <input
+                        type="text"
+                        name="diar_model"
+                        value={(formData as NemoSpeechConfig).diar_model || ''}
+                        onChange={handleChange}
+                        placeholder="sortformer.gguf"
+                        className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent font-mono text-sm"
+                      />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="edit-nemo-diarize"
+                        name="diarize"
+                        checked={!!(formData as NemoSpeechConfig).diarize}
+                        onChange={handleChange}
+                        className="w-4 h-4 rounded border-nord-3 bg-nord-2 text-nord-10 focus:ring-nord-10"
+                      />
+                      <label htmlFor="edit-nemo-diarize" className="text-sm font-medium text-nord-4">
+                        Speaker diarization
+                      </label>
+                    </div>
+                  </>
+                )}
+
+                <div>
+                  <label className="block text-sm font-medium text-nord-4 mb-1">Language</label>
+                  <input
+                    type="text"
+                    name="language"
+                    value={(formData as WhisperCppConfig | NemoSpeechConfig).language || ''}
+                    onChange={handleChange}
+                    placeholder={isNemoSpeechConfig(formData) ? 'en' : 'auto'}
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  />
+                </div>
+
+                {isNemoSpeechConfig(formData) && (
+                  <>
+                    <div>
+                      <label className="block text-sm font-medium text-nord-4 mb-1">Instruction (Optional)</label>
+                      <input
+                        type="text"
+                        name="instruction"
+                        value={(formData as NemoSpeechConfig).instruction || ''}
+                        onChange={handleChange}
+                        placeholder="Transcribe verbatim."
+                        className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                      />
+                      <p className="text-xs text-nord-4 mt-1">
+                        Style hint passed to nemo-speech as <code>--instruction</code>
+                      </p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-nord-4 mb-1">Translate To (Optional)</label>
+                      <input
+                        type="text"
+                        name="translate_to"
+                        value={(formData as NemoSpeechConfig).translate_to || ''}
+                        onChange={handleChange}
+                        placeholder="hu"
+                        className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                      />
+                      <p className="text-xs text-nord-4 mt-1">
+                        Target language passed to nemo-speech as <code>--translate-to</code>
+                      </p>
+                    </div>
+                  </>
+                )}
+
+                <div>
+                  <label className="block text-sm font-medium text-nord-4 mb-1">Device</label>
+                  <select
+                    name="device"
+                    value={(formData as WhisperCppConfig | NemoSpeechConfig).device || 'auto'}
+                    onChange={handleChange}
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  >
+                    <option value="auto">auto (detect)</option>
+                    <option value="cpu">cpu</option>
+                    {isNemoSpeechConfig(formData) && <option value="cuda">cuda</option>}
+                  </select>
+                </div>
+
+                {isWhisperCppConfig(formData) && (
+                  <div>
+                    <label className="block text-sm font-medium text-nord-4 mb-1">Threads</label>
+                    <input
+                      type="number"
+                      name="threads"
+                      value={(formData as WhisperCppConfig).threads ?? 4}
+                      onChange={handleChange}
+                      min="1"
+                      className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                    />
+                  </div>
+                )}
+              </>
+            ) : isHuggingFaceAudioConfig(formData) ? (
+              /* HuggingFace audio: chunked transcription instead of max_length */
+              <>
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-nord-4 mb-1">
+                    Model ID <span className="text-nord-11">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    name="model_id"
+                    value={(formData as HuggingFaceAudioConfig).model_id || ''}
+                    onChange={handleChange}
+                    placeholder="openai/whisper-large-v3 or /local/path"
+                    required
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  />
+                </div>
+
+                <div className="md:col-span-2">
+                  <label className="block text-sm font-medium text-nord-4 mb-1">
+                    Alias <span className="text-nord-11">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    name="alias"
+                    value={formData.alias}
+                    onChange={handleChange}
+                    required
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-nord-4 mb-1">Device</label>
+                  <select
+                    name="device"
+                    value={(formData as HuggingFaceAudioConfig).device || 'auto'}
+                    onChange={handleChange}
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  >
+                    {DEVICE_OPTIONS.map((d) => (
+                      <option key={d} value={d}>
+                        {d === 'auto' ? 'auto (detect)' : d}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-nord-4 mb-1">Data Type</label>
+                  <select
+                    name="dtype"
+                    value={(formData as HuggingFaceAudioConfig).dtype || 'auto'}
+                    onChange={handleChange}
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  >
+                    {DTYPE_OPTIONS.map((d) => (
+                      <option key={d} value={d}>
+                        {d === 'auto' ? 'auto (detect)' : d}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-nord-4 mb-1">Language</label>
+                  <input
+                    type="text"
+                    name="language"
+                    value={(formData as HuggingFaceAudioConfig).language || ''}
+                    onChange={handleChange}
+                    placeholder="hu"
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-nord-4 mb-1">Chunk Length (s)</label>
+                  <input
+                    type="number"
+                    name="chunk_length_s"
+                    value={(formData as HuggingFaceAudioConfig).chunk_length_s ?? 30}
+                    onChange={handleChange}
+                    min="1"
+                    step="0.5"
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-nord-4 mb-1">Batch Size</label>
+                  <input
+                    type="number"
+                    name="batch_size"
+                    value={(formData as HuggingFaceAudioConfig).batch_size ?? 8}
+                    onChange={handleChange}
+                    min="1"
+                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                  />
+                </div>
+
+                {/* Trust Remote Code */}
+                <div className="flex items-start gap-3">
+                  <input
+                    type="checkbox"
+                    id="trust_remote_code"
+                    name="trust_remote_code"
+                    checked={!!(formData as HuggingFaceAudioConfig).trust_remote_code}
+                    onChange={handleChange}
+                    className="h-4 w-4 mt-0.5 rounded border-nord-3 bg-nord-1 text-nord-10 focus:ring-nord-10"
+                  />
+                  <div>
+                    <label htmlFor="trust_remote_code" className="block text-sm font-medium text-nord-4">
+                      Trust Remote Code
+                    </label>
+                    <p className="text-xs text-nord-4">Allow running custom model code from HuggingFace</p>
+                  </div>
+                </div>
+              </>
             ) : (
               /* HuggingFace specific fields */
               <>
@@ -764,18 +1052,20 @@ export function EditInstanceModal({ instance, hostId, onClose, onUpdate }: EditI
                   </select>
                 </div>
 
-                {/* Max Length */}
-                <div>
-                  <label className="block text-sm font-medium text-nord-4 mb-1">Max Length</label>
-                  <input
-                    type="number"
-                    name="max_length"
-                    value={(formData as HuggingFaceCausalConfig).max_length}
-                    onChange={handleChange}
-                    min="1"
-                    className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
-                  />
-                </div>
+                {/* Max Length — audio models chunk instead of truncating */}
+                {!isHuggingFaceAudioConfig(formData) && (
+                  <div>
+                    <label className="block text-sm font-medium text-nord-4 mb-1">Max Length</label>
+                    <input
+                      type="number"
+                      name="max_length"
+                      value={(formData as HuggingFaceCausalConfig).max_length}
+                      onChange={handleChange}
+                      min="1"
+                      className="w-full px-3 py-2 bg-nord-2 border border-nord-3 text-nord-6 placeholder-nord-4 placeholder:opacity-60 rounded-md focus:ring-2 focus:ring-nord-10 focus:border-transparent"
+                    />
+                  </div>
+                )}
 
                 {/* Classification-specific: Labels */}
                 {isHuggingFaceClassificationConfig(formData) && (

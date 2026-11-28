@@ -294,8 +294,8 @@ describe('IntentFormModal in edit mode', () => {
     expect(screen.getByText(/meaningless for model_type/)).toBeInTheDocument();
   });
 
-  it('keeps a model_file error visible when the backend is not llama.cpp', async () => {
-    // The model_file slot lives inside the llama.cpp branch, so it does not
+  it('keeps a model_file error visible when the backend does not own it', async () => {
+    // The model_file slot only mounts on the GGML backends, so it does not
     // mount on a HuggingFace backend — which is the only configuration that
     // produces the error. Client-side validation gets there before the server
     // here, and used to set a field error with no slot and no banner, so the
@@ -306,7 +306,9 @@ describe('IntentFormModal in edit mode', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
     expect(await screen.findByText('backend.model_file')).toBeInTheDocument();
-    expect(screen.getByText(/only available for the llama\.cpp backend/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/only available for the llama\.cpp, whisper\.cpp and NeMo-Speech backends/),
+    ).toBeInTheDocument();
     expect(updateIntent).not.toHaveBeenCalled();
   });
 

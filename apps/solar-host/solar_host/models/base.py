@@ -17,6 +17,9 @@ class BackendType(str, Enum):
     HUGGINGFACE_VISION = "huggingface_vision"
     SGLANG = "sglang"
     VLLM = "vllm"
+    WHISPERCPP = "whispercpp"
+    NEMOSPEECH = "nemospeech"
+    HUGGINGFACE_AUDIO = "huggingface_audio"
 
 
 class InstanceStatus(str, Enum):

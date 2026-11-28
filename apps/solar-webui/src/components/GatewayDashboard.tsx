@@ -603,6 +603,7 @@ export function GatewayDashboard() {
               <option value="completion">Completion</option>
               <option value="embedding">Embedding</option>
               <option value="classification">Classification</option>
+              <option value="transcription">Transcription</option>
               <option value="rerank">Rerank</option>
             </select>
             <select

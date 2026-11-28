@@ -106,6 +106,8 @@ def classify_request_type(endpoint: str | None) -> str:
     ep = endpoint.lower()
     if "/embeddings" in ep:
         return "embedding"
+    if "/audio/transcriptions" in ep:
+        return "transcription"
     if "/chat/completions" in ep:
         return "chat"
     if "/completions" in ep:

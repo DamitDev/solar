@@ -13,14 +13,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from solar_host.models.base import Instance, InstanceStatus
 from solar_host.models.huggingface import (
+    HuggingFaceAudioConfig,
     HuggingFaceCausalConfig,
     HuggingFaceClassificationConfig,
     HuggingFaceEmbeddingConfig,
     HuggingFaceVisionConfig,
 )
 from solar_host.models.llamacpp import LlamaCppConfig
+from solar_host.models.nemospeech import NemoSpeechConfig
 from solar_host.models.sglang import SglangConfig
 from solar_host.models.vllm import VllmConfig
+from solar_host.models.whispercpp import WhisperCppConfig
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +132,21 @@ class Settings(BaseSettings):
     # the tier's root_dir must come from the instance config instead (the host
     # still cleans nothing, because it owns no directory).
     vllm_prompt_cache_dir: str = ""
+
+    # whisper.cpp backend (optional, any host). whispercpp_binary is the
+    # whisper-server executable; when empty the runner falls back to
+    # `whisper-server` on PATH, and when neither resolves the host does not
+    # advertise the backend at all.
+    whispercpp_binary: str = ""
+    # NeMo-Speech.cpp backend (optional, any host). nemo_speech_binary is the
+    # nemo-speech executable; when empty the runner falls back to
+    # `nemo-speech` on PATH, and when neither resolves the host does not
+    # advertise the backend at all.
+    nemo_speech_binary: str = ""
+    # Total budget for one transcription forward from the audio shim to its child
+    # runtime. Long recordings take far longer than aiohttp's 300 s default; the
+    # control gateway's own route budget is route_total_timeout_s.
+    audio_request_timeout_s: float = 1800.0
 
     # GPU telemetry override (dev/test only, L2): a JSON array of
     # {"index", "name", "total_gb", "used_gb"} describing the devices this
@@ -246,14 +264,60 @@ def _resolve_llamacpp_file_patterns(config_data: dict[str, Any], strict: bool) -
     the recorded paths are kept, so a temporarily missing file does not drop
     the instance from config.json.
     """
+    _resolve_sidecar_patterns(
+        config_data, ("model_file",), ("mmproj", "spec_draft_model"), strict
+    )
+
+
+def _resolve_whispercpp_file_patterns(
+    config_data: dict[str, Any], strict: bool
+) -> None:
+    """Resolve ``model_file`` inside the pulled artifact.
+
+    A HuggingFace pull returns the snapshot directory, so the GGML file has to be
+    selected from it. ``model_file`` is a filename, relative path or glob that
+    replaces ``model`` when it resolves.
+    """
+    _resolve_sidecar_patterns(config_data, ("model_file",), (), strict)
+
+
+def _resolve_nemospeech_file_patterns(
+    config_data: dict[str, Any], strict: bool
+) -> None:
+    """Resolve the NeMo decoder and its optional sidecars in the artifact.
+
+    ``model_file`` selects the decoder GGUF. ``encoder`` and ``diar_model`` name a
+    second file next to it; a bare filename is resolved inside the artifact, an
+    explicit path is used verbatim, exactly like llama.cpp's mmproj.
+    """
+    _resolve_sidecar_patterns(
+        config_data,
+        ("model_file",),
+        ("encoder", "diar_model"),
+        strict,
+    )
+
+
+def _resolve_sidecar_patterns(
+    config_data: dict[str, Any],
+    selectors: tuple[str, ...],
+    sidecars: tuple[str, ...],
+    strict: bool,
+) -> None:
+    """Resolve selector patterns to the model and bare sidecar filenames.
+
+    Selectors always resolve against the artifact directory (``model`` is replaced
+    when the selector resolves). Sidecars resolve only when they are not already an
+    existing file, so an explicit path is used verbatim.
+    """
     from solar_host.models_manager import resolve_model_file
 
-    model_file = config_data.get("model_file")
-
     targets: list[tuple[str, str]] = []
-    if model_file and str(model_file).strip():
-        targets.append(("model", str(model_file).strip()))
-    for field in ("mmproj", "spec_draft_model"):
+    for field in selectors:
+        value = config_data.get(field)
+        if value and str(value).strip():
+            targets.append(("model", str(value).strip()))
+    for field in sidecars:
         value = config_data.get(field)
         if value and str(value).strip() and not Path(str(value).strip()).is_file():
             targets.append((field, str(value).strip()))
@@ -299,7 +363,9 @@ def parse_instance_config(config_data: dict[str, Any], strict: bool = True) -> A
         and not config_data.get("model_path")
     ):
         resolved_path = resolve_model_source(model_source)
-        if backend_type == "llamacpp":
+        if backend_type in ("llamacpp", "whispercpp", "nemospeech"):
+            # GGML runtimes take a single model path (a file, or a directory
+            # whose file is selected by model_file).
             config_data["model"] = resolved_path
         elif backend_type in ("sglang", "vllm"):
             # Both CUDA engines take the model directory as a path argument.
@@ -311,6 +377,12 @@ def parse_instance_config(config_data: dict[str, Any], strict: bool = True) -> A
     if backend_type == "llamacpp":
         _resolve_llamacpp_file_patterns(config_data, strict)
         return LlamaCppConfig(**config_data)
+    elif backend_type == "whispercpp":
+        _resolve_whispercpp_file_patterns(config_data, strict)
+        return WhisperCppConfig(**config_data)
+    elif backend_type == "nemospeech":
+        _resolve_nemospeech_file_patterns(config_data, strict)
+        return NemoSpeechConfig(**config_data)
     elif backend_type == "huggingface_causal":
         return HuggingFaceCausalConfig(**config_data)
     elif backend_type == "huggingface_classification":
@@ -319,6 +391,8 @@ def parse_instance_config(config_data: dict[str, Any], strict: bool = True) -> A
         return HuggingFaceEmbeddingConfig(**config_data)
     elif backend_type == "huggingface_vision":
         return HuggingFaceVisionConfig(**config_data)
+    elif backend_type == "huggingface_audio":
+        return HuggingFaceAudioConfig(**config_data)
     elif backend_type == "sglang":
         return SglangConfig(**config_data)
     elif backend_type == "vllm":
