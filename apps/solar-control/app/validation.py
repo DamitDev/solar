@@ -625,6 +625,9 @@ def _validate_device(
     backends the value must be one of ``auto/cuda/mps/cpu`` and must not
     contradict an explicitly chosen ``placement.gpu_type`` — the reported
     ``mps`` plus NVIDIA-host symptom is fully static and a hard 422.
+    NeMo-Speech accepts ``cuda`` too, but only with an explicit
+    ``nvidia_cuda`` placement: unlike HF, an absent ``gpu_type`` is not a
+    wildcard there because the scheduler could pick a CPU-only host.
 
     ``exempt_fields`` grandfathers the *ownership* rejection only. The value
     checks below still run: an update that leaves ``device`` alone but points
@@ -674,6 +677,24 @@ def _validate_device(
             }
         )
         return errors
+
+    if backend_type == "nemospeech" and device == "cuda":
+        # cuda is valid vocabulary but only makes sense on an NVIDIA host; an
+        # unset gpu_type would let the scheduler pick a CPU-only host and
+        # --device cuda would fail at startup. A concrete non-NVIDIA value
+        # falls through to the generic contradiction check below.
+        gpu_type = placement.get("gpu_type") if isinstance(placement, dict) else None
+        if gpu_type is None:
+            errors.append(
+                {
+                    "field": "backend.device",
+                    "message": (
+                        "device 'cuda' requires gpu_type 'nvidia_cuda', but "
+                        "the placement carries no gpu_type"
+                    ),
+                }
+            )
+            return errors
     # cuda is valid vocabulary but still constrains the placement, so fall
     # through to the same contradiction check as the generic branch.
 

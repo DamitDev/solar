@@ -289,9 +289,10 @@ describe('validateIntentRequest', () => {
         for (const device of ['cuda', 'mps']) {
           expect(fieldNames({ backend: { backend_type: 'whispercpp', device } })).toContain('backend.device');
         }
-        for (const device of ['auto', 'cpu', 'cuda']) {
+        for (const device of ['auto', 'cpu']) {
           expect(fieldNames({ backend: { backend_type: 'nemospeech', device } })).not.toContain('backend.device');
         }
+        expect(fieldNames({ backend: { backend_type: 'nemospeech', device: 'cuda' } })).toContain('backend.device');
         expect(fieldNames({ backend: { backend_type: 'nemospeech', device: 'mps' } })).toContain('backend.device');
       });
 
@@ -311,6 +312,18 @@ describe('validateIntentRequest', () => {
             placement: { gpu_type: 'cuda' },
           }),
         ).not.toContain('backend.device');
+      });
+
+      it('rejects a NeMo-Speech cuda device with no gpu_type', () => {
+        // The scheduler filters on gpu_type, so an unset value can land the
+        // instance on a CPU-only host and --device cuda fails at startup.
+        const errors = errorsFor({
+          backend: { backend_type: 'nemospeech', device: 'cuda' },
+        });
+        const err = errors.find((e) => e.field === 'backend.device');
+        expect(err).toBeDefined();
+        expect(err!.message).toContain("requires gpu_type 'nvidia_cuda'");
+        expect(err!.message).toContain('no gpu_type');
       });
     });
 

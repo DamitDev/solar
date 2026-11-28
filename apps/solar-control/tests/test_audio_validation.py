@@ -193,7 +193,13 @@ def test_audio_device_vocabulary_is_per_backend():
     errors = _validate_device({"backend_type": "whispercpp", "device": "cuda"}, {})
     assert errors and "auto or cpu" in errors[0]["message"]
 
-    assert _validate_device({"backend_type": "nemospeech", "device": "cuda"}, {}) == []
+    assert (
+        _validate_device(
+            {"backend_type": "nemospeech", "device": "cuda"},
+            {"gpu_type": "nvidia_cuda"},
+        )
+        == []
+    )
     errors = _validate_device({"backend_type": "nemospeech", "device": "mps"}, {})
     assert errors and "auto, cpu or cuda" in errors[0]["message"]
 
@@ -201,6 +207,39 @@ def test_audio_device_vocabulary_is_per_backend():
         _validate_device({"backend_type": "huggingface_audio", "device": "mps"}, {})
         == []
     )
+
+
+def test_nemospeech_cuda_requires_an_explicit_nvidia_placement():
+    """cuda needs a concrete NVIDIA host, not just a non-contradiction.
+
+    The scheduler filters on gpu_type; leaving it unset lets a CPU-only host
+    match and ``nemo-speech serve --device cuda`` fails at startup.
+    """
+    errors = _validate_device(
+        {"backend_type": "nemospeech", "device": "cuda"},
+        {},
+    )
+    assert errors and errors[0]["field"] == "backend.device"
+    assert "requires gpu_type 'nvidia_cuda'" in errors[0]["message"]
+    assert "no gpu_type" in errors[0]["message"]
+
+    # The value check is never grandfathered: an edit that carries device
+    # over untouched still fails against an unset placement.
+    errors = _validate_device(
+        {"backend_type": "nemospeech", "device": "cuda"},
+        {},
+        exempt_fields=frozenset({"device"}),
+    )
+    assert errors and errors[0]["field"] == "backend.device"
+
+    for device in ("auto", "cpu"):
+        assert (
+            _validate_device(
+                {"backend_type": "nemospeech", "device": device},
+                {},
+            )
+            == []
+        )
 
 
 def test_nemospeech_cuda_contradicts_a_non_nvidia_placement():

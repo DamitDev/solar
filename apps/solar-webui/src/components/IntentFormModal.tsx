@@ -161,11 +161,19 @@ export function IntentFormModal({ intent, initial, onClose, onSaved }: IntentFor
     };
   }, []);
 
-  // SGLang and vLLM are CUDA-only and the server pins the same token, so the
-  // placement follows the backend rather than letting the operator save a 422.
-  const cudaOnlySelected = backend.backend_type === 'sglang' || backend.backend_type === 'vllm';
-  const cudaOnlyGpuType = backend.backend_type === 'vllm' ? VLLM_GPU_TYPE : SGLANG_GPU_TYPE;
-  const cudaOnlyEngine = backend.backend_type === 'vllm' ? 'vLLM' : 'SGLang';
+  // SGLang, vLLM and a cuda-pinned NeMo-Speech are CUDA-only and the
+  // server pins the same token, so the placement follows the backend rather
+  // than letting the operator save a 422.
+  const nemospeechCuda = backend.backend_type === 'nemospeech' && backend.device === 'cuda';
+  const cudaOnlySelected = backend.backend_type === 'sglang' || backend.backend_type === 'vllm' || nemospeechCuda;
+  const cudaOnlyGpuType =
+    backend.backend_type === 'vllm'
+      ? VLLM_GPU_TYPE
+      : backend.backend_type === 'sglang'
+        ? SGLANG_GPU_TYPE
+        : 'nvidia_cuda';
+  const cudaOnlyEngine =
+    backend.backend_type === 'vllm' ? 'vLLM' : backend.backend_type === 'sglang' ? 'SGLang' : 'NeMo-Speech';
   useEffect(() => {
     if (cudaOnlySelected) setGpuType(cudaOnlyGpuType);
   }, [cudaOnlySelected, cudaOnlyGpuType]);

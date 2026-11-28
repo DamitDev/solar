@@ -398,8 +398,21 @@ function validateDevice(
         },
       ];
     }
-    // cuda is valid vocabulary but still constrains the placement, so fall
-    // through to the same contradiction check as the generic branch.
+    // cuda is valid vocabulary but the scheduler must land the instance on
+    // an NVIDIA host; an absent gpu_type is not a wildcard here. A concrete
+    // non-NVIDIA value falls through to the generic contradiction check.
+    if (device === 'cuda') {
+      const gpuType = placement?.gpu_type;
+      const canonical = gpuType ? (normalizeGpuType(gpuType) ?? gpuType) : null;
+      if (!canonical) {
+        return [
+          {
+            field: 'backend.device',
+            message: "device 'cuda' requires gpu_type 'nvidia_cuda', but the placement carries no gpu_type",
+          },
+        ];
+      }
+    }
   }
 
   if (!DEVICE_OPTIONS.includes(device)) {
