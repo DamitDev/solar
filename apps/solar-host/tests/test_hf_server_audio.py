@@ -439,6 +439,8 @@ async def test_a_word_granularity_returns_real_segments_with_the_words_attached(
 @pytest.mark.anyio
 async def test_words_are_attached_to_the_segment_that_contains_them():
     class _Pipeline:
+        type = "seq2seq_whisper"
+
         def __init__(self):
             self.calls: list[dict] = []
 
@@ -485,6 +487,8 @@ async def test_words_are_attached_to_the_segment_that_contains_them():
 @pytest.mark.anyio
 async def test_words_before_and_after_every_segment_stay_on_the_edge_segments():
     class _Pipeline:
+        type = "seq2seq_whisper"
+
         def __call__(self, samples, **kwargs):
             if kwargs["return_timestamps"] == "word":
                 return {
@@ -558,6 +562,8 @@ async def test_a_slow_word_pass_on_verbose_json_times_out_before_the_segment_pas
     release = threading.Event()
 
     class _Pipeline:
+        type = "seq2seq_whisper"
+
         def __call__(self, samples, **kwargs):
             release.wait(5)
             return {"text": "late"}
@@ -589,6 +595,8 @@ async def test_a_slow_segment_pass_after_a_word_pass_times_out_with_an_envelope(
     release = threading.Event()
 
     class _Pipeline:
+        type = "seq2seq_whisper"
+
         def __call__(self, samples, **kwargs):
             if kwargs["return_timestamps"] == "word":
                 return {
@@ -624,6 +632,8 @@ async def test_a_slow_word_timestamp_pipeline_times_out_with_an_envelope(monkeyp
     release = threading.Event()
 
     class _SlowPipeline:
+        type = "seq2seq_whisper"
+
         def __call__(self, samples, **kwargs):
             release.wait(5)
             return {"text": "late"}
@@ -932,8 +942,8 @@ async def test_verbose_json_language_is_normalised_to_the_iso_code():
 class _NonWhisperPipeline:
     """A seq2seq ASR pipeline that is not Whisper.
 
-    transformers raises ValueError when ``return_language`` is passed to anything
-    but a Whisper pipeline, so this fake does the same.
+    transformers raises ValueError when ``return_language`` or ``return_timestamps``
+    is passed to anything but a Whisper pipeline, so this fake does the same.
     """
 
     type = "seq2seq"
@@ -945,21 +955,56 @@ class _NonWhisperPipeline:
         self.calls.append(kwargs)
         if kwargs.get("return_language") is not None:
             raise ValueError("Only Whisper can return language for now.")
+        if kwargs.get("return_timestamps"):
+            raise ValueError(
+                "We cannot return_timestamps yet on non-CTC models apart from Whisper!"
+            )
         return {"text": "hello world"}
 
 
 @pytest.mark.anyio
 async def test_a_non_whisper_pipeline_is_not_asked_for_the_language():
-    """return_language is Whisper-only; a seq2seq pipeline must not receive it
-    and verbose_json must report the language as und."""
+    """return_language is Whisper-only; a seq2seq pipeline must not receive it."""
     pipeline = _NonWhisperPipeline()
     hf.state.pipeline = pipeline
 
-    payload = await _call(_form(model="whisper-hu", response_format="verbose_json"))
+    payload = await _call(_form(model="whisper-hu"))
 
-    assert isinstance(payload, dict)
-    assert payload["language"] == "und"
+    assert payload == {"text": "hello world"}
     assert "return_language" not in pipeline.calls[0]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("response_format", ["verbose_json", "srt", "vtt"])
+async def test_a_non_whisper_pipeline_refuses_the_timestamp_formats(response_format):
+    """transformers raises "We cannot return_timestamps yet on non-CTC models
+    apart from Whisper!" for a plain seq2seq checkpoint, so the timestamp
+    formats must answer a 400 envelope instead of a bare 500."""
+    pipeline = _NonWhisperPipeline()
+    hf.state.pipeline = pipeline
+
+    response = await _call(_form(model="whisper-hu", response_format=response_format))
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 400
+    error = json.loads(bytes(response.body))["error"]
+    assert error["param"] == "response_format"
+    assert "Whisper checkpoint" in error["message"]
+    # Refused before the pipeline runs, so it cannot raise the 500.
+    assert pipeline.calls == []
+
+
+@pytest.mark.anyio
+async def test_a_non_whisper_pipeline_still_answers_json():
+    """json and text carry no timestamps, so a non-Whisper checkpoint keeps
+    them working; the Whisper-only pipeline kwargs stay out of the call."""
+    pipeline = _NonWhisperPipeline()
+    hf.state.pipeline = pipeline
+
+    response = await _call(_form(model="whisper-hu"))
+
+    assert response == {"text": "hello world"}
+    assert "return_timestamps" not in pipeline.calls[0]
 
 
 @pytest.mark.anyio

@@ -191,8 +191,13 @@ def _child_command(args: argparse.Namespace) -> list[str]:
         "--device",
         device,
         # verbose_json segments[] and diarized_json are synthesized from the
-        # runtime's words array, so the child must emit word timestamps.
+        # runtime's words array, so the child must emit word timestamps in JSON.
         "--word-times",
+        # The shim decodes the child's body as JSON (and relays the json format
+        # as application/json), so the runtime must not answer in its default
+        # text format.
+        "--format",
+        "json",
     ]
     if state.encoder:
         # v0.3.0 names the encoder sidecar --salm-encoder.

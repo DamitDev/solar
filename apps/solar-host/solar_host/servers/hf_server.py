@@ -522,13 +522,19 @@ async def _run_transcription_pass(
 ) -> dict[str, Any]:
     """Run one pipeline pass, bounded so the HTTP request always answers."""
     assert state.pipeline is not None
+    pipeline_type = getattr(state.pipeline, "type", "")
     pipeline_kwargs: dict[str, Any] = {
         "chunk_length_s": state.chunk_length_s,
         "batch_size": state.batch_size,
         "generate_kwargs": generate_kwargs,
-        "return_timestamps": return_timestamps,
     }
-    if return_language and getattr(state.pipeline, "type", "") == "seq2seq_whisper":
+    if pipeline_type == "seq2seq_whisper":
+        # `return_timestamps` is Whisper-only: transformers raises "We cannot
+        # return_timestamps yet on non-CTC models apart from Whisper!" for a
+        # plain seq2seq checkpoint. The route refuses the timestamp formats for
+        # those models; this is the second guard.
+        pipeline_kwargs["return_timestamps"] = return_timestamps
+    if return_language and pipeline_type == "seq2seq_whisper":
         # The detected language is only returned when the pipeline is asked for
         # it, and the parameter is Whisper-only: transformers raises
         # "Only Whisper can return language for now." for any other type.
@@ -1265,6 +1271,21 @@ async def audio_transcriptions(
                 "response_format",
                 "invalid_request_error",
             )
+        # `return_timestamps` is Whisper-only: transformers raises "We cannot
+        # return_timestamps yet on non-CTC models apart from Whisper!" for a plain
+        # seq2seq checkpoint, so the timestamp formats would answer a bare 500.
+        # Refuse them here, before the upload is decoded or the pipeline runs.
+        pipeline_type = getattr(state.pipeline, "type", "")
+        if response_format in ("verbose_json", "srt", "vtt") and (
+            pipeline_type != "seq2seq_whisper"
+        ):
+            return _transcription_error(
+                f"response_format '{response_format}' needs a Whisper checkpoint: "
+                "this HuggingFace audio model cannot return timestamps; use 'json' "
+                "or 'text'",
+                "response_format",
+                "invalid_request_error",
+            )
         for name in values:
             if name not in ACCEPTED_FIELDS:
                 # The audio shim and this route accept the same field set, so a
@@ -1403,10 +1424,10 @@ async def audio_transcriptions(
 
     # `task`, `language` and `prompt_ids` are Whisper-only generate arguments:
     # another seq2seq checkpoint raises when they reach model.generate. The
-    # pipeline type is the same signal that gates `return_language` above.
-    whisper_pipeline = getattr(state.pipeline, "type", "") == "seq2seq_whisper"
+    # pipeline type is the same signal that gates the timestamp formats and
+    # `return_language` above.
     generate_kwargs: dict[str, object] = {}
-    if whisper_pipeline:
+    if pipeline_type == "seq2seq_whisper":
         generate_kwargs["task"] = "transcribe"
         if language and language.strip().lower() != "auto":
             # Whisper's lang_to_id has no 'auto' token; omitting the language
@@ -1425,7 +1446,7 @@ async def audio_transcriptions(
     )
     if prompt:
         get_prompt_ids = getattr(state.tokenizer, "get_prompt_ids", None)
-        if get_prompt_ids is None or not whisper_pipeline:
+        if get_prompt_ids is None or pipeline_type != "seq2seq_whisper":
             return _transcription_error(
                 "prompt is not supported by this checkpoint's tokenizer",
                 "prompt",

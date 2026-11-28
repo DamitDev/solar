@@ -123,6 +123,16 @@ def test_the_instruction_and_translation_reach_the_child_command(monkeypatch):
     assert child[child.index("--translate-to") + 1] == "en"
 
 
+def test_the_child_is_asked_for_json_output(monkeypatch):
+    """The shim decodes the child's body as JSON (verbose_json segments[] and
+    the diarized body are built from its words array), so the runtime must be
+    told to emit JSON rather than its default text format."""
+    cmd = NemoSpeechRunner().build_command(_instance())
+
+    child = _child_command(cmd, monkeypatch)
+    assert child[child.index("--format") + 1] == "json"
+
+
 def test_the_language_is_omitted_when_unset():
     cmd = NemoSpeechRunner().build_command(_instance(language=None))
     assert "--language" not in cmd
