@@ -6,6 +6,7 @@ import json
 import os
 import struct
 import tempfile
+import threading
 import wave
 
 import pytest
@@ -1090,6 +1091,39 @@ def test_a_crafted_fmt_chunk_size_never_reads_more_than_40_bytes():
     assert shim._wave_format(_Upload()) is not None
     assert recording.read_sizes
     assert max(recording.read_sizes) <= 40
+
+
+def test_the_wave_inspection_runs_off_the_event_loop(client, monkeypatch):
+    """The header walk costs one read per 8 bytes of a crafted upload.
+
+    The parser is bounded only by the upload size, so the route must run it in a
+    worker thread; the wrapper records the thread that executes it, and the route
+    coroutine records the event-loop thread it was entered on.
+    """
+    captured = _forward_stub(monkeypatch)
+    original = shim._wave_format
+    parse_idents: list[int] = []
+    loop_idents: list[int] = []
+
+    def _recording_wave_format(upload):
+        parse_idents.append(threading.get_ident())
+        return original(upload)
+
+    monkeypatch.setattr(shim, "_wave_format", _recording_wave_format)
+    upload = _TrackingUpload(WAV)
+    form = FormData([("file", upload), ("model", "whisper-tiny")])
+
+    async def _run():
+        loop_idents.append(threading.get_ident())
+        return await shim.audio_transcriptions(_FormRequest(form), True)
+
+    response = asyncio.run(_run())
+
+    assert response.status_code == 200
+    assert captured["format"] == "json"
+    assert parse_idents
+    assert loop_idents
+    assert parse_idents[0] != loop_idents[0]
 
 
 # ── language is the ISO-639-1 code ───────────────────────────────

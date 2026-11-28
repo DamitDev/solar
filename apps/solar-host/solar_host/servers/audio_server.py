@@ -968,7 +968,10 @@ async def audio_transcriptions(
                 404,
             )
         if state.model_type == "nemospeech":
-            wave_problem = _wave_problem(upload)
+            # The header walk is bounded only by the upload size: a crafted WAV of
+            # zero-length chunks costs one read per 8 bytes, so the inspection
+            # must not run on the event loop.
+            wave_problem = await asyncio.to_thread(_wave_problem, upload)
             if wave_problem is not None:
                 return _error(wave_problem, "invalid_request_error")
             temperature = values.get("temperature")
@@ -986,12 +989,14 @@ async def audio_transcriptions(
                         "transcriptions; omit it or set it to 0",
                         "invalid_request_error",
                     )
-        elif _wave_format(upload) is None and not shutil.which("ffmpeg"):
-            return _error(
-                f"whisper.cpp cannot convert '{upload.filename}': ffmpeg is not "
-                f"installed on the host; upload a WAV file",
-                "invalid_request_error",
-            )
+        else:
+            wave_format = await asyncio.to_thread(_wave_format, upload)
+            if wave_format is None and not shutil.which("ffmpeg"):
+                return _error(
+                    f"whisper.cpp cannot convert '{upload.filename}': ffmpeg is not "
+                    f"installed on the host; upload a WAV file",
+                    "invalid_request_error",
+                )
 
         forwarded = _forward_fields(fields, response_format)
         print(
