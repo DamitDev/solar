@@ -116,6 +116,33 @@ describe('validateIntentRequest', () => {
       );
     });
 
+    it('requires a model file for a whisper.cpp or NeMo-Speech pull source', () => {
+      // A pull source returns the snapshot directory; the control plane rejects a
+      // whisper.cpp/NeMo-Speech intent without a file picked from it.
+      for (const backend_type of ['whispercpp', 'nemospeech']) {
+        const errors = errorsFor({ backend: { backend_type } });
+        const err = errors.find((e) => e.field === 'backend.model_file');
+        expect(err?.message).toBe('model_file is required when the source is a pull; the pull returns a directory');
+        expect(fieldNames({ backend: { backend_type, model_file: 'ggml-tiny.bin' } })).not.toContain(
+          'backend.model_file',
+        );
+      }
+    });
+
+    it('does not require a model file for a local source or llama.cpp', () => {
+      // local:// points at a directory the host owns, and llama.cpp picks a file
+      // itself; only the whisper.cpp/NeMo-Speech pull path needs a selection.
+      expect(fieldNames({ backend: { backend_type: 'whispercpp' }, model_source: 'local:///tmp/model' })).not.toContain(
+        'backend.model_file',
+      );
+      expect(fieldNames({ backend: { backend_type: 'llamacpp' } })).not.toContain('backend.model_file');
+    });
+
+    it('grandfathers an unchanged model file on update', () => {
+      const payload: any = { ...validRequest, backend: { backend_type: 'whispercpp' } };
+      expect(validateIntentRequest(payload, ['model_file'])).toEqual([]);
+    });
+
     it('allows download filters only for huggingface:// sources', () => {
       const backend = { backend_type: 'llamacpp', file_filters: ['*UD-Q4_K_XL*'] };
       expect(fieldNames({ backend, model_source: 'huggingface://unsloth/Model-GGUF' })).not.toContain(

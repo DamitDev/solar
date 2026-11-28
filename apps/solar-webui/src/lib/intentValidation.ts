@@ -588,6 +588,22 @@ export function validateIntentRequest(
       });
     }
 
+    // A pull source returns the snapshot directory, and a directory model needs a
+    // file selected from it; the server rejects a whisper.cpp/NeMo-Speech pull
+    // without model_file, so catch it here instead of as a 422 round trip.
+    const pullSource = source.startsWith('repo://') || source.startsWith('huggingface://');
+    if (
+      !modelFile &&
+      (backendType === 'whispercpp' || backendType === 'nemospeech') &&
+      pullSource &&
+      !unchangedFields.includes('model_file')
+    ) {
+      errors.push({
+        field: 'backend.model_file',
+        message: 'model_file is required when the source is a pull; the pull returns a directory',
+      });
+    }
+
     const specType = req.backend.spec_type;
     const draftModel = req.backend.spec_draft_model;
     if (specType && backendType !== 'llamacpp') {

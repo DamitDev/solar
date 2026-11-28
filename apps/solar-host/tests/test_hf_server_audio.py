@@ -892,6 +892,22 @@ async def test_a_non_numeric_temperature_is_a_400_envelope():
     assert "is not a number" in json.loads(response.body)["error"]["message"]
 
 
+@pytest.mark.anyio
+async def test_an_out_of_range_temperature_is_a_400_envelope():
+    """The control route refuses a temperature outside 0-1; a direct request must
+    get the same envelope instead of the value reaching the pipeline."""
+    for bad in ("1.5", "-0.1"):
+        response = await _call(_form(model="whisper-hu", temperature=bad))
+        assert isinstance(response, JSONResponse)
+        assert response.status_code == 400
+        payload = json.loads(response.body)["error"]
+        assert payload["param"] == "temperature"
+        assert payload["code"] == "invalid_request_error"
+        assert "between 0 and 1" in payload["message"]
+
+    assert hf.state.pipeline.calls == []
+
+
 def test_a_malformed_multipart_body_is_a_400_envelope(monkeypatch):
     """Starlette converts the parser error to HTTPException(400), whose default
     body is {"detail": ...}; the route must answer with the OpenAI envelope."""

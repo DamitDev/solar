@@ -1344,6 +1344,14 @@ async def audio_transcriptions(
                     "temperature",
                     "invalid_request_error",
                 )
+            # The control route refuses a temperature outside 0-1; mirror it so a
+            # direct request cannot forward a value the control plane rejects.
+            if not 0.0 <= temperature_value <= 1.0:
+                return _transcription_error(
+                    "temperature must be between 0 and 1",
+                    "temperature",
+                    "invalid_request_error",
+                )
 
         with tempfile.NamedTemporaryFile(delete=False) as temp:
             temp_path = temp.name
