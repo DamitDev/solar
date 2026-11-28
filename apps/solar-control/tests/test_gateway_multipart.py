@@ -8,7 +8,9 @@ the token-usage machinery on it.
 """
 
 import asyncio
+import builtins
 import json
+import threading
 from unittest.mock import AsyncMock, patch
 
 import aiohttp
@@ -221,6 +223,40 @@ async def test_multipart_is_posted_as_data_not_json(tmp_path):
     assert session.posted[0].get("json") is None
     assert session.posted[0]["data"] is session.forms[0]
     assert emitted["usage"] == {}
+
+
+@pytest.mark.anyio
+async def test_the_upload_handle_is_opened_off_the_event_loop(tmp_path):
+    """The open is a filesystem call: on a slow disk it would block every
+    in-flight gateway request while the event loop waits for the handle.
+
+    The test records the thread that opens the upload temp file and the thread the
+    route coroutine was entered on; the two must differ.
+    """
+    audio = tmp_path / "sample.wav"
+    audio.write_bytes(b"RIFFdata")
+    session = _RecordingSession([_Response(200, b"ok", "text/plain")])
+    real_open = builtins.open
+    open_idents: list[int] = []
+    loop_idents: list[int] = []
+
+    def _recording_open(path, *args, **kwargs):
+        if str(path) == str(audio):
+            open_idents.append(threading.get_ident())
+        return real_open(path, *args, **kwargs)
+
+    loop_idents.append(threading.get_ident())
+    with patch("builtins.open", _recording_open):
+        result, _ = await _route(
+            OpenAIGateway(),
+            session,
+            _upload(str(audio), [("model", ALIAS)]),
+        )
+
+    assert isinstance(result, UpstreamResponse)
+    assert open_idents
+    assert loop_idents
+    assert open_idents[0] != loop_idents[0]
 
 
 @pytest.mark.anyio

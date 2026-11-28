@@ -909,7 +909,7 @@ class OpenAIGateway:
             ]
         return list(fields)
 
-    def _multipart_form(
+    async def _multipart_form(
         self,
         instance: RegistryEntry,
         upload: MultipartUpload,
@@ -928,8 +928,10 @@ class OpenAIGateway:
         ):
             form.add_field(name, value)
         # The caller owns the handle's lifetime: it must stay open across the
-        # post and be closed per attempt.
-        handle = open(upload.path, "rb")  # noqa: SIM115
+        # post and be closed per attempt, so it is deliberately not a context
+        # manager. The open is a filesystem call, so it runs in a worker thread
+        # and never blocks the event loop.
+        handle = await asyncio.to_thread(open, upload.path, "rb")
         form.add_field(
             "file",
             handle,
@@ -1962,7 +1964,7 @@ class OpenAIGateway:
                         if multipart is not None:
                             # The upload is streamed from a disk temp file, so
                             # the request never holds it whole in memory.
-                            form, handle = self._multipart_form(
+                            form, handle = await self._multipart_form(
                                 instance,
                                 multipart,
                                 virtual=virtual_target is not None,
