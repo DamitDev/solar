@@ -139,12 +139,15 @@ async def test_the_upload_copy_runs_off_the_event_loop():
 @pytest.mark.anyio
 async def test_the_forward_covers_the_host_audio_budget():
     """The host allows 1800 s for audio; the gateway's 600 s default would cut
-    a long recording the host would finish."""
+    a long recording the host would finish. The forwarded budget adds 60 s of
+    headroom so the multipart upload and the response fit outside the host's
+    own 1800 s forward budget."""
     _, captured = await _call(
         _form(model="whisper-tiny"),
         result=UpstreamResponse(200, b"", "text/plain"),
     )
-    assert captured["kwargs"]["timeout_s"] == 1800.0
+    assert captured["kwargs"]["timeout_s"] == 1860.0
+    assert captured["kwargs"]["timeout_s"] > 1800.0
 
 
 @pytest.mark.anyio

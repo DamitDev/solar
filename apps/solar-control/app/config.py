@@ -48,8 +48,9 @@ class Settings(BaseSettings):
     # The host gives an audio request up to 1800 s (its
     # audio_request_timeout_s); the generic route budget would cut a long
     # recording the host would finish, so the transcription route asks for
-    # this budget instead.
-    audio_route_total_timeout_s: float = 1800.0
+    # this budget instead. The 60 s headroom covers the multipart upload and
+    # the response, which run outside the host's own forward budget.
+    audio_route_total_timeout_s: float = 1860.0
     route_max_attempts: int = 3
     route_retry_delay_s: float = 0.15
 
