@@ -604,6 +604,25 @@ export function validateIntentRequest(
       });
     }
 
+    // The host's NemoSpeechConfig.check_diarizer rejects diarization without a
+    // diarizer model, so a ticked box with an empty selector is a 422 round
+    // trip; say it here instead. A flag an edit carries over untouched is
+    // grandfathered the same way the pull-source model_file rule is: the missing
+    // diarizer has no key to compare, so only the flag can identify a stored
+    // intent that predates the rule.
+    const diarModel = req.backend.diar_model;
+    if (
+      backendType === 'nemospeech' &&
+      req.backend.diarize &&
+      !(typeof diarModel === 'string' && diarModel.trim()) &&
+      !unchangedFields.includes('diarize')
+    ) {
+      errors.push({
+        field: 'backend.diar_model',
+        message: 'a diarizer model is required for diarization',
+      });
+    }
+
     const specType = req.backend.spec_type;
     const draftModel = req.backend.spec_draft_model;
     if (specType && backendType !== 'llamacpp') {

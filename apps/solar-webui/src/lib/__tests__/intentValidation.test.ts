@@ -143,6 +143,35 @@ describe('validateIntentRequest', () => {
       expect(validateIntentRequest(payload, ['model_file'])).toEqual([]);
     });
 
+    it('requires a diarizer model when NeMo-Speech diarization is on', () => {
+      // The host's NemoSpeechConfig.check_diarizer rejects diarize without a
+      // diarizer model, so the form says it instead of a 422 round trip.
+      const errors = errorsFor({ backend: { backend_type: 'nemospeech', diarize: true } });
+      const err = errors.find((e) => e.field === 'backend.diar_model');
+      expect(err?.message).toBe('a diarizer model is required for diarization');
+      expect(fieldNames({ backend: { backend_type: 'nemospeech', diarize: true, diar_model: '   ' } })).toContain(
+        'backend.diar_model',
+      );
+
+      expect(
+        fieldNames({ backend: { backend_type: 'nemospeech', diarize: true, diar_model: 'sortformer.gguf' } }),
+      ).not.toContain('backend.diar_model');
+      // Diarization off needs no diarizer; the default NeMo-Speech config has none.
+      expect(fieldNames({ backend: { backend_type: 'nemospeech', diarize: false } })).not.toContain(
+        'backend.diar_model',
+      );
+    });
+
+    it('grandfathers an unchanged diarizer on update', () => {
+      // A stored intent predates the host rule: diarize is on with no diarizer
+      // key at all, so only the flag can carry the exemption.
+      const current = { backend_type: 'nemospeech', diarize: true };
+      const payload: any = { ...validRequest, model_source: 'local:///tmp/model', backend: { ...current } };
+      const unchanged = unchangedBackendFields(payload.backend, current);
+      expect(unchanged).toContain('diarize');
+      expect(validateIntentRequest(payload, unchanged)).toEqual([]);
+    });
+
     it('allows download filters only for huggingface:// sources', () => {
       const backend = { backend_type: 'llamacpp', file_filters: ['*UD-Q4_K_XL*'] };
       expect(fieldNames({ backend, model_source: 'huggingface://unsloth/Model-GGUF' })).not.toContain(
