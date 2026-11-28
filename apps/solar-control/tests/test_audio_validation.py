@@ -290,6 +290,78 @@ def test_model_file_is_required_for_a_pull_source_and_a_local_directory_passes(
         )
 
 
+def test_a_diarized_nemo_intent_requires_a_diarizer_model():
+    """The host's NemoSpeechConfig.check_diarizer rejects this combination.
+
+    Without the rule a direct API client could save diarize=true with no
+    diar_model and only fail when the instance was created.
+    """
+    errors = _validate_backend_model_selection(
+        {"backend_type": "nemospeech", "diarize": True}, None
+    )
+    assert errors == [
+        {
+            "field": "backend.diar_model",
+            "message": "a diarizer model is required for diarization",
+        }
+    ]
+
+    # A blank selector is as unusable as a missing one, like model_file.
+    errors = _validate_backend_model_selection(
+        {"backend_type": "nemospeech", "diarize": True, "diar_model": "   "}, None
+    )
+    assert errors and errors[0]["field"] == "backend.diar_model"
+    assert errors[0]["message"] == "a diarizer model is required for diarization"
+
+    # A real diarizer passes, and diarization off needs none.
+    assert (
+        _validate_backend_model_selection(
+            {
+                "backend_type": "nemospeech",
+                "diarize": True,
+                "diar_model": "sortformer.gguf",
+            },
+            None,
+        )
+        == []
+    )
+    assert (
+        _validate_backend_model_selection(
+            {"backend_type": "nemospeech", "diarize": False}, None
+        )
+        == []
+    )
+    # The rule is NeMo-Speech's own model: whisper.cpp has no diarizer.
+    assert (
+        _validate_backend_model_selection(
+            {"backend_type": "whispercpp", "diarize": True}, None
+        )
+        == []
+    )
+
+
+def test_a_diarized_nemo_intent_is_grandfathered_when_diarize_is_unchanged():
+    """A stored intent must stay editable after the diarizer rule tightens.
+
+    Every update replays the full spec, and a stored diarize=true with no
+    diar_model has no diar_model value to compare, so only the flag can
+    identify the intent that predates the rule.
+    """
+    backend = {"backend_type": "nemospeech", "diarize": True}
+    errors = _validate_backend_model_selection(backend, None)
+    assert [error["field"] for error in errors] == ["backend.diar_model"]
+    # An exemption on another field must not hide the missing diarizer.
+    assert _validate_backend_model_selection(
+        backend, None, exempt_fields=frozenset({"model_file"})
+    )
+    assert (
+        _validate_backend_model_selection(
+            backend, None, exempt_fields=frozenset({"diarize"})
+        )
+        == []
+    )
+
+
 def test_fallback_capabilities_advertise_transcription():
     for backend_type in AUDIO_BACKENDS:
         assert OpenAIGateway._fallback_capabilities(backend_type) == ["transcription"]

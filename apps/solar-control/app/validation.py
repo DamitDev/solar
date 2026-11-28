@@ -337,6 +337,12 @@ def _validate_backend_model_selection(
     (``_LLAMACPP_ONLY_FIELDS``) rather than here, so one mechanism owns it and
     grandfathering applies uniformly.
 
+    A diarized NeMo-Speech intent needs its Sortformer model: the host's
+    ``NemoSpeechConfig.check_diarizer`` refuses ``diarize`` without one, so the
+    same rule here fails at save time instead of instance creation.
+    ``diarize`` carries the grandfathering because a stored intent has no
+    ``diar_model`` value to compare.
+
     ``exempt_fields`` grandfathers values an update carried over unchanged, so
     tightening a rule cannot strand a stored intent. ``file_filters`` is
     deliberately *not* grandfathered: it is validated against ``model_source``,
@@ -381,6 +387,23 @@ def _validate_backend_model_selection(
                     "model_file is required when the source is a pull; the pull "
                     "returns a directory"
                 ),
+            }
+        )
+
+    # The host's NemoSpeechConfig.check_diarizer refuses diarization without
+    # a Sortformer model, so an intent saved with diarize=true and no
+    # diar_model used to fail only when the instance was created.
+    diar_model = backend.get("diar_model")
+    if (
+        backend.get("backend_type") == "nemospeech"
+        and backend.get("diarize")
+        and "diarize" not in exempt_fields
+        and not (isinstance(diar_model, str) and diar_model.strip())
+    ):
+        errors.append(
+            {
+                "field": "backend.diar_model",
+                "message": "a diarizer model is required for diarization",
             }
         )
 
