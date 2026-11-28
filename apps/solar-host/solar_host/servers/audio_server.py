@@ -86,6 +86,9 @@ _WAVE_FORMAT_NAMES: dict[int, str] = {
 }
 
 _NEMO_WAVE_REQUIREMENTS = "16 kHz mono 16-bit PCM"
+_WAVE_DATA_BEFORE_FMT_PROBLEM = (
+    "the fmt chunk must precede the data chunk in a WAV upload"
+)
 
 
 @dataclass(frozen=True)
@@ -770,8 +773,12 @@ async def _forward(
         os.unlink(temp_path)
 
 
-def _wave_format(upload: UploadFile) -> WaveFormat | None:
+def _wave_format(upload: UploadFile) -> WaveFormat | str | None:
     """Parse the RIFF/WAVE ``fmt `` chunk, or None when the upload is not WAV.
+
+    A ``data`` chunk before the ``fmt `` chunk returns the distinct chunk-order
+    problem string instead: the shim requires the ``fmt `` chunk first, and the
+    unreadable-file message would wrongly describe a valid RIFF/WAVE upload.
 
     The magic alone is not enough: the NeMo-Speech model requires 16 kHz mono
     PCM16, and wider input was observed to mis-transcribe, so the sample rate,
@@ -789,6 +796,12 @@ def _wave_format(upload: UploadFile) -> WaveFormat | None:
                 return None
             chunk_id = chunk_header[:4]
             size = int.from_bytes(chunk_header[4:8], "little")
+            if chunk_id == b"data":
+                # The shim requires the fmt chunk first; a data-first WAV is a
+                # valid RIFF layout but an unsupported chunk order here, so stop
+                # the walk and name the order instead of scanning on to EOF and
+                # reporting the file as unreadable.
+                return _WAVE_DATA_BEFORE_FMT_PROBLEM
             if chunk_id == b"fmt ":
                 # The parser reads at most 40 bytes of the chunk: the largest
                 # layout it understands is a WAVEFORMATEXTENSIBLE header, and a
@@ -829,6 +842,8 @@ def _wave_problem(upload: UploadFile) -> str | None:
     shim deliberately keeps this strict gate and refuses it.
     """
     wave = _wave_format(upload)
+    if isinstance(wave, str):
+        return wave
     if wave is None:
         return (
             "NeMo-Speech.cpp accepts uncompressed WAV only: the upload is not a "

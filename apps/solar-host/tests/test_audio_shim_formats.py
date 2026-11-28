@@ -55,6 +55,29 @@ def _extensible_wav_bytes(subformat: int = 1, bits: int = 16) -> bytes:
     )
 
 
+def _data_before_fmt_wav_bytes() -> bytes:
+    """A 16 kHz mono PCM16 WAV with the ``data`` chunk before the ``fmt `` chunk.
+
+    The data chunk declares the streaming placeholder size (0xFFFFFFFF), as a
+    writer that cannot seek back leaves it unknown; the ``fmt `` chunk follows the
+    data payload, so the shim must name the chunk order rather than report the
+    upload as an unreadable RIFF/WAVE file.
+    """
+    fmt = struct.pack("<HHIIHH", 1, 1, 16000, 32000, 2, 16)
+    data = b"\x00\x00" * 160
+    return (
+        b"RIFF"
+        + (4 + 8 + len(data) + 8 + len(fmt)).to_bytes(4, "little")
+        + b"WAVE"
+        + b"data"
+        + (0xFFFFFFFF).to_bytes(4, "little")
+        + data
+        + b"fmt "
+        + len(fmt).to_bytes(4, "little")
+        + fmt
+    )
+
+
 class _Child:
     """A runtime that is alive; the readiness gate only polls it."""
 
@@ -904,6 +927,29 @@ def test_nemo_accepts_uncompressed_wav_only(nemo, monkeypatch):
     )
     assert response.status_code == 400
     assert "accepts uncompressed WAV only" in response.json()["error"]["message"]
+    assert captured == {}
+
+
+def test_nemo_refuses_a_wav_with_the_data_chunk_before_fmt(nemo, monkeypatch):
+    """A data-first WAV names the chunk order, not an unreadable file."""
+    captured = _forward_stub(monkeypatch)
+    files = {
+        "file": (
+            "sample.wav",
+            io.BytesIO(_data_before_fmt_wav_bytes()),
+            "audio/wav",
+        )
+    }
+    response = nemo.post(
+        "/v1/audio/transcriptions",
+        files=files,
+        data={"model": "nemotron-stream-en"},
+    )
+
+    assert response.status_code == 400
+    message = response.json()["error"]["message"]
+    assert "the fmt chunk must precede the data chunk in a WAV upload" in message
+    assert "not a readable RIFF/WAVE file" not in message
     assert captured == {}
 
 
