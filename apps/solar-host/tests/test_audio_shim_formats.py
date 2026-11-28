@@ -1,11 +1,13 @@
 """The audio shim's OpenAI contract: formats, refusals and the format matrix."""
 
+import asyncio
 import io
 import json
 import struct
 import wave
 
 import pytest
+from starlette.datastructures import FormData, UploadFile
 from starlette.testclient import TestClient
 
 import solar_host.servers.audio_server as shim
@@ -584,6 +586,68 @@ def test_a_failed_runtime_answers_503(client, monkeypatch):
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "runtime_failed"
     assert captured == {}
+
+
+class _UnparsedRequest:
+    """A request whose body must never be parsed."""
+
+    def __init__(self):
+        self.form_calls = 0
+
+    async def form(self):
+        self.form_calls += 1
+        raise AssertionError("the form must not be parsed")
+
+
+def test_a_starting_runtime_refuses_before_the_form_is_parsed(client, monkeypatch):
+    """A 503 must cost no upload, so the child state is checked first."""
+    monkeypatch.setattr(shim.state, "child_ready", False)
+    request = _UnparsedRequest()
+
+    response = asyncio.run(shim.audio_transcriptions(request, True))
+
+    assert response.status_code == 503
+    assert json.loads(response.body)["error"]["code"] == "runtime_not_ready"
+    assert request.form_calls == 0
+
+
+class _TrackingUpload(UploadFile):
+    """An upload that counts every close."""
+
+    def __init__(self, data: bytes):
+        super().__init__(file=io.BytesIO(data), filename="sample.wav", size=len(data))
+        self.close_calls = 0
+
+    async def close(self):
+        self.close_calls += 1
+        await super().close()
+
+
+class _FormRequest:
+    """A request that answers with one already-built form."""
+
+    def __init__(self, form: FormData):
+        self._form = form
+
+    async def form(self):
+        return self._form
+
+
+def test_a_rejected_upload_is_closed(client):
+    """A validation refusal must not leak the spooled upload until GC."""
+    upload = _TrackingUpload(WAV)
+    form = FormData(
+        [
+            ("file", upload),
+            ("model", "whisper-tiny"),
+            ("response_format", "diarized_json"),
+        ]
+    )
+
+    response = asyncio.run(shim.audio_transcriptions(_FormRequest(form), True))
+
+    assert response.status_code == 400
+    assert upload.close_calls == 1
 
 
 # ── NeMo-Speech.cpp ──────────────────────────────────────────────

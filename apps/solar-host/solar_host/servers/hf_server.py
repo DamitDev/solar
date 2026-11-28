@@ -1212,9 +1212,10 @@ async def audio_transcriptions(
     ``avg_logprob`` and ``no_speech_prob`` are not available and are omitted.
     """
     if state.model_type != "audio":
-        raise HTTPException(
-            status_code=400,
-            detail="Transcriptions only available for audio models",
+        return _transcription_error(
+            "Transcriptions only available for audio models",
+            None,
+            "invalid_request_error",
         )
 
     try:
@@ -1233,102 +1234,100 @@ async def audio_transcriptions(
     if not isinstance(upload, StarletteUploadFile):
         return _transcription_error("file is required", "file", "invalid_request_error")
 
-    values: dict[str, str] = {}
-    for name, value in form.multi_items():
-        if name == "file" or not isinstance(value, str):
-            continue
-        values[name] = value
+    try:
+        values: dict[str, str] = {}
+        for name, value in form.multi_items():
+            if name == "file" or not isinstance(value, str):
+                continue
+            values[name] = value
 
-    response_format = values.get("response_format", "json")
-    if values.get("stream", "false").lower() in ("1", "true", "yes"):
-        return _transcription_error(
-            "streaming transcription is not supported by this endpoint; "
-            "omit 'stream' or set it to false",
-            "stream",
-            "invalid_request_error",
-        )
-    if response_format not in RESPONSE_FORMATS:
-        return _transcription_error(
-            f"response_format '{response_format}' is not supported; must be one "
-            f"of: {', '.join(RESPONSE_FORMATS)}",
-            "response_format",
-            "invalid_request_error",
-        )
-    if response_format == "diarized_json":
-        return _transcription_error(
-            "response_format 'diarized_json' is not supported by the HuggingFace "
-            "audio backend; supported formats are json, text, srt, verbose_json, vtt",
-            "response_format",
-            "invalid_request_error",
-        )
-    for name in values:
-        if name not in ACCEPTED_FIELDS:
-            # The audio shim and this route accept the same field set, so a
-            # client gets the same 400 for an unknown field on all three
-            # backends. A backend-specific field is accepted and dropped by a
-            # runtime that does not own it.
+        response_format = values.get("response_format", "json")
+        if values.get("stream", "false").lower() in ("1", "true", "yes"):
             return _transcription_error(
-                f"field '{name}' is not supported by /v1/audio/transcriptions",
-                name,
+                "streaming transcription is not supported by this endpoint; "
+                "omit 'stream' or set it to false",
+                "stream",
                 "invalid_request_error",
             )
-    # The audio shim and the control plane refuse an unknown granularity, so a
-    # direct request must get the same 400 here instead of the value being
-    # silently dropped by this route.
-    for name, value in form.multi_items():
-        if (
-            name in ("timestamp_granularities[]", "timestamp_granularities")
-            and isinstance(value, str)
-            and value not in TIMESTAMP_GRANULARITIES
-        ):
+        if response_format not in RESPONSE_FORMATS:
             return _transcription_error(
-                "timestamp_granularities must contain only 'word' or 'segment'",
-                "timestamp_granularities",
+                f"response_format '{response_format}' is not supported; must be one "
+                f"of: {', '.join(RESPONSE_FORMATS)}",
+                "response_format",
                 "invalid_request_error",
             )
-    if "model" not in values:
-        return _transcription_error(
-            "model is required", "model", "invalid_request_error"
-        )
-    if values["model"] != state.alias:
-        return _transcription_error(
-            f"model '{values['model']}' is not served by this instance; it "
-            f"serves '{state.alias}'",
-            "model",
-            "model_not_found",
-            404,
-        )
-    if not shutil.which("ffmpeg"):
-        return _transcription_error(
-            "ffmpeg is required to decode the upload; install ffmpeg on the host",
-            None,
-            "server_error",
-            500,
-        )
-
-    # A non-numeric temperature is client input, so it must be a 400 envelope
-    # (like the shim answers) rather than an unhandled ValueError.
-    temperature_value: float | None = None
-    temperature = values.get("temperature")
-    if temperature is not None:
-        try:
-            temperature_value = float(temperature)
-        except ValueError:
+        if response_format == "diarized_json":
             return _transcription_error(
-                f"temperature '{temperature}' is not a number",
-                "temperature",
+                "response_format 'diarized_json' is not supported by the HuggingFace "
+                "audio backend; supported formats are json, text, srt, verbose_json, vtt",
+                "response_format",
                 "invalid_request_error",
             )
+        for name in values:
+            if name not in ACCEPTED_FIELDS:
+                # The audio shim and this route accept the same field set, so a
+                # client gets the same 400 for an unknown field on all three
+                # backends. A backend-specific field is accepted and dropped by a
+                # runtime that does not own it.
+                return _transcription_error(
+                    f"field '{name}' is not supported by /v1/audio/transcriptions",
+                    name,
+                    "invalid_request_error",
+                )
+        # The audio shim and the control plane refuse an unknown granularity, so a
+        # direct request must get the same 400 here instead of the value being
+        # silently dropped by this route.
+        for name, value in form.multi_items():
+            if (
+                name in ("timestamp_granularities[]", "timestamp_granularities")
+                and isinstance(value, str)
+                and value not in TIMESTAMP_GRANULARITIES
+            ):
+                return _transcription_error(
+                    "timestamp_granularities must contain only 'word' or 'segment'",
+                    "timestamp_granularities",
+                    "invalid_request_error",
+                )
+        if "model" not in values:
+            return _transcription_error(
+                "model is required", "model", "invalid_request_error"
+            )
+        if values["model"] != state.alias:
+            return _transcription_error(
+                f"model '{values['model']}' is not served by this instance; it "
+                f"serves '{state.alias}'",
+                "model",
+                "model_not_found",
+                404,
+            )
+        if not shutil.which("ffmpeg"):
+            return _transcription_error(
+                "ffmpeg is required to decode the upload; install ffmpeg on the host",
+                None,
+                "server_error",
+                500,
+            )
 
-    with tempfile.NamedTemporaryFile(delete=False) as temp:
-        temp_path = temp.name
-        upload.file.seek(0)
-        while True:
-            chunk = upload.file.read(1024 * 1024)
-            if not chunk:
-                break
-            temp.write(chunk)
-    await upload.close()
+        # A non-numeric temperature is client input, so it must be a 400 envelope
+        # (like the shim answers) rather than an unhandled ValueError.
+        temperature_value: float | None = None
+        temperature = values.get("temperature")
+        if temperature is not None:
+            try:
+                temperature_value = float(temperature)
+            except ValueError:
+                return _transcription_error(
+                    f"temperature '{temperature}' is not a number",
+                    "temperature",
+                    "invalid_request_error",
+                )
+
+        with tempfile.NamedTemporaryFile(delete=False) as temp:
+            temp_path = temp.name
+            upload.file.seek(0)
+            await asyncio.to_thread(shutil.copyfileobj, upload.file, temp, 1024 * 1024)
+    finally:
+        await upload.close()
 
     try:
         process = await asyncio.create_subprocess_exec(

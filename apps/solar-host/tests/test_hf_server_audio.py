@@ -189,6 +189,36 @@ async def test_diarized_json_is_refused():
     )
 
 
+class _TrackingUpload(UploadFile):
+    """An upload that counts every close."""
+
+    def __init__(self, data: bytes):
+        super().__init__(file=io.BytesIO(data), filename="sample.wav", size=len(data))
+        self.close_calls = 0
+
+    async def close(self):
+        self.close_calls += 1
+        await super().close()
+
+
+@pytest.mark.anyio
+async def test_a_refused_upload_is_closed():
+    """A validation refusal must not leak the spooled upload until GC."""
+    upload = _TrackingUpload(_wav_bytes())
+    form = FormData(
+        [
+            ("file", upload),
+            ("model", "whisper-hu"),
+            ("response_format", "diarized_json"),
+        ]
+    )
+
+    response = await hf.audio_transcriptions(_Request(form))
+
+    assert response.status_code == 400
+    assert upload.close_calls == 1
+
+
 @pytest.mark.anyio
 async def test_an_unknown_format_is_refused():
     response = await _call(_form(model="whisper-hu", response_format="mp3"))
@@ -965,9 +995,12 @@ def test_a_non_audio_instance_is_refused_with_a_400(monkeypatch):
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == (
-        "Transcriptions only available for audio models"
-    )
+    assert response.json()["error"] == {
+        "message": "Transcriptions only available for audio models",
+        "type": "invalid_request_error",
+        "param": None,
+        "code": "invalid_request_error",
+    }
 
 
 # ── the runner sees the audio request as busy ─────────────────────

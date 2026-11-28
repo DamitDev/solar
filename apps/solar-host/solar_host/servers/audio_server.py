@@ -37,6 +37,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -716,6 +717,12 @@ async def _forward(
 
     ``fields`` is already the final set: the endpoint applied the format matrix
     and dropped what the child cannot take.
+
+    aiohttp reads a user-supplied file object synchronously in the event loop
+    while streaming, so the spooled upload is copied to a disk temp file in a
+    worker thread first and the post streams a fresh handle to that copy. A
+    fresh handle per request keeps the request retryable: aiohttp closes a
+    user-supplied handle after a connection error.
     """
     assert state.session is not None
     if state.model_type == "whispercpp":
@@ -723,20 +730,32 @@ async def _forward(
     else:
         url = f"http://127.0.0.1:{state.child_port}/v1/audio/transcriptions"
 
-    form = aiohttp.FormData()
-    for name, value in fields:
-        form.add_field(name, value)
-    upload.file.seek(0)
-    form.add_field(
-        "file",
-        upload.file,
-        filename=upload.filename or "audio",
-        content_type=upload.content_type or "application/octet-stream",
-    )
-    async with state.session.post(url, data=form) as response:
-        body = await response.read()
-        content_type = response.headers.get("Content-Type", "application/octet-stream")
-        return response.status, body, content_type
+    with tempfile.NamedTemporaryFile(delete=False) as temp:
+        temp_path = temp.name
+        upload.file.seek(0)
+        await asyncio.to_thread(shutil.copyfileobj, upload.file, temp, 1024 * 1024)
+    try:
+        form = aiohttp.FormData()
+        for name, value in fields:
+            form.add_field(name, value)
+        handle = await asyncio.to_thread(open, temp_path, "rb")
+        try:
+            form.add_field(
+                "file",
+                handle,
+                filename=upload.filename or "audio",
+                content_type=upload.content_type or "application/octet-stream",
+            )
+            async with state.session.post(url, data=form) as response:
+                body = await response.read()
+                content_type = response.headers.get(
+                    "Content-Type", "application/octet-stream"
+                )
+                return response.status, body, content_type
+        finally:
+            handle.close()
+    finally:
+        os.unlink(temp_path)
 
 
 def _wave_format(upload: UploadFile) -> WaveFormat | None:
@@ -838,6 +857,11 @@ async def audio_transcriptions(
     """OpenAI-compatible transcription, forwarded to the child runtime."""
     started = time.monotonic()
 
+    if state.child_error is not None:
+        return _runtime_error(f"runtime failed: {state.child_error}", "runtime_failed")
+    if not state.child_ready or state.child is None or state.child.poll() is not None:
+        return _runtime_error("runtime is starting", "runtime_not_ready")
+
     try:
         form = await request.form()
     except (MultipartParseError, MultiPartException, StarletteHTTPException):
@@ -848,130 +872,131 @@ async def audio_transcriptions(
         # envelope, so all are answered with one here.
         return _error("malformed multipart body", "invalid_request_error")
 
-    if state.child_error is not None:
-        return _runtime_error(f"runtime failed: {state.child_error}", "runtime_failed")
-    if not state.child_ready or state.child is None or state.child.poll() is not None:
-        return _runtime_error("runtime is starting", "runtime_not_ready")
+    try:
+        fields: list[tuple[str, str]] = []
+        upload: UploadFile | None = None
+        for name, value in form.multi_items():
+            if name == "file":
+                if isinstance(value, UploadFile):
+                    upload = value
+                continue
+            if isinstance(value, str):
+                fields.append((name, value))
 
-    fields: list[tuple[str, str]] = []
-    upload: UploadFile | None = None
-    for name, value in form.multi_items():
-        if name == "file":
-            if isinstance(value, UploadFile):
-                upload = value
-            continue
-        if isinstance(value, str):
-            fields.append((name, value))
+        values: dict[str, str] = dict(fields)
+        response_format = values.get("response_format", "json")
 
-    values: dict[str, str] = dict(fields)
-    response_format = values.get("response_format", "json")
-
-    if values.get("stream", "false").lower() in ("1", "true", "yes"):
-        return _error(
-            "streaming transcription is not supported by this endpoint; "
-            "omit 'stream' or set it to false",
-            "invalid_request_error",
-        )
-    if response_format not in RESPONSE_FORMATS:
-        return _error(
-            f"response_format '{response_format}' is not supported; must be one "
-            f"of: {', '.join(RESPONSE_FORMATS)}",
-            "invalid_request_error",
-        )
-    if response_format == "diarized_json" and state.model_type != "nemospeech":
-        runtime = "whisper.cpp" if state.model_type == "whispercpp" else "HuggingFace"
-        return _error(
-            f"response_format 'diarized_json' is not supported by the {runtime} "
-            f"audio backend; supported formats are json, text, srt, verbose_json, vtt",
-            "invalid_request_error",
-        )
-    if (
-        response_format == "diarized_json"
-        and state.model_type == "nemospeech"
-        and not state.diar_model
-    ):
-        return _error(
-            "response_format 'diarized_json' requires a diarizer model; start the "
-            "instance with diar_model set to a Sortformer GGUF",
-            "invalid_request_error",
-        )
-    if state.model_type == "whispercpp" and values.get("vad", "false").lower() in (
-        "1",
-        "true",
-        "yes",
-    ):
-        return _error(
-            "vad requires a VAD model, and no VAD model is configured for this "
-            "whisper.cpp instance; omit vad or set it to false",
-            "invalid_request_error",
-        )
-    for name in values:
-        if name not in ACCEPTED_FIELDS:
+        if values.get("stream", "false").lower() in ("1", "true", "yes"):
             return _error(
-                f"field '{name}' is not supported by /v1/audio/transcriptions",
+                "streaming transcription is not supported by this endpoint; "
+                "omit 'stream' or set it to false",
                 "invalid_request_error",
             )
-    # NeMo-Speech.cpp receives this field, so an unknown entry must be refused
-    # here rather than at the runtime, which cannot know the OpenAI vocabulary.
-    for name, value in fields:
+        if response_format not in RESPONSE_FORMATS:
+            return _error(
+                f"response_format '{response_format}' is not supported; must be one "
+                f"of: {', '.join(RESPONSE_FORMATS)}",
+                "invalid_request_error",
+            )
+        if response_format == "diarized_json" and state.model_type != "nemospeech":
+            runtime = (
+                "whisper.cpp" if state.model_type == "whispercpp" else "HuggingFace"
+            )
+            return _error(
+                f"response_format 'diarized_json' is not supported by the {runtime} "
+                f"audio backend; supported formats are json, text, srt, verbose_json, vtt",
+                "invalid_request_error",
+            )
         if (
-            name in ("timestamp_granularities[]", "timestamp_granularities")
-            and value not in TIMESTAMP_GRANULARITIES
+            response_format == "diarized_json"
+            and state.model_type == "nemospeech"
+            and not state.diar_model
         ):
             return _error(
-                "timestamp_granularities must contain only 'word' or 'segment'",
+                "response_format 'diarized_json' requires a diarizer model; start the "
+                "instance with diar_model set to a Sortformer GGUF",
                 "invalid_request_error",
             )
-    if upload is None:
-        return _error("file is required", "invalid_request_error")
-    if "model" not in values:
-        return _error("model is required", "invalid_request_error")
-    if values["model"] != state.alias:
-        return _error(
-            f"model '{values['model']}' is not served by this instance; "
-            f"it serves '{state.alias}'",
-            "model_not_found",
-            404,
-        )
-    if state.model_type == "nemospeech":
-        wave_problem = _wave_problem(upload)
-        if wave_problem is not None:
-            return _error(wave_problem, "invalid_request_error")
-        temperature = values.get("temperature")
-        if temperature is not None:
-            try:
-                requested = float(temperature)
-            except ValueError:
+        if state.model_type == "whispercpp" and values.get("vad", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            return _error(
+                "vad requires a VAD model, and no VAD model is configured for this "
+                "whisper.cpp instance; omit vad or set it to false",
+                "invalid_request_error",
+            )
+        for name in values:
+            if name not in ACCEPTED_FIELDS:
                 return _error(
-                    f"temperature '{temperature}' is not a number",
+                    f"field '{name}' is not supported by /v1/audio/transcriptions",
                     "invalid_request_error",
                 )
-            if requested != 0.0:
+        # NeMo-Speech.cpp receives this field, so an unknown entry must be refused
+        # here rather than at the runtime, which cannot know the OpenAI vocabulary.
+        for name, value in fields:
+            if (
+                name in ("timestamp_granularities[]", "timestamp_granularities")
+                and value not in TIMESTAMP_GRANULARITIES
+            ):
                 return _error(
-                    "temperature is not supported by NeMo-Speech.cpp "
-                    "transcriptions; omit it or set it to 0",
+                    "timestamp_granularities must contain only 'word' or 'segment'",
                     "invalid_request_error",
                 )
-    elif _wave_format(upload) is None and not shutil.which("ffmpeg"):
-        return _error(
-            f"whisper.cpp cannot convert '{upload.filename}': ffmpeg is not "
-            f"installed on the host; upload a WAV file",
-            "invalid_request_error",
-        )
+        if upload is None:
+            return _error("file is required", "invalid_request_error")
+        if "model" not in values:
+            return _error("model is required", "invalid_request_error")
+        if values["model"] != state.alias:
+            return _error(
+                f"model '{values['model']}' is not served by this instance; "
+                f"it serves '{state.alias}'",
+                "model_not_found",
+                404,
+            )
+        if state.model_type == "nemospeech":
+            wave_problem = _wave_problem(upload)
+            if wave_problem is not None:
+                return _error(wave_problem, "invalid_request_error")
+            temperature = values.get("temperature")
+            if temperature is not None:
+                try:
+                    requested = float(temperature)
+                except ValueError:
+                    return _error(
+                        f"temperature '{temperature}' is not a number",
+                        "invalid_request_error",
+                    )
+                if requested != 0.0:
+                    return _error(
+                        "temperature is not supported by NeMo-Speech.cpp "
+                        "transcriptions; omit it or set it to 0",
+                        "invalid_request_error",
+                    )
+        elif _wave_format(upload) is None and not shutil.which("ffmpeg"):
+            return _error(
+                f"whisper.cpp cannot convert '{upload.filename}': ffmpeg is not "
+                f"installed on the host; upload a WAV file",
+                "invalid_request_error",
+            )
 
-    forwarded = _forward_fields(fields, response_format)
-    print(
-        f"[REQUEST] model={state.alias} endpoint=/v1/audio/transcriptions "
-        f"format={response_format}",
-        flush=True,
-    )
-    try:
-        status, body, content_type = await _forward(upload, forwarded)
-    except (TimeoutError, aiohttp.ClientError) as exc:
-        print(f"[ERROR] runtime request failed: {exc}", flush=True)
-        return _runtime_error(f"runtime request failed: {exc}", "runtime_unreachable")
+        forwarded = _forward_fields(fields, response_format)
+        print(
+            f"[REQUEST] model={state.alias} endpoint=/v1/audio/transcriptions "
+            f"format={response_format}",
+            flush=True,
+        )
+        try:
+            status, body, content_type = await _forward(upload, forwarded)
+        except (TimeoutError, aiohttp.ClientError) as exc:
+            print(f"[ERROR] runtime request failed: {exc}", flush=True)
+            return _runtime_error(
+                f"runtime request failed: {exc}", "runtime_unreachable"
+            )
     finally:
-        await upload.close()
+        if upload is not None:
+            await upload.close()
 
     elapsed = time.monotonic() - started
     if status != 200:
