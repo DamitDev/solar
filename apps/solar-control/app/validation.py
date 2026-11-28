@@ -102,7 +102,6 @@ _HUGGINGFACE_ONLY_FIELDS: frozenset[str] = frozenset(
     {
         "device",
         "dtype",
-        "max_length",
         "trust_remote_code",
     }
 )
@@ -161,13 +160,17 @@ _VLLM_FIELDS: frozenset[str] = frozenset(
         "extra_env",
     }
 )
+# ``max_length`` is per-type rather than shared: the host's
+# ``HuggingFaceAudioConfig`` has no such field (long-form audio is chunked),
+# so claiming it for every huggingface_* type would let control accept a value
+# the audio backend silently drops.
 BACKEND_FIELD_OWNERS: dict[str, frozenset[str]] = {
     "llamacpp": _LLAMACPP_ONLY_FIELDS,
     "huggingface": _HUGGINGFACE_ONLY_FIELDS,
-    "huggingface_classification": frozenset({"labels"}),
-    "huggingface_embedding": frozenset({"normalize_embeddings"}),
-    "huggingface_causal": frozenset({"use_flash_attention"}),
-    "huggingface_vision": frozenset({"use_flash_attention"}),
+    "huggingface_classification": frozenset({"labels", "max_length"}),
+    "huggingface_embedding": frozenset({"normalize_embeddings", "max_length"}),
+    "huggingface_causal": frozenset({"use_flash_attention", "max_length"}),
+    "huggingface_vision": frozenset({"use_flash_attention", "max_length"}),
     "huggingface_audio": frozenset(
         {
             "device",

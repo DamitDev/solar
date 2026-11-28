@@ -18,7 +18,10 @@ from solar_host.models.base import BackendType, InstancePhase
 
 # The shim prints this line only after the child runtime answers its own health
 # route and is alive. The uvicorn banner is deliberately NOT the readiness
-# signal: it appears before the child can serve anything.
+# signal: it appears before the child can serve anything. whisper-server's own
+# listening banner is unusable too: it is printed with printf and no flush, so it
+# stays block-buffered on the pipe; the shim's health-route [READY] line (see
+# solar_host.servers.audio_server._poll_child_ready) is the authoritative signal.
 _RE_READY = re.compile(r"\[READY\] runtime ready")
 
 # Structured shim log lines. elapsed_s is the wall-clock time the shim spent on

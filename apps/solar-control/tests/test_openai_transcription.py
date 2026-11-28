@@ -201,6 +201,40 @@ async def test_a_text_part_named_file_is_rejected():
     assert captured == {}
 
 
+class _TrackingUpload(UploadFile):
+    """An upload that counts every close."""
+
+    def __init__(self, data: bytes):
+        super().__init__(file=io.BytesIO(data), filename="sample.wav", size=len(data))
+        self.close_calls = 0
+
+    async def close(self):
+        self.close_calls += 1
+        await super().close()
+
+
+@pytest.mark.anyio
+async def test_every_file_part_is_closed():
+    """A multipart body may carry several ``file`` parts, and Starlette's form
+    keeps only the last one: the close must cover every part, not just it."""
+    first = _TrackingUpload(WAV)
+    second = _TrackingUpload(WAV)
+    form = FormData(
+        [
+            ("file", first),
+            ("file", second),
+            ("model", "whisper-tiny"),
+            ("response_format", "mp3"),
+        ]
+    )
+
+    response, _ = await _call(form, result=UpstreamResponse(200, b"", "text/plain"))
+
+    assert response.status_code == 400
+    assert first.close_calls == 1
+    assert second.close_calls == 1
+
+
 @pytest.mark.anyio
 async def test_stream_is_rejected_before_the_forward():
     response, captured = await _call(

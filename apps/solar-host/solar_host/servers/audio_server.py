@@ -995,8 +995,10 @@ async def audio_transcriptions(
                 f"runtime request failed: {exc}", "runtime_unreachable"
             )
     finally:
-        if upload is not None:
-            await upload.close()
+        # FormData.close() closes every UploadFile part. Starlette keeps only
+        # the last value per key, so closing the selected ``upload`` alone would
+        # leak the earlier ``file`` parts' spooled temp files until GC.
+        await form.close()
 
     elapsed = time.monotonic() - started
     if status != 200:

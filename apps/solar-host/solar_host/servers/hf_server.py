@@ -1327,7 +1327,10 @@ async def audio_transcriptions(
             upload.file.seek(0)
             await asyncio.to_thread(shutil.copyfileobj, upload.file, temp, 1024 * 1024)
     finally:
-        await upload.close()
+        # FormData.close() closes every UploadFile part. Starlette keeps only
+        # the last value per key, so closing the selected ``upload`` alone would
+        # leak the earlier ``file`` parts' spooled temp files until GC.
+        await form.close()
 
     try:
         process = await asyncio.create_subprocess_exec(

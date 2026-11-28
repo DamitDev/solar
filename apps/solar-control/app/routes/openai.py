@@ -275,8 +275,10 @@ async def audio_transcriptions(request: Request):
     finally:
         if tmp_path is not None:
             Path(tmp_path).unlink(missing_ok=True)
-        if isinstance(upload, UploadFile):
-            await upload.close()
+        # FormData.close() closes every UploadFile part. Starlette keeps only
+        # the last value per key, so closing the selected ``upload`` alone would
+        # leak the earlier ``file`` parts' spooled temp files until GC.
+        await form.close()
 
 
 @router.get("/models")

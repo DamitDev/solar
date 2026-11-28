@@ -650,6 +650,27 @@ def test_a_rejected_upload_is_closed(client):
     assert upload.close_calls == 1
 
 
+def test_every_file_part_is_closed(client):
+    """A multipart body may carry several ``file`` parts, and Starlette's form
+    keeps only the last one: the close must cover every part, not just it."""
+    first = _TrackingUpload(WAV)
+    second = _TrackingUpload(WAV)
+    form = FormData(
+        [
+            ("file", first),
+            ("file", second),
+            ("model", "whisper-tiny"),
+            ("response_format", "diarized_json"),
+        ]
+    )
+
+    response = asyncio.run(shim.audio_transcriptions(_FormRequest(form), True))
+
+    assert response.status_code == 400
+    assert first.close_calls == 1
+    assert second.close_calls == 1
+
+
 # ── NeMo-Speech.cpp ──────────────────────────────────────────────
 
 

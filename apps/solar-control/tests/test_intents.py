@@ -16,6 +16,7 @@ from app.models.intent import (
 )
 from app.validation import (
     VALID_GPU_TYPES,
+    _validate_backend_field_ownership,
     canonicalize_intent_backend,
     normalize_gpu_type,
     validate_intent_create,
@@ -1773,13 +1774,32 @@ class TestFieldOwnership:
         assert BACKEND_FIELD_OWNERS["huggingface"] == {
             "device",
             "dtype",
-            "max_length",
             "trust_remote_code",
         }
-        assert BACKEND_FIELD_OWNERS["huggingface_classification"] == {"labels"}
-        assert BACKEND_FIELD_OWNERS["huggingface_embedding"] == {"normalize_embeddings"}
-        assert BACKEND_FIELD_OWNERS["huggingface_causal"] == {"use_flash_attention"}
-        assert BACKEND_FIELD_OWNERS["huggingface_vision"] == {"use_flash_attention"}
+        assert BACKEND_FIELD_OWNERS["huggingface_classification"] == {
+            "labels",
+            "max_length",
+        }
+        assert BACKEND_FIELD_OWNERS["huggingface_embedding"] == {
+            "normalize_embeddings",
+            "max_length",
+        }
+        assert BACKEND_FIELD_OWNERS["huggingface_causal"] == {
+            "use_flash_attention",
+            "max_length",
+        }
+        assert BACKEND_FIELD_OWNERS["huggingface_vision"] == {
+            "use_flash_attention",
+            "max_length",
+        }
+        # The audio config has no max_length (long-form audio is chunked), so an
+        # audio intent carrying it must be reported instead of silently dropped.
+        assert [
+            e["field"]
+            for e in _validate_backend_field_ownership(
+                {"backend_type": "huggingface_audio", "max_length": 128}
+            )
+        ] == ["backend.max_length"]
         assert BACKEND_FIELD_OWNERS["sglang"] == {
             # Shared with huggingface — ownership is many-to-many.
             "dtype",
